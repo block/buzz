@@ -90,11 +90,18 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             reason,
             replaced_by,
             content,
+            admin,
         } => {
             validate_hex64(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
-            let auth =
-                resolve_auth(client, &target_pubkey, &signer_hex, &mut std::io::stderr()).await?;
+            let auth = resolve_auth(
+                client,
+                &target_pubkey,
+                &signer_hex,
+                admin,
+                &mut std::io::stderr(),
+            )
+            .await?;
             let builder = build_archive_identity_request(
                 &target_pubkey,
                 &content,
@@ -122,11 +129,18 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             target_pubkey,
             reason,
             content,
+            admin,
         } => {
             validate_hex64(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
-            let auth =
-                resolve_auth(client, &target_pubkey, &signer_hex, &mut std::io::stderr()).await?;
+            let auth = resolve_auth(
+                client,
+                &target_pubkey,
+                &signer_hex,
+                admin,
+                &mut std::io::stderr(),
+            )
+            .await?;
             let builder = build_unarchive_identity_request(
                 &target_pubkey,
                 &content,
@@ -162,16 +176,20 @@ fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
     PublicKey::parse(&hex).map_err(|e| CliError::Auth(format!("invalid owner attestation: {e}")))
 }
 
-/// Typed reason why NIP-OA owner-auth could not be extracted from a kind:0.
+/// Typed reason why NIP-OA owner-auth could not be extracted.
 ///
-/// Produced by [`classify_owner_auth_tag`] and formatted into a JSON warning
-/// by [`resolve_auth`]. One variant per distinguishable failure cause so the
-/// diagnostic is always accurate and never duplicates validation logic.
+/// Covers all distinguishable failure causes from profile fetch through tag
+/// validation so the diagnostic in [`resolve_auth`] is always precise and
+/// never duplicates classification logic.
 #[derive(Debug, PartialEq)]
 enum AuthFailure {
-    /// kind:0 has no `tags` array or the array is empty of `auth`-labelled entries.
+    /// No kind:0 profile was found for the target; target pubkey included.
+    NoProfile(String),
+    /// kind:0 was found but has no `tags` array; target pubkey included.
+    NoTagsArray(String),
+    /// `tags` array has no `auth`-labelled entries.
     NoAuthTag,
-    /// kind:0 has more than one `auth`-labelled tag; count included.
+    /// `tags` array has more than one `auth`-labelled entry; count included.
     AmbiguousAuthTag(usize),
     /// Sole `auth` tag has wrong element count; actual count included.
     WrongArity(usize),
@@ -189,6 +207,12 @@ impl AuthFailure {
     /// Human-readable description suitable for the `"warning"` JSON field.
     fn message(&self) -> String {
         match self {
+            AuthFailure::NoProfile(target) => {
+                format!("no kind:0 profile found for target {target}")
+            }
+            AuthFailure::NoTagsArray(target) => {
+                format!("target {target} kind:0 has no tags array")
+            }
             AuthFailure::NoAuthTag => "target kind:0 has no \"auth\" tag".to_owned(),
             AuthFailure::AmbiguousAuthTag(n) => format!(
                 "target kind:0 has {n} \"auth\" tags (expected exactly 1) — ambiguous ownership"
@@ -262,79 +286,87 @@ fn classify_owner_auth_tag(
     ])
 }
 
-/// Pure sync core of auth resolution: given a fetched kind:0 profile (or
-/// `None` when no event was found), either return the extracted auth tag or
-/// emit one `{"warning":"..."}` JSON line to `warn_sink` and return `None`.
+/// Pure typed extractor: given a fetched kind:0 profile (or `None` when no
+/// event was found), return the auth tag or the typed failure reason.
 ///
-/// Separated from [`resolve_auth`] so unit tests can call this directly with
-/// a `Vec<u8>` sink and assert on exactly what hits the wire — without needing
-/// a live `BuzzClient` or async runtime.
-///
-/// Three warning branches, one success path:
-/// 1. `profile == None` → no kind:0 found for target.
-/// 2. `profile.get("tags")` absent or non-array → no tags array.
-/// 3. [`classify_owner_auth_tag`] returns `Err` → typed failure reason.
-/// 4. `classify_owner_auth_tag` returns `Ok` → `Some(tag)`, no warning.
-fn resolve_auth_from_profile(
+/// Separated from [`resolve_auth`] so pure-unit tests can exercise all
+/// failure cases without a live `BuzzClient` or async runtime.
+fn extract_auth(
     profile: Option<&serde_json::Value>,
     target_hex: &str,
     signer_hex: &str,
-    warn_sink: &mut dyn std::io::Write,
-) -> Option<[String; 4]> {
-    let event = match profile {
-        Some(e) => e,
-        None => {
-            let msg = format!(
-                "no kind:0 profile found for target {target_hex}; \
-                 proceeding without owner attestation — this succeeds only if your key is a relay admin"
-            );
-            let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
-            return None;
-        }
-    };
-    let tags = match event.get("tags").and_then(|v| v.as_array()) {
-        Some(t) => t,
-        None => {
-            let msg = format!(
-                "target {target_hex} kind:0 has no tags array; \
-                 proceeding without owner attestation — this succeeds only if your key is a relay admin"
-            );
-            let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
-            return None;
-        }
-    };
-    match classify_owner_auth_tag(tags, signer_hex) {
-        Ok(tag) => Some(tag),
-        Err(failure) => {
-            let msg = format!(
-                "{}; proceeding without owner attestation — \
-                 this succeeds only if your key is a relay admin",
-                failure.message()
-            );
-            let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
-            None
-        }
-    }
+) -> Result<[String; 4], AuthFailure> {
+    let event = profile.ok_or_else(|| AuthFailure::NoProfile(target_hex.to_owned()))?;
+    let tags = event
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| AuthFailure::NoTagsArray(target_hex.to_owned()))?;
+    classify_owner_auth_tag(tags, signer_hex)
 }
 
-/// Resolve the optional NIP-OA `auth` tag for archive/unarchive requests.
+/// Resolve the optional NIP-OA `auth` tag for archive/unarchive requests,
+/// with one automatic retry on extraction failure.
 ///
-/// Mirrors the desktop's `maybe_owner_auth_tag`:
-/// - `target == signer`: self path — no auth needed → `Ok(None)`, silent.
-/// - Otherwise: fetch target's kind:0, delegate to [`resolve_auth_from_profile`]
-///   which either returns the extracted tag or emits one `{"warning":"..."}` JSON
-///   line to `warn_sink` and returns `None` — the bare request is still sent so
-///   relay admins can succeed without owner attestation. Query/network failures
-///   surface as `Err`.
+/// Resolution logic (linear state machine):
+/// - `target == signer`: self path — no auth needed → `Ok(None)`, silent, zero fetches.
+/// - Otherwise: fetch target's kind:0 and attempt extraction.
+///   - Success (attempt 1) → `Ok(Some(tag))`, one fetch.
+///   - Failure (attempt 1) → fetch again once (transient republish is the
+///     dominant cause), then attempt extraction again.
+///     - Success (attempt 2) → `Ok(Some(tag))`, two fetches.
+///     - Failure (attempt 2), `allow_bare == false` → `Err(CliError::Usage)`
+///       with an actionable message naming the reason. Request is NOT sent.
+///     - Failure (attempt 2), `allow_bare == true` → emit one
+///       `{"warning":"..."}` line to `warn_sink`, return `Ok(None)` (bare
+///       send) for relay-admin callers.
+/// - Network/parse failures surface as `Err` regardless of `allow_bare`.
 async fn resolve_auth(
     client: &BuzzClient,
     target_hex: &str,
     signer_hex: &str,
+    allow_bare: bool,
     warn_sink: &mut dyn std::io::Write,
 ) -> Result<Option<[String; 4]>, CliError> {
     if target_hex.eq_ignore_ascii_case(signer_hex) {
         return Ok(None);
     }
+
+    // Attempt 1.
+    let profile = fetch_kind0(client, target_hex).await?;
+    if let Ok(tag) = extract_auth(profile.as_ref(), target_hex, signer_hex) {
+        return Ok(Some(tag));
+    }
+
+    // Attempt 2 — one retry for transient republish churn.
+    let profile = fetch_kind0(client, target_hex).await?;
+    match extract_auth(profile.as_ref(), target_hex, signer_hex) {
+        Ok(tag) => Ok(Some(tag)),
+        Err(failure) => {
+            let detail = failure.message();
+            if allow_bare {
+                let msg = format!(
+                    "{detail}; proceeding without owner attestation (--admin) — \
+                     this succeeds only if your key is a relay admin"
+                );
+                let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
+                Ok(None)
+            } else {
+                Err(CliError::Usage(format!(
+                    "{detail}; refusing to send a bare request that the relay will reject — \
+                     re-run once the target's profile has finished publishing, or pass --admin \
+                     if your key is a relay admin"
+                )))
+            }
+        }
+    }
+}
+
+/// Fetch the most-recent kind:0 for `target_hex` from the relay.
+/// Returns `None` when no event was found, `Err` on network/parse failure.
+async fn fetch_kind0(
+    client: &BuzzClient,
+    target_hex: &str,
+) -> Result<Option<serde_json::Value>, CliError> {
     let filter = json!({"kinds": [0], "authors": [target_hex], "limit": 1});
     let raw = client
         .query(&filter)
@@ -342,13 +374,7 @@ async fn resolve_auth(
         .map_err(|e| CliError::Other(format!("failed to fetch target kind:0: {e}")))?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("invalid kind:0 query response: {e}")))?;
-    let profile = events.into_iter().next();
-    Ok(resolve_auth_from_profile(
-        profile.as_ref(),
-        target_hex,
-        signer_hex,
-        warn_sink,
-    ))
+    Ok(events.into_iter().next())
 }
 
 /// Pure extraction helper: require exactly one kind:0 tag whose first
@@ -742,140 +768,316 @@ mod tests {
         );
     }
 
-    // --- (c2) resolve_auth_from_profile emission boundary ---
+    // --- (c2) extract_auth: profile-level failure taxonomy ---
     //
-    // Observable-boundary tests: each test calls the production function
-    // `resolve_auth_from_profile` directly with a `Vec<u8>` sink and asserts
-    // on exactly what the production code writes.  Deleting any `writeln!`
-    // call in that function makes at least one of these tests fail.
-    //
-    // `resolve_auth` is async and requires a live `BuzzClient`; the sync
-    // decomposition lets us test the warning logic without a relay connection.
+    // Pure-unit tests: exercise `extract_auth` directly with pre-built
+    // profiles. No relay, no async runtime. These guard all failure paths
+    // that the async production resolver depends on.
 
-    fn assert_one_json_warning(sink: &[u8], expected_fragment: &str) {
-        let text = std::str::from_utf8(sink).expect("sink is valid UTF-8");
+    #[test]
+    fn extract_auth_no_profile_returns_no_profile_failure() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        assert_eq!(
+            extract_auth(None, &target, &signer),
+            Err(AuthFailure::NoProfile(target.clone()))
+        );
+    }
+
+    #[test]
+    fn extract_auth_no_tags_array_returns_no_tags_array_failure() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let profile = json!({"kind": 0, "content": "{}"});
+        assert_eq!(
+            extract_auth(Some(&profile), &target, &signer),
+            Err(AuthFailure::NoTagsArray(target.clone()))
+        );
+    }
+
+    #[test]
+    fn extract_auth_no_auth_tag_returns_no_auth_tag_failure() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let profile = json!({"tags": [["p", hex64('b')]]});
+        assert_eq!(
+            extract_auth(Some(&profile), &target, &signer),
+            Err(AuthFailure::NoAuthTag)
+        );
+    }
+
+    #[test]
+    fn extract_auth_valid_tag_returns_ok() {
+        let signer = hex64('a');
+        let sig = hex128('b');
+        let profile = json!({"tags": [["auth", signer, "conditions", sig]]});
+        let result = extract_auth(Some(&profile), &hex64('t'), &signer);
+        assert!(result.is_ok(), "must succeed with a valid tag");
+        let tag = result.unwrap();
+        assert_eq!(tag[0], "auth");
+        assert_eq!(tag[1], signer);
+    }
+
+    #[test]
+    fn extract_auth_owner_mismatch_returns_owner_mismatch_failure() {
+        let actual_owner = hex64('a');
+        let signer = hex64('b');
+        let sig = hex128('c');
+        let profile = json!({"tags": [["auth", actual_owner, "conditions", sig]]});
+        assert_eq!(
+            extract_auth(Some(&profile), &hex64('t'), &signer),
+            Err(AuthFailure::OwnerMismatch(actual_owner.clone()))
+        );
+        // Message must include the actual owner for actionability.
+        let msg = AuthFailure::OwnerMismatch(actual_owner.clone()).message();
+        assert!(
+            msg.contains(&actual_owner),
+            "OwnerMismatch message must include actual owner, got: {msg}"
+        );
+    }
+
+    // --- (c3) resolve_auth: production async resolver via counted test server ---
+    //
+    // Each test spins up a local Axum server that handles POST /query, counts
+    // calls, and returns a canned kind:0 (or empty array) based on the
+    // attempt number. The test drives the production `resolve_auth` function
+    // and asserts on both return value and exact fetch count.
+
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Response, StatusCode};
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    /// Spin up an Axum server handling POST /query.
+    /// `f(n)` is called with the 1-based attempt number and returns the JSON body.
+    async fn query_server<F>(f: F) -> (String, Arc<AtomicU32>)
+    where
+        F: Fn(u32) -> String + Send + Sync + 'static,
+    {
+        let counter = Arc::new(AtomicU32::new(0));
+        let handler: Arc<dyn Fn(u32) -> String + Send + Sync> = Arc::new(f);
+        let state = (handler, counter.clone());
+
+        type S = (Arc<dyn Fn(u32) -> String + Send + Sync>, Arc<AtomicU32>);
+        let app = Router::new()
+            .route(
+                "/query",
+                axum::routing::post(
+                    |State((handler, ctr)): State<S>, _headers: HeaderMap, _body: Body| async move {
+                        let n = ctr.fetch_add(1, Ordering::SeqCst) + 1;
+                        let body = handler(n);
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap()
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), counter)
+    }
+
+    fn test_client(base_url: &str) -> crate::client::BuzzClient {
+        let keys = nostr::Keys::generate();
+        crate::client::BuzzClient::new(base_url.to_string(), keys, None, None).unwrap()
+    }
+
+    fn kind0_response(signer_hex: &str) -> String {
+        let sig = hex128('b');
+        serde_json::json!([{
+            "kind": 0,
+            "tags": [["auth", signer_hex, "conditions", sig]],
+            "content": "{}"
+        }])
+        .to_string()
+    }
+
+    fn empty_response() -> String {
+        "[]".to_string()
+    }
+
+    fn no_auth_response() -> String {
+        serde_json::json!([{"kind": 0, "tags": [["p", "xx"]], "content": "{}"}]).to_string()
+    }
+
+    /// First attempt succeeds — exactly 1 fetch, Ok(Some(tag)).
+    #[tokio::test]
+    async fn resolve_auth_first_success_one_fetch() {
+        let signer = hex64('a');
+        let signer_clone = signer.clone();
+        let (url, counter) = query_server(move |_n| kind0_response(&signer_clone)).await;
+        let client = test_client(&url);
+        let target = hex64('b'); // target ≠ signer
+        let mut sink: Vec<u8> = Vec::new();
+
+        let result = resolve_auth(&client, &target, &signer, false, &mut sink).await;
+
+        assert!(result.is_ok(), "first success must return Ok: {result:?}");
+        assert!(result.unwrap().is_some(), "must return the extracted tag");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "first-success path must issue exactly 1 query"
+        );
+        assert!(sink.is_empty(), "no warning on success");
+    }
+
+    /// First fails (no auth tag), retry succeeds — exactly 2 fetches, Ok(Some(tag)).
+    #[tokio::test]
+    async fn resolve_auth_retry_success_two_fetches() {
+        let signer = hex64('a');
+        let signer_clone = signer.clone();
+        let (url, counter) = query_server(move |n| {
+            if n == 1 {
+                no_auth_response()
+            } else {
+                kind0_response(&signer_clone)
+            }
+        })
+        .await;
+        let client = test_client(&url);
+        let target = hex64('b');
+        let mut sink: Vec<u8> = Vec::new();
+
+        let result = resolve_auth(&client, &target, &signer, false, &mut sink).await;
+
+        assert!(result.is_ok(), "retry success must return Ok: {result:?}");
+        assert!(result.unwrap().is_some(), "must return the extracted tag");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "retry-success path must issue exactly 2 queries"
+        );
+        assert!(sink.is_empty(), "no warning on success");
+    }
+
+    /// Both attempts fail, allow_bare == false — exactly 2 fetches, Err (fail closed).
+    #[tokio::test]
+    async fn resolve_auth_double_failure_no_admin_fail_closed() {
+        let (url, counter) = query_server(|_n| no_auth_response()).await;
+        let client = test_client(&url);
+        let signer = hex64('s');
+        let target = hex64('t');
+        let mut sink: Vec<u8> = Vec::new();
+
+        let result = resolve_auth(&client, &target, &signer, false, &mut sink).await;
+
+        assert!(result.is_err(), "double failure must fail closed");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("refusing to send"),
+            "error must name the refusal: {err}"
+        );
+        assert!(
+            err.contains("--admin"),
+            "error must mention --admin escape: {err}"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "double-failure path must issue exactly 2 queries"
+        );
+        assert!(sink.is_empty(), "no warning on fail-closed path");
+    }
+
+    /// Both attempts fail, allow_bare == true (--admin) — exactly 2 fetches,
+    /// Ok(None) + exactly one warning line.
+    #[tokio::test]
+    async fn resolve_auth_double_failure_admin_allows_bare_with_warning() {
+        let (url, counter) = query_server(|_n| no_auth_response()).await;
+        let client = test_client(&url);
+        let signer = hex64('s');
+        let target = hex64('t');
+        let mut sink: Vec<u8> = Vec::new();
+
+        let result = resolve_auth(&client, &target, &signer, true, &mut sink).await;
+
+        assert!(result.is_ok(), "--admin must allow bare send: {result:?}");
+        assert!(result.unwrap().is_none(), "bare path returns None");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "--admin double-failure path must issue exactly 2 queries"
+        );
+        // Exactly one warning line.
+        let text = std::str::from_utf8(&sink).expect("UTF-8");
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines.len(),
             1,
-            "expected exactly one warning line, got: {text:?}"
+            "expected exactly one warning, got: {text:?}"
         );
-        let parsed: serde_json::Value =
-            serde_json::from_str(lines[0]).expect("warning line must be parseable JSON");
-        let warning = parsed["warning"]
-            .as_str()
-            .expect("warning line must have a string 'warning' field");
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON warning");
+        let warning = parsed["warning"].as_str().expect("string warning field");
         assert!(
-            warning.contains(expected_fragment),
-            "warning must contain {expected_fragment:?}, got: {warning}"
+            warning.contains("proceeding without owner attestation"),
+            "warning must name the bare-send: {warning}"
         );
     }
 
-    fn assert_no_warning(sink: &[u8]) {
-        let text = std::str::from_utf8(sink).expect("sink is valid UTF-8");
-        assert!(text.is_empty(), "expected no warning output, got: {text:?}");
-    }
-
-    // Branch 1: profile == None → no kind:0 found.
-    #[test]
-    fn resolve_auth_from_profile_no_kind0_emits_json_warning() {
-        let target = hex64('t');
-        let signer = hex64('s');
-        let mut sink: Vec<u8> = Vec::new();
-        let result = resolve_auth_from_profile(None, &target, &signer, &mut sink);
-        assert!(result.is_none(), "bare path: must return None");
-        assert_one_json_warning(&sink, "no kind:0 profile found");
-    }
-
-    // Branch 2: profile present but no tags array.
-    #[test]
-    fn resolve_auth_from_profile_no_tags_array_emits_json_warning() {
-        let target = hex64('t');
-        let signer = hex64('s');
-        let profile = json!({"kind": 0, "content": "{}"});
-        let mut sink: Vec<u8> = Vec::new();
-        let result = resolve_auth_from_profile(Some(&profile), &target, &signer, &mut sink);
-        assert!(result.is_none(), "bare path: must return None");
-        assert_one_json_warning(&sink, "no tags array");
-    }
-
-    // Branch 3a: tags present but no auth tag (NoAuthTag).
-    #[test]
-    fn resolve_auth_from_profile_no_auth_tag_emits_json_warning() {
-        let target = hex64('t');
-        let signer = hex64('s');
-        let profile = json!({"tags": [["p", hex64('b')]]});
-        let mut sink: Vec<u8> = Vec::new();
-        let result = resolve_auth_from_profile(Some(&profile), &target, &signer, &mut sink);
-        assert!(result.is_none(), "bare path: must return None");
-        assert_one_json_warning(&sink, "no \"auth\" tag");
-    }
-
-    // Branch 3b: duplicate auth tags (AmbiguousAuthTag).
-    #[test]
-    fn resolve_auth_from_profile_ambiguous_auth_tag_emits_json_warning() {
-        let signer = hex64('s');
-        let sig = hex128('b');
-        let profile = json!({"tags": [
-            ["auth", signer, "conditions", sig],
-            ["auth", signer, "conditions", sig],
-        ]});
-        let mut sink: Vec<u8> = Vec::new();
-        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
-        assert!(result.is_none(), "bare path: must return None");
-        assert_one_json_warning(&sink, "ambiguous");
-    }
-
-    // Branch 3c: sole auth tag malformed (WrongArity).
-    #[test]
-    fn resolve_auth_from_profile_malformed_tag_emits_json_warning() {
-        let signer = hex64('s');
-        // arity 3 — missing sig field
-        let profile = json!({"tags": [["auth", signer, "conditions"]]});
-        let mut sink: Vec<u8> = Vec::new();
-        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
-        assert!(result.is_none(), "bare path: must return None");
-        assert_one_json_warning(&sink, "element");
-    }
-
-    // Branch 3d: owner mismatch — warning must include the actual owner pubkey.
-    #[test]
-    fn resolve_auth_from_profile_owner_mismatch_emits_json_warning_with_actual_owner() {
-        let actual_owner = hex64('a');
-        let signer = hex64('b');
-        let sig = hex128('c');
-        let profile = json!({"tags": [["auth", actual_owner, "conditions", sig]]});
-        let mut sink: Vec<u8> = Vec::new();
-        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
-        assert!(result.is_none(), "bare path: must return None");
-        assert_one_json_warning(&sink, &actual_owner);
-    }
-
-    // Success path: valid auth tag → Some returned, sink stays empty.
-    #[test]
-    fn resolve_auth_from_profile_valid_auth_tag_returns_some_emits_nothing() {
+    /// Self path (target == signer, case-insensitive) — zero fetches, Ok(None).
+    #[tokio::test]
+    async fn resolve_auth_self_path_zero_fetches() {
+        // Server counts every /query call; we assert 0.
+        let (url, counter) = query_server(|_n| empty_response()).await;
+        let client = test_client(&url);
         let signer = hex64('a');
-        let sig = hex128('b');
-        let profile = json!({"tags": [["auth", signer, "conditions", sig]]});
+        let target_upper = signer.to_uppercase(); // case-insensitive self
         let mut sink: Vec<u8> = Vec::new();
-        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
-        assert!(result.is_some(), "must return the extracted tag");
-        assert_no_warning(&sink);
+
+        let result = resolve_auth(&client, &target_upper, &signer, false, &mut sink).await;
+
+        assert!(result.is_ok(), "self path must return Ok: {result:?}");
+        assert!(result.unwrap().is_none(), "self path returns None");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "self path must issue zero queries"
+        );
+        assert!(sink.is_empty(), "no warning on self path");
     }
 
-    // Warning output must be valid JSON (serde_json serializes safely).
+    // --- (c4) --admin flag parser: both archive and unarchive ---
+    //
+    // These tests confirm the flag is declared and parsed on both subcommands
+    // so it can't silently disappear from one of them.
+
     #[test]
-    fn resolve_auth_from_profile_warning_is_valid_json() {
-        let actual_owner = hex64('a');
-        let signer = hex64('b');
-        let sig = hex128('c');
-        let profile = json!({"tags": [["auth", actual_owner, "conditions", sig]]});
-        let mut sink: Vec<u8> = Vec::new();
-        let _ = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
-        let text = std::str::from_utf8(&sink).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(text.trim()).expect("warning output must be valid JSON");
-        assert!(parsed["warning"].is_string());
+    fn archive_admin_flag_is_parsed() {
+        use crate::Cli;
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["buzz", "agents", "archive", &hex64('a'), "--admin"])
+            .expect("--admin must be accepted by agents archive");
+        match cli.command {
+            crate::Cmd::Agents(crate::AgentsCmd::Archive { admin, .. }) => {
+                assert!(admin, "--admin must be true when flag is present");
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn unarchive_admin_flag_is_parsed() {
+        use crate::Cli;
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["buzz", "agents", "unarchive", &hex64('a'), "--admin"])
+            .expect("--admin must be accepted by agents unarchive");
+        match cli.command {
+            crate::Cmd::Agents(crate::AgentsCmd::Unarchive { admin, .. }) => {
+                assert!(admin, "--admin must be true when flag is present");
+            }
+            _ => panic!("unexpected command variant"),
+        }
     }
 
     // --- (d) NIP-11 self normalization: normalize_relay_self_hex ---

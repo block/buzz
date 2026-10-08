@@ -17,7 +17,17 @@ export type FeatureOverrides = Record<string, boolean>;
 export function getOverrides(): FeatureOverrides {
   try {
     const raw = window.localStorage.getItem(OVERRIDES_KEY);
-    return raw ? (JSON.parse(raw) as FeatureOverrides) : {};
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return {};
+    const featureIds = new Set(manifest.features.map((feature) => feature.id));
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, boolean] =>
+          featureIds.has(entry[0]) && typeof entry[1] === "boolean",
+      ),
+    );
   } catch {
     return {};
   }

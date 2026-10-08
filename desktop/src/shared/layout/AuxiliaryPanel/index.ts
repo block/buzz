@@ -1,6 +1,7 @@
 export { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanelShell";
 export { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanelBody";
 export {
+  AUXILIARY_PANEL_DEFAULT_SURFACE_CLASS,
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,

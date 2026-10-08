@@ -1,7 +1,11 @@
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/channels/channels_page.dart';
+import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -33,12 +37,135 @@ void main() {
     );
   }
 
+  testWidgets('iOS glass retains icons, tab taps and unread semantics', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const support = MethodChannel('buzz/concentric_sheet_surface');
+    final created = <Map<Object?, Object?>>[];
+    messenger.setMockMethodCallHandler(support, (call) async => true);
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method == 'create') {
+        final args = call.arguments as Map<Object?, Object?>;
+        if (args['viewType'] == 'buzz/concentric_sheet_surface') {
+          created.add(
+            const StandardMessageCodec().decodeMessage(
+                  ByteData.sublistView(args['params'] as Uint8List),
+                )
+                as Map<Object?, Object?>,
+          );
+        }
+      }
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(support, null);
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+    });
+    await tester.pumpWidget(await buildHome(unreadInboxCount: 2));
+    await tester.pump();
+    await tester.pump();
+    final bar = find.byKey(const ValueKey('home-ios-glass-tabs'));
+    expect(bar, findsOneWidget);
+    expect(tester.getSize(bar), const Size(218, 56));
+    expect(created.where((params) => params['usesGlass'] == true), isNotEmpty);
+    expect(
+      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.house500)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.inbox300)),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('Activity, unread'), findsOneWidget);
+    expect(find.descendant(of: bar, matching: find.byType(Text)), findsNothing);
+    final launcherGlass = find.byKey(const ValueKey('quick-actions-ios-glass'));
+    expect(launcherGlass, findsOneWidget);
+    expect(tester.getSize(launcherGlass), const Size.square(56));
+    expect(
+      created.where(
+        (params) => params['glassTintColor'] == Colors.black.toARGB32(),
+      ),
+      hasLength(1),
+    );
+    expect(
+      tester
+          .widget<Icon>(
+            find.descendant(
+              of: launcherGlass,
+              matching: find.byIcon(BuzzIcons.plus),
+            ),
+          )
+          .color,
+      Colors.white,
+    );
+    expect(
+      created.where((params) => params['usesGlass'] == true).length,
+      greaterThanOrEqualTo(2),
+    );
+    expect(
+      find.descendant(of: launcherGlass, matching: find.byIcon(BuzzIcons.plus)),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(tester.getSize(launcherGlass).width, greaterThan(56));
+    expect(find.text('Create channel').hitTestable(), findsOneWidget);
+    expect(find.text('New direct message').hitTestable(), findsOneWidget);
+    expect(find.text('Browse channels').hitTestable(), findsOneWidget);
+    await tester.tapAt(const Offset(8, 8));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(tester.getSize(launcherGlass), const Size.square(56));
+    await tester.tap(find.byTooltip('Activity'));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(
+      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.inbox500)),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('Activity, unread'), findsNothing);
+    final semantics = tester.ensureSemantics();
+    expect(find.byType(SearchPage), findsNothing);
+    expect(
+      tester
+          .getSemantics(find.bySemanticsLabel('Search'))
+          .flagsCollection
+          .isSelected
+          .toString(),
+      'Tristate.isFalse',
+    );
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
+    expect(find.byType(SearchPage), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(find.bySemanticsLabel('Search'))
+          .flagsCollection
+          .isSelected
+          .toString(),
+      'Tristate.isTrue',
+    );
+    semantics.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('shows icon-only navigation and an aligned quick action', (
     tester,
   ) async {
     await tester.pumpWidget(await buildHome());
     await tester.pump();
 
+    expect(find.byKey(const ValueKey('home-ios-glass-tabs')), findsNothing);
     expect(find.text('Home'), findsNothing);
     expect(find.text('Activity'), findsNothing);
     expect(find.text('Search'), findsNothing);
@@ -109,6 +236,90 @@ void main() {
           .opacity,
       1,
     );
+  });
+
+  testWidgets('keeps Home opaque beneath the Settings transition', (
+    tester,
+  ) async {
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 95));
+
+    double homeOpacity() => tester
+        .widget<Opacity>(
+          find.byKey(const ValueKey('home-settings-transition-opacity')),
+        )
+        .opacity;
+
+    expect(homeOpacity(), 1);
+
+    await tester.pumpAndSettle();
+    Navigator.of(
+      tester.element(
+        find.byKey(
+          const ValueKey('settings-transition-opacity'),
+          skipOffstage: false,
+        ),
+      ),
+    ).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 95));
+
+    expect(homeOpacity(), 1);
+  });
+
+  testWidgets('uses one monotonic route animation for Settings and Home', (
+    tester,
+  ) async {
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+
+    double homeScale() => tester
+        .widget<Transform>(
+          find.byKey(const ValueKey('home-settings-transition-scale')),
+        )
+        .transform
+        .storage[0];
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pump();
+
+    final settingsTransition = find.byKey(
+      const ValueKey('settings-transition-opacity'),
+      skipOffstage: false,
+    );
+    final settingsRoute = ModalRoute.of(tester.element(settingsTransition));
+
+    final entranceScales = <double>[homeScale()];
+    final routeValues = <double>[settingsRoute!.animation!.value];
+    for (var frame = 0; frame < 15; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      entranceScales.add(homeScale());
+      routeValues.add(settingsRoute.animation!.value);
+    }
+    expect(entranceScales.first, closeTo(1, 0.000001));
+    final reversalFrames = <int>[];
+    for (var frame = 1; frame < entranceScales.length; frame++) {
+      if (entranceScales[frame] > entranceScales[frame - 1] + 0.000001) {
+        reversalFrames.add(frame);
+      }
+    }
+    expect(
+      reversalFrames,
+      isEmpty,
+      reason:
+          'Home must scale down in one direction on entrance. '
+          'scales=$entranceScales route=$routeValues',
+    );
+    expect(entranceScales, everyElement(inInclusiveRange(0.97, 1)));
+    expect(entranceScales.last, closeTo(0.97, 0.001));
+
+    await tester.pumpAndSettle();
+    Navigator.of(tester.element(settingsTransition)).pop();
+    await tester.pumpAndSettle();
   });
 
   testWidgets('gives selection haptics only when the tab changes', (

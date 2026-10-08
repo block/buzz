@@ -62,7 +62,12 @@ function findCrossedSliderTick(
 }
 
 type AvatarFramingSliderProps = {
+  ariaDescribedBy?: string;
+  ariaLabel?: string;
+  ariaValueText?: string;
+  compact?: boolean;
   disabled?: boolean;
+  handleAlwaysVisible?: boolean;
   helpText?: string | null;
   helpTestId?: string;
   max: number;
@@ -70,6 +75,7 @@ type AvatarFramingSliderProps = {
   onChange: (value: number) => void;
   onReset: () => void;
   resetValue: number;
+  resetLabel?: string;
   resetTestId: string;
   testId: string;
   tipText?: string | null;
@@ -77,7 +83,12 @@ type AvatarFramingSliderProps = {
 };
 
 export function AvatarFramingSlider({
+  ariaDescribedBy,
+  ariaLabel = "Avatar size",
+  ariaValueText,
+  compact = false,
   disabled = false,
+  handleAlwaysVisible = false,
   helpText = null,
   helpTestId,
   max,
@@ -85,6 +96,7 @@ export function AvatarFramingSlider({
   onChange,
   onReset,
   resetValue,
+  resetLabel = "Reset avatar size",
   resetTestId,
   testId,
   tipText = null,
@@ -158,13 +170,18 @@ export function AvatarFramingSlider({
   const sliderControl = (
     <div className="buzz-avatar-framing-slider-wrapper">
       <div
-        aria-label="Avatar size"
-        aria-describedby={tipText ? tipId : undefined}
+        aria-label={ariaLabel}
+        aria-describedby={tipText ? tipId : ariaDescribedBy}
         aria-valuemax={max}
         aria-valuemin={min}
         aria-valuenow={value}
-        className="buzz-avatar-framing-slider"
+        aria-valuetext={ariaValueText}
+        className={cn(
+          "buzz-avatar-framing-slider",
+          compact && "buzz-avatar-framing-slider--compact",
+        )}
         data-active={isActive ? "true" : undefined}
+        data-handle-visible={handleAlwaysVisible ? "true" : undefined}
         data-testid={testId}
         onKeyDown={(event) => {
           if (disabled) {
@@ -242,7 +259,7 @@ export function AvatarFramingSlider({
         <div aria-hidden="true" className="buzz-avatar-framing-slider-handle" />
       </div>
       <button
-        aria-label="Reset avatar size"
+        aria-label={resetLabel}
         className="buzz-avatar-framing-slider-hashmark"
         data-reset="true"
         data-testid={resetTestId}
@@ -255,7 +272,7 @@ export function AvatarFramingSlider({
           onReset();
         }}
         style={resetTickStyle}
-        title="Reset avatar size"
+        title={resetLabel}
         type="button"
       />
       {tipText ? (
@@ -386,7 +403,7 @@ export function AvatarFilmstripPicker({
         aria-valuemax={maxFrameIndex}
         aria-valuemin={0}
         aria-valuenow={safeSelectedFrame}
-        className="relative h-12 min-w-0 touch-none rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="relative h-16 min-w-0 touch-none rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         data-testid={`${testIdPrefix}-animated-poster-scrubber`}
         onKeyDown={(event) => {
           if (event.key === "ArrowLeft") {
@@ -417,45 +434,46 @@ export function AvatarFilmstripPicker({
           }
           selectFromClientX(event.clientX);
         }}
-        ref={stripRef}
         role="slider"
         tabIndex={disabled ? -1 : 0}
       >
-        <div className="absolute inset-0 overflow-hidden rounded-md border border-foreground/10 bg-background/70 shadow-inner">
-          {frames.length === 0 ? (
-            <div className="grid h-full w-full place-items-center">
-              <Spinner
-                aria-label="Generating frame thumbnails"
-                className="h-5 w-5"
-              />
-            </div>
-          ) : (
-            <div aria-hidden="true" className="absolute inset-0 flex h-full">
-              {frames.map((frame, index) => (
-                <img
-                  alt=""
-                  className="h-full min-w-0 flex-1 object-cover"
-                  draggable={false}
-                  // biome-ignore lint/suspicious/noArrayIndexKey: filmstrip frames are regenerated as a fixed, ordered capture sequence.
-                  key={`filmstrip-frame-${index}`}
-                  src={frame}
+        <div className="absolute inset-x-2 top-2 h-12" ref={stripRef}>
+          <div className="absolute inset-0 overflow-hidden rounded-md border border-foreground/10 bg-background/70 shadow-inner">
+            {frames.length === 0 ? (
+              <div className="grid h-full w-full place-items-center">
+                <Spinner
+                  aria-label="Generating frame thumbnails"
+                  className="h-5 w-5"
                 />
-              ))}
-            </div>
-          )}
+              </div>
+            ) : (
+              <div aria-hidden="true" className="absolute inset-0 flex h-full">
+                {frames.map((frame, index) => (
+                  <img
+                    alt=""
+                    className="h-full min-w-0 flex-1 object-cover"
+                    draggable={false}
+                    // biome-ignore lint/suspicious/noArrayIndexKey: filmstrip frames are regenerated as a fixed, ordered capture sequence.
+                    key={`filmstrip-frame-${index}`}
+                    src={frame}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          {frames.length > 0 ? (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 z-10 h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-lg border-[3px] border-white bg-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.32)] ring-1 ring-black/20 transition-[left] duration-75 ease-out"
+              data-testid={`${testIdPrefix}-animated-poster-selector`}
+              style={{
+                left: `clamp(${FILMSTRIP_SELECTOR_SIZE / 2}px, ${
+                  selectedFrameProgress * 100
+                }%, calc(100% - ${FILMSTRIP_SELECTOR_SIZE / 2}px))`,
+              }}
+            />
+          ) : null}
         </div>
-        {frames.length > 0 ? (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute top-1/2 z-10 h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-lg border-[3px] border-white bg-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.32)] ring-1 ring-black/20 transition-[left] duration-75 ease-out"
-            data-testid={`${testIdPrefix}-animated-poster-selector`}
-            style={{
-              left: `clamp(${FILMSTRIP_SELECTOR_SIZE / 2}px, ${
-                selectedFrameProgress * 100
-              }%, calc(100% - ${FILMSTRIP_SELECTOR_SIZE / 2}px))`,
-            }}
-          />
-        ) : null}
       </div>
       {helpText ? (
         <p

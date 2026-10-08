@@ -216,7 +216,7 @@ class _CameraPlaceholder extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     const Icon(
-                      LucideIcons.cameraOff,
+                      BuzzIcons.cameraOff,
                       color: Colors.white,
                       size: 28,
                     ),
@@ -287,6 +287,16 @@ class _CameraCloseButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (Theme.of(context).platform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        icon: IosGlassNavigationIcon.back,
+        semanticLabel: 'Back to attachment options',
+        onPressed: () => _runComposerAction(onTap),
+        width: emphasized ? _cameraBackSize : 40,
+        height: emphasized ? _cameraBackSize : 40,
+        foregroundColor: Colors.white,
+      );
+    }
     return SizedBox.square(
       dimension: emphasized ? _cameraBackSize : 36,
       child: IconButton(
@@ -299,7 +309,7 @@ class _CameraCloseButton extends StatelessWidget {
           ),
           foregroundColor: Colors.white,
         ),
-        icon: Icon(LucideIcons.arrowLeft, size: emphasized ? 24 : 18),
+        icon: Icon(BuzzIcons.arrowLeft, size: emphasized ? 24 : 18),
       ),
     );
   }

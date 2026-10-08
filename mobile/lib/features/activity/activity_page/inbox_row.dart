@@ -72,23 +72,52 @@ class _InboxRow extends HookConsumerWidget {
     final revealAmount = useState(0.0);
     final isDragging = useState(false);
     final labelHapticFired = useRef(false);
-    final userCache = ref.watch(userCacheProvider);
-    final profile = userCache[item.item.pubkey.toLowerCase()];
-    final senderLabel = profile?.displayName ?? shortPubkey(item.item.pubkey);
-    final profileMentionNames = {
-      for (final pubkey in mentionedPubkeysFromTags(item.item.tags))
-        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
-          pubkey: userCache[pubkey]!.displayName!.trim(),
-    };
+    final senderPubkey = item.item.pubkey.toLowerCase();
     final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
+    final relevantPubkeys = {senderPubkey, ...mentionPubkeys};
+    final profiles = <String, UserProfile?>{
+      for (final pubkey in relevantPubkeys)
+        pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
+    };
+    final profile = profiles[senderPubkey];
+    // The shared label contract: blank cached names (empty or whitespace-only
+    // are relay-valid) fall back to the compact npub, never a blank sender.
+    // Rows compare names within their own channel, like the channel itself.
+    final channelId = channel?.id ?? item.item.channelId;
+    final Map<String, String> contextualLabels;
+    if (channelId == null) {
+      // No channel: the row's own identities are the comparison context.
+      final names = watchIdentityNames(ref, relevantPubkeys);
+      contextualLabels = {
+        for (final key in names.candidates) key: names.labelFor(key),
+      };
+    } else {
+      contextualLabels = watchChannelIdentityLabels(
+        ref,
+        channelId,
+        relevantPubkeys,
+      );
+    }
+    final senderLabel =
+        contextualLabels[senderPubkey] ??
+        profile?.label ??
+        shortPubkey(item.item.pubkey);
+    final profileMentionNames = {
+      for (final pubkey in mentionPubkeys)
+        if (profiles[pubkey]?.displayName?.trim().isNotEmpty == true)
+          pubkey: profiles[pubkey]!.displayName!.trim(),
+    };
     final knownAgentPubkeys = channel == null
         ? ref.watch(knownAgentPubkeysProvider)
         : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final isAgent =
+        knownAgentPubkeys.contains(senderPubkey) ||
+        profile?.ownerPubkey != null;
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: knownAgentPubkeys,
       profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
-          if (profile.ownerPubkey != null) profile.pubkey,
+        for (final pubkey in mentionPubkeys)
+          if (profiles[pubkey]?.ownerPubkey != null) pubkey,
       ],
     );
     final mentionNames = mentionNamesWithDirectoryLabels(
@@ -149,7 +178,7 @@ class _InboxRow extends HookConsumerWidget {
                       key: ValueKey('inbox-swipe-read-${item.id}'),
                       color: actionColor,
                       foregroundColor: contrastForeground(actionColor),
-                      icon: isDone ? LucideIcons.mail : LucideIcons.mailOpen,
+                      icon: isDone ? BuzzIcons.mail : BuzzIcons.mailOpen,
                       label: isDone ? 'Mark unread' : 'Mark as read',
                       onTap: toggleReadState,
                     ),
@@ -218,6 +247,7 @@ class _InboxRow extends HookConsumerWidget {
                             _RowAvatar(
                               pubkey: item.item.pubkey,
                               profile: profile,
+                              isAgent: isAgent,
                             ),
                             const SizedBox(width: messageAvatarContentGap),
                             Expanded(
@@ -239,7 +269,7 @@ class _InboxRow extends HookConsumerWidget {
                                           nameColor: context.colors.onSurface,
                                           metadataColor: mutedColor,
                                           nameStyle: activityUsernameTextStyle,
-                                          metadataStyle:
+                                          timestampStyle:
                                               activityTimestampTextStyle,
                                           displayNameKey: ValueKey(
                                             'activity-author-${item.id}',
@@ -314,6 +344,7 @@ class _InboxRow extends HookConsumerWidget {
                                   MessageContent(
                                     content: item.item.displayContent,
                                     mentionNames: mentionNames,
+                                    mentionLabels: contextualLabels,
                                     agentMentionPubkeys: agentMentionPubkeys,
                                     tags: item.item.tags,
                                     maxLines: 2,
@@ -352,13 +383,10 @@ class _InboxRow extends HookConsumerWidget {
           ),
           child: IconTheme.merge(
             data: const IconThemeData(size: 18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+            child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: Icon(
-                    isDone ? LucideIcons.mail : LucideIcons.mailOpen,
-                  ),
+                  leading: Icon(isDone ? BuzzIcons.mail : BuzzIcons.mailOpen),
                   title: Text(isDone ? 'Mark unread' : 'Mark as read'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -366,7 +394,7 @@ class _InboxRow extends HookConsumerWidget {
                   },
                 ),
                 ListTile(
-                  leading: const Icon(LucideIcons.externalLink),
+                  leading: const Icon(BuzzIcons.externalLink),
                   title: const Text('Open conversation'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -448,8 +476,13 @@ class _InboxSwipeAction extends StatelessWidget {
 class _RowAvatar extends StatelessWidget {
   final String pubkey;
   final UserProfile? profile;
+  final bool isAgent;
 
-  const _RowAvatar({required this.pubkey, required this.profile});
+  const _RowAvatar({
+    required this.pubkey,
+    required this.profile,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -467,6 +500,7 @@ class _RowAvatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: isAgent,
     );
   }
 }

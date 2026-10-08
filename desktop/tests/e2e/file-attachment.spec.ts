@@ -72,6 +72,56 @@ async function choosePhoto(page: Page) {
   });
 }
 
+const PHOTO_FILE = {
+  buffer: Buffer.from("photo"),
+  mimeType: "image/png",
+  name: "photo.png",
+};
+
+async function uploadCommandCount(page: Page) {
+  return page.evaluate(
+    () =>
+      (
+        (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+          .__BUZZ_E2E_COMMANDS__ ?? []
+      ).filter((command) => command === "upload_media_bytes_raw").length,
+  );
+}
+
+test("picker survives cancel, same-file retry, and multiple selection", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const attach = page.getByRole("button", { name: "Attach file" });
+
+  // Model cancel/no selection, then immediately reopen. The composer must
+  // reuse its one mounted input rather than creating competing detached ones.
+  const [canceledChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    attach.click(),
+  ]);
+  await canceledChooser.setFiles([]);
+
+  await choosePhoto(page);
+  await expect.poll(() => uploadCommandCount(page)).toBe(1);
+
+  // Reset-before-open is load-bearing: without it browsers suppress `change`
+  // when the same path remains selected.
+  await choosePhoto(page);
+  await expect.poll(() => uploadCommandCount(page)).toBe(2);
+
+  const [multipleChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    attach.click(),
+  ]);
+  await multipleChooser.setFiles([
+    PHOTO_FILE,
+    { ...PHOTO_FILE, buffer: Buffer.from("second photo"), name: "other.png" },
+  ]);
+  await expect.poll(() => uploadCommandCount(page)).toBe(4);
+});
+
 test("photos upload before Send without a queued spoiler control", async ({
   page,
 }) => {
@@ -116,25 +166,49 @@ test("opening edit during an immediate photo upload preserves the draft", async 
   page,
 }) => {
   await page.goto("/");
-  await page.evaluate(() => {
-    const e2e = (
-      window as Window & {
-        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
-      }
-    ).__BUZZ_E2E__;
-    if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
-  });
   await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  // Hold the upload at the IPC boundary until the edit assertion completes.
+  // A fixed delay races menu interaction and CI scheduling, so it can test
+  // an already-completed upload instead of the in-flight draft guard.
+  await page.evaluate(() => {
+    const w = window as Window & {
+      __RELEASE_PHOTO_UPLOAD__?: () => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          payload: unknown,
+          options: unknown,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+    const gate = new Promise<void>((resolve) => {
+      w.__RELEASE_PHOTO_UPLOAD__ = resolve;
+    });
+    w.__TAURI_INTERNALS__.invoke = async (command, payload, options) => {
+      if (command === "upload_media_bytes_raw") await gate;
+      return original(command, payload, options);
+    };
+  });
   await choosePhoto(page);
   await expect(page.getByTestId("upload-progress")).toBeVisible();
 
   await openMoreActionsMenu(page, "mock-general-welcome");
   await page.getByTestId("edit-message-mock-general-welcome").click();
+  // Edit is dispatched by onCloseAutoFocus after Radix unmounts the menu,
+  // not by the click itself. Keep the upload held through that handoff.
+  await expect(page.getByRole("menu")).toHaveCount(0);
 
   // Edit entry is rejected while the compacted draft cannot represent the
   // reserved upload slot. The upload remains current and lands in the draft.
   await expect(page.getByTestId("edit-target")).toHaveCount(0);
   await expect(page.getByTestId("upload-progress")).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as Window & { __RELEASE_PHOTO_UPLOAD__: () => void }
+    ).__RELEASE_PHOTO_UPLOAD__();
+  });
   await expect(page.getByTestId("upload-progress")).toHaveCount(0, {
     timeout: 5_000,
   });

@@ -15,8 +15,11 @@ class Radii {
   static const double lg = 10.0;
   static const double md = 8.0;
   static const double sm = 6.0;
-  static const double card = 12.0; // grouped settings cards
-  static const double popover = 20.0;
+
+  /// Shared strong radius for grouped rows, fields, and utility containers.
+  static const double container = 22.0;
+  static const double card = container; // Backwards-compatible card alias.
+  static const double popover = container;
   static const double dialog = 24.0; // desktop uses rounded-3xl for dialogs
 
   /// Fully rounds pills, circles, and other capsule shapes.
@@ -33,6 +36,9 @@ class AppTheme {
       success: const Color(0xFF40A02B), // Catppuccin Latte Green — universal
       warning: const Color(0xFFDF8E1D), // Latte Yellow
       accent: scheme.tertiary,
+      huddleDrawerSurface: const Color(0xFF000000),
+      huddleControlSurface: const Color(0xFF333333),
+      onHuddleDrawer: const Color(0xFFFAFAFA),
       topSectionGradient: topSectionGradient,
     );
 
@@ -56,6 +62,12 @@ class AppTheme {
       ), // Catppuccin Macchiato Green — universal
       warning: const Color(0xFFEED49F), // Macchiato Yellow
       accent: scheme.tertiary,
+      huddleDrawerSurface: scheme.primaryContainer,
+      huddleControlSurface: Color.alphaBlend(
+        scheme.onPrimaryContainer.withValues(alpha: 0.18),
+        scheme.primaryContainer,
+      ),
+      onHuddleDrawer: scheme.onPrimaryContainer,
       topSectionGradient: topSectionGradient,
     );
 
@@ -278,7 +290,7 @@ class AppTheme {
         labelPadding: EdgeInsets.zero,
       ),
 
-      // Popups/menus share the elevated 20px mobile popover treatment.
+      // Popup menus use the same corner radius as grouped utility rows.
       popupMenuTheme: PopupMenuThemeData(
         color: scheme.surface.withValues(alpha: 0.98),
         elevation: 8,

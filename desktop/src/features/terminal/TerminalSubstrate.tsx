@@ -19,6 +19,7 @@ import { buildBannerColorTable, phaseAt } from "./terminalBannerWave";
 import {
   TERMINAL_CELL_METRICS,
   type TerminalFrame,
+  type TerminalSelectionRow,
   TerminalGrid,
 } from "./terminalRenderer";
 
@@ -128,6 +129,9 @@ export function TerminalSubstrate({
   );
   const [owner, setOwner] = React.useState<"buzz" | "terminal">("buzz");
   const [viewport, setViewport] = React.useState({ columns: 1, rows: 1 });
+  const [selectionRows, setSelectionRows] = React.useState<
+    readonly TerminalSelectionRow[]
+  >([]);
   const [welcomeVisible, setWelcomeVisible] = React.useState(false);
   const [cursorPainted, setCursorPainted] = React.useState(true);
   const [cursorReset, setCursorReset] = React.useState(0);
@@ -457,6 +461,7 @@ export function TerminalSubstrate({
     gridRef.current = activeSessionId
       ? (gridsRef.current.get(activeSessionId) ?? null)
       : null;
+    setSelectionRows(gridRef.current?.selectionRows() ?? []);
 
     paintTerminal();
   }, [activeSessionId, cursorPainted, frames, terminalPalette]);
@@ -672,17 +677,84 @@ export function TerminalSubstrate({
           </button>
         </div>
       </div>
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: the hidden textarea owns keyboard semantics; this only preserves its focus across canvas clicks. */}
-      <div
-        className="buzz-terminal-viewport px-5 pt-2"
-        onMouseDown={(event) => {
-          // Preventing the canvas mousedown also suppresses selection. Revisit
-          // this when the terminal gains mouse selection support.
-          event.preventDefault();
-          textareaRef.current?.focus({ preventScroll: true });
-        }}
-      >
+      <div className="buzz-terminal-viewport px-5 pt-2">
         <canvas ref={canvasRef} />
+        <div
+          aria-hidden="true"
+          className="buzz-terminal-selection-layer"
+          onCopy={(event) => {
+            const selection = window.getSelection();
+            const grid = gridRef.current;
+            if (!selection || selection.isCollapsed || !grid) return;
+            const rowFor = (node: Node | null) =>
+              (node?.nodeType === 1
+                ? (node as Element)
+                : node?.parentElement
+              )?.closest<HTMLElement>("[data-terminal-selection-row]");
+            const anchorNode = selection.anchorNode;
+            const focusNode = selection.focusNode;
+            if (!anchorNode || !focusNode) return;
+            let startRow = rowFor(anchorNode);
+            let endRow = rowFor(focusNode);
+            if (!startRow || !endRow) return;
+            let startIndex = Number(startRow.dataset.terminalSelectionRow);
+            let endIndex = Number(endRow.dataset.terminalSelectionRow);
+            const offsetInRow = (
+              row: HTMLElement,
+              node: Node,
+              offset: number,
+            ) => {
+              const range = document.createRange();
+              range.selectNodeContents(row);
+              range.setEnd(node, offset);
+              return range.toString().length;
+            };
+            let startOffset = offsetInRow(
+              startRow,
+              anchorNode,
+              selection.anchorOffset,
+            );
+            let endOffset = offsetInRow(
+              endRow,
+              focusNode,
+              selection.focusOffset,
+            );
+            if (
+              startIndex > endIndex ||
+              (startIndex === endIndex && startOffset > endOffset)
+            ) {
+              [startRow, endRow] = [endRow, startRow];
+              [startIndex, endIndex] = [endIndex, startIndex];
+              [startOffset, endOffset] = [endOffset, startOffset];
+            }
+            startOffset = grid.normalizeSelectionOffset(
+              startIndex,
+              startOffset,
+              "start",
+            );
+            endOffset = grid.normalizeSelectionOffset(
+              endIndex,
+              endOffset,
+              "end",
+            );
+            event.preventDefault();
+            event.clipboardData.setData(
+              "text/plain",
+              grid.selectionText(startIndex, startOffset, endIndex, endOffset),
+            );
+          }}
+          onMouseUp={() => {
+            if (window.getSelection()?.isCollapsed !== false) {
+              textareaRef.current?.focus({ preventScroll: true });
+            }
+          }}
+        >
+          {selectionRows.map((row) => (
+            <div data-terminal-selection-row={row.line} key={row.line}>
+              {row.text || "\u00a0"}
+            </div>
+          ))}
+        </div>
         {welcomeVisible && banner ? (
           <canvas className="buzz-terminal-welcome" ref={bannerCanvasRef} />
         ) : null}

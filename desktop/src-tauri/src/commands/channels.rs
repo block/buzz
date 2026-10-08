@@ -3,14 +3,23 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse},
+    models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse, GetChannelsPayload},
     nostr_convert,
-    relay::{query_relay, relay_api_base_url_with_override, submit_event, submit_event_with_keys},
+    relay::{
+        assert_expected_relay_scope, assert_expected_signer, query_relay,
+        relay_api_base_url_with_override, submit_event, submit_event_at_with_keys,
+        submit_event_with_keys,
+    },
 };
 
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
 
-const DIRECTORY_PAGE_SIZE: usize = 500;
+// The relay-backed channel list computation (fetch_channels, DirectoryScope,
+// the directory cursor, the not-modified hash, and member-count collection)
+// lives in the `fetch` submodule to keep this file under the per-file line cap.
+mod fetch;
+use fetch::{compute_channels_hash, fetch_channels, DirectoryScope};
+
 const STARTER_CHANNEL_NAMESPACE: uuid::Uuid = uuid::uuid!("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0");
 
 struct StarterChannelSpec {
@@ -32,342 +41,66 @@ const STARTER_CHANNELS: &[StarterChannelSpec] = &[
     },
 ];
 
-fn advance_directory_cursor(filter: &mut serde_json::Value, page: &[nostr::Event]) {
-    let last = page
-        .last()
-        .expect("a full relay page always has a last event");
-    filter["until"] = serde_json::json!(last.created_at.as_secs());
-    filter["before_id"] = serde_json::json!(last.id.to_hex());
-}
+// ── Tauri commands ────────────────────────────────────────────────────────────
 
-/// Fetch every page for a historical relay filter using the relay's composite
-/// `(until, before_id)` cursor. A timestamp-only cursor can skip rows when more
-/// than one page of events shares the same second.
-async fn query_relay_all(
-    state: &AppState,
-    mut filter: serde_json::Value,
-) -> Result<Vec<nostr::Event>, String> {
-    filter["limit"] = serde_json::json!(DIRECTORY_PAGE_SIZE);
-    let mut all = Vec::new();
-
-    loop {
-        let page = query_relay(state, &[filter.clone()]).await?;
-        let done = page.len() < DIRECTORY_PAGE_SIZE;
-
-        if !done {
-            advance_directory_cursor(&mut filter, &page);
-        }
-
-        all.extend(page);
-        if done {
-            return Ok(all);
-        }
-    }
-}
-
-/// Whether an open channel not yet in the real member set should still be
-/// classified `is_member=true` via the pending-owner overlay. Pulled out of
-/// `get_channels`'s open-channel branch so the exact `(d_tag, my_pubkey,
-/// overlay) -> is_member` decision — including the identity binding that
-/// keeps one identity's pending entry from covering another's — is directly
-/// unit-testable without going through the async relay-backed command.
-fn classify_pending_owner(state: &AppState, my_pubkey: &str, d_tag: Option<&str>) -> bool {
-    d_tag.is_some_and(|d| state.is_pending_owned_channel(my_pubkey, d))
-}
-
+/// Return the channels the active identity belongs to (plus its own
+/// not-yet-propagated creations). This is the 60s poll path: it performs no
+/// all-open directory scan, so its phase-2 fan-out is bounded by membership.
+/// Joinable open channels are served separately by
+/// [`get_open_channel_directory`].
+///
+/// `known_hash` is a previously returned `hash` value. When it matches the
+/// computed stable hash (which excludes `last_message_at`), the response
+/// carries `channels: null` so the multi-MB list is not serialized across IPC.
+/// `last_messages` is always included because it is cheap and changes with
+/// every new message.
 #[tauri::command]
-pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>, String> {
-    let _profile_start = std::time::Instant::now();
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+pub async fn get_channels(
+    known_hash: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<GetChannelsPayload, String> {
+    let channels = fetch_channels(&state, DirectoryScope::MemberOnly).await?;
 
-    // Step 1: find all kind:39002 (members) events that mention me, then
-    // pull the channel ids out of their `d` tags.
-    let member_events = query_relay_all(
-        &state,
-        serde_json::json!({"kinds": [39002], "#p": [&my_pubkey]}),
-    )
-    .await?;
-
-    #[cfg(debug_assertions)]
-    let t_members = _profile_start.elapsed();
-
-    let mut channel_ids: Vec<String> = member_events
+    let last_messages: std::collections::HashMap<String, String> = channels
         .iter()
-        .filter_map(|ev| {
-            ev.tags.iter().find_map(|t| {
-                let s = t.as_slice();
-                if s.len() >= 2 && s[0] == "d" {
-                    Some(s[1].clone())
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-    channel_ids.sort();
-    channel_ids.dedup();
-
-    // The real kind:39002 membership has now resolved for these channels —
-    // drop them from the pending-owner overlay (see `AppState::pending_owned_channels`)
-    // so a channel this identity created no longer speaks through the overlay
-    // once genuine membership is observable, and a later leave correctly
-    // flips it back to `is_member=false`.
-    for id in &channel_ids {
-        state.clear_pending_owned_channel(&my_pubkey, id);
-    }
-
-    // Step 2: fetch channel metadata events (kind:39000) for member channels.
-    // kind:39000 is addressable: exactly one event per `d` tag, so a limit
-    // equal to the number of ids is both necessary and sufficient. Without
-    // an explicit limit, multi-value `#d` filters fall through to the relay's
-    // default LIMIT and can drop results when there are many channels.
-    let meta_events = if !channel_ids.is_empty() {
-        query_relay(
-            &state,
-            &[serde_json::json!({
-                "kinds": [39000],
-                "#d": channel_ids,
-                "limit": channel_ids.len(),
-            })],
-        )
-        .await?
-    } else {
-        Vec::new()
-    };
-
-    #[cfg(debug_assertions)]
-    let t_member_meta = _profile_start.elapsed();
-
-    // Step 3: fetch ALL open channel metadata so the channel browser can show
-    // discoverable channels the user hasn't joined yet. The relay's access
-    // control allows reading kind:39000 for open channels regardless of membership.
-    let open_meta_events = query_relay_all(&state, serde_json::json!({"kinds": [39000]})).await?;
-
-    #[cfg(debug_assertions)]
-    let t_open_meta = _profile_start.elapsed();
-
-    // Merge: member channels (marked as member) + open channels (not yet joined).
-    let member_d_tags: std::collections::HashSet<String> = meta_events
-        .iter()
-        .filter_map(|ev| {
-            ev.tags.iter().find_map(|t| {
-                let s = t.as_slice();
-                if s.len() >= 2 && s[0] == "d" {
-                    Some(s[1].clone())
-                } else {
-                    None
-                }
-            })
+        .filter_map(|c| {
+            c.last_message_at
+                .as_ref()
+                .map(|ts| (c.id.clone(), ts.clone()))
         })
         .collect();
 
-    let mut channels = Vec::with_capacity(meta_events.len() + open_meta_events.len());
-    for ev in &meta_events {
-        if let Ok(info) = nostr_convert::channel_info_from_event(ev, None, Some(true)) {
-            channels.push(info);
-        }
-    }
-    for ev in &open_meta_events {
-        // Skip channels already included from the member set.
-        let d_tag = ev.tags.iter().find_map(|t| {
-            let s = t.as_slice();
-            if s.len() >= 2 && s[0] == "d" {
-                Some(s[1].clone())
-            } else {
-                None
-            }
+    let hash = compute_channels_hash(&channels);
+
+    // Not-modified short-circuit: skip the multi-MB IPC payload when the
+    // caller's hash matches. `last_messages` still ships so the TS side can
+    // update sidebar timestamps without re-rendering the full list.
+    if known_hash.as_deref() == Some(hash.as_str()) {
+        return Ok(GetChannelsPayload {
+            hash,
+            channels: None,
+            last_messages,
         });
-        if let Some(ref d) = d_tag {
-            if member_d_tags.contains(d) {
-                continue;
-            }
-        }
-        // The overlay (`AppState::pending_owned_channels`) marks channels this
-        // identity just created via `create_channel` whose kind:39002 owner
-        // membership hasn't propagated yet (#1761) — a fresh channel has no
-        // member event and would otherwise fall through to `is_member=false`
-        // here, disabling the owner's own composer until that snapshot lands.
-        // The overlay can only be populated by this process's own
-        // `create_channel` call (never by relay data) and is keyed by
-        // `(my_pubkey, d_tag)`, so it adds no trust-boundary risk and can
-        // never speak for a channel a different identity created; `channel_ids`
-        // above clears it once real membership is observed for `my_pubkey`.
-        let is_pending_owner = classify_pending_owner(&state, &my_pubkey, d_tag.as_deref());
-        if let Ok(info) = nostr_convert::channel_info_from_event(ev, None, Some(is_pending_owner)) {
-            channels.push(info);
-        }
     }
 
-    // Populate member_count by batch-fetching kind:39002 for every listed
-    // channel and counting unique p-tag pubkeys. The kind:40901 summary
-    // sidecar that channel_info_from_event prefers isn't emitted by the
-    // relay today, so without this step every channel reports 0 members
-    // in the channel browser (the active-channel top bar masks this with
-    // its own live members query).
-    let all_d_tags: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
-    if !all_d_tags.is_empty() {
-        let members_events = query_relay(
-            &state,
-            &[serde_json::json!({
-                "kinds": [39002],
-                "#d": all_d_tags,
-                "limit": all_d_tags.len(),
-            })],
-        )
-        .await
-        .unwrap_or_default();
-
-        let membership = collect_members_by_channel(&members_events);
-        for channel in &mut channels {
-            if let Some(info) = membership.get(&channel.id) {
-                channel.member_count = info.count;
-                channel.member_pubkeys = info.pubkeys.clone();
-            }
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    let t_member_counts = _profile_start.elapsed();
-
-    // Populate last_message_at by fetching the most recent human message per
-    // channel. Uses per-channel filters (single #h value each) so the relay can
-    // push the query to its indexed channel_id column. Multi-value #h is NOT
-    // SQL-pushed and would silently drop quieter channels under the global limit.
-    let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
-    if !channel_ids.is_empty() {
-        let filters: Vec<serde_json::Value> = channel_ids
-            .iter()
-            .map(|id| {
-                serde_json::json!({
-                    "kinds": [9, 40002],
-                    "#h": [id],
-                    "limit": 1
-                })
-            })
-            .collect();
-
-        let message_events = query_relay(&state, &filters).await.unwrap_or_default();
-
-        let mut last_message_by_channel: std::collections::HashMap<String, u64> =
-            std::collections::HashMap::new();
-        for ev in &message_events {
-            if let Some(ch_id) = ev.tags.iter().find_map(|t| {
-                let s = t.as_slice();
-                (s.len() >= 2 && s[0] == "h").then(|| s[1].clone())
-            }) {
-                let ts = ev.created_at.as_secs();
-                last_message_by_channel
-                    .entry(ch_id)
-                    .and_modify(|existing| {
-                        if ts > *existing {
-                            *existing = ts;
-                        }
-                    })
-                    .or_insert(ts);
-            }
-        }
-
-        for channel in &mut channels {
-            if let Some(&ts) = last_message_by_channel.get(&channel.id) {
-                channel.last_message_at = Some(nostr_convert::timestamp_to_iso(ts));
-            }
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    let t_last_message = _profile_start.elapsed();
-
-    // NIP-DV: drop DMs the viewer has hidden. The relay maintains a per-viewer
-    // parameterized-replaceable snapshot (kind:30622, d=my pubkey) whose `h`
-    // tags list currently-hidden DM channel ids. The snapshot also carries
-    // `p`=my pubkey so the relay's #p read-gate scopes it to me; we query by
-    // `#p` for that reason. Reading the latest one is the only way the client
-    // learns hide state, which the relay tracks privately.
-    let hidden_dms: std::collections::HashSet<String> = {
-        let events = query_relay(
-            &state,
-            &[serde_json::json!({
-                "kinds": [buzz_core_pkg::kind::KIND_DM_VISIBILITY],
-                "#p": [&my_pubkey],
-                "limit": 1,
-            })],
-        )
-        .await
-        .unwrap_or_default();
-        events
-            .iter()
-            .max_by_key(|e| e.created_at.as_secs())
-            .map(|e| {
-                e.tags
-                    .iter()
-                    .filter_map(|t| {
-                        let s = t.as_slice();
-                        (s.len() >= 2 && s[0] == "h").then(|| s[1].clone())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    if !hidden_dms.is_empty() {
-        channels.retain(|c| c.channel_type != "dm" || !hidden_dms.contains(&c.id));
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        let total = _profile_start.elapsed();
-        eprintln!(
-            "buzz-desktop: get_channels profile channels={} members={:?} member_meta={:?} open_meta={:?} member_counts={:?} last_message={:?} hidden_dm={:?} total={:?}",
-            channels.len(),
-            t_members,
-            t_member_meta - t_members,
-            t_open_meta - t_member_meta,
-            t_member_counts - t_open_meta,
-            t_last_message - t_member_counts,
-            total - t_last_message,
-            total,
-        );
-    }
-
-    Ok(channels)
+    Ok(GetChannelsPayload {
+        hash,
+        channels: Some(channels),
+        last_messages,
+    })
 }
 
-struct ChannelMembership {
-    count: i64,
-    pubkeys: Vec<String>,
-}
-
-/// Build a `channel_id → membership` map from a batch of kind:39002 events.
-/// Events without a `d` tag are skipped; member dedupe is delegated to
-/// [`nostr_convert::channel_members_from_event`] so the parsing rules match the
-/// per-channel `get_channel_members` path.
-fn collect_members_by_channel(
-    events: &[nostr::Event],
-) -> std::collections::HashMap<String, ChannelMembership> {
-    let mut map: std::collections::HashMap<String, ChannelMembership> =
-        std::collections::HashMap::with_capacity(events.len());
-    for ev in events {
-        let Some(d) = ev.tags.iter().find_map(|t| {
-            let s = t.as_slice();
-            (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
-        }) else {
-            continue;
-        };
-        let Ok(resp) = nostr_convert::channel_members_from_event(ev) else {
-            continue;
-        };
-        let pubkeys: Vec<String> = resp.members.iter().map(|m| m.pubkey.clone()).collect();
-        map.insert(
-            d,
-            ChannelMembership {
-                count: pubkeys.len() as i64,
-                pubkeys,
-            },
-        );
-    }
-    map
+/// Return the open-channel directory: every joinable open channel plus the
+/// identity's own channels, marked with `is_member`. This is the discovery
+/// superset that `get_channels` intentionally omits from the 60s poll — the
+/// channel browser and global search fetch it on demand (browse open / search
+/// active) with a generous staleTime, so the expensive all-open scan runs only
+/// when a user is actually looking for channels to join.
+#[tauri::command]
+pub async fn get_open_channel_directory(
+    state: State<'_, AppState>,
+) -> Result<Vec<ChannelInfo>, String> {
+    fetch_channels(&state, DirectoryScope::IncludeOpenDirectory).await
 }
 
 #[tauri::command]
@@ -392,18 +125,36 @@ pub async fn get_channel_details(
         .ok_or_else(|| "channel not found".to_string())
 }
 
+/// Cap for the kind:0 profile join in `get_channel_members`. Enriching a
+/// huge roster required an `authors` filter carrying every member pubkey — a
+/// query whose size and relay cost grow linearly with membership and which
+/// dominated channel-open latency on large channels. Members past the cap
+/// keep `display_name: None` (the UI falls back to pubkey-derived labels and
+/// resolves visible names through its profile caches); `role == "bot"` agent
+/// flags are roster-derived and unaffected by the cap.
+const MEMBER_PROFILE_JOIN_LIMIT: usize = 500;
+
+/// The pubkeys eligible for the kind:0 profile join: roster order, capped.
+fn profile_join_pubkeys(members: &[crate::models::ChannelMemberInfo], limit: usize) -> Vec<String> {
+    members
+        .iter()
+        .take(limit)
+        .map(|member| member.pubkey.clone())
+        .collect()
+}
+
 #[tauri::command]
 pub async fn get_channel_members(
     channel_id: String,
+    read_your_writes: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<ChannelMembersResponse, String> {
     let events = query_relay(
         &state,
-        &[serde_json::json!({
-            "kinds": [39002],
-            "#d": [channel_id],
-            "limit": 1
-        })],
+        &[channel_members_filter(
+            &channel_id,
+            read_your_writes.unwrap_or(false),
+        )],
     )
     .await?;
 
@@ -413,8 +164,9 @@ pub async fn get_channel_members(
         .transpose()?
         .ok_or_else(|| "channel members not found".to_string())?;
 
-    // Batch-fetch kind:0 profiles to populate display names.
-    let pubkeys: Vec<String> = response.members.iter().map(|m| m.pubkey.clone()).collect();
+    // Batch-fetch kind:0 profiles to populate display names, capped so the
+    // query cost is bounded on large rosters (see MEMBER_PROFILE_JOIN_LIMIT).
+    let pubkeys = profile_join_pubkeys(&response.members, MEMBER_PROFILE_JOIN_LIMIT);
     if !pubkeys.is_empty() {
         let profile_events = query_relay(
             &state,
@@ -497,6 +249,7 @@ async fn ensure_starter_channel_memberships(
     state: &AppState,
     keys: &nostr::Keys,
     channels: &mut [ChannelInfo],
+    changed_channel_ids: &mut Vec<String>,
 ) -> Result<(), String> {
     for spec in STARTER_CHANNELS {
         let Some(channel) = channels
@@ -514,9 +267,39 @@ async fn ensure_starter_channel_memberships(
         let builder = events::build_join(channel_uuid)?;
         submit_event_with_keys(builder, state, keys, None).await?;
         channel.is_member = true;
+        changed_channel_ids.push(channel.id.clone());
     }
 
     Ok(())
+}
+
+/// Build the kind:39002 member-list filter. Display reads stay replica-eligible;
+/// `read_your_writes` is for callers acting on state this client just wrote.
+fn channel_members_filter(channel_id: &str, read_your_writes: bool) -> serde_json::Value {
+    let mut filter = serde_json::json!({
+        "kinds": [39002],
+        "#d": [channel_id],
+        "limit": 1,
+    });
+    if read_your_writes {
+        // Read-your-writes: pin to the writer so a lagging replica cannot hide
+        // the member list the relay wrote for a just-created channel.
+        filter["consistency"] = serde_json::json!("strong");
+    }
+    filter
+}
+
+/// Build the kind:39000 filter that reads back channel metadata by ID right
+/// after this client created or edited those channels.
+pub(crate) fn channel_metadata_filter(channel_ids: &[impl serde::Serialize]) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [39000],
+        "#d": channel_ids,
+        "limit": channel_ids.len(),
+        // Read-your-writes: a lagging read replica would miss the metadata the
+        // relay just wrote, so pin this read to the writer.
+        "consistency": "strong",
+    })
 }
 
 async fn fetch_starter_channel_metadata(
@@ -527,15 +310,7 @@ async fn fetch_starter_channel_metadata(
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
-        state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": channel_ids,
-            "limit": channel_ids.len(),
-        })],
-    )
-    .await?;
+    let events = query_relay(state, &[channel_metadata_filter(channel_ids)]).await?;
 
     events
         .iter()
@@ -591,15 +366,7 @@ pub async fn create_channel(
     state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
 
     // Re-fetch the canonical metadata event to return ChannelInfo.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": [channel_uuid_string],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let events = query_relay(&state, &[channel_metadata_filter(&[&channel_uuid_string])]).await?;
 
     events
         .first()
@@ -608,12 +375,40 @@ pub async fn create_channel(
         .ok_or_else(|| "channel created but metadata not yet available".to_string())
 }
 
+/// Starter channels plus every channel this call created or joined. Any
+/// failure is reported in `error` rather than as the command error, so the
+/// writes accepted before it are still reported; the frontend rethrows
+/// `error` unchanged.
+#[derive(serde::Serialize)]
+pub struct StarterChannelsResult {
+    channels: Vec<ChannelInfo>,
+    changed_channel_ids: Vec<String>,
+    error: Option<String>,
+}
+
 #[tauri::command]
 pub async fn ensure_starter_channels(
     state: State<'_, AppState>,
+) -> Result<StarterChannelsResult, String> {
+    let mut changed_channel_ids = Vec::new();
+    let (channels, error) =
+        match ensure_starter_channels_inner(&state, &mut changed_channel_ids).await {
+            Ok(channels) => (channels, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+    Ok(StarterChannelsResult {
+        channels,
+        changed_channel_ids,
+        error,
+    })
+}
+
+async fn ensure_starter_channels_inner(
+    state: &AppState,
+    changed_channel_ids: &mut Vec<String>,
 ) -> Result<Vec<ChannelInfo>, String> {
-    let mut existing_channels = get_channels(state.clone()).await?;
-    let relay_scope = relay_api_base_url_with_override(&state);
+    let mut existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
+    let relay_scope = relay_api_base_url_with_override(state);
     let creator_keys = state.signing_keys()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
     let mut starter_ids = Vec::with_capacity(STARTER_CHANNELS.len());
@@ -639,10 +434,11 @@ pub async fn ensure_starter_channels(
             None,
         )?;
 
-        match submit_event_with_keys(builder, &state, &creator_keys, None).await {
+        match submit_event_with_keys(builder, state, &creator_keys, None).await {
             Ok(_) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
                 created_ids.insert(channel_uuid_string.clone());
+                changed_channel_ids.push(channel_uuid_string.clone());
             }
             Err(error) if is_duplicate_channel_rejection(&error) => {
                 state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
@@ -652,7 +448,7 @@ pub async fn ensure_starter_channels(
     }
 
     for _ in 0..3 {
-        let metadata = fetch_starter_channel_metadata(&state, &starter_ids).await?;
+        let metadata = fetch_starter_channel_metadata(state, &starter_ids).await?;
         for mut channel in metadata {
             if created_ids.contains(&channel.id) {
                 channel.is_member = true;
@@ -671,14 +467,20 @@ pub async fn ensure_starter_channels(
     }
 
     if !has_all_starter_channels(&existing_channels) {
-        existing_channels = get_channels(state.clone()).await?;
+        existing_channels = fetch_channels(state, DirectoryScope::IncludeOpenDirectory).await?;
     }
 
     if !has_all_starter_channels(&existing_channels) {
         return Err("starter channels created but metadata not yet available".to_string());
     }
 
-    ensure_starter_channel_memberships(&state, &creator_keys, &mut existing_channels).await?;
+    ensure_starter_channel_memberships(
+        state,
+        &creator_keys,
+        &mut existing_channels,
+        changed_channel_ids,
+    )
+    .await?;
     Ok(existing_channels)
 }
 
@@ -712,15 +514,7 @@ pub async fn update_channel(
     )?;
     submit_event(builder, &state).await?;
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "#d": [input.channel_id],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let events = query_relay(&state, &[channel_metadata_filter(&[&input.channel_id])]).await?;
 
     events
         .first()
@@ -785,9 +579,18 @@ pub async fn add_channel_members(
     channel_id: String,
     pubkeys: Vec<String>,
     role: Option<String>,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    let relay_base = relay_api_base_url_with_override(&state);
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    let signing_keys = state.signing_keys()?;
+    assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &signing_keys.public_key().to_hex(),
+    )?;
     let role_str = match role.as_deref() {
         Some("admin") => Some("admin"),
         Some("bot") => Some("bot"),
@@ -807,7 +610,7 @@ pub async fn add_channel_members(
                 continue;
             }
         };
-        match submit_event(builder, &state).await {
+        match submit_event_at_with_keys(builder, &state, &relay_base, &signing_keys).await {
             Ok(_) => added.push(pubkey.clone()),
             Err(e) => errors.push(serde_json::json!({"pubkey": pubkey, "error": e})),
         }
@@ -867,3 +670,6 @@ pub async fn leave_channel(channel_id: String, state: State<'_, AppState>) -> Re
 #[cfg(test)]
 #[path = "channels_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod starter_tests;

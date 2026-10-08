@@ -5,6 +5,11 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/buzz-theme";
 const THEME_STORAGE_KEY = "buzz-theme";
+const GLASS_BACKGROUND_STORAGE_KEY = "buzz-glass-background";
+const GLASS_OPACITY_STORAGE_KEY = "buzz-glass-opacity";
+const PROMINENT_ACTIVE_TAB_STORAGE_KEY = "buzz-prominent-active-tab";
+const CONVERSATION_DENSITY_STORAGE_KEY = "buzz.appearance.conversationDensity";
+const FONT_SIZE_STORAGE_KEY = "buzz.appearance.fontSize";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -57,10 +62,10 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
     mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 255, 255, 0.4)";
   const searchSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.04)" : "rgba(255, 255, 255, 0.04)";
-  const hoverSurface =
+  const rowHoverSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.04)" : "rgba(255, 255, 255, 0.04)";
   const activeSurface =
-    mode === "light" ? "rgba(0, 0, 0, 0.07)" : "color(srgb 1 1 1 / 0.16)";
+    mode === "light" ? "rgba(0, 0, 0, 0.07)" : "rgba(255, 255, 255, 0.16)";
   const chromeColor =
     mode === "light" ? "rgba(0, 0, 0, 0.5)" : "rgba(255, 255, 255, 0.5)";
   const search = page.getByTestId("open-search");
@@ -155,31 +160,57 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
     mutedColor,
   );
   await expect(page.getByTestId("channel-general")).toHaveCSS(
+    "font-weight",
+    "400",
+  );
+  await expect(
+    page.getByTestId("channel-general").locator("[data-sidebar-row-label]"),
+  ).toHaveCSS("opacity", "1");
+  await page.mouse.move(600, 100);
+  await expect(page.getByTestId("channel-general")).toHaveCSS(
     "background-color",
     activeSurface,
   );
   const hoverChannel = page.getByTestId("channel-random");
   await hoverChannel.hover();
-  await expect(hoverChannel).toHaveCSS("background-color", hoverSurface);
+  await expect(hoverChannel).toHaveCSS("background-color", rowHoverSurface);
 
   const firstDmItem = page
     .getByTestId("dm-list")
     .locator('[data-sidebar="menu-item"]')
     .first();
   const firstDmButton = firstDmItem.locator('[data-sidebar="menu-button"]');
+  const firstDmLabel = firstDmButton.locator("[data-sidebar-row-label]");
   const closeDmButton = firstDmItem.getByRole("button", {
     name: "Close direct message",
   });
+  const hoverChannelLabel = hoverChannel.locator("[data-sidebar-row-label]");
+  const hoverChannelIcon = hoverChannel.locator("svg").first();
+  const agentsButton = page.getByTestId("open-agents-view");
+  const agentsLabel = agentsButton.locator('[data-sidebar="menu-label"]');
+  const agentsIcon = agentsButton.locator("svg").first();
+  const sidebarForeground = await page
+    .getByTestId("app-sidebar")
+    .evaluate((element) => getComputedStyle(element).color);
+  await expect(hoverChannel).toHaveCSS("color", sidebarForeground);
+  await expect(firstDmButton).toHaveCSS("color", sidebarForeground);
+  await expect(agentsButton).toHaveCSS("color", sidebarForeground);
+  await expect(hoverChannelLabel).toHaveCSS("opacity", "0.8");
+  await expect(hoverChannelIcon).toHaveCSS("opacity", "0.8");
+  await expect(firstDmButton).toHaveCSS("opacity", "1");
+  await expect(firstDmLabel).toHaveCSS("opacity", "0.8");
+  await expect(agentsLabel).toHaveCSS("opacity", "0.8");
+  await expect(agentsIcon).toHaveCSS("opacity", "0.8");
   await firstDmItem.hover();
   await expect(closeDmButton).toBeVisible();
   await closeDmButton.hover();
-  await expect(firstDmButton).toHaveCSS("background-color", hoverSurface);
+  await expect(firstDmButton).toHaveCSS("background-color", rowHoverSurface);
 
   const scrollbarThumbColor = await sidebarScroller.evaluate(
     (element) =>
       getComputedStyle(element, "::-webkit-scrollbar-thumb").backgroundColor,
   );
-  expect(scrollbarThumbColor).toBe(hoverSurface);
+  expect(scrollbarThumbColor).toBe(searchSurface);
 }
 
 async function expectIconlessSectionTitleAligned(
@@ -445,6 +476,693 @@ async function openAppearance(page: Page, mode: "system" | "light" | "dark") {
   return panel;
 }
 
+test("appearance groups theme and preferences into labeled rows", async ({
+  page,
+}) => {
+  await seedTheme(page, "github-light");
+  await page.addInitScript((prominentActiveTabStorageKey) => {
+    window.localStorage.setItem(prominentActiveTabStorageKey, "true");
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  }, PROMINENT_ACTIVE_TAB_STORAGE_KEY);
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+  const themeCard = page.getByTestId("appearance-theme-card");
+  const preferencesCard = page.getByTestId("appearance-preferences-card");
+
+  await expect(
+    themeCard.getByRole("heading", { name: "Theme", exact: true }),
+  ).toBeVisible();
+  await expect(
+    preferencesCard.getByRole("heading", {
+      name: "Preferences",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    themeCard.getByRole("group", { name: "Color mode" }),
+  ).toBeVisible();
+  await expect(themeCard.getByTestId("glass-background-toggle")).toBeVisible();
+  await expect(
+    themeCard.getByTestId("prominent-active-tab-toggle"),
+  ).toHaveCount(0);
+  await expect(
+    preferencesCard.getByTestId("prominent-active-tab-toggle"),
+  ).toHaveCount(0);
+  await expect(
+    preferencesCard.getByRole("group", { name: "Thread layout" }),
+  ).toBeVisible();
+  const themeStyleTrigger = themeCard.getByTestId("theme-style-trigger");
+  const themeStyleOptions = themeCard.getByTestId("theme-style-options");
+  const selectedThemePreview = themeCard.getByTestId(
+    "theme-style-selected-preview",
+  );
+  await expect(themeStyleTrigger).toHaveAttribute(
+    "aria-label",
+    "Theme style, Github Light",
+  );
+  await expect(themeStyleTrigger).not.toContainText("Github Light");
+  await expect(themeStyleTrigger).toHaveAttribute("aria-expanded", "false");
+  await expect(themeStyleTrigger).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(themeStyleTrigger).toHaveCSS("border-width", "0px");
+  await expect(selectedThemePreview).toBeVisible();
+  const selectedThemePreviewSvg = selectedThemePreview.locator("svg");
+  await expect(selectedThemePreviewSvg).toBeVisible();
+  const selectedThemePreviewBox = await selectedThemePreview.boundingBox();
+  const selectedThemePreviewSvgBox =
+    await selectedThemePreviewSvg.boundingBox();
+  expect(selectedThemePreviewBox?.width).toBe(168);
+  expect(selectedThemePreviewBox?.height).toBe(112);
+  expect(selectedThemePreviewSvgBox?.width).toBeGreaterThan(100);
+  expect(selectedThemePreviewSvgBox?.height).toBeGreaterThan(70);
+  await expect(themeStyleOptions).toHaveCount(0);
+
+  await themeStyleTrigger.click();
+  await expect(themeStyleTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(themeStyleOptions).toBeVisible();
+  await themeCard.getByTestId("theme-option-buzz").click();
+  await expect(themeStyleTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(themeStyleOptions).toBeVisible();
+  await expect(
+    themeCard.getByTestId("prominent-active-tab-toggle"),
+  ).toBeChecked();
+  const glassBeforeProminent = await themeCard.evaluate((card) => {
+    const glass = card.querySelector('[data-testid="glass-background-toggle"]');
+    const prominent = card.querySelector(
+      '[data-testid="prominent-active-tab-row"]',
+    );
+    return Boolean(
+      glass &&
+        prominent &&
+        glass.compareDocumentPosition(prominent) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+  expect(glassBeforeProminent).toBe(true);
+
+  const colorModeLabelBox = await themeCard
+    .getByTestId("appearance-color-mode-row")
+    .locator("p")
+    .first()
+    .boundingBox();
+  const colorModeControlBox = await themeCard
+    .getByRole("group", { name: "Color mode" })
+    .boundingBox();
+  const glassLabelBox = await themeCard
+    .getByText("Glass background", { exact: true })
+    .boundingBox();
+  const glassToggleBox = await themeCard
+    .getByTestId("glass-background-toggle")
+    .boundingBox();
+  const colorModeIndicator = themeCard.getByTestId(
+    "appearance-color-mode-indicator",
+  );
+  const lightModeButton = themeCard.getByTestId("appearance-mode-light");
+  const initialIndicatorBox = await colorModeIndicator.boundingBox();
+  const lightModeButtonBox = await lightModeButton.boundingBox();
+  const themeCardBox = await themeCard.boundingBox();
+  const preferencesCardBox = await preferencesCard.boundingBox();
+
+  expect(colorModeLabelBox).not.toBeNull();
+  expect(colorModeControlBox).not.toBeNull();
+  expect(glassLabelBox).not.toBeNull();
+  expect(glassToggleBox).not.toBeNull();
+  expect(initialIndicatorBox).not.toBeNull();
+  expect(lightModeButtonBox).not.toBeNull();
+  expect(themeCardBox).not.toBeNull();
+  expect(preferencesCardBox).not.toBeNull();
+  if (
+    !colorModeLabelBox ||
+    !colorModeControlBox ||
+    !glassLabelBox ||
+    !glassToggleBox ||
+    !initialIndicatorBox ||
+    !lightModeButtonBox ||
+    !themeCardBox ||
+    !preferencesCardBox
+  ) {
+    throw new Error("Appearance card geometry is missing");
+  }
+
+  expect(colorModeLabelBox.x).toBeLessThan(colorModeControlBox.x);
+  expect(glassLabelBox.x).toBeLessThan(glassToggleBox.x);
+  expect(themeCardBox.y).toBeLessThan(preferencesCardBox.y);
+  expect(
+    Math.abs(
+      initialIndicatorBox.x +
+        initialIndicatorBox.width / 2 -
+        (lightModeButtonBox.x + lightModeButtonBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(0.5);
+  await expect(colorModeIndicator).toHaveCSS("transition-duration", "0.2s");
+
+  await themeCard.getByTestId("appearance-mode-dark").click();
+  await waitForAnimations(page);
+  const movedIndicatorBox = await colorModeIndicator.boundingBox();
+  const darkModeButtonBox = await themeCard
+    .getByTestId("appearance-mode-dark")
+    .boundingBox();
+  expect(movedIndicatorBox).not.toBeNull();
+  expect(darkModeButtonBox).not.toBeNull();
+  if (!movedIndicatorBox || !darkModeButtonBox) {
+    throw new Error("Color mode indicator geometry is missing");
+  }
+  expect(
+    Math.abs(
+      movedIndicatorBox.x +
+        movedIndicatorBox.width / 2 -
+        (darkModeButtonBox.x + darkModeButtonBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(0.5);
+});
+
+test("app font size and conversation density apply independently", async ({
+  page,
+}) => {
+  await seedTheme(page, "buzz");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  const root = page.locator("html");
+  const densityControl = page.getByTestId("conversation-density-control");
+  const compact = page.getByTestId("conversation-density-compact");
+  const comfortable = page.getByTestId("conversation-density-comfortable");
+  const spacious = page.getByTestId("conversation-density-spacious");
+  const densityIndicator = page.getByTestId(
+    "conversation-density-control-indicator",
+  );
+  const fontSizeControl = page.getByTestId("font-size-control");
+  const smaller = page.getByTestId("font-size-smaller");
+  const defaultSize = page.getByTestId("font-size-default");
+  const larger = page.getByTestId("font-size-larger");
+  const fontSizeIndicator = page.getByTestId("font-size-control-indicator");
+  const preview = page.getByTestId("conversation-preview");
+  const previewSurface = page.getByTestId("conversation-preview-surface");
+  const previewContent = page.getByTestId("conversation-preview-content");
+  const previewChip = preview.getByText("Preview");
+  const firstPreviewMessage = previewSurface.locator("article").first();
+  const previewMessage = preview.getByText(
+    "The revised conversation layout is ready to review.",
+  );
+  const previewTimestamp = preview.getByText("9:41");
+  const densityDescription = page
+    .getByTestId("conversation-density-row")
+    .locator("[data-settings-subcopy]");
+  const fontSizeDescription = page
+    .getByTestId("font-size-row")
+    .locator("[data-settings-subcopy]");
+  // The conversation tokens are rem-relative `calc(...)` expressions (the
+  // type tokens ride on `--buzz-type-rem`, which itself derives from the
+  // root rem so Cmd +/- zooms everything together). Reading the raw custom
+  // property strings off <html> would just return unresolved calc text, so
+  // resolve each token to px through a probe element instead: assign the
+  // token to the probe's font-size and read the computed value back.
+  // font-size is used (rather than width) because its computed value keeps
+  // fractional precision instead of snapping to layout units.
+  const readScale = () =>
+    root.evaluate((element) => {
+      const PROBE_ID = "buzz-e2e-conversation-scale-probe";
+      const tokens = {
+        authorLineHeight: "--conversation-author-line-height",
+        bodyGap: "--conversation-body-gap",
+        fontSize: "--conversation-message-font-size",
+        lineHeight: "--conversation-message-line-height",
+        paragraphGap: "--conversation-paragraph-gap",
+        rowPadding: "--conversation-row-padding-block",
+        timestampFontSize: "--conversation-timestamp-font-size",
+        timestampLineHeight: "--conversation-timestamp-line-height",
+      } as const;
+      let probe = element.ownerDocument.getElementById(PROBE_ID);
+      if (!probe) {
+        probe = element.ownerDocument.createElement("span");
+        probe.id = PROBE_ID;
+        probe.style.cssText =
+          "position:absolute;left:-9999px;top:0;visibility:hidden;pointer-events:none";
+        element.appendChild(probe);
+      }
+      const resolvePx = (token: string) => {
+        probe.style.fontSize = `var(${token})`;
+        const px = Number.parseFloat(window.getComputedStyle(probe).fontSize);
+        return Math.round(px * 100) / 100;
+      };
+      return Object.fromEntries(
+        Object.entries(tokens).map(([key, token]) => [key, resolvePx(token)]),
+      ) as Record<keyof typeof tokens, number>;
+    });
+  const readSettingsScale = () =>
+    page.getByTestId("conversation-density-row").evaluate((element) => {
+      const rowStyle = window.getComputedStyle(element);
+      const label = element.querySelector("p");
+      if (!label) throw new Error("Conversation density label is missing");
+      const labelStyle = window.getComputedStyle(label);
+      return {
+        fontSize: labelStyle.fontSize,
+        lineHeight: labelStyle.lineHeight,
+        minHeight: rowStyle.minHeight,
+        paddingBlock: rowStyle.paddingTop,
+      };
+    });
+  const readPreviewTimestampScale = () =>
+    previewTimestamp.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      return [style.fontSize, style.lineHeight];
+    });
+  const readSettingsChromeScale = () =>
+    Promise.all([
+      page
+        .getByRole("heading", { name: "Appearance" })
+        .evaluate((element) => window.getComputedStyle(element).fontSize),
+      page
+        .getByTestId("settings-nav-appearance")
+        .evaluate((element) => window.getComputedStyle(element).fontSize),
+      page
+        .getByRole("heading", { name: "Preferences" })
+        .evaluate((element) => window.getComputedStyle(element).fontSize),
+    ]);
+
+  await expect(
+    page.getByRole("group", { name: "Conversation density" }),
+  ).toBeVisible();
+  await expect(page.getByRole("group", { name: "Font size" })).toBeVisible();
+  await expect(densityControl).toHaveAccessibleName("Conversation density");
+  await expect(fontSizeControl).toHaveAccessibleName("Font size");
+  await expect(comfortable).toHaveText("Comfy");
+  await expect(defaultSize).toHaveText("Default");
+  await expect(preview).toContainText("Preview");
+  await expect(preview).not.toContainText("Message #design");
+  await expect(comfortable).toHaveAttribute("aria-pressed", "true");
+  await expect(defaultSize).toHaveAttribute("aria-pressed", "true");
+  await expect(densityDescription).toHaveText(
+    "Spacing in conversations and Markdown content across Buzz",
+  );
+  await expect(fontSizeDescription).toHaveText(
+    "Applies across conversations and interface text",
+  );
+  // Comfy + Default: 14px conversation text on a 16px root rem.
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 16,
+    bodyGap: 2,
+    fontSize: 14,
+    lineHeight: 20,
+    paragraphGap: 8,
+    rowPadding: 4,
+    timestampFontSize: 12,
+    timestampLineHeight: 16,
+  });
+  await expect
+    .poll(() =>
+      Promise.all([
+        densityControl.evaluate(
+          (element) => element.getBoundingClientRect().width,
+        ),
+        fontSizeControl.evaluate(
+          (element) => element.getBoundingClientRect().width,
+        ),
+        page
+          .getByTestId("appearance-color-mode-control")
+          .evaluate((element) => element.getBoundingClientRect().width),
+      ]),
+    )
+    .toEqual([288, 288, 240]);
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["14px", "20px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "14px",
+    lineHeight: "20px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect.poll(readPreviewTimestampScale).toEqual(["12px", "16px"]);
+  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "14px"]);
+  await expect(densityIndicator).toHaveCSS("transition-duration", "0.2s");
+  await expect(densityIndicator).toHaveCSS("transition-property", /transform/);
+  await expect(fontSizeIndicator).toHaveCSS("transition-duration", "0.2s");
+  await expect(fontSizeIndicator).toHaveCSS("transition-property", /transform/);
+  await expect
+    .poll(async () => {
+      const [previewBackground, labelBackground, controlBackground] =
+        await Promise.all([
+          previewSurface.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+          previewChip.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+          densityControl.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+        ]);
+      return {
+        labelIsAnnotation: labelBackground !== controlBackground,
+        previewBackground,
+      };
+    })
+    .toEqual({
+      labelIsAnnotation: true,
+      previewBackground: "rgba(0, 0, 0, 0)",
+    });
+  const previewSurfaceBox = await previewSurface.boundingBox();
+  const previewChipBox = await previewChip.boundingBox();
+  const firstPreviewMessageBox = await firstPreviewMessage.boundingBox();
+  expect(previewSurfaceBox).not.toBeNull();
+  expect(previewChipBox).not.toBeNull();
+  expect(firstPreviewMessageBox).not.toBeNull();
+  if (!previewSurfaceBox || !previewChipBox || !firstPreviewMessageBox) {
+    throw new Error("Conversation preview geometry is missing");
+  }
+  const previewChipRightInset =
+    previewSurfaceBox.x +
+    previewSurfaceBox.width -
+    (previewChipBox.x + previewChipBox.width);
+  expect(previewChipRightInset).toBeGreaterThanOrEqual(13);
+  expect(previewChipRightInset).toBeLessThanOrEqual(15);
+  const previewChipTopInset = previewChipBox.y - previewSurfaceBox.y;
+  expect(previewChipTopInset).toBeGreaterThanOrEqual(13);
+  expect(previewChipTopInset).toBeLessThanOrEqual(15);
+  await expect(previewContent).toHaveCSS("padding-top", "16px");
+  await expect(previewContent).toHaveCSS("padding-right", "16px");
+  await expect(previewContent).toHaveCSS("padding-bottom", "16px");
+  await expect(previewContent).toHaveCSS("padding-left", "16px");
+  expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeGreaterThanOrEqual(
+    15,
+  );
+  expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeLessThanOrEqual(
+    17,
+  );
+  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeGreaterThanOrEqual(
+    15,
+  );
+  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeLessThanOrEqual(
+    17,
+  );
+  await densityIndicator.evaluate((element) => {
+    element.addEventListener(
+      "transitionrun",
+      () => element.setAttribute("data-transition-ran", "true"),
+      { once: true },
+    );
+  });
+
+  await compact.click();
+  await expect(densityIndicator).toHaveAttribute("data-transition-ran", "true");
+  await expect(root).toHaveAttribute("data-conversation-density", "compact");
+  await expect(root).toHaveAttribute("data-font-size", "default");
+  await expect(compact).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        CONVERSATION_DENSITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("compact");
+  // Compact only tightens spacing; type is untouched.
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 16,
+    bodyGap: 0,
+    fontSize: 14,
+    lineHeight: 20,
+    paragraphGap: 6,
+    rowPadding: 4,
+    timestampFontSize: 12,
+    timestampLineHeight: 16,
+  });
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "14px",
+    lineHeight: "20px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect.poll(readPreviewTimestampScale).toEqual(["12px", "16px"]);
+  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "14px"]);
+
+  await larger.click();
+  await expect(root).toHaveAttribute("data-conversation-density", "compact");
+  await expect(root).toHaveAttribute("data-font-size", "larger");
+  await expect(larger).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("larger");
+  // Larger scales only the type tokens (15/14); compact spacing is unchanged.
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 17.14,
+    bodyGap: 0,
+    fontSize: 15,
+    lineHeight: 21.43,
+    paragraphGap: 6,
+    rowPadding: 4,
+    timestampFontSize: 12.86,
+    timestampLineHeight: 17.14,
+  });
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["15px", "21.4286px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "15px",
+    lineHeight: "21.4286px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["12.8571px", "17.1429px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "15px"]);
+  await waitForAnimations(page);
+  await page.getByTestId("appearance-preferences-card").screenshot({
+    path: `${SHOTS}/15-conversation-compact-larger.png`,
+  });
+
+  await spacious.click();
+  await expect(root).toHaveAttribute("data-conversation-density", "spacious");
+  await expect(root).toHaveAttribute("data-font-size", "larger");
+  await expect(spacious).toHaveAttribute("aria-pressed", "true");
+  // Spacious loosens spacing only; Larger type carries over.
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 17.14,
+    bodyGap: 4,
+    fontSize: 15,
+    lineHeight: 21.43,
+    paragraphGap: 10,
+    rowPadding: 8,
+    timestampFontSize: 12.86,
+    timestampLineHeight: 17.14,
+  });
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "15px",
+    lineHeight: "21.4286px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["12.8571px", "17.1429px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "15px"]);
+
+  await smaller.click();
+  await expect(root).toHaveAttribute("data-conversation-density", "spacious");
+  await expect(root).toHaveAttribute("data-font-size", "smaller");
+  await expect(smaller).toHaveAttribute("aria-pressed", "true");
+  // Smaller scales only the type tokens (13/14); spacious spacing is unchanged.
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 14.86,
+    bodyGap: 4,
+    fontSize: 13,
+    lineHeight: 18.57,
+    paragraphGap: 10,
+    rowPadding: 8,
+    timestampFontSize: 11.14,
+    timestampLineHeight: 14.86,
+  });
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["13px", "18.5714px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "13px",
+    lineHeight: "18.5714px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["11.1429px", "14.8571px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["22.2857px", "13px", "13px"]);
+  await waitForAnimations(page);
+  await page.getByTestId("appearance-preferences-card").screenshot({
+    path: `${SHOTS}/16-conversation-spacious-smaller.png`,
+  });
+
+  await comfortable.click();
+  await defaultSize.click();
+  await expect(root).toHaveAttribute(
+    "data-conversation-density",
+    "comfortable",
+  );
+  await expect(comfortable).toHaveAttribute("aria-pressed", "true");
+
+  const controlBox = await densityControl.boundingBox();
+  const compactBox = await compact.boundingBox();
+  const spaciousBox = await spacious.boundingBox();
+  expect(controlBox).not.toBeNull();
+  expect(compactBox).not.toBeNull();
+  expect(spaciousBox).not.toBeNull();
+  if (!controlBox || !compactBox || !spaciousBox) {
+    throw new Error("Conversation density control geometry is missing");
+  }
+  await page.mouse.move(
+    compactBox.x + compactBox.width / 2,
+    controlBox.y + controlBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    spaciousBox.x + spaciousBox.width / 2,
+    controlBox.y + controlBox.height / 2,
+  );
+  await expect(root).toHaveAttribute("data-conversation-density", "spacious");
+  await expect(root).toHaveAttribute("data-font-size", "default");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        CONVERSATION_DENSITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("comfortable");
+  // Back to Default type while the drag previews spacious spacing.
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 16,
+    bodyGap: 4,
+    fontSize: 14,
+    lineHeight: 20,
+    paragraphGap: 10,
+    rowPadding: 8,
+    timestampFontSize: 12,
+    timestampLineHeight: 16,
+  });
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "14px",
+    lineHeight: "20px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await page.mouse.up();
+  await expect(spacious).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        CONVERSATION_DENSITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("spacious");
+  await comfortable.click();
+
+  const fontSizeControlBox = await fontSizeControl.boundingBox();
+  const smallerBox = await smaller.boundingBox();
+  const largerBox = await larger.boundingBox();
+  expect(fontSizeControlBox).not.toBeNull();
+  expect(smallerBox).not.toBeNull();
+  expect(largerBox).not.toBeNull();
+  if (!fontSizeControlBox || !smallerBox || !largerBox) {
+    throw new Error("Font size control geometry is missing");
+  }
+  await page.mouse.move(
+    smallerBox.x + smallerBox.width / 2,
+    fontSizeControlBox.y + fontSizeControlBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    largerBox.x + largerBox.width / 2,
+    fontSizeControlBox.y + fontSizeControlBox.height / 2,
+  );
+  await expect(root).toHaveAttribute("data-font-size", "larger");
+  await expect(root).toHaveAttribute(
+    "data-conversation-density",
+    "comfortable",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("default");
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["15px", "21.4286px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "15px"]);
+
+  // Losing the window during a scrub cancels the temporary preview rather
+  // than leaving presentation and persisted selection out of sync.
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect(root).toHaveAttribute("data-font-size", "default");
+  await expect(defaultSize).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("default");
+
+  // Cancellation resets the gesture completely; the next selection persists.
+  await larger.click();
+  await expect(larger).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("larger");
+  await defaultSize.click();
+  await waitForAnimations(page);
+  await page.getByTestId("appearance-preferences-card").screenshot({
+    path: `${SHOTS}/14-conversation-preferences.png`,
+  });
+});
+
 test("appearance picker — system tab (Buzz follows OS)", async ({ page }) => {
   await seedTheme(page, "buzz");
   await installMockBridge(page);
@@ -518,6 +1236,212 @@ test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
   });
 });
 
+test("prominent active tab is opt-in and switches selection surfaces", async ({
+  page,
+}) => {
+  await seedTheme(page, "buzz");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  const root = page.locator("html");
+  const activeRow = page.getByTestId("settings-nav-appearance");
+  const toggle = page.getByTestId("prominent-active-tab-toggle");
+  await expect(toggle).not.toBeChecked();
+  await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+  await expect(activeRow).toHaveCSS("background-color", "rgba(0, 0, 0, 0.07)");
+  const subtleTextStyle = await activeRow.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return { color: styles.color, fontWeight: styles.fontWeight };
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+      ),
+    )
+    .toBeNull();
+
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect(root).toHaveAttribute("data-prominent-active-tab", "");
+  await expect(activeRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+      ),
+    )
+    .toBe("true");
+  const prominentTextStyle = await activeRow.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return { color: styles.color, fontWeight: styles.fontWeight };
+  });
+  expect(prominentTextStyle).toEqual(subtleTextStyle);
+
+  await toggle.click();
+  await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+  await expect(activeRow).toHaveCSS("background-color", "rgba(0, 0, 0, 0.07)");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        PROMINENT_ACTIVE_TAB_STORAGE_KEY,
+      ),
+    )
+    .toBe("false");
+});
+
+test("prominent channel and direct-message rows share one flat active state", async ({
+  page,
+}) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript(
+    ({ key }) => window.localStorage.setItem(key, "true"),
+    { key: PROMINENT_ACTIVE_TAB_STORAGE_KEY },
+  );
+  await installMockBridge(page);
+  await openChannel(page);
+
+  const channelRow = page.getByTestId("channel-general");
+  const directMessageRow = page.getByTestId("channel-alice-tyler");
+
+  await expect(channelRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+  await expect(channelRow).toHaveCSS("box-shadow", "none");
+  await channelRow.hover();
+  await expect(channelRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+
+  await directMessageRow.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await expect(directMessageRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+  await expect(directMessageRow).toHaveCSS("box-shadow", "none");
+  await directMessageRow.hover();
+  await expect(directMessageRow).toHaveCSS(
+    "background-color",
+    "rgba(255, 255, 255, 0.82)",
+  );
+});
+
+for (const { activeSurface, hoverSurface, mode, theme } of [
+  {
+    activeSurface: "rgba(0, 0, 0, 0.07)",
+    hoverSurface: "rgba(0, 0, 0, 0.04)",
+    mode: "light" as const,
+    theme: "buzz",
+  },
+  {
+    activeSurface: "rgba(255, 255, 255, 0.16)",
+    hoverSurface: "rgba(255, 255, 255, 0.04)",
+    mode: "dark" as const,
+    theme: "buzz-dark",
+  },
+]) {
+  test(`non-prominent ${theme} selection matches production`, async ({
+    page,
+  }) => {
+    await seedTheme(page, theme);
+    await page.addInitScript(
+      ({ key }) => window.localStorage.setItem(key, "false"),
+      { key: PROMINENT_ACTIVE_TAB_STORAGE_KEY },
+    );
+    await installMockBridge(page);
+    await openChannel(page);
+
+    const root = page.locator("html");
+    const sidebar = page.getByTestId("app-sidebar");
+    const activeRow = page.getByTestId("channel-general");
+    await expect(root).toHaveClass(
+      new RegExp(`(^|\\s)${mode === "dark" ? "dark" : "light"}($|\\s)`),
+    );
+    await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+    await expect(activeRow).toHaveCSS("background-color", activeSurface);
+    await expect(activeRow).toHaveCSS("box-shadow", "none");
+    await expect(activeRow).toHaveCSS("font-weight", "400");
+    await activeRow.hover();
+    await expect(activeRow).toHaveCSS("background-color", activeSurface);
+    const inactiveRow = page.getByTestId("channel-random");
+    await inactiveRow.hover();
+    await expect(inactiveRow).toHaveCSS("background-color", hoverSurface);
+    const expectedForeground = await sidebar.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.color = "hsl(var(--sidebar-active-foreground))";
+      element.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    });
+    await expect(activeRow).toHaveCSS("color", expectedForeground);
+  });
+}
+
+for (const { mode, theme } of [
+  { mode: "light" as const, theme: "github-light" },
+  { mode: "dark" as const, theme: "github-dark" },
+]) {
+  test(`${theme} ignores the Buzz prominent preference`, async ({ page }) => {
+    await seedTheme(page, theme);
+    await page.addInitScript(
+      ({ key }) => window.localStorage.setItem(key, "true"),
+      { key: PROMINENT_ACTIVE_TAB_STORAGE_KEY },
+    );
+    await installMockBridge(page);
+    await openAppearance(page, mode);
+
+    const root = page.locator("html");
+    const activeRow = page.getByTestId("settings-nav-appearance");
+    await expect(page.getByTestId("prominent-active-tab-row")).toHaveCount(0);
+    await expect(root).not.toHaveAttribute("data-prominent-active-tab", "");
+
+    const productionStyle = await page.evaluate(() => {
+      const sidebar = document.querySelector<HTMLElement>(
+        '[data-testid="settings-sidebar"]',
+      );
+      const row = document.querySelector<HTMLElement>(
+        '[data-testid="settings-nav-appearance"]',
+      );
+      if (!sidebar || !row) return null;
+      const probe = document.createElement("span");
+      probe.style.backgroundColor = "hsl(var(--sidebar-active))";
+      probe.style.color = "hsl(var(--sidebar-active-foreground))";
+      sidebar.append(probe);
+      const probeStyles = getComputedStyle(probe);
+      const rowStyles = getComputedStyle(row);
+      const result = {
+        expectedBackground: probeStyles.backgroundColor,
+        expectedForeground: probeStyles.color,
+        background: rowStyles.backgroundColor,
+        color: rowStyles.color,
+        fontWeight: rowStyles.fontWeight,
+      };
+      probe.remove();
+      return result;
+    });
+
+    expect(productionStyle).not.toBeNull();
+    expect(productionStyle?.background).toBe(
+      productionStyle?.expectedBackground,
+    );
+    expect(productionStyle?.color).toBe(productionStyle?.expectedForeground);
+    await expect(activeRow).toHaveCSS(
+      "font-weight",
+      productionStyle?.fontWeight ?? "",
+    );
+  });
+}
+
 test("settings content uses the same inset surface as the main app", async ({
   page,
 }) => {
@@ -530,10 +1454,22 @@ test("settings content uses the same inset surface as the main app", async ({
 
   const settingsView = page.getByTestId("settings-view");
   const contentSurface = page.getByTestId("settings-content-surface");
+  const settingsTopChrome = page.getByTestId("settings-top-chrome");
+  const settingsSidebarTopChrome = page.getByTestId(
+    "settings-sidebar-top-chrome",
+  );
   const backToAppBox = await page
     .getByTestId("settings-back-to-app")
     .boundingBox();
   await expect(contentSurface).toBeVisible({ timeout: 10_000 });
+  for (const dragRegion of [settingsTopChrome, settingsSidebarTopChrome]) {
+    await expect(dragRegion).toHaveAttribute(
+      "data-tauri-drag-region",
+      /^(?:|true)$/,
+    );
+    await expect(dragRegion).toHaveCSS("cursor", "default");
+    await expect(dragRegion).toHaveCSS("user-select", "none");
+  }
   await expect(page.getByTestId("settings-content-scroll")).toHaveCSS(
     "padding-top",
     "24px",
@@ -560,6 +1496,28 @@ test("settings content uses the same inset surface as the main app", async ({
     8,
   );
 
+  const topChromeBox = await settingsTopChrome.boundingBox();
+  const settingsHeadingBox = await page
+    .getByRole("heading", { level: 1, name: "Profile" })
+    .boundingBox();
+  expect(topChromeBox).not.toBeNull();
+  expect(settingsHeadingBox).not.toBeNull();
+  if (!topChromeBox || !settingsHeadingBox) {
+    throw new Error("Settings drag region or title is missing");
+  }
+  await page.mouse.move(
+    topChromeBox.x + topChromeBox.width / 2,
+    topChromeBox.y + topChromeBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    settingsHeadingBox.x + settingsHeadingBox.width / 2,
+    settingsHeadingBox.y + settingsHeadingBox.height / 2,
+    { steps: 5 },
+  );
+  await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("");
+
   await waitForAnimations(page);
   await settingsView.screenshot({
     path: `${SHOTS}/08-settings-content-inset.png`,
@@ -576,23 +1534,305 @@ test("appearance hides accent picker under Buzz", async ({ page }) => {
   await panel.screenshot({ path: `${SHOTS}/10-appearance-no-accent.png` });
 });
 
+test("glass background keeps the content panel solid", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript(() => {
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page);
+  const panel = await openAppearance(page, "light");
+
+  const toggle = page.getByTestId("glass-background-toggle");
+  const opacitySlider = page.getByTestId("glass-opacity-slider");
+  const root = page.locator("html");
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        GLASS_BACKGROUND_STORAGE_KEY,
+      ),
+    )
+    .toBeNull();
+  await expect(opacitySlider).toHaveCount(0);
+  await expect(root).not.toHaveAttribute("data-glass-background", "");
+  await expect(page.locator(".buzz-theme-gradient-underlay")).not.toHaveCSS(
+    "background-image",
+    "none",
+  );
+
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect(opacitySlider).toBeVisible();
+  await expect(opacitySlider).toHaveClass(/buzz-avatar-framing-slider/);
+  await expect(opacitySlider).toHaveAttribute("aria-valuenow", "65");
+  await expect(opacitySlider).toHaveCSS("height", "32px");
+  const matchingRadiusControls = [
+    page.getByTestId("appearance-color-mode-control"),
+    page.getByTestId("appearance-color-mode-indicator"),
+    page.getByTestId("font-size-control"),
+    page.getByTestId("font-size-control-indicator"),
+    page.getByTestId("conversation-density-control"),
+    page.getByTestId("conversation-density-control-indicator"),
+    page.getByTestId("theme-style-trigger"),
+    page.getByTestId("link-preview-style-control"),
+    page.getByTestId("link-preview-style-control-indicator"),
+    page.getByTestId("thread-layout-control"),
+    page.getByTestId("thread-layout-control-indicator"),
+  ];
+  for (const control of matchingRadiusControls) {
+    await expect(control).toHaveCSS("border-radius", "8px");
+  }
+  await expect(page.getByTestId("glass-opacity-value")).toHaveCount(0);
+  await expect(
+    opacitySlider.locator(".buzz-avatar-framing-slider-handle"),
+  ).toHaveCSS("opacity", "1");
+  await expect(root).toHaveAttribute("data-glass-background", "");
+  const buzzSettingOrder = await page
+    .getByTestId("appearance-theme-card")
+    .locator(
+      '[data-testid="appearance-color-mode-row"], [data-testid="theme-style-row"], [data-testid="glass-background-row"], [data-testid="glass-opacity-row"], [data-testid="prominent-active-tab-row"]',
+    )
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+  expect(buzzSettingOrder).toEqual([
+    "appearance-color-mode-row",
+    "theme-style-row",
+    "glass-background-row",
+    "glass-opacity-row",
+    "prominent-active-tab-row",
+  ]);
+  await expect(page.locator(".buzz-theme-gradient-underlay")).toHaveCSS(
+    "background-image",
+    "none",
+  );
+  for (const canvas of [root, page.locator("body"), page.locator("#root")]) {
+    await expect(canvas).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  }
+  await expect(
+    page.getByTestId("settings-sidebar").locator('[data-sidebar="sidebar"]'),
+  ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.getByTestId("settings-content-surface")).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) =>
+            entry.command === "set_window_vibrancy" &&
+            (entry.payload as { enabled?: boolean } | undefined)?.enabled ===
+              true,
+        ),
+      ),
+    )
+    .toBe(true);
+
+  await opacitySlider.press("Home");
+  await expect(opacitySlider).toHaveAttribute("aria-valuenow", "30");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        document.documentElement.style.getPropertyValue(
+          "--glass-background-opacity",
+        ),
+      ),
+    )
+    .toBe("30%");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => localStorage.getItem(storageKey),
+        GLASS_OPACITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("30");
+  await waitForAnimations(page);
+  await panel.screenshot({ path: `${SHOTS}/11-appearance-glass.png` });
+
+  await toggle.click();
+  await expect(root).not.toHaveAttribute("data-glass-background", "");
+  await expect(opacitySlider).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => localStorage.getItem(storageKey),
+        GLASS_BACKGROUND_STORAGE_KEY,
+      ),
+    )
+    .toBe("false");
+});
+
+test("glass background is unavailable on Linux", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript((storageKey) => {
+    window.localStorage.setItem(storageKey, "true");
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "Linux x86_64",
+    });
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      get: () => "Buzz Desktop Linux",
+    });
+  }, GLASS_BACKGROUND_STORAGE_KEY);
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  await expect(page.getByTestId("glass-background-row")).toHaveCount(0);
+  await expect(page.getByTestId("glass-background-toggle")).toHaveCount(0);
+  await expect(page.getByTestId("glass-opacity-slider")).toHaveCount(0);
+  await expect(page.locator("html")).not.toHaveAttribute(
+    "data-glass-background",
+    "",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "set_window_vibrancy",
+        ),
+      ),
+    )
+    .toBe(false);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => window.localStorage.getItem(storageKey),
+        GLASS_BACKGROUND_STORAGE_KEY,
+      ),
+    )
+    .toBe("true");
+});
+
+test("non-Buzz glass preserves the selected theme sidebar tint", async ({
+  page,
+}) => {
+  await seedTheme(page, "rose-pine-dawn");
+  await page.addInitScript(() => {
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  const root = page.locator("html");
+  await expect(root).not.toHaveAttribute("data-buzz-sidebar", "");
+  await page.getByTestId("glass-background-toggle").click();
+  await expect(root).toHaveAttribute("data-glass-background", "");
+
+  const tint = await page
+    .locator(".buzz-theme-gradient-layer")
+    .evaluate((element) => {
+      const rootStyles = getComputedStyle(document.documentElement);
+      const sidebar = rootStyles
+        .getPropertyValue("--sidebar-background")
+        .trim();
+      const staticFallback = rootStyles.getPropertyValue("--sidebar").trim();
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = `hsl(${sidebar} / 65%)`;
+      document.body.appendChild(probe);
+      const expected = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+
+      return {
+        actual: getComputedStyle(element).backgroundColor,
+        expected,
+        sidebar,
+        staticFallback,
+      };
+    });
+
+  expect(tint.sidebar).not.toBe(tint.staticFallback);
+  expect(tint.actual).toBe(tint.expected);
+});
+
 test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
   // Start on a non-Buzz theme so the accent picker is present, then select the
   // Buzz tile — the picker should animate out and unmount. Reselecting a
   // non-Buzz tile brings it back. Asserts the presence toggle (the motion
   // wrapper) works end to end.
   await seedTheme(page, "github-light");
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
   await installMockBridge(page);
   await openAppearance(page, "light");
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+  const nonBuzzSettingOrder = await page
+    .getByTestId("appearance-theme-card")
+    .locator(
+      '[data-testid="appearance-color-mode-row"], [data-testid="theme-style-row"], [data-testid="accent-color-options"], [data-testid="glass-background-row"], [data-testid="prominent-active-tab-row"]',
+    )
+    .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+  expect(nonBuzzSettingOrder).toEqual([
+    "appearance-color-mode-row",
+    "theme-style-row",
+    "accent-color-options",
+    "glass-background-row",
+  ]);
 
   // Switch to Buzz — picker should leave (allow the exit animation to settle).
+  await page.getByTestId("theme-style-trigger").click();
   await page.getByTestId("theme-option-buzz").click();
+  await expect(page.getByTestId("theme-style-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
   await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
 
   // Back to a non-Buzz theme — picker returns.
   await page.getByTestId("theme-option-github-light").click();
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+  await expect(page.getByTestId("theme-style-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+
+  const swatchBoxes = await page
+    .getByTestId("accent-color-options")
+    .locator("button")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        return { x: box.x, y: box.y };
+      }),
+    );
+  expect(swatchBoxes).toHaveLength(10);
+  expect(new Set(swatchBoxes.map((box) => Math.round(box.y))).size).toBe(1);
+  await expect(page.getByTestId("accent-color-options")).toHaveCSS(
+    "overflow-x",
+    "auto",
+  );
+  await expect(page.getByTestId("accent-color-blue")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    page.getByTestId("accent-color-blue").getByTestId("accent-color-selection"),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.getByTestId("settings-theme").screenshot({
+    path: `${SHOTS}/12-appearance-theme-and-accents.png`,
+  });
+  const accentOptions = page.getByTestId("accent-color-options");
+  await accentOptions.scrollIntoViewIfNeeded();
+  await waitForAnimations(page);
+  await accentOptions.screenshot({
+    path: `${SHOTS}/13-appearance-accent-row.png`,
+  });
 });
 
 test("Buzz light and dark modes apply live without a reload", async ({

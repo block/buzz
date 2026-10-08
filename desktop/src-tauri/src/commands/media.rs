@@ -8,12 +8,16 @@ use tokio_util::sync::CancellationToken;
 use crate::app_state::AppState;
 use crate::relay::{parse_json_response, relay_api_base_url_with_override, relay_error_message};
 
+use super::media_filename::sanitize_filename;
 use super::media_transcode::{
     has_heic_extension, is_heic_file, is_video_file, transcode_and_extract_poster,
     transcode_and_extract_poster_with_cancellation, transcode_heic_path_to_jpeg_bytes,
     transcode_heic_path_to_jpeg_bytes_with_cancellation,
 };
 use super::media_upload_progress::{emit_media_upload_phase, send_upload_attempt, UploadAttempt};
+use super::media_voice_note::{
+    is_voice_note_filename, prepare_voice_note_for_upload, voice_note_mp4_filename,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobDescriptor {
@@ -115,11 +119,10 @@ fn fd_real_path(_file: &std::fs::File) -> Result<std::path::PathBuf, String> {
 
 /// MIME types blocked from upload — mirrors the server's generic-file deny-list.
 ///
-/// Active-content XSS carriers and native executables. Everything else (images,
-/// video, documents, archives, audio, text, data) is accepted; un-sniffable
-/// files fall back to `application/octet-stream` and are served as downloads.
+/// Active-content XSS carriers (JS, SVG) and native executables. Other types,
+/// including HTML, are accepted as downloads; un-sniffable files fall back to
+/// `application/octet-stream`. XHTML remains blocked in lockstep with the relay.
 const BLOCKED_MIME: &[&str] = &[
-    "text/html",
     "application/xhtml+xml",
     "image/svg+xml",
     "application/javascript",
@@ -134,24 +137,6 @@ const BLOCKED_MIME: &[&str] = &[
     "application/vnd.android.package-archive",
     "application/x-apple-diskimage",
 ];
-
-/// Sanitize a filename for use as a display label in the imeta `filename` field.
-///
-/// Strips any directory components (keeps only the final path segment), removes
-/// control characters, and bounds length to 255. Mirrors the relay's filename
-/// validation so a sanitized name always passes ingest. Returns a fallback when
-/// the result would be empty.
-pub(crate) fn sanitize_filename(name: &str) -> String {
-    // Keep only the final path segment — defend against `../` and absolute paths
-    // regardless of separator style.
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
-    let cleaned: String = base.chars().filter(|c| !c.is_control()).take(255).collect();
-    if cleaned.is_empty() {
-        "file".to_string()
-    } else {
-        cleaned
-    }
-}
 
 /// Return true when a PNG/WebP payload declares animation.
 ///
@@ -309,20 +294,21 @@ pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
     Ok(mime)
 }
 
-/// Lifetime of a Blossom `t=get` read token. Ten minutes keeps a token alive
-/// across a video's range-request stream while staying well inside the
-/// server's `created_at` freshness window (3600s, matching upload).
-pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
+/// Lifetime of a Blossom `t=get` read token.
+///
+/// 60 seconds is the maximum permitted by NIP-FI §Freshness: `expiration <= created_at + 60s`.
+/// Callers that make range requests across longer video playback sessions must re-mint on
+/// a 401 or 403 from the server (expired/rejected token), using a single fresh mint+retry.
+pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 60;
 
 /// Sign a Blossom (BUD-01) `t=get` authorization event, server-scoped to the
 /// relay's authority, and return the full `Authorization` header value.
 ///
 /// Server-scoped (a `server` tag, no `x` tag): one token authorizes reads of
-/// any blob on that host for its lifetime, which keeps avatar-grid bursts and
-/// video range requests cheap. This is deliberately broader than per-blob
-/// scoping and is safe only because the relay still enforces NIP-43
-/// membership on the verified pubkey — and because callers only attach this
-/// header to requests bound for the relay origin itself.
+/// any blob on that host for its lifetime. Callers must only attach this
+/// header to requests bound for the relay origin itself (never third-party
+/// origins). Tokens expire after `expiry_secs` (≤ 60 per NIP-FI §Freshness)
+/// and must be re-minted on 401 or 403 for long-running range-request streams.
 pub(crate) fn sign_blossom_get_auth_header(
     keys: &Keys,
     base_url: &str,
@@ -374,22 +360,22 @@ pub(crate) fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<St
     }
 }
 
-fn sign_blossom_upload_auth(
+pub(crate) fn sign_blossom_upload_auth(
     keys: &Keys,
     sha256: &str,
     expiry_secs: u64,
     base_url: &str,
 ) -> Result<nostr::Event, String> {
+    let server = extract_server_authority(base_url)
+        .ok_or_else(|| "cannot derive server authority from relay URL".to_string())?;
     let now = Timestamp::now().as_secs();
-    let mut tags = vec![
+    let tags = vec![
         Tag::parse(vec!["t", "upload"]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["x", sha256]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
             .map_err(|e| e.to_string())?,
+        Tag::parse(vec!["server".to_string(), server]).map_err(|e| e.to_string())?,
     ];
-    if let Some(domain) = extract_server_authority(base_url) {
-        tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
-    }
     EventBuilder::new(Kind::from(24242), "Upload buzz-media")
         .tags(tags)
         .sign_with_keys(keys)
@@ -429,14 +415,12 @@ async fn do_upload(
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
-    // Video uploads get a 1-hour auth window to survive slow connections;
-    // images use 5 minutes. Must match the server-side max_age_secs values
-    // in process_upload (600s) and process_video_upload (3600s).
-    let expiry_secs = if mime.starts_with("video/") {
-        3600
-    } else {
-        300
-    };
+    // All upload tokens use a 60-second expiry window per NIP-FI §Freshness:
+    // `expiration <= created_at + 60s`. Upload tokens are minted immediately
+    // before the PUT request, so 60 seconds is ample for any upload over a
+    // reasonable connection (the body is already hashed and ready to send).
+    // The server-side window is also 60s in Strict mode, matching this value.
+    let expiry_secs = 60u64;
     let base_url = relay_api_base_url_with_override(state);
     let auth_event = {
         let keys = state.signing_keys()?;
@@ -725,8 +709,12 @@ pub(super) async fn upload_media_bytes_inner(
     let heic_by_extension = filename
         .as_deref()
         .is_some_and(|name| has_heic_extension(std::path::Path::new(name)));
+    let is_voice_note = is_voice_note_filename(filename.as_deref());
 
-    let (body, poster_bytes) = if is_video_file(&data) {
+    let (body, poster_bytes) = if is_voice_note {
+        emit_media_upload_phase(&app, progress_id.as_deref(), "processing-audio");
+        prepare_voice_note_for_upload(data, cancellation).await?
+    } else if is_video_file(&data) {
         emit_media_upload_phase(&app, progress_id.as_deref(), "processing-video");
         // Video: write to temp → transcode + extract poster → read results.
         // All blocking I/O runs off the async runtime via spawn_blocking.
@@ -791,7 +779,14 @@ pub(super) async fn upload_media_bytes_inner(
         }
     }
 
-    descriptor.filename = filename.as_deref().map(sanitize_filename);
+    descriptor.filename = filename.as_deref().map(|name| {
+        let upload_name = if is_voice_note {
+            voice_note_mp4_filename(name)
+        } else {
+            name.to_string()
+        };
+        sanitize_filename(&upload_name)
+    });
 
     Ok(descriptor)
 }
@@ -847,7 +842,7 @@ mod tests {
     #[test]
     fn test_sign_blossom_get_auth_header_shape() {
         let keys = Keys::generate();
-        let header = sign_blossom_get_auth_header(&keys, "http://localhost:3000", 600).unwrap();
+        let header = sign_blossom_get_auth_header(&keys, "http://localhost:3000", 60).unwrap();
         let b64 = header.strip_prefix("Nostr ").expect("Nostr scheme prefix");
         let json = URL_SAFE_NO_PAD.decode(b64).unwrap();
         let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
@@ -867,13 +862,48 @@ mod tests {
         assert!(tag("x").is_none());
         let expiration: u64 = tag("expiration").unwrap().parse().unwrap();
         let now = Timestamp::now().as_secs();
-        assert!(expiration > now && expiration <= now + 600);
+        // Token expiry must be within the 60s NIP-FI window.
+        assert!(expiration > now && expiration <= now + 60);
     }
 
     #[test]
     fn test_sign_blossom_get_auth_header_invalid_base_url() {
         let keys = Keys::generate();
-        assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 600).is_err());
+        assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 60).is_err());
+    }
+
+    #[test]
+    fn test_sign_blossom_upload_auth_shape() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let base_url = "http://relay.example:3000";
+        let event = sign_blossom_upload_auth(&keys, &sha256, 60, base_url).unwrap();
+
+        assert_eq!(event.kind, nostr::Kind::from(24242));
+        event.verify().expect("valid signature");
+
+        let tag = |name: &str| -> Option<String> {
+            event.tags.iter().find_map(|t| {
+                let v = t.as_slice();
+                (v.first().map(String::as_str) == Some(name)).then(|| v[1].clone())
+            })
+        };
+        assert_eq!(tag("t").as_deref(), Some("upload"));
+        assert_eq!(tag("x").as_deref(), Some(sha256.as_str()));
+        // server tag MUST be present (NIP-FI §Upload proofs)
+        assert_eq!(tag("server").as_deref(), Some("relay.example:3000"));
+        // expiry must be within the 60s NIP-FI window
+        let expiration: u64 = tag("expiration").unwrap().parse().unwrap();
+        let now = nostr::Timestamp::now().as_secs();
+        assert!(expiration > now && expiration <= now + 60);
+    }
+
+    #[test]
+    fn test_sign_blossom_upload_auth_fails_without_valid_url() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        // URL that cannot yield a server authority → should fail (server tag mandatory)
+        assert!(sign_blossom_upload_auth(&keys, &sha256, 60, "not-a-url").is_err());
     }
 
     #[test]
@@ -895,9 +925,29 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_and_validate_mime_rejects_html() {
+    fn test_detect_and_validate_mime_accepts_html_as_inert_download() {
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        assert!(detect_and_validate_mime(html).is_err());
+        assert_eq!(detect_and_validate_mime(html).unwrap(), "text/html");
+    }
+
+    #[test]
+    fn test_detect_and_validate_mime_still_rejects_executable() {
+        let elf = [b"\x7fELF".as_slice(), &[0u8; 60]].concat();
+        assert!(detect_and_validate_mime(&elf).is_err());
+    }
+
+    #[test]
+    fn test_blocked_mime_keeps_active_content_and_executables() {
+        for kept in [
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "application/javascript",
+            "text/javascript",
+            "application/x-executable",
+            "application/x-mach-binary",
+        ] {
+            assert!(BLOCKED_MIME.contains(&kept), "{kept} must stay blocked");
+        }
     }
 
     #[test]
@@ -961,19 +1011,5 @@ mod tests {
         assert!(!should_retry_legacy_upload(
             reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
         ));
-    }
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
-        // Strips directory components and traversal.
-        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        assert_eq!(sanitize_filename("/abs/path/notes.txt"), "notes.txt");
-        assert_eq!(sanitize_filename(r"C:\Users\me\doc.docx"), "doc.docx");
-        // Empty / separator-only falls back.
-        assert_eq!(sanitize_filename(""), "file");
-        assert_eq!(sanitize_filename("/"), "file");
-        // Control chars removed.
-        assert_eq!(sanitize_filename("a\nb\tc.txt"), "abc.txt");
     }
 }

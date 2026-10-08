@@ -75,6 +75,9 @@ export function classifyReconcileResult(
   attempted: readonly string[],
   rows: readonly ManagedAgentRuntimeStatus[] | null,
   canonicalize: (url: string) => string | null,
+  // Relays whose community was removed mid-call; the fence stopped their
+  // pairs, so they count as neither reconciled nor due a retry.
+  fenced: ReadonlySet<string> = new Set(),
 ): { succeeded: string[]; failed: string[] } {
   if (rows === null) {
     return { succeeded: [], failed: [...attempted] };
@@ -88,6 +91,7 @@ export function classifyReconcileResult(
   const succeeded: string[] = [];
   const failed: string[] = [];
   for (const relay of attempted) {
+    if (fenced.has(relay)) continue;
     if (failedRelays.has(relay)) failed.push(relay);
     else succeeded.push(relay);
   }

@@ -1,4 +1,7 @@
+import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
+import { useCommunities } from "@/features/communities/useCommunities";
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -13,9 +16,13 @@ import {
   useStopManagedAgentMutation,
   useDeleteManagedAgentMutation,
 } from "@/features/agents/hooks";
+import {
+  agentPresenceStartBlockReason,
+  useAgentAvailabilityLookup,
+} from "../lib/useAgentAvailability";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
-import { usePresenceQuery } from "@/features/presence/hooks";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import type { AgentPersona, Channel, ManagedAgent } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -34,6 +41,8 @@ import {
 } from "../lib/instanceInputForDefinition";
 
 export function useManagedAgentActions() {
+  const queryClient = useQueryClient();
+  const relayUrl = useCommunities().activeCommunity?.relayUrl;
   const { globalConfig } = useGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -98,7 +107,16 @@ export function useManagedAgentActions() {
     [managedAgents],
   );
 
-  const managedPresenceQuery = usePresenceQuery(managedPubkeyList);
+  const { query: managedPresenceQuery, getAvailability } =
+    useAgentAvailabilityLookup(managedPubkeyList);
+
+  function assertStartNotBlockedByPresence(agent: ManagedAgent) {
+    const reason = agentPresenceStartBlockReason(
+      isManagedAgentActive(agent),
+      getAvailability(agent.pubkey),
+    );
+    if (reason) throw new Error(reason);
+  }
 
   const channelsByPubkey = React.useMemo(() => {
     const map: Record<string, { id: string; name: string }[]> = {};
@@ -161,11 +179,13 @@ export function useManagedAgentActions() {
     try {
       const agent = managedAgents.find((c) => c.pubkey === pubkey);
       if (!agent) return;
+      assertStartNotBlockedByPresence(agent);
       await startManagedAgentWithRules({
         agent,
         startManagedAgent: startMutation.mutateAsync,
       });
     } catch (error) {
+      if (isRelayRemovedError(error)) return;
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
       );
@@ -181,13 +201,16 @@ export function useManagedAgentActions() {
         (candidate) => candidate.pubkey === pubkey,
       );
       if (!agent) return;
+      assertStartNotBlockedByPresence(agent);
       await respawnManagedAgentWithRules({
         agent,
+        relayUrl,
         startManagedAgent: startMutation.mutateAsync,
         stopManagedAgent: stopMutation.mutateAsync,
         onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
       });
     } catch (error) {
+      if (isRelayRemovedError(error)) return;
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to restart agent.",
       );
@@ -226,7 +249,7 @@ export function useManagedAgentActions() {
       toast.success("Agent created");
       const notices = [...warnings];
 
-      if (created.spawnError) {
+      if (created.spawnError && !isRelayRemovedError(created.spawnError)) {
         setActionErrorMessage(created.spawnError);
       }
 
@@ -240,6 +263,7 @@ export function useManagedAgentActions() {
       void managedAgentsQuery.refetch();
       void relayAgentsQuery.refetch();
     } catch (error) {
+      if (isRelayRemovedError(error)) return;
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
       );
@@ -296,6 +320,9 @@ export function useManagedAgentActions() {
     await Promise.allSettled(
       channelIds.map((channelId) => removeChannelMember(channelId, pubkey)),
     );
+    // Direct writes bypass the member mutations' invalidation; without this,
+    // the deleted agent stays in cached rosters for the freshness window.
+    await invalidateChannelMembersRosters(queryClient, channelIds);
   }
 
   async function handleDelete(pubkey: string) {
@@ -308,7 +335,7 @@ export function useManagedAgentActions() {
         agent,
         channels,
         deleteManagedAgent: deleteMutation.mutateAsync,
-        presenceLookup: managedPresenceQuery.data,
+        getAvailability,
         relayAgents: relayAgentsQuery.data ?? [],
       });
       if (result.cancelled) return;
@@ -423,6 +450,7 @@ export function useManagedAgentActions() {
     managedAgentsQuery,
     managedAgentLogQuery,
     managedPresenceQuery,
+    getAvailability,
     managedAgents,
     managedPubkeys,
     channelIdToName,

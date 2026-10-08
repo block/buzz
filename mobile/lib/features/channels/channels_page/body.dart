@@ -5,7 +5,7 @@ class _ChannelsBody extends StatelessWidget {
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
   final SessionStatus sessionStatus;
-  final bool showConnectionSkeleton;
+  final ValueChanged<bool> onReadyChanged;
   final String? currentPubkey;
   final double topSectionHeight;
   final bool usesPinnedGradient;
@@ -18,7 +18,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.channelsAsync,
     required this.showError,
     required this.sessionStatus,
-    required this.showConnectionSkeleton,
+    required this.onReadyChanged,
     required this.currentPubkey,
     required this.topSectionHeight,
     required this.usesPinnedGradient,
@@ -31,8 +31,7 @@ class _ChannelsBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final barHeight = topSectionHeight;
     final loadedChannels = channels;
-    final loading =
-        showConnectionSkeleton || (loadedChannels == null && !showError);
+    final loading = loadedChannels == null && !showError;
     final content = showError && channelsAsync.hasError
         ? Padding(
             padding: EdgeInsets.only(top: barHeight),
@@ -45,9 +44,10 @@ class _ChannelsBody extends StatelessWidget {
             onRefresh: onRefresh,
             child: CustomScrollView(
               controller: scrollController,
-              // The transparent gap shows the top section and must not absorb
-              // taps meant for the community or profile controls beneath it.
-              hitTestBehavior: HitTestBehavior.deferToChild,
+              // Transparent list gaps must remain hit-testable so a new drag
+              // can interrupt ballistic scrolling. The app bar is painted
+              // later and retains its community and profile controls.
+              hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
                 if (usesPinnedGradient)
@@ -75,12 +75,18 @@ class _ChannelsBody extends StatelessWidget {
           );
 
     return SkeletonReveal(
+      onReadyChanged: onReadyChanged,
       loading: loading,
+      loadingSemanticsKey: const Key('channels-connection-skeleton'),
+      loadingLabel: switch (sessionStatus) {
+        SessionStatus.connecting => 'Connecting',
+        SessionStatus.reconnecting => 'Reconnecting',
+        _ => 'Loading',
+      },
       shimmerEnabled: sessionStatus != SessionStatus.disconnected,
       skeleton: _ChannelsSkeleton(
         channels: loadedChannels,
         topInset: barHeight,
-        status: sessionStatus,
       ),
       content: content,
     );
@@ -118,10 +124,25 @@ class _SliverChannelsList extends HookConsumerWidget {
     final streamChannels = visibleChannels
         .where((channel) => channel.isStream)
         .toList();
-    final dmChannels = sortDmChannelsByDisplayLabel(
-      visibleChannels.where((channel) => channel.isDm),
-      currentPubkey: currentPubkey,
+    final unsortedDms = visibleChannels.where((channel) => channel.isDm);
+    // Rebuild only when the DM order changes, not for every profile fetch.
+    final dmOrder = ref.watch(
+      identityNameSourcesProvider.select(
+        (names) => [
+          for (final channel in sortDmChannelsByDisplayLabel(
+            unsortedDms,
+            currentPubkey: currentPubkey,
+            names: names,
+          ))
+            channel.id,
+        ].join('\u0000'),
+      ),
     );
+    final dmRank = {
+      for (final (index, id) in dmOrder.split('\u0000').indexed) id: index,
+    };
+    final dmChannels = unsortedDms.toList()
+      ..sort((a, b) => dmRank[a.id]!.compareTo(dmRank[b.id]!));
 
     final starredExpanded = useState(true);
     final channelsExpanded = useState(true);
@@ -240,7 +261,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             if (starredStreamChannels.isNotEmpty)
               _ChannelSection(
                 title: 'Starred',
-                icon: LucideIcons.star,
+                icon: BuzzIcons.star,
                 showTopDivider: false,
                 expanded: starredExpanded.value,
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
@@ -351,7 +372,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               ),
             _ChannelSection(
               title: 'Channels',
-              icon: LucideIcons.hash,
+              icon: BuzzIcons.hash,
               showTopDivider:
                   starredStreamChannels.isNotEmpty || userSections.isNotEmpty,
               expanded: channelsExpanded.value,
@@ -367,7 +388,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             ),
             _ChannelSection(
               title: 'DMs',
-              icon: LucideIcons.messagesSquare,
+              icon: BuzzIcons.messagesSquare,
               showTopDivider: true,
               expanded: dmsExpanded.value,
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,

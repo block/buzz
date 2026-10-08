@@ -5,28 +5,31 @@ import {
   projectsQueryKey,
   type Repository,
 } from "@/features/projects/hooks";
+import { publishOwnedAgentProjectAnnouncements } from "@/features/projects/projectOwnerControl";
 import { addRepositoryToProject } from "@/features/projects/projectModels";
 import { buildProjectPatchTemplate } from "@/features/projects/projectRepositoryCreation";
+import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
+import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
-import { signRelayEvent } from "@/shared/api/tauri";
-import { getIdentity } from "@/shared/api/tauriIdentity";
 import { KIND_PROJECT_ANNOUNCEMENT } from "@/shared/constants/kinds";
 
 export type AttachProjectRepositoryInput = {
+  ownerControlAgentPubkey?: string;
   project: Project;
   repository: Repository;
 };
 
 async function attachProjectRepository({
+  ownerControlAgentPubkey,
   project,
   repository,
 }: AttachProjectRepositoryInput) {
-  const identity = await getIdentity();
+  const targetOwner = project.owner.toLowerCase();
 
   // Fetch the live signed project head immediately before mutating.
   const liveHeads = await relayClient.fetchEvents({
     kinds: [KIND_PROJECT_ANNOUNCEMENT],
-    authors: [identity.pubkey],
+    authors: [targetOwner],
     "#d": [project.dtag],
     limit: 1,
   });
@@ -53,21 +56,43 @@ async function attachProjectRepository({
   }
   const template = buildProjectPatchTemplate({
     liveHead,
-    ownerPubkey: identity.pubkey,
+    ownerPubkey: targetOwner,
     repositoryAddresses: [...liveAddresses, repository.repoAddress],
   });
-  const projectEvent = await signRelayEvent({
-    ...template,
-    createdAt: Math.max(
-      Math.floor(Date.now() / 1_000),
-      liveHead.created_at + 1,
-    ),
-  });
-  await relayClient.publishEvent(
-    projectEvent,
-    "Timed out updating the project.",
-    "Failed to attach the repository.",
+  const createdAt = Math.max(
+    Math.floor(Date.now() / 1_000),
+    liveHead.created_at + 1,
   );
+  if (ownerControlAgentPubkey) {
+    const [projectEvent] = await publishOwnedAgentProjectAnnouncements(
+      ownerControlAgentPubkey,
+      [{ ...template, createdAt }],
+    );
+    if (!projectEvent || projectEvent.kind !== KIND_PROJECT_ANNOUNCEMENT) {
+      throw new Error(
+        "The owner agent updated the project but its response was incomplete. Refresh and try again.",
+      );
+    }
+    return {
+      previousProjectId: project.id,
+      project: addRepositoryToProject(
+        project,
+        repository,
+        projectEvent.created_at,
+      ),
+      repository,
+    };
+  }
+
+  const publication = await publishProjectOwnerAnnouncement({
+    ...template,
+    createdAt,
+    targetOwner,
+  });
+  if (publication.publicationError) {
+    throw new Error(publication.publicationError);
+  }
+  const projectEvent = publication.event;
 
   return {
     previousProjectId: project.id,
@@ -85,6 +110,7 @@ export function useAttachProjectRepositoryMutation() {
   return useMutation({
     mutationFn: attachProjectRepository,
     onSuccess: ({ previousProjectId, project }) => {
+      markProjectDataAuthoritative(project, "local-write");
       if (previousProjectId !== project.id) {
         queryClient.removeQueries({
           exact: true,

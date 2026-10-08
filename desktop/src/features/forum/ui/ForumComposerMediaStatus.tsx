@@ -19,17 +19,27 @@ type ComposerMedia = Pick<
 >;
 
 type ForumComposerMediaStatusProps = {
+  disabled?: boolean;
   media: ComposerMedia;
 };
 
 export function ForumComposerMediaStatus({
+  disabled = false,
   media,
 }: ForumComposerMediaStatusProps) {
   const handleEditSave = React.useCallback(
     async (url: string, bytes: Uint8Array) => {
+      if (disabled) return;
       await media.uploadEditedAttachment(url, bytes);
     },
-    [media.uploadEditedAttachment],
+    [disabled, media.uploadEditedAttachment],
+  );
+  const guard = React.useCallback(
+    <T,>(callback: (value: T) => void) =>
+      (value: T) => {
+        if (!disabled) callback(value);
+      },
+    [disabled],
   );
 
   return (
@@ -39,6 +49,7 @@ export function ForumComposerMediaStatus({
           Upload failed: {media.uploadState.message}
           <button
             className="ml-2 underline"
+            disabled={disabled}
             onClick={() => media.setUploadState({ status: "idle" })}
             type="button"
           >
@@ -52,10 +63,10 @@ export function ForumComposerMediaStatus({
           <ComposerAttachments
             attachments={media.pendingImeta}
             isUploading={media.isUploading}
-            onCancelUpload={media.cancelUpload}
+            onCancelUpload={guard(media.cancelUpload)}
             onEditSave={handleEditSave}
-            onRemove={media.removeAttachment}
-            onRevert={media.revertAttachment}
+            onRemove={guard(media.removeAttachment)}
+            onRevert={guard(media.revertAttachment)}
             originalUrlByUrl={media.originalUrlByUrl}
             uploadingCount={media.uploadingCount}
             uploadingPreviews={media.uploadingPreviews}

@@ -39,7 +39,7 @@ The relay enforces all access control. Channel membership is the only gate.
 | Type | Visibility | Join | Create |
 |------|-----------|------|--------|
 | **Open channels** | Searchable by all members | Self-join | Any member |
-| **Private channels** | Hidden, invite-only | Invited by an owner/admin | Any member |
+| **Private channels** | Hidden, invite-only | Invited by member | Any member |
 | **DMs** | Participants only | N/A (up to 9) | Any member |
 | **Guests** | Scoped to specific channels | Invited | N/A |
 
@@ -73,6 +73,8 @@ sig       Schnorr signature
 Buzz extends the standard Nostr event format with custom kind numbers for enterprise features.
 
 New message type? New kind integer. Zero breaking changes.
+
+**The conversation is Nostr; Buzz adds accessories around it.** Messages, threads, reactions, and the rest of the conversation are signed Nostr events, and Nostr reads must cover all of that state, so a standards-leaning Buzz client stays possible. Around it, the relay serves accessories that don't fit that shape: Blossom media, git smart HTTP, workflow webhooks, derived unread counts, and namespaced `/buzz/v1/...` endpoints for backend-for-frontend reads (thread catch-up, sync) over the same authoritative store. We start with this rule and refine it as more cases show up.
 
 ---
 

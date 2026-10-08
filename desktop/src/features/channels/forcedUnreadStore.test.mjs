@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   addForcedUnreadSource,
+  boundForcedUnreadMap,
   forcedUnreadMarker,
+  MAX_FORCED_UNREAD_ENTRIES,
   removeForcedUnreadSource,
 } from "./forcedUnreadStore.ts";
 
@@ -47,6 +49,22 @@ test("clearing the only force owner removes the entry", () => {
   };
 
   assert.equal(removeForcedUnreadSource(entry, "inbox"), undefined);
+});
+
+test("forced unread map keeps the newest 500 insertion-ordered entries", () => {
+  const map = Object.fromEntries(
+    Array.from({ length: MAX_FORCED_UNREAD_ENTRIES + 2 }, (_, index) => [
+      `channel-${index}`,
+      index,
+    ]),
+  );
+
+  const bounded = boundForcedUnreadMap(map);
+
+  assert.equal(Object.keys(bounded).length, MAX_FORCED_UNREAD_ENTRIES);
+  assert.equal(bounded["channel-0"], undefined);
+  assert.equal(bounded["channel-1"], undefined);
+  assert.equal(bounded[`channel-${MAX_FORCED_UNREAD_ENTRIES + 1}`], 501);
 });
 
 test("legacy persisted entries retain their read-marker baseline", () => {

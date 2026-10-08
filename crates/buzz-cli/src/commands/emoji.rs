@@ -16,10 +16,22 @@ struct EmojiEntry {
 }
 
 /// Parse `["emoji", shortcode, url]` tags from one event into entries.
+///
+/// Mirrors desktop `customEmojiFromTags` (`desktop/src/shared/api/customEmoji.ts`):
+/// - Shortcode is canonicalized via `buzz_sdk::normalize_custom_emoji_shortcode`
+///   (trim whitespace/colons, validate charset/length, lowercase). The relay
+///   validates with the same fn at ingest but stores the original signed tag,
+///   so a relay-valid stored key like `"  :WAVE:  "` must be normalized here or
+///   it will never resolve against `scan_shortcodes` output. Malformed tags
+///   (where normalization returns `Err`) are skipped.
+/// - Entries with a missing or empty URL are skipped.
+/// - Within one event the first occurrence of a normalized shortcode wins;
+///   later duplicates are dropped.
 fn emoji_tags_of(event: &serde_json::Value) -> Vec<EmojiEntry> {
     let Some(tags) = event.get("tags").and_then(|v| v.as_array()) else {
         return vec![];
     };
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for tag in tags {
         let Some(parts) = tag.as_array() else {
@@ -28,16 +40,33 @@ fn emoji_tags_of(event: &serde_json::Value) -> Vec<EmojiEntry> {
         if parts.first().and_then(|v| v.as_str()) != Some("emoji") {
             continue;
         }
-        let (Some(shortcode), Some(url)) = (
+        let (Some(raw_shortcode), Some(url)) = (
             parts.get(1).and_then(|v| v.as_str()),
             parts.get(2).and_then(|v| v.as_str()),
         ) else {
             continue;
         };
-        out.push(EmojiEntry {
-            shortcode: shortcode.to_string(),
-            url: url.to_string(),
-        });
+        // Skip entries with empty URL — they are malformed and would silently
+        // produce tags without a resolvable image.
+        if url.is_empty() {
+            continue;
+        }
+        // Canonicalize via the SDK normalizer: trim whitespace/colons, validate
+        // charset/length, lowercase.  Relay validates with this same fn at
+        // ingest but stores the original tag — so a relay-valid key like
+        // "  :WAVE:  " must map to "wave" here or it will never resolve against
+        // scan_shortcodes output.  Skip on Err (malformed tag).
+        let shortcode = match buzz_sdk::normalize_custom_emoji_shortcode(raw_shortcode) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // First occurrence within this event wins; later duplicates are dropped.
+        if seen.insert(shortcode.clone()) {
+            out.push(EmojiEntry {
+                shortcode,
+                url: url.to_string(),
+            });
+        }
     }
     out
 }
@@ -308,6 +337,94 @@ async fn cmd_import(
     publish_own_set(client, &final_set).await
 }
 
+/// Scan `content` for `:shortcode:` patterns, mirroring the desktop's
+/// `customEmojiTags.ts` algorithm exactly:
+///
+/// - Pattern: `:([a-z0-9_-]+):` (case-insensitive; canonical lowercase emitted)
+/// - One tag per distinct first-appearing shortcode
+/// - Unknown shortcodes silently ignored
+///
+/// Returns NIP-30 `["emoji", shortcode, url]` tag vectors for every
+/// shortcode that resolves in the workspace palette.  Returns an empty `Vec`
+/// without a relay round-trip if no candidates appear in the content.
+///
+/// Callers must pre-screen with `content.contains(':')` to skip this
+/// function entirely for the common case of plain content.
+pub async fn resolve_emoji_tags_for_content(
+    client: &BuzzClient,
+    content: &str,
+) -> Result<Vec<Vec<String>>, CliError> {
+    let candidates = scan_shortcodes(content);
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Fetch workspace palette (union of all members' kind:30030 sets).
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_EMOJI_SET],
+        "#d": [CUSTOM_EMOJI_SET_D_TAG],
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse emoji set query: {e}")))?;
+    let palette = union_custom_emoji(&events);
+    let url_by_shortcode: std::collections::HashMap<&str, &str> = palette
+        .iter()
+        .map(|e| (e.shortcode.as_str(), e.url.as_str()))
+        .collect();
+
+    let tags: Vec<Vec<String>> = candidates
+        .iter()
+        .filter_map(|sc| {
+            url_by_shortcode
+                .get(sc.as_str())
+                .map(|url| vec!["emoji".to_string(), sc.clone(), url.to_string()])
+        })
+        .collect();
+
+    Ok(tags)
+}
+
+/// Collect candidate shortcodes from `content` without a regex dependency.
+///
+/// Implements `:([a-z0-9_-]+):` (applied case-insensitively with lowercase
+/// normalization) using a hand-rolled single-pass scanner.  Each distinct
+/// shortcode appears exactly once in first-appearance order.
+pub(crate) fn scan_shortcodes(content: &str) -> Vec<String> {
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] != b':' {
+            i += 1;
+            continue;
+        }
+        // Found opening `:`.  Scan forward for valid shortcode chars.
+        let start = i + 1;
+        let mut j = start;
+        while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'-')
+        {
+            j += 1;
+        }
+        // Require at least one char and a closing `:`.
+        if j > start && j < len && bytes[j] == b':' {
+            // SAFETY: `content` is valid UTF-8 and the slice covers only ASCII.
+            let sc = content[start..j].to_lowercase();
+            if seen.insert(sc.clone()) {
+                out.push(sc);
+            }
+            // Advance past the closing `:` so overlapping patterns like `:a::b:`
+            // are handled correctly (`:a:` consumed, next scan starts at `:`).
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 pub async fn dispatch(cmd: crate::EmojiCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::EmojiCmd;
     match cmd {
@@ -385,5 +502,309 @@ mod tests {
         assert_eq!(emojis.len(), 1);
         assert_eq!(emojis[0].shortcode, "zort");
         assert_eq!(emojis[0].url, "https://example.com/zort.png");
+    }
+
+    // ── scan_shortcodes ──────────────────────────────────────────────────────
+
+    // ── emoji_tags_of — normalization and dedup ──────────────────────────────
+
+    #[test]
+    fn emoji_tags_of_normalizes_uppercase_shortcode_to_lowercase() {
+        // Relay stores the original case; scanner always lowercases; so a
+        // stored "WAVE" must map to "wave" for resolution to work.  Also
+        // covers relay-valid keys with surrounding whitespace/colons.
+        let event = serde_json::json!({
+            "created_at": 100,
+            "tags": [
+                ["emoji", "WAVE", "https://example.com/wave.png"],
+                ["emoji", "  :SweatBlob:  ", "https://example.com/sweatblob.gif"],
+            ]
+        });
+        let entries = emoji_tags_of(&event);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].shortcode, "wave");
+        assert_eq!(entries[1].shortcode, "sweatblob");
+    }
+
+    #[test]
+    fn emoji_tags_of_skips_empty_url() {
+        // An entry with a missing or empty URL is malformed; it must be
+        // dropped so palette lookups never return an unusable image URL.
+        let event = serde_json::json!({
+            "created_at": 100,
+            "tags": [
+                ["emoji", "good", "https://example.com/good.png"],
+                ["emoji", "bad", ""],
+                ["emoji", "alsobad"],  // missing url field entirely
+            ]
+        });
+        let entries = emoji_tags_of(&event);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].shortcode, "good");
+    }
+
+    #[test]
+    fn emoji_tags_of_first_occurrence_wins_within_event() {
+        // Within one event the first occurrence of a (normalized) shortcode
+        // wins; a later duplicate tag for the same shortcode is dropped.
+        let event = serde_json::json!({
+            "created_at": 100,
+            "tags": [
+                ["emoji", "wave", "https://example.com/wave-first.png"],
+                ["emoji", "wave", "https://example.com/wave-second.png"],
+                ["emoji", "WAVE", "https://example.com/wave-uppercase.png"],
+            ]
+        });
+        let entries = emoji_tags_of(&event);
+        assert_eq!(
+            entries.len(),
+            1,
+            "all three normalize to 'wave'; only first kept"
+        );
+        assert_eq!(entries[0].url, "https://example.com/wave-first.png");
+    }
+
+    #[test]
+    fn scan_finds_basic_shortcode() {
+        assert_eq!(scan_shortcodes(":wave:"), vec!["wave"]);
+    }
+
+    #[test]
+    fn scan_finds_multiple_shortcodes_in_order() {
+        let result = scan_shortcodes(":wave: hello :party_parrot: world :tada:");
+        assert_eq!(result, vec!["wave", "party_parrot", "tada"]);
+    }
+
+    #[test]
+    fn scan_deduplicates_shortcodes() {
+        let result = scan_shortcodes(":wave: :wave: :wave:");
+        assert_eq!(result, vec!["wave"]);
+    }
+
+    #[test]
+    fn scan_normalizes_to_lowercase() {
+        let result = scan_shortcodes(":WAVE: :Wave:");
+        assert_eq!(result, vec!["wave"]);
+    }
+
+    #[test]
+    fn scan_ignores_invalid_chars_in_shortcode() {
+        // Spaces inside are not valid shortcode chars
+        let result = scan_shortcodes(":hello world:");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scan_empty_colons_not_matched() {
+        // "::" has zero chars between — must not match
+        assert!(scan_shortcodes("::").is_empty());
+    }
+
+    #[test]
+    fn scan_no_candidates_in_plain_content() {
+        assert!(scan_shortcodes("Hello world, no emoji here").is_empty());
+    }
+
+    #[test]
+    fn scan_handles_adjacent_shortcodes() {
+        // ":a::b:" — `:a:` consumed, then `:b:` starts at `:`
+        let result = scan_shortcodes(":a::b:");
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn scan_allows_hyphens_and_underscores() {
+        let result = scan_shortcodes(":party-parrot: :sweat_blob:");
+        assert_eq!(result, vec!["party-parrot", "sweat_blob"]);
+    }
+
+    // ── resolve_emoji_tags_for_content — send-path palette seam ─────────────
+    //
+    // These tests drive the production `resolve_emoji_tags_for_content` through
+    // a real `BuzzClient` against an axum fake `/query` server.  They verify
+    // the full chain: scan → palette fetch → tag assembly.
+
+    use crate::client::BuzzClient;
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::Keys;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    fn test_client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    /// Fake relay: serves a `/query` endpoint returning the given JSON body,
+    /// and records how many times it was called.
+    async fn fake_query_server(response_body: String) -> (String, Arc<Mutex<u32>>) {
+        let call_count: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        type S = (Arc<Mutex<u32>>, String);
+        let state: S = (call_count.clone(), response_body);
+
+        let app = Router::new()
+            .route(
+                "/query",
+                post(
+                    |State((count, body)): State<S>, _headers: HeaderMap, _req: Bytes| async move {
+                        *count.lock().unwrap() += 1;
+                        (StatusCode::OK, [("content-type", "application/json")], body)
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), call_count)
+    }
+
+    /// Palette response: two custom emoji — `wave` and `sweatblob`.
+    fn palette_response() -> String {
+        serde_json::json!([{
+            "created_at": 100,
+            "tags": [
+                ["d", "buzz:custom-emoji"],
+                ["emoji", "wave", "https://cdn.example.com/wave.png"],
+                ["emoji", "sweatblob", "https://cdn.example.com/sweatblob.gif"]
+            ]
+        }])
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_known_shortcode_returns_correct_tag() {
+        let (url, _calls) = fake_query_server(palette_response()).await;
+        let client = test_client(&url);
+        let tags = resolve_emoji_tags_for_content(&client, "hello :wave:")
+            .await
+            .unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            tags[0],
+            vec!["emoji", "wave", "https://cdn.example.com/wave.png"]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_unknown_shortcode_is_filtered_out() {
+        let (url, _calls) = fake_query_server(palette_response()).await;
+        let client = test_client(&url);
+        // :notarealemoji: is not in the palette — must produce no tags.
+        let tags = resolve_emoji_tags_for_content(&client, ":notarealemoji:")
+            .await
+            .unwrap();
+        assert!(tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_deduplicates_repeated_shortcode() {
+        let (url, _calls) = fake_query_server(palette_response()).await;
+        let client = test_client(&url);
+        // `:wave:` appears twice; output must have exactly one tag for it.
+        let tags = resolve_emoji_tags_for_content(&client, ":wave: and :wave: again")
+            .await
+            .unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0][1], "wave");
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_first_appearance_order() {
+        let (url, _calls) = fake_query_server(palette_response()).await;
+        let client = test_client(&url);
+        // `:sweatblob:` before `:wave:` — tags must appear in that order.
+        let tags = resolve_emoji_tags_for_content(&client, ":sweatblob: :wave:")
+            .await
+            .unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0][1], "sweatblob");
+        assert_eq!(tags[1][1], "wave");
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_case_insensitive_match_emits_lowercase() {
+        let (url, _calls) = fake_query_server(palette_response()).await;
+        let client = test_client(&url);
+        // `:WAVE:` must resolve to the lowercase `wave` tag.
+        let tags = resolve_emoji_tags_for_content(&client, ":WAVE:")
+            .await
+            .unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            tags[0][1], "wave",
+            "canonical tag shortcode must be lowercase"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_no_colon_content_skips_palette_query() {
+        let (url, call_count) = fake_query_server(palette_response()).await;
+        let client = test_client(&url);
+        // Content with no `:` must return empty tags with ZERO relay queries.
+        let tags = resolve_emoji_tags_for_content(&client, "Hello world, no colons here")
+            .await
+            .unwrap();
+        assert!(tags.is_empty());
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            0,
+            "must not query the palette when content has no colon"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_unknown_only_content_still_queries_once() {
+        let (url, call_count) = fake_query_server(palette_response()).await;
+        let client = test_client(&url);
+        // Content has `:` but the shortcode is not in the palette.
+        // One palette query should occur (candidates are non-empty), zero tags returned.
+        let tags = resolve_emoji_tags_for_content(&client, ":notreal:")
+            .await
+            .unwrap();
+        assert!(tags.is_empty());
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            1,
+            "must query palette once even when no shortcodes resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tags_non_canonical_palette_key_resolves() {
+        // The relay validates shortcodes via normalize_custom_emoji_shortcode but
+        // stores the original signed tag.  A relay-valid stored key like
+        // "  :WAVE:  " must resolve when content contains `:wave:`.
+        // This is the production-resolver regression that proves emoji_tags_of
+        // uses the SDK normalizer rather than a plain lowercase conversion.
+        let non_canonical_palette = serde_json::json!([{
+            "created_at": 100,
+            "tags": [
+                ["d", "buzz:custom-emoji"],
+                // Relay-valid but non-canonical: whitespace + surrounding colons + uppercase.
+                ["emoji", "  :WAVE:  ", "https://cdn.example.com/wave.png"],
+            ]
+        }])
+        .to_string();
+        let (url, _calls) = fake_query_server(non_canonical_palette).await;
+        let client = test_client(&url);
+        let tags = resolve_emoji_tags_for_content(&client, "hello :wave:")
+            .await
+            .unwrap();
+        assert_eq!(
+            tags.len(),
+            1,
+            "non-canonical palette key must resolve; got tags: {tags:?}"
+        );
+        assert_eq!(
+            tags[0],
+            vec!["emoji", "wave", "https://cdn.example.com/wave.png"],
+            "resolved tag must use the canonical lowercase shortcode"
+        );
     }
 }

@@ -1,11 +1,11 @@
 //! Relay configuration from environment variables.
 
-use std::net::SocketAddr;
 use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Default maximum inbound WebSocket frame size in bytes.
 ///
@@ -24,11 +24,50 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
-/// Deny-by-default read-only deployment-admin configuration.
+/// Authentication mode for the deployment-admin API.
+///
+/// Configured by `BUZZ_ADMIN_AUTH`: unset/empty/`nip98` → `Nip98` (fail-secure
+/// default), `disabled` → `Disabled`, anything else is a startup error.
+///
+/// # Role resolution (nip98 mode only)
+///
+/// In `nip98` mode the authenticated pubkey is resolved to an
+/// `AdminPrincipal` at request time via [`crate::api::admin::auth::resolve_admin_principal`]:
+/// - `Operator/Config` if pubkey ∈ `RELAY_OPERATOR_PUBKEYS`
+/// - `Operator/OwnerFallback` if pubkey == `RELAY_OWNER_PUBKEY` **and**
+///   `RELAY_OPERATOR_PUBKEYS` is empty (evaluated from config, never runtime rows)
+/// - `Moderator/Db` from the `relay_operators` table otherwise
+/// - `None` → 403 (no fall-through role, ever)
+///
+/// Disabled mode serves every moderation read and refuses writes and staffing.
+/// NIP-98 mode is read-write per resolved principal.
+#[derive(Debug, Clone)]
+pub enum AdminAuth {
+    /// Authentication disabled. The operator has explicitly asserted
+    /// that the admin API is protected at the network layer (reverse proxy,
+    /// VPN, firewall). `Host`/`Origin` checks remain active as defense-in-depth.
+    /// Selected by `BUZZ_ADMIN_AUTH=disabled`.
+    /// Every moderation read is served to anyone who can reach the relay;
+    /// `authorize()` returns `NetworkTrusted` with no identity, so write and
+    /// staffing routes always 403.
+    Disabled,
+    /// NIP-98 HTTP Auth. Every request must carry an `Authorization: Nostr`
+    /// header containing a signed kind-27235 event. The authenticated pubkey
+    /// is resolved to an [`crate::api::admin::auth::AdminPrincipal`] at request
+    /// time from config + DB. Selected by `BUZZ_ADMIN_AUTH=nip98` or by leaving
+    /// `BUZZ_ADMIN_AUTH` unset (fail-secure default). Read-write per resolved
+    /// principal; attributes mutations to a distinct human operator.
+    Nip98,
+}
+
+/// Deny-by-default deployment-admin configuration. Mutation and staffing routes
+/// require a resolved principal (NIP-98 only); disabled mode serves reads only.
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
     /// Exact admin HTTP authority.
     pub host: String,
+    /// Authentication mode selected at startup.
+    pub auth: AdminAuth,
     /// Optional admin SPA bundle directory.
     pub web_dir: Option<std::path::PathBuf>,
 }
@@ -44,6 +83,30 @@ pub struct JoinPolicyConfig {
     pub age_attestation_required: bool,
     /// Content-derived identifier binding receipts to the exact policy revision.
     pub version: String,
+}
+
+/// Optional KLIPY GIF-search integration owned by the relay operator.
+///
+/// The API key deliberately stays private and its [`Debug`] implementation is
+/// redacted so dumping [`Config`] cannot disclose it.
+#[derive(Clone)]
+pub struct KlipyConfig {
+    api_key: String,
+}
+
+impl KlipyConfig {
+    /// Return the key only to the outbound KLIPY client.
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
+    }
+}
+
+impl std::fmt::Debug for KlipyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KlipyConfig")
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
@@ -64,6 +127,10 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
+    /// Replica freshness budget for fleet usage telemetry
+    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). Independent of serving-read
+    /// routing; defaults to 30 seconds and `0` disables telemetry DB queries.
+    pub usage_metrics_replica_max_age_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -118,6 +185,10 @@ pub struct Config {
     /// Whether REST API requests must present a valid token. Independent of
     /// WebSocket protocol auth, which is *always* required by REQ/EVENT/COUNT.
     pub require_auth_token: bool,
+    /// Opt-in private accessory API; disabled until explicitly deployed.
+    pub buzz_v1_enabled: bool,
+    /// Author-time unread tracking duration, independent of NIP-RS retention.
+    pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
     /// If empty, permissive CORS is used (dev mode).
     /// Example: "tauri://localhost,http://localhost:3000"
@@ -133,6 +204,10 @@ pub struct Config {
     pub health_port: u16,
     /// TCP port for the Prometheus metrics exporter (`GET /metrics`).
     pub metrics_port: u16,
+    /// Interval between read-only partition catalog audits.
+    pub partition_audit_interval: Duration,
+    /// Whether the partition manager may create uncovered monthly partitions.
+    pub partition_manager_create_enabled: bool,
 
     /// When true, NIP-42 pubkey-only authentication (no API token) is
     /// restricted to pubkeys in the `pubkey_allowlist` table. Users with valid
@@ -186,9 +261,14 @@ pub struct Config {
     /// Canonical HTTP origin of the deployment-global operator API.
     ///
     /// Every operator NIP-98 `u` tag is verified against this origin, independent
-    /// of the inbound HTTP `Host` header and tenant registry. Required when
-    /// `RELAY_OPERATOR_PUBKEYS` is non-empty. Set via `RELAY_OPERATOR_API_ORIGIN`
-    /// as an `http://` or `https://` origin with no path, query, or fragment.
+    /// of the inbound HTTP `Host` header and tenant registry. Required only to
+    /// *use* the community-provisioning endpoints: when it is unset, those
+    /// endpoints fail closed at request time (see
+    /// `api::operator::authorize_operator_request`). It is NOT required at boot
+    /// even when `RELAY_OPERATOR_PUBKEYS` is set, because that allowlist is
+    /// shared with the NIP-98 admin console, which needs no origin. Set via
+    /// `RELAY_OPERATOR_API_ORIGIN` as an `http://` or `https://` origin with no
+    /// path, query, or fragment.
     pub relay_operator_api_origin: Option<String>,
 
     /// Deployment-level relay operator pubkeys allowed to use the
@@ -204,6 +284,9 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Configured operator-listener identities and their HTTPS delivery URLs.
+    pub operator_listener_delivery_urls: HashMap<String, url::Url>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -217,6 +300,10 @@ pub struct Config {
     ///
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
+
+    /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
+    /// and its proxy routes return 404.
+    pub klipy: Option<KlipyConfig>,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -269,13 +356,19 @@ pub struct Config {
     /// Used to authenticate internal policy endpoint requests.
     pub git_hook_hmac_secret: String,
 
+    /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
+    /// are enabled for this deployment. Defaults to false.
+    pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
-    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
-    /// Push lease support is disabled when unset.
+    /// Exact HTTP(S) gateway endpoint used to sign and submit APNs delivery capabilities.
+    /// Required while push is enabled. An explicitly empty setting is allowed
+    /// only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
-    /// Hard timeout for one gateway delivery request.
+    /// Hard timeout for one push gateway delivery request.
     pub push_gateway_timeout: Duration,
+    /// Hard timeout for one operator-listener delivery request.
+    pub operator_listener_timeout: Duration,
 
     /// Optional relay-hosted policy shown on join surfaces. Disabled when no
     /// documents or age attestation are configured.
@@ -291,6 +384,15 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+
+    /// NIP-FI federated-identity enforcement configuration.
+    ///
+    /// Selected by `BUZZ_NIP_FI_MODE`: `enforce` validates assertions at HTTP
+    /// ingress and (via S3) at WebSocket upgrade; `deny_protected` denies
+    /// protected requests without evaluating; `shadow` evaluates and records
+    /// the enforce verdict but admits exactly as `off`. `Off` (the default)
+    /// leaves all identity enforcement to NIP-42 alone.
+    pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -318,6 +420,10 @@ fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigErro
         human_messages_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN",
             defaults.human_messages_per_min,
+        )?,
+        gif_searches_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN",
+            defaults.gif_searches_per_min,
         )?,
         human_api_calls_per_min: positive_u64_from_env(
             "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
@@ -367,16 +473,15 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
-const DEFAULT_PUSH_GATEWAY_DELIVERY_URL: &str = "https://push.buzz.xyz/v1/deliveries/apns";
-
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
         ConfigError::InvalidValue(format!(
             "BUZZ_PUSH_GATEWAY_DELIVERY_URL is not a valid URL: {e}"
         ))
     })?;
-    if url.scheme() != "https"
+    if !matches!(url.scheme(), "http" | "https")
         || url.host().is_none()
+        || (url.scheme() == "https" && url.port().is_some())
         || !url.username().is_empty()
         || url.password().is_some()
         || url.path() != "/v1/deliveries/apns"
@@ -384,11 +489,63 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         || url.fragment().is_some()
     {
         return Err(ConfigError::InvalidValue(
-            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries/apns URL without credentials, query, or fragment"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTP(S) /v1/deliveries/apns URL without credentials, query, or fragment; explicit ports are supported only for HTTP"
                 .to_string(),
         ));
     }
     Ok(url)
+}
+
+fn parse_operator_listener_delivery_urls(
+    raw: &str,
+) -> Result<HashMap<String, url::Url>, ConfigError> {
+    let mut endpoints = HashMap::new();
+    let entries: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if !raw.trim().is_empty() && entries.is_empty() {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_OPERATOR_LISTENERS must contain pubkey:delivery_url pairs".to_string(),
+        ));
+    }
+    for entry in entries {
+        let (pubkey, delivery_url) = entry.split_once(':').ok_or_else(|| {
+            ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS entries must be pubkey:delivery_url pairs".to_string(),
+            )
+        })?;
+        let pubkey = pubkey.trim().to_ascii_lowercase();
+        if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS entry has an invalid pubkey: {pubkey:?}"
+            )));
+        }
+        let url = url::Url::parse(delivery_url.trim()).map_err(|e| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS endpoint is not a valid URL: {e}"
+            ))
+        })?;
+        if url.scheme() != "https"
+            || url.host().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_OPERATOR_LISTENERS endpoints must be HTTPS URLs without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+        if endpoints.insert(pubkey.clone(), url).is_some() {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_OPERATOR_LISTENERS contains duplicate pubkey: {pubkey}"
+            )));
+        }
+    }
+    Ok(endpoints)
 }
 
 fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
@@ -491,6 +648,16 @@ impl Config {
             })?,
             Err(_) => 0,
         };
+        let usage_metrics_replica_max_age_ms =
+            match std::env::var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS") {
+                Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
+                    ConfigError::InvalidValue(
+                        "BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS must be a non-negative integer"
+                            .to_string(),
+                    )
+                })?,
+                Err(_) => 30_000,
+            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -628,25 +795,36 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let klipy = std::env::var("BUZZ_KLIPY_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|api_key| KlipyConfig { api_key });
+
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
         let relay_owner_pubkey = std::env::var("RELAY_OWNER_PUBKEY")
             .ok()
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
-            .and_then(|s| {
+            .map(|s| {
                 // Must be exactly 64 lowercase hex characters (32-byte pubkey).
+                // Fail closed — once RELAY_OWNER_PUBKEY can be the break-glass
+                // operator root (owner-fallback B), silently discarding a malformed
+                // value would be a lockout, not a graceful degradation.
                 let valid = s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
                 if valid {
-                    Some(s)
+                    Ok(s)
                 } else {
-                    warn!(
-                        "RELAY_OWNER_PUBKEY is not a valid 64-char hex pubkey — ignoring. \
-                         Got: {s:?}"
-                    );
-                    None
+                    Err(ConfigError::InvalidValue(format!(
+                        "RELAY_OWNER_PUBKEY is not a valid 64-char hex pubkey — \
+                         got: {s:?}. Fix or unset it; a malformed value is a startup error \
+                         because this key can serve as the break-glass operator root when \
+                         RELAY_OPERATOR_PUBKEYS is empty."
+                    )))
                 }
-            });
+            })
+            .transpose()?;
 
         // Note: intentionally not prefixed with BUZZ_ — same relay-identity
         // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
@@ -682,10 +860,36 @@ impl Config {
             Err(_) => Vec::new(),
         };
         if !relay_operator_pubkeys.is_empty() && relay_operator_api_origin.is_none() {
-            return Err(ConfigError::InvalidValue(
-                "RELAY_OPERATOR_API_ORIGIN is required when RELAY_OPERATOR_PUBKEYS is configured"
-                    .to_string(),
-            ));
+            // Do NOT fail closed at boot: RELAY_OPERATOR_PUBKEYS is the shared
+            // allowlist for BOTH the community-provisioning endpoints and the
+            // NIP-98 admin console. Only provisioning needs the canonical
+            // origin, so requiring it at boot would force admin-console
+            // operators to configure a provisioning surface they never use.
+            // The provisioning endpoints stay fail-closed at request time
+            // (see `api::operator::authorize_operator_request`, which rejects
+            // when the origin is unconfigured); this warning names that so an
+            // operator who *did* want provisioning knows why it 500s.
+            warn!(
+                "RELAY_OPERATOR_PUBKEYS is set but RELAY_OPERATOR_API_ORIGIN is not — \
+                 the community-provisioning endpoints (POST /operator/communities) will \
+                 reject every request until RELAY_OPERATOR_API_ORIGIN is set. The NIP-98 \
+                 admin console does not require it and is unaffected."
+            );
+        }
+
+        let operator_listener_delivery_urls = match std::env::var("BUZZ_OPERATOR_LISTENERS") {
+            Ok(raw) => parse_operator_listener_delivery_urls(&raw)?,
+            Err(std::env::VarError::NotPresent) => HashMap::new(),
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_OPERATOR_LISTENERS must be valid UTF-8: {error}"
+                )));
+            }
+        };
+        if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
+            error!(
+                "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
+            );
         }
 
         let auth = buzz_auth::AuthConfig {
@@ -722,6 +926,18 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
+
+        // Catalog-only and cheap, but clamp operator mistakes away from a hot
+        // loop or a multi-day observability gap.
+        let partition_audit_interval = Duration::from_secs(
+            std::env::var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(15 * 60)
+                .clamp(60, 24 * 60 * 60),
+        );
+        let partition_manager_create_enabled =
+            parse_bool("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", true)?;
 
         let s3_addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
             Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
@@ -859,6 +1075,7 @@ impl Config {
                 let secret: [u8; 32] = rand::random();
                 hex::encode(secret)
             });
+        let push_enabled = parse_bool("BUZZ_PUSH_ENABLED", false)?;
         let push_executor_key_id =
             std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
         if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
@@ -867,11 +1084,26 @@ impl Config {
             ));
         }
         let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
+            Ok(raw) if raw.trim().is_empty() && push_enabled => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must not be empty when BUZZ_PUSH_ENABLED=true"
+                        .to_string(),
+                ));
+            }
             Ok(raw) if raw.trim().is_empty() => None,
             Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
-            Err(_) => Some(parse_push_gateway_delivery_url(
-                DEFAULT_PUSH_GATEWAY_DELIVERY_URL,
-            )?),
+            Err(std::env::VarError::NotPresent) if push_enabled => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be configured when BUZZ_PUSH_ENABLED=true"
+                        .to_string(),
+                ));
+            }
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be valid UTF-8: {error}"
+                )));
+            }
         };
         let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
             Ok(raw) => raw
@@ -887,6 +1119,33 @@ impl Config {
             Err(_) => 2_000,
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
+        let operator_listener_timeout_millis = match std::env::var(
+            "BUZZ_OPERATOR_LISTENER_TIMEOUT_MS",
+        ) {
+            Ok(raw) => match raw
+                .parse::<u64>()
+                .ok()
+                .filter(|millis| (100..=10_000).contains(millis))
+            {
+                Some(millis) => millis,
+                None => {
+                    error!(
+                        value = %raw,
+                        "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms (expected integer in 100..=10000)"
+                    );
+                    5_000
+                }
+            },
+            Err(std::env::VarError::NotPresent) => 5_000,
+            Err(err) => {
+                error!(
+                    error = %err,
+                    "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms"
+                );
+                5_000
+            }
+        };
+        let operator_listener_timeout = Duration::from_millis(operator_listener_timeout_millis);
 
         const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
         let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
@@ -927,19 +1186,124 @@ impl Config {
             })
         };
 
-        // Read-only deployment-admin surface. The route is absent when the host is unset.
+        // Deployment-admin surface. The route is absent when the host is unset.
         let admin = match std::env::var("BUZZ_ADMIN_HOST")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
         {
-            None => None,
+            None => {
+                if std::env::var_os("BUZZ_ADMIN_TOKEN").is_some() {
+                    tracing::warn!(
+                        "BUZZ_ADMIN_TOKEN is set but token authentication was removed — \
+                         the value is ignored; the admin API now supports only \
+                         BUZZ_ADMIN_AUTH=nip98 (default) or disabled; remove \
+                         BUZZ_ADMIN_TOKEN from the environment"
+                    );
+                }
+                if std::env::var_os("BUZZ_ADMIN_AUTH").is_some() {
+                    tracing::warn!(
+                        "BUZZ_ADMIN_AUTH is set without BUZZ_ADMIN_HOST — \
+                         the admin dashboard and API stay disabled and the value is ignored"
+                    );
+                }
+                None
+            }
             Some(host) => {
                 if host.contains(['/', '\\', '@']) {
                     return Err(ConfigError::InvalidValue(
                         "BUZZ_ADMIN_HOST must be an exact authority".to_string(),
                     ));
                 }
+
+                // IPv6 authorities must be bracketed (RFC 3986). An unbracketed
+                // literal such as `::1` cannot form a valid URI authority — the
+                // advertised NIP-11 origin and the NIP-98 `u`-tag verifier would
+                // emit `http://::1`, which no URL parser accepts, and no real
+                // client sends an unbracketed IPv6 `Host` header. Reject it here
+                // so every accepted host yields usable discovery and signing URLs.
+                if !host.starts_with('[') && host.matches(':').count() > 1 {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_ADMIN_HOST={host} looks like a bare IPv6 literal; \
+                         wrap IPv6 addresses in brackets, e.g. [::1] or [::1]:3000"
+                    )));
+                }
+
+                // Catch-all authority gate: every accepted host is interpolated
+                // into the NIP-11 advertisement and NIP-98 `u`-tag URLs, so it
+                // must be exactly an authority — a host with an optional port and
+                // nothing else. Parsing `http://{host}` and requiring the sentinel
+                // to carry only a host rejects any shape that smuggles a path,
+                // query, fragment, or credentials into the value (the bracket guard
+                // above already names the honest bare-IPv6 shape).
+                // Structural check, not parse-only: `admin.example.com?x=1` parses
+                // as a valid URL but lands `?x=1` in the query, which would corrupt
+                // both the advertised origin and the canonical `u`-tag URL. Mirrors
+                // `parse_operator_api_origin`. After passing the gate the host is
+                // lowercased (hostnames are case-insensitive per RFC 4343) so a
+                // mixed-case BUZZ_ADMIN_HOST round-trips correctly through desktop
+                // URL parsing, which always lowercases hostnames (the `url` crate
+                // normalizes an empty path to `/`, so a bare authority satisfies
+                // `path == "/"`).
+                let is_bare_authority =
+                    url::Url::parse(&format!("http://{host}")).is_ok_and(|url| {
+                        url.host().is_some()
+                            && url.username().is_empty()
+                            && url.password().is_none()
+                            && url.path() == "/"
+                            && url.query().is_none()
+                            && url.fragment().is_none()
+                    });
+                if !is_bare_authority {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_ADMIN_HOST={host} is not a valid URL authority; \
+                         it must be a host with an optional port and nothing else \
+                         (no path, query, fragment, or credentials), e.g. \
+                         relay.example.com:8443 or [::1]:3000"
+                    )));
+                }
+                let host = host.to_lowercase();
+
+                // Parse BUZZ_ADMIN_AUTH. Accepted values: "nip98" (default when
+                // unset or empty) and "disabled". Any other value is a startup
+                // error (typo-proofing). Token authentication was removed —
+                // BUZZ_ADMIN_TOKEN in the environment is ignored with a startup
+                // warning so a deploy that used to honor a credential learns the
+                // value is now inert without bricking the boot.
+                if std::env::var_os("BUZZ_ADMIN_TOKEN").is_some() {
+                    tracing::warn!(
+                        "BUZZ_ADMIN_TOKEN is set but token authentication was removed — \
+                         the value is ignored; the admin API now supports only \
+                         BUZZ_ADMIN_AUTH=nip98 (default) or disabled; remove \
+                         BUZZ_ADMIN_TOKEN from the environment"
+                    );
+                }
+
+                let auth = match std::env::var("BUZZ_ADMIN_AUTH")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim)
+                {
+                    None | Some("") | Some("nip98") => AdminAuth::Nip98,
+                    Some("disabled") => {
+                        tracing::warn!(
+                            "BUZZ_ADMIN_AUTH=disabled — the admin API serves every \
+                             moderation read without authentication to anyone who can \
+                             reach the relay: reports, feedback and attachments, \
+                             restrictions, the community directory, member profiles and \
+                             any stored message by ID, in every community. Writes and \
+                             staffing are refused. Keep the whole relay port private to \
+                             people allowed to see all of that"
+                        );
+                        AdminAuth::Disabled
+                    }
+                    Some(other) => {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_ADMIN_AUTH must be \"nip98\" or \"disabled\"; got \"{other}\""
+                        )))
+                    }
+                };
+
                 let web_dir = std::env::var("BUZZ_ADMIN_WEB_DIR")
                     .ok()
                     .map(|value| std::path::PathBuf::from(value.trim()))
@@ -952,7 +1316,11 @@ impl Config {
                         )));
                     }
                 }
-                Some(AdminConfig { host, web_dir })
+                Some(AdminConfig {
+                    host,
+                    auth,
+                    web_dir,
+                })
             }
         };
 
@@ -986,11 +1354,21 @@ impl Config {
             ));
         }
 
+        let buzz_v1_enabled = std::env::var("BUZZ_V1_ENABLED").is_ok_and(|v| v == "true");
+        // Read only when enabled: a disabled relay ignores every v1 setting.
+        let buzz_v1_retention_seconds = match std::env::var("BUZZ_V1_RETENTION_SECONDS") {
+            Ok(v) if buzz_v1_enabled => v.parse().ok().filter(|s| *s > 0).ok_or_else(|| {
+                ConfigError::InvalidValue("BUZZ_V1_RETENTION_SECONDS must be positive".into())
+            })?,
+            _ => buzz_db::personal_read::DEFAULT_RETENTION_SECONDS,
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
             read_database_url,
             replica_read_max_age_ms,
+            usage_metrics_replica_max_age_ms,
             drain_jitter_ms,
             redis_url,
             redis_pool_size,
@@ -1005,11 +1383,15 @@ impl Config {
             slow_client_grace_limit,
             auth,
             require_auth_token,
+            buzz_v1_enabled,
+            buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
             uds_path,
             health_port,
             metrics_port,
+            partition_audit_interval,
+            partition_manager_create_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
             huddle_audio_available,
@@ -1018,7 +1400,9 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            operator_listener_delivery_urls,
             allow_nip_oa_auth,
+            klipy,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -1034,14 +1418,44 @@ impl Config {
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,
+            push_enabled,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            operator_listener_timeout,
             join_policy,
             admin,
             web_dir,
             serve_git_web_gui,
+            nip_fi: crate::nip_fi_config::NipFiRelayConfig::from_env()?,
         })
+    }
+
+    /// Build a baseline `Config` suitable for test fixtures that need a
+    /// structurally valid config without caring about specific field values.
+    ///
+    /// Equivalent to `from_env()` with all env variables absent, but calls
+    /// that function while holding `NIP_FI_ENV_LOCK` so that concurrent NIP-FI
+    /// env-writer tests cannot produce a partially-written env state that this
+    /// call observes.  Every test fixture that previously called
+    /// `Config::from_env().expect("…")` should use this instead — it is the
+    /// only env-isolation-safe way to obtain a default config in test code.
+    ///
+    /// Fields that differ from production defaults (`database_url`,
+    /// `redis_url`, etc.) should be overridden on the returned struct after
+    /// calling this function, exactly as was done before.
+    ///
+    /// [FI-TRACE-ENV-RACE]
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        crate::nip_fi_config::FOR_TEST_LOCK_WAITERS
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        let _fi_guard = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::from_env().expect("default config must load for test fixture")
     }
 }
 
@@ -1049,10 +1463,40 @@ impl Config {
 mod tests {
     use super::*;
 
+    #[test]
+    fn klipy_config_debug_redacts_the_api_key() {
+        let config = KlipyConfig {
+            api_key: "private-klipy-key".to_string(),
+        };
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("private-klipy-key"));
+    }
+
     // Mutex to serialize tests that mutate environment variables.
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire both the FI env lock and the config-test env lock in a consistent
+    /// order so concurrent FI writers never observe a partially-written env state.
+    ///
+    /// Lock ordering: NIP_FI_ENV_LOCK → ENV_MUTEX. Every direct `Config::from_env()`
+    /// caller in this test module must hold both locks. Use this helper instead of
+    /// acquiring them separately to guarantee the order is never inverted.
+    ///
+    /// [FI-TRACE-ENV-RACE]
+    fn env_guards() -> (
+        std::sync::MutexGuard<'static, ()>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let fi = crate::nip_fi_config::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cfg = ENV_MUTEX.lock().unwrap();
+        (fi, cfg)
+    }
 
     /// Look up against a fixed set, standing in for process env.
     fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
@@ -1109,7 +1553,7 @@ mod tests {
 
     #[test]
     fn defaults_are_valid() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let config = Config::from_env().expect("default config");
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
@@ -1119,6 +1563,8 @@ mod tests {
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
+        assert_eq!(config.partition_audit_interval, Duration::from_secs(900));
+        assert!(config.partition_manager_create_enabled);
         assert!(config.slow_client_grace_limit > 0);
         assert!(
             !config.pubkey_allowlist_enabled,
@@ -1159,9 +1605,473 @@ mod tests {
         );
     }
 
+    /// Run `Config::from_env()` with the admin variables forced to `values`,
+    /// restoring the ambient environment afterwards.
+    ///
+    /// Callers must already hold [`env_guards()`] before calling this function,
+    /// so that FI writers cannot produce a partially-written env state while
+    /// `Config::from_env()` reads it. [FI-TRACE-ENV-RACE]
+    fn config_with_admin_env(values: &[(&str, Option<&str>)]) -> Result<Config, ConfigError> {
+        const KEYS: [&str; 3] = ["BUZZ_ADMIN_HOST", "BUZZ_ADMIN_TOKEN", "BUZZ_ADMIN_AUTH"];
+        let previous: Vec<_> = KEYS
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+        for (key, value) in values {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let config = Config::from_env();
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        config
+    }
+
+    /// Like `config_with_admin_env`, but also captures the tracing output
+    /// emitted during `Config::from_env()` so a test can assert the startup
+    /// warning fired. The `BUZZ_ADMIN_TOKEN` warning is the sole behavioral
+    /// value of retaining the guards (the variable is otherwise inert), so it
+    /// must be regression-protected: deleting a warn block has to fail a test.
+    fn config_with_admin_env_capturing_logs(
+        values: &[(&str, Option<&str>)],
+    ) -> (Result<Config, ConfigError>, String) {
+        use std::sync::{Arc, Mutex};
+
+        let _tracing = crate::test_support::tracing_dispatch_lock();
+
+        #[derive(Clone)]
+        struct CapturingMakeWriter {
+            buf: Arc<Mutex<Vec<u8>>>,
+        }
+        struct CapturingWriter {
+            buf: Arc<Mutex<Vec<u8>>>,
+        }
+        impl std::io::Write for CapturingWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.buf.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingMakeWriter {
+            type Writer = CapturingWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturingWriter {
+                    buf: Arc::clone(&self.buf),
+                }
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CapturingMakeWriter {
+                buf: Arc::clone(&buf),
+            })
+            .with_ansi(false)
+            .finish();
+        let config =
+            tracing::subscriber::with_default(subscriber, || config_with_admin_env(values));
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap_or_default();
+        (config, captured)
+    }
+
+    fn config_with_operator_listeners(raw: Option<&str>) -> Result<Config, ConfigError> {
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        match raw {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+        let result = Config::from_env();
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+        result
+    }
+
+    /// Assert `captured` contains a WARN naming the removal of `BUZZ_ADMIN_TOKEN`
+    /// so the migration breadcrumb Will's ruling preserved cannot silently regress.
+    fn assert_admin_token_removal_warning(captured: &str) {
+        assert!(
+            captured.contains("WARN"),
+            "expected a WARN line: {captured:?}"
+        );
+        for needle in ["BUZZ_ADMIN_TOKEN", "removed", "ignored"] {
+            assert!(
+                captured.contains(needle),
+                "WARN must mention {needle:?}: {captured:?}"
+            );
+        }
+    }
+
+    /// A valid-looking token value, used only to prove that setting
+    /// `BUZZ_ADMIN_TOKEN` is now ignored with a startup warning and never
+    /// changes the resolved auth mode (token auth was removed).
+    const SOME_ADMIN_TOKEN: &str =
+        "5f0e1d2c3b4a59687786958493a2b1c0decadebeefcafe0123456789abcdef01";
+
+    #[test]
+    fn admin_token_set_is_ignored_and_warns_at_startup() {
+        let _guards = env_guards();
+        // Token authentication was removed. A lingering BUZZ_ADMIN_TOKEN with a
+        // host is ignored (logged as a warning) and never changes the resolved
+        // auth mode: unset/nip98 stay nip98, disabled stays disabled.
+        for (auth, expected) in [
+            (None, AdminAuth::Nip98),
+            (Some("nip98"), AdminAuth::Nip98),
+            (Some("disabled"), AdminAuth::Disabled),
+        ] {
+            let (config, logs) = config_with_admin_env_capturing_logs(&[
+                ("BUZZ_ADMIN_HOST", Some("admin.example")),
+                ("BUZZ_ADMIN_TOKEN", Some(SOME_ADMIN_TOKEN)),
+                ("BUZZ_ADMIN_AUTH", auth),
+            ]);
+            let admin = config
+                .unwrap_or_else(|e| {
+                    panic!("BUZZ_ADMIN_TOKEN with auth={auth:?} must be ignored: {e:?}")
+                })
+                .admin
+                .expect("admin surface is configured");
+            assert_eq!(admin.host, "admin.example");
+            assert_eq!(
+                std::mem::discriminant(&admin.auth),
+                std::mem::discriminant(&expected),
+                "BUZZ_ADMIN_TOKEN must not change auth mode for auth={auth:?}"
+            );
+            assert_admin_token_removal_warning(&logs);
+        }
+    }
+
+    #[test]
+    fn admin_surface_defaults_to_nip98_when_auth_unset() {
+        let _guards = env_guards();
+        let admin = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some("admin.example"))])
+            .expect("config with an admin host and no BUZZ_ADMIN_AUTH")
+            .admin
+            .expect("admin surface is configured");
+        assert_eq!(admin.host, "admin.example");
+        assert!(
+            matches!(admin.auth, crate::config::AdminAuth::Nip98),
+            "unset BUZZ_ADMIN_AUTH must default to nip98 (fail-secure)"
+        );
+    }
+
+    #[test]
+    fn admin_host_bare_ipv6_literal_fails_closed() {
+        let _guards = env_guards();
+        for host in ["::1", "::1:3000", "fe80::1", "2001:db8::1"] {
+            let result = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some(host))]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_ADMIN_HOST") && message.contains("bracket")
+                ),
+                "bare IPv6 host {host:?} must be rejected: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_host_malformed_authority_fails_closed() {
+        // Shapes that slip the earlier guards but are not a bare authority, so
+        // they would corrupt the NIP-11 advertisement and NIP-98 `u`-tag URL:
+        //   - unclosed-bracket typos start with `[` (pass the bracket guard)
+        //     but are not parseable authorities;
+        //   - query/fragment suffixes parse as a valid URL, but the `?x=1` /
+        //     `#frag` lands in the query/fragment rather than the host, so a
+        //     parse-only gate would miss them — the structural check catches them.
+        let _guards = env_guards();
+        for host in [
+            "[::1",
+            "[::1:3000",
+            "[not-closed",
+            "admin.example.com?x=1",
+            "admin.example.com#frag",
+            "[::1]?x=1",
+            "[::1]#frag",
+        ] {
+            let result = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some(host))]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_ADMIN_HOST") && message.contains("valid URL authority")
+                ),
+                "malformed authority {host:?} must be rejected: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_host_bracketed_ipv6_literal_is_accepted() {
+        let _guards = env_guards();
+        for host in ["[::1]", "[::1]:3000", "[2001:db8::1]:8443"] {
+            let admin = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some(host))])
+                .unwrap_or_else(|e| panic!("bracketed IPv6 host {host:?} must be accepted: {e:?}"))
+                .admin
+                .expect("admin surface is configured");
+            assert_eq!(admin.host, host);
+        }
+    }
+
+    #[test]
+    fn admin_host_mixed_case_is_normalized_to_lowercase() {
+        let _guards = env_guards();
+        // Hostnames are case-insensitive (RFC 4343). A mixed-case BUZZ_ADMIN_HOST
+        // must be stored lowercase so it round-trips through desktop URL parsing
+        // (url::Url always lowercases hostnames) without a mismatch.
+        for (input, expected) in [
+            ("Admin.Example.com", "admin.example.com"),
+            ("Admin.Example.com:8443", "admin.example.com:8443"),
+            ("LOCALHOST:3000", "localhost:3000"),
+        ] {
+            let admin = config_with_admin_env(&[("BUZZ_ADMIN_HOST", Some(input))])
+                .unwrap_or_else(|e| panic!("mixed-case host {input:?} must be accepted: {e:?}"))
+                .admin
+                .expect("admin surface is configured");
+            assert_eq!(
+                admin.host, expected,
+                "host {input:?} must be stored as lowercase {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_token_without_a_host_is_ignored_and_warns() {
+        let _guards = env_guards();
+        // Even without BUZZ_ADMIN_HOST, a lingering BUZZ_ADMIN_TOKEN is ignored
+        // (logged as a warning) — token auth was removed and the admin surface
+        // stays absent because the host is unset, not because of the token.
+        let (config, logs) = config_with_admin_env_capturing_logs(&[
+            ("BUZZ_ADMIN_HOST", None),
+            ("BUZZ_ADMIN_TOKEN", Some(SOME_ADMIN_TOKEN)),
+        ]);
+        let admin = config
+            .expect("BUZZ_ADMIN_TOKEN without a host is ignored, not a startup error")
+            .admin;
+        assert!(
+            admin.is_none(),
+            "admin surface stays absent when the host is unset: {admin:?}"
+        );
+        assert_admin_token_removal_warning(&logs);
+    }
+
+    #[test]
+    fn disabled_mode_activates_without_a_token() {
+        let _guards = env_guards();
+        let admin = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_TOKEN", None),
+            ("BUZZ_ADMIN_AUTH", Some("disabled")),
+        ])
+        .expect("disabled mode without a token is valid")
+        .admin
+        .expect("admin surface is configured");
+        assert_eq!(admin.host, "admin.example");
+        assert!(matches!(admin.auth, crate::config::AdminAuth::Disabled));
+    }
+
+    #[test]
+    fn admin_auth_junk_values_all_fail_closed() {
+        let _guards = env_guards();
+        for junk in [
+            "1",
+            "yes",
+            "TRUE",
+            "True",
+            "false",
+            "0",
+            "on",
+            "insecure_no_auth",
+            // "token" is now a junk value — token authentication was removed.
+            "token",
+        ] {
+            let result = config_with_admin_env(&[
+                ("BUZZ_ADMIN_HOST", Some("admin.example")),
+                ("BUZZ_ADMIN_TOKEN", None),
+                ("BUZZ_ADMIN_AUTH", Some(junk)),
+            ]);
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_ADMIN_AUTH")
+                ),
+                "{junk:?} must be rejected: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_auth_empty_string_defaults_to_nip98() {
+        // An empty value (e.g. `BUZZ_ADMIN_AUTH=`) is treated as unset → nip98,
+        // the fail-secure default.
+        let _guards = env_guards();
+        let admin = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_TOKEN", None),
+            ("BUZZ_ADMIN_AUTH", Some("")),
+        ])
+        .expect("empty BUZZ_ADMIN_AUTH defaults to nip98")
+        .admin
+        .expect("admin surface is configured");
+        assert!(matches!(admin.auth, crate::config::AdminAuth::Nip98));
+    }
+
+    #[test]
+    fn nip98_mode_parses_and_succeeds_without_pubkeys_env() {
+        let _guards = env_guards();
+        let admin = config_with_admin_env(&[
+            ("BUZZ_ADMIN_HOST", Some("admin.example")),
+            ("BUZZ_ADMIN_AUTH", Some("nip98")),
+        ])
+        .expect(
+            "nip98 mode succeeds without BUZZ_ADMIN_PUBKEYS (role resolution is at request time)",
+        )
+        .admin
+        .expect("admin surface is configured");
+        assert!(matches!(admin.auth, crate::config::AdminAuth::Nip98));
+    }
+
+    #[test]
+    fn buzz_v1_retention_is_validated_only_when_enabled() {
+        let _guards = env_guards();
+        const KEYS: [&str; 2] = ["BUZZ_V1_ENABLED", "BUZZ_V1_RETENTION_SECONDS"];
+        let previous = KEYS.map(std::env::var_os);
+        std::env::set_var("BUZZ_V1_RETENTION_SECONDS", "0");
+        std::env::remove_var("BUZZ_V1_ENABLED");
+        let disabled = Config::from_env();
+        std::env::set_var("BUZZ_V1_ENABLED", "true");
+        let enabled = Config::from_env();
+        for (key, value) in KEYS.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        assert!(
+            disabled.is_ok(),
+            "a disabled relay ignores it: {disabled:?}"
+        );
+        assert!(matches!(
+            enabled,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_V1_RETENTION_SECONDS")
+        ));
+    }
+
+    #[test]
+    fn malformed_relay_owner_pubkey_is_a_startup_error_not_warn_and_ignore() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("RELAY_OWNER_PUBKEY");
+        for bad in ["not-a-pubkey", &"a".repeat(63), &"z".repeat(64), "abcd"] {
+            std::env::set_var("RELAY_OWNER_PUBKEY", bad);
+            let result = Config::from_env();
+            std::env::remove_var("RELAY_OWNER_PUBKEY");
+            assert!(
+                matches!(
+                    result,
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("RELAY_OWNER_PUBKEY")
+                ),
+                "malformed RELAY_OWNER_PUBKEY {bad:?} must be a startup error, got: {result:?}"
+            );
+        }
+        // Restore.
+        match previous {
+            Some(v) => std::env::set_var("RELAY_OWNER_PUBKEY", v),
+            None => std::env::remove_var("RELAY_OWNER_PUBKEY"),
+        }
+    }
+
+    #[test]
+    fn valid_relay_owner_pubkey_parses_correctly() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("RELAY_OWNER_PUBKEY");
+        let valid = "a".repeat(64);
+        std::env::set_var("RELAY_OWNER_PUBKEY", &valid);
+        let config = Config::from_env().expect("valid RELAY_OWNER_PUBKEY parses");
+        std::env::remove_var("RELAY_OWNER_PUBKEY");
+        if let Some(v) = previous {
+            std::env::set_var("RELAY_OWNER_PUBKEY", v);
+        }
+        assert_eq!(config.relay_owner_pubkey, Some(valid));
+    }
+
+    #[test]
+    fn partition_manager_config_has_bounded_interval_and_create_kill_switch() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_interval = std::env::var_os("BUZZ_PARTITION_AUDIT_INTERVAL_SECS");
+        let previous_create = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+
+        std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", "1");
+        std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", "false");
+        let minimum = Config::from_env().expect("minimum config");
+        std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", "999999");
+        let maximum = Config::from_env().expect("maximum config");
+
+        if let Some(value) = previous_interval {
+            std::env::set_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS");
+        }
+        if let Some(value) = previous_create {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+        }
+
+        assert_eq!(minimum.partition_audit_interval, Duration::from_secs(60));
+        assert!(!minimum.partition_manager_create_enabled);
+        assert_eq!(
+            maximum.partition_audit_interval,
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert!(!maximum.partition_manager_create_enabled);
+    }
+
+    #[test]
+    fn partition_manager_create_kill_switch_parses_false_values_strictly() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+
+        for value in ["FALSE", "off", "  false  "] {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+            let config = Config::from_env().expect("recognized false value");
+            assert!(!config.partition_manager_create_enabled, "value: {value:?}");
+        }
+
+        std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", "disable-maybe");
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PARTITION_MANAGER_CREATE_ENABLED");
+        }
+
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PARTITION_MANAGER_CREATE_ENABLED")
+        ));
+    }
+
     #[test]
     fn s3_addressing_style_env_accepts_virtual_and_rejects_invalid_values() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
 
         std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "virtual");
@@ -1192,7 +2102,7 @@ mod tests {
     fn s3_addressing_style_env_rejects_non_unicode_values() {
         use std::os::unix::ffi::OsStringExt;
 
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
         std::env::set_var(
             "BUZZ_S3_ADDRESSING_STYLE",
@@ -1216,7 +2126,7 @@ mod tests {
 
     #[test]
     fn redis_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
 
         std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
@@ -1241,7 +2151,7 @@ mod tests {
 
     #[test]
     fn db_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_POOL_SIZE");
 
         std::env::set_var("BUZZ_DB_POOL_SIZE", "80");
@@ -1266,7 +2176,7 @@ mod tests {
 
     #[test]
     fn db_read_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_READ_POOL_SIZE");
 
         std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
@@ -1295,7 +2205,7 @@ mod tests {
 
     #[test]
     fn read_database_url_unset_or_blank_is_none() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("READ_DATABASE_URL");
 
         std::env::remove_var("READ_DATABASE_URL");
@@ -1323,7 +2233,7 @@ mod tests {
 
     #[test]
     fn replica_read_max_age_defaults_off_and_rejects_junk() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
         let previous_old = std::env::var_os("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
         std::env::remove_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
@@ -1374,8 +2284,37 @@ mod tests {
     }
 
     #[test]
-    fn drain_jitter_defaults_off_and_rejects_junk() {
+    fn usage_metrics_replica_budget_defaults_on_independently_of_serving_reads() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_usage = std::env::var_os("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        let previous_serving = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
+
+        std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        let defaults = Config::from_env().expect("config");
+
+        std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", "0");
+        let disabled = Config::from_env().expect("config");
+
+        if let Some(value) = previous_usage {
+            std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
+        }
+        if let Some(value) = previous_serving {
+            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        }
+
+        assert_eq!(defaults.replica_read_max_age_ms, 0);
+        assert_eq!(defaults.usage_metrics_replica_max_age_ms, 30_000);
+        assert_eq!(disabled.usage_metrics_replica_max_age_ms, 0);
+    }
+
+    #[test]
+    fn drain_jitter_defaults_off_and_rejects_junk() {
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DRAIN_JITTER_MS");
 
         std::env::remove_var("BUZZ_DRAIN_JITTER_MS");
@@ -1429,7 +2368,7 @@ mod tests {
 
     #[test]
     fn audit_logging_defaults_on_and_accepts_explicit_off() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
         std::env::remove_var("BUZZ_AUDIT_ENABLED");
         assert!(parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
@@ -1444,7 +2383,7 @@ mod tests {
 
     #[test]
     fn audit_logging_rejects_invalid_boolean() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
         std::env::set_var("BUZZ_AUDIT_ENABLED", "sometimes");
         let result = parse_bool("BUZZ_AUDIT_ENABLED", true);
@@ -1462,7 +2401,7 @@ mod tests {
 
     #[test]
     fn join_policy_age_attestation_rejects_invalid_boolean() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AGE_ATTESTATION_REQUIRED");
         std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", "sometimes");
         let result = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED");
@@ -1480,24 +2419,27 @@ mod tests {
 
     #[test]
     fn rate_limits_can_be_overridden() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
+        std::env::set_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN", "1004");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
 
         let config = Config::from_env().expect("config");
 
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN");
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
         assert_eq!(config.auth.rate_limits.human_messages_per_min, 1001);
+        assert_eq!(config.auth.rate_limits.gif_searches_per_min, 1004);
         assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
         assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
     }
 
     #[test]
     fn rate_limit_overrides_reject_zero() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "0");
         let result = Config::from_env();
         std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
@@ -1511,7 +2453,7 @@ mod tests {
 
     #[test]
     fn relay_operator_pubkeys_parse_dedupe_and_normalize() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var(
             "RELAY_OPERATOR_PUBKEYS",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1535,7 +2477,7 @@ mod tests {
 
     #[test]
     fn relay_operator_pubkeys_invalid_entry_is_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("RELAY_OPERATOR_PUBKEYS", "not-a-pubkey");
         let result = Config::from_env();
         std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
@@ -1547,8 +2489,12 @@ mod tests {
     }
 
     #[test]
-    fn relay_operator_pubkeys_require_api_origin() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+    fn relay_operator_pubkeys_without_api_origin_boots_and_warns() {
+        // Regression: RELAY_OPERATOR_PUBKEYS is the shared allowlist for both
+        // community provisioning and the NIP-98 admin console. Configuring the
+        // admin console (pubkeys) must NOT force the provisioning origin — boot
+        // succeeds; provisioning stays fail-closed at request time.
+        let _guards = env_guards();
         std::env::set_var(
             "RELAY_OPERATOR_PUBKEYS",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1557,15 +2503,20 @@ mod tests {
         let result = Config::from_env();
         std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
 
-        assert!(matches!(
-            result,
-            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("RELAY_OPERATOR_API_ORIGIN is required")
-        ));
+        let config = result.expect("pubkeys-set/origin-unset must boot, not fail closed");
+        assert_eq!(
+            config.relay_operator_pubkeys,
+            vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()]
+        );
+        assert!(
+            config.relay_operator_api_origin.is_none(),
+            "origin stays unset — only the provisioning path requires it, at request time"
+        );
     }
 
     #[test]
     fn relay_operator_api_origin_rejects_paths() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("RELAY_OPERATOR_API_ORIGIN", "https://buzz.example/operator");
         let result = Config::from_env();
         std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
@@ -1577,23 +2528,55 @@ mod tests {
     }
 
     #[test]
-    fn push_gateway_defaults_to_buzz_and_can_be_disabled() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+    fn push_is_opt_in_and_gateway_is_required_when_enabled() {
+        let _guards = env_guards();
+        let previous_enabled = std::env::var_os("BUZZ_PUSH_ENABLED");
         let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::remove_var("BUZZ_PUSH_ENABLED");
         std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         let config = Config::from_env().expect("default config");
+        assert!(!config.push_enabled);
+        assert!(config.push_gateway_delivery_url.is_none());
+
+        std::env::set_var("BUZZ_PUSH_ENABLED", "true");
+        let result = Config::from_env();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must be configured")
+        ));
+
+        std::env::set_var(
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL",
+            "https://push.example/v1/deliveries/apns",
+        );
+        let config = Config::from_env().expect("enabled push config");
+        assert!(config.push_enabled);
         assert_eq!(
             config
                 .push_gateway_delivery_url
                 .as_ref()
                 .map(url::Url::as_str),
-            Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
+            Some("https://push.example/v1/deliveries/apns")
         );
 
         std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
+        let result = Config::from_env();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must not be empty")
+        ));
+
+        std::env::set_var("BUZZ_PUSH_ENABLED", "false");
         let config = Config::from_env().expect("disabled push config");
         assert!(config.push_gateway_delivery_url.is_none());
 
+        if let Some(value) = previous_enabled {
+            std::env::set_var("BUZZ_PUSH_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_ENABLED");
+        }
         if let Some(value) = previous {
             std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
         } else {
@@ -1602,10 +2585,40 @@ mod tests {
     }
 
     #[test]
+    fn invalid_push_enabled_value_is_rejected() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_PUSH_ENABLED");
+        std::env::set_var("BUZZ_PUSH_ENABLED", "sometimes");
+        let result = Config::from_env();
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PUSH_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_ENABLED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PUSH_ENABLED")
+        ));
+    }
+
+    #[test]
     fn push_gateway_url_is_exact_and_fail_closed() {
         assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
+        let delivery_url = "http://push.example:8080/v1/deliveries/apns";
+        assert_eq!(
+            parse_push_gateway_delivery_url(delivery_url)
+                .unwrap()
+                .as_str(),
+            delivery_url
+        );
+        assert!(parse_push_gateway_delivery_url("http://push-gateway/v1/deliveries/apns").is_ok());
         for invalid in [
-            "http://push.example/v1/deliveries/apns",
+            "ftp://push.example/v1/deliveries/apns",
+            "http://push-gateway:8080/v1/deliveries/apns?token=x",
+            "http://user@push-gateway:8080/v1/deliveries/apns",
+            "http://push-gateway:8080/v1/deliveries/apns#fragment",
+            "https://push.example:8443/v1/deliveries/apns",
             "https://push.example/v1/deliveries/apns/",
             "https://push.example/v1/deliveries/apns?token=x",
             "https://user@push.example/v1/deliveries/apns",
@@ -1618,8 +2631,95 @@ mod tests {
     }
 
     #[test]
+    fn operator_listener_routes_parse_and_normalize() {
+        let routes = parse_operator_listener_delivery_urls(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:https://one.example/mentions;bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:https://two.example/mentions",
+        )
+        .expect("valid operator-listener routes");
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes.contains_key("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert!(
+            routes.contains_key("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn operator_listener_routes_reject_unsafe_or_duplicate_entries() {
+        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for raw in [
+            format!("{key}:http://listener.example/mentions"),
+            format!("{key}:https://user:pass@listener.example/mentions"),
+            format!("{key}:https://listener.example/mentions?token=secret"),
+            format!("{key}:https://listener.example/mentions;{key}:https://other.example"),
+        ] {
+            assert!(
+                parse_operator_listener_delivery_urls(&raw).is_err(),
+                "unsafe or duplicate route accepted: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_operator_listener_config_prevents_startup() {
+        let _guards = env_guards();
+        let result = config_with_operator_listeners(Some(";"));
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OPERATOR_LISTENERS")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_operator_listener_config_prevents_startup() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_OPERATOR_LISTENERS");
+        std::env::set_var(
+            "BUZZ_OPERATOR_LISTENERS",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+
+        let result = Config::from_env();
+
+        match previous {
+            Some(value) => std::env::set_var("BUZZ_OPERATOR_LISTENERS", value),
+            None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
+        }
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_OPERATOR_LISTENERS must be valid UTF-8")
+        ));
+    }
+
+    #[test]
+    fn valid_and_absent_operator_listener_config_preserve_routes() {
+        let _guards = env_guards();
+        let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let raw = format!("{key}:https://listener.example/mentions");
+        let config = config_with_operator_listeners(Some(&raw)).expect("valid listener config");
+        assert_eq!(
+            config
+                .operator_listener_delivery_urls
+                .get(key)
+                .map(url::Url::as_str),
+            Some("https://listener.example/mentions")
+        );
+
+        let config = config_with_operator_listeners(None).expect("absent listener config");
+        assert!(config.operator_listener_delivery_urls.is_empty());
+    }
+
+    #[test]
     fn invalid_push_gateway_timeout_is_not_silently_defaulted() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS", "99");
         let result = Config::from_env();
         std::env::remove_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS");
@@ -1632,7 +2732,7 @@ mod tests {
 
     #[test]
     fn invalid_push_executor_key_id_is_rejected() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_PUSH_EXECUTOR_KEY_ID", "");
         let result = Config::from_env();
         std::env::remove_var("BUZZ_PUSH_EXECUTOR_KEY_ID");
@@ -1645,7 +2745,7 @@ mod tests {
 
     #[test]
     fn huddle_audio_available_can_be_disabled_for_horizontal_scaling() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_HUDDLE_AUDIO_AVAILABLE", "false");
         let config = Config::from_env().expect("config");
         std::env::remove_var("BUZZ_HUDDLE_AUDIO_AVAILABLE");
@@ -1665,7 +2765,7 @@ mod tests {
 
     #[test]
     fn pairing_relay_url_accepts_websocket_urls_and_rejects_http() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_PAIRING_RELAY_URL", "wss://pairing.buzz.xyz");
         let config = Config::from_env().expect("config");
         assert_eq!(
@@ -1684,7 +2784,7 @@ mod tests {
 
     #[test]
     fn max_frame_bytes_can_be_configured() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         std::env::set_var("BUZZ_MAX_FRAME_BYTES", "262144");
         let config = Config::from_env().expect("config");
         std::env::remove_var("BUZZ_MAX_FRAME_BYTES");
@@ -1693,7 +2793,7 @@ mod tests {
 
     #[test]
     fn git_repo_path_is_created_if_missing() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guards = env_guards();
         // Pick a path under temp_dir that definitely doesn't exist yet.
         let base = std::env::temp_dir().join(format!(
             "buzz-test-git-repo-path-{}-{}",

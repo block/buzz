@@ -19,6 +19,17 @@ fn relay_ws_url() -> String {
         .replace("https://", "wss://")
 }
 
+/// Extract the host:port authority from the relay URL for use as the `server` tag.
+fn relay_server_authority() -> String {
+    let url = relay_http_url();
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost:3000")
+        .to_string()
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(15))
@@ -28,10 +39,12 @@ fn http_client() -> Client {
 
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "upload"]).unwrap(),
         Tag::parse(["x", sha256]).unwrap(),
-        Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+        Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
+        Tag::parse(["server", &server]).unwrap(),
     ];
     EventBuilder::new(Kind::from(24242), "Upload test")
         .tags(tags)
@@ -43,10 +56,12 @@ fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
 /// unconditionally, so round-trip GETs must present one of these.
 fn sign_blossom_get_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "get"]).unwrap(),
         Tag::parse(["x", sha256]).unwrap(),
-        Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+        Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
+        Tag::parse(["server", &server]).unwrap(),
     ];
     EventBuilder::new(Kind::from(24242), "Get test")
         .tags(tags)
@@ -259,7 +274,7 @@ async fn test_auth_wrong_kind() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -281,7 +296,7 @@ async fn test_auth_missing_t_tag() {
         "Upload test",
         vec![
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -348,7 +363,7 @@ async fn test_auth_empty_content() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -371,7 +386,7 @@ async fn test_auth_server_tag_mismatch() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
             Tag::parse(["server", "evil.example.com"]).unwrap(),
         ],
     );
@@ -395,7 +410,7 @@ async fn test_auth_server_tag_correct() {
         vec![
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+            Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
             Tag::parse(["server", "localhost:3000"]).unwrap(),
         ],
     );
@@ -421,6 +436,72 @@ async fn test_upload_svg_accepted_as_text_xml() {
     let desc: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(desc["type"].as_str().unwrap(), "text/xml");
     println!("✅ SVG (XML declaration) → 200 as text/xml");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upload_html_served_as_inert_attachment() {
+    // HTML is accepted on the generic file path and MUST be served as an inert
+    // download: the security property the whole feature relies on is that the
+    // relay returns `Content-Disposition: attachment` + `X-Content-Type-Options:
+    // nosniff` + `Content-Security-Policy: default-src 'none'` so the payload can
+    // never execute or render as active content. This response-level regression
+    // pins that end to end (upload → GET), not just the deny-list membership.
+    let client = http_client();
+    let keys = Keys::generate();
+    // Exactly the shape `infer` classifies as text/html (leading recognised tag).
+    let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
+    let resp = upload(&client, &keys, html).await;
+    let status = resp.status().as_u16();
+    assert_eq!(
+        status, 200,
+        "HTML should upload via file path, got {status}"
+    );
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(desc["type"].as_str().unwrap(), "text/html");
+    let url = desc["url"].as_str().unwrap();
+    assert!(
+        url.ends_with(".html"),
+        "served URL must carry the .html extension, got {url}"
+    );
+    let sha256 = desc["sha256"].as_str().unwrap();
+
+    let get_resp = client
+        .get(url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, sha256)),
+        )
+        .send()
+        .await
+        .expect("GET request");
+    assert_eq!(get_resp.status(), 200, "HTML GET roundtrip should succeed");
+
+    let header = |name: &str| {
+        get_resp
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(header("content-type"), "text/html");
+    assert_eq!(
+        header("content-disposition"),
+        "attachment",
+        "HTML must be forced to download, never rendered inline"
+    );
+    assert_eq!(
+        header("x-content-type-options"),
+        "nosniff",
+        "nosniff must prevent MIME re-sniffing to an executable type"
+    );
+    assert_eq!(
+        header("content-security-policy"),
+        "default-src 'none'",
+        "restrictive CSP must neutralise any active content"
+    );
+    println!("✅ HTML → 200, served as inert attachment (disposition+nosniff+CSP)");
 }
 
 #[tokio::test]

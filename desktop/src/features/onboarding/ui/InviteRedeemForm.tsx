@@ -530,10 +530,7 @@ export function InviteRedeemForm({
       </AnimatePresence>
 
       {isOnboardingSpotlight ? (
-        <OnboardingFooter>
-          {submitButton}
-          {cancelButton}
-        </OnboardingFooter>
+        <OnboardingFooter>{submitButton}</OnboardingFooter>
       ) : isAddCommunity ? (
         <div className="flex justify-end pt-1">{submitButton}</div>
       ) : (

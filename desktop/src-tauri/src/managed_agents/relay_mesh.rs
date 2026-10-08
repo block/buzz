@@ -1,9 +1,33 @@
 pub const RELAY_MESH_API_BASE_URL: &str = "http://127.0.0.1:9337/v1";
 pub const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "buzz-mesh-local";
 pub const RELAY_MESH_PROVIDER_ID: &str = "relay-mesh";
+/// Stored value for "let the mesh decide", kept as the user-facing word.
 pub const RELAY_MESH_AUTO_MODEL_ID: &str = "auto";
+/// MeshLLM's virtual model. It resolves per request: a Mixture-of-Agents
+/// committee when two or more workers are reachable, and otherwise degrades to
+/// a single served model rather than erroring
+/// (`moa_gateway::degrade_to_single_model`). That degradation is a pre-flight
+/// capacity decision, so a committee that forms and *then* loses a worker still
+/// surfaces as a failed turn — MoA repairs partial results internally
+/// (`repair_tool_result_answer`) before it gets that far. Buzz translates the
+/// stored `auto` here rather than teaching buzz-agent anything about meshes.
 #[cfg(feature = "mesh-llm")]
-pub const RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV: &str = "BUZZ_AGENT_PREFER_MESH_FOR_AUTO";
+pub const RELAY_MESH_VIRTUAL_MODEL_ID: &str = "mesh";
+
+/// The wire name for a stored shared-compute model: `auto` (and a blank legacy
+/// value) means "let the mesh decide" and becomes MeshLLM's virtual `mesh`
+/// model; anything else is a model the user named and is passed through.
+///
+/// The single place this mapping happens. Every consumer that has to name a
+/// model to the mesh — the LLM transport env and the ACP harness — goes through
+/// here, so they cannot disagree.
+#[cfg(feature = "mesh-llm")]
+pub fn relay_mesh_wire_model(stored: &str) -> &str {
+    match stored.trim() {
+        "" | RELAY_MESH_AUTO_MODEL_ID => RELAY_MESH_VIRTUAL_MODEL_ID,
+        named => named,
+    }
+}
 
 /// Translate the native Buzz shared compute provider into the OpenAI-compatible
 /// transport understood by buzz-agent. These are derived runtime details, not
@@ -17,11 +41,7 @@ pub fn apply_relay_mesh_env(
     if provider.map(str::trim) != Some(RELAY_MESH_PROVIDER_ID) {
         return;
     }
-    let model = model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(RELAY_MESH_AUTO_MODEL_ID)
-        .to_string();
+    let model = relay_mesh_wire_model(model.unwrap_or(RELAY_MESH_AUTO_MODEL_ID)).to_string();
     env.insert("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string());
     env.insert("BUZZ_AGENT_MODEL".to_string(), model.clone());
     env.insert(
@@ -34,14 +54,6 @@ pub fn apply_relay_mesh_env(
         RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
     );
     env.insert("OPENAI_COMPAT_API".to_string(), "chat".to_string());
-    // Buzz owns the meaning of relay-mesh `auto`: buzz-agent dynamically uses
-    // mesh-llm's virtual Mixture-of-Agents model whenever the live catalog says
-    // at least two distinct models are available, and otherwise keeps the
-    // router's normal single-model `auto` behavior.
-    env.insert(
-        RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV.to_string(),
-        "1".to_string(),
-    );
     // Keep the requested response inside smaller local-model context windows.
     // These are defaults, not policy: the effective agent/persona/global env
     // may deliberately choose a smaller cap or a different effort. This function
@@ -54,6 +66,21 @@ pub fn apply_relay_mesh_env(
     // survives (see `insert_default_if_unset`, and the copy-forward list in
     // `relay_mesh_process_env` that preserves it through the spawn path).
     insert_default_if_unset(env, "BUZZ_AGENT_REQUIRE_REPLY", "1");
+    // A local mesh prefills a cold multi-ten-thousand-token prompt at a few
+    // hundred tokens/second, so the first turn of a large session legitimately
+    // runs for minutes with no bytes on the wire (`stream: false`). MeshLLM's
+    // own frontend gives such a request 600 s before it aborts
+    // (`OpenAiFrontendConfig::DEFAULT_BACKEND_TIMEOUT`); buzz-agent's 240 s
+    // default abandons it at four minutes, so the client gives up on work the
+    // server is still doing and retries it — adding load to a box that is
+    // already prefilling. Seat the client just above the server's budget so the
+    // mesh's own error is what surfaces, rather than a client-side abort racing
+    // it. Measured: an 88,318-token cold prompt on an M5 Max returns 200 at
+    // 503 s. Remote providers keep the 240 s default; only mesh moves.
+    // A default, not policy — an explicit user value survives via
+    // `insert_default_if_unset` and the copy-forward list in
+    // `relay_mesh_process_env`.
+    insert_default_if_unset(env, "BUZZ_AGENT_LLM_TIMEOUT_SECS", "660");
     // Deliberately no BUZZ_AGENT_THINKING_EFFORT default: mesh translates
     // `reasoning_effort` into the chat template's `enable_thinking` flag, so any
     // value we pick overrides each model's own template default — and the right
@@ -90,6 +117,10 @@ pub fn relay_mesh_process_env(
     for key in [
         "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
         "BUZZ_AGENT_THINKING_EFFORT",
+        // Same reason as `BUZZ_AGENT_REQUIRE_REPLY` below: without the
+        // copy-forward, an explicit user timeout is re-defaulted to 660 by
+        // `apply_relay_mesh_env`.
+        "BUZZ_AGENT_LLM_TIMEOUT_SECS",
         // Must be copied forward for the user's value to survive: this map is
         // written onto the command *after* the layered user env, so a key absent
         // here is re-defaulted by `apply_relay_mesh_env` below and an explicit
@@ -128,10 +159,76 @@ mod tests {
         // stops gemma tool-calling; enabling thinking makes Qwen3 burn ~4x the
         // output budget).
         assert_eq!(env.get("BUZZ_AGENT_THINKING_EFFORT"), None);
+    }
+
+    /// Stored `auto` is translated here, so buzz-agent receives a plain model
+    /// name and needs no knowledge of the mesh. MeshLLM decides per request
+    /// whether `mesh` becomes a committee or a single served model.
+    #[test]
+    fn stored_auto_becomes_the_virtual_mesh_model_on_the_wire() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
         assert_eq!(
-            env.get(RELAY_MESH_PREFER_MESH_FOR_AUTO_ENV)
-                .map(String::as_str),
-            Some("1")
+            env.get("BUZZ_AGENT_MODEL").map(String::as_str),
+            Some(RELAY_MESH_VIRTUAL_MODEL_ID)
+        );
+        assert_eq!(
+            env.get("OPENAI_COMPAT_MODEL").map(String::as_str),
+            Some(RELAY_MESH_VIRTUAL_MODEL_ID)
+        );
+    }
+
+    /// A blank stored model is the legacy encoding of the same intent.
+    #[test]
+    fn blank_stored_model_becomes_the_virtual_mesh_model() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(&mut env, Some(RELAY_MESH_PROVIDER_ID), Some("  "));
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MODEL").map(String::as_str),
+            Some(RELAY_MESH_VIRTUAL_MODEL_ID)
+        );
+    }
+
+    /// Every consumer that names a model to the mesh goes through one helper,
+    /// so the LLM transport and the ACP harness cannot be told different things.
+    #[test]
+    fn wire_model_maps_auto_and_blank_but_passes_named_through() {
+        assert_eq!(
+            relay_mesh_wire_model(RELAY_MESH_AUTO_MODEL_ID),
+            RELAY_MESH_VIRTUAL_MODEL_ID
+        );
+        assert_eq!(relay_mesh_wire_model(""), RELAY_MESH_VIRTUAL_MODEL_ID);
+        assert_eq!(relay_mesh_wire_model("  "), RELAY_MESH_VIRTUAL_MODEL_ID);
+        assert_eq!(
+            relay_mesh_wire_model("unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"),
+            "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"
+        );
+    }
+
+    /// A named model is sent verbatim: picking one is an explicit choice to
+    /// bypass mesh routing, and must not be rewritten.
+    #[test]
+    fn a_named_model_is_sent_verbatim() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some("unsloth/Qwen3-8B-GGUF:Q4_K_M"),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_MODEL").map(String::as_str),
+            Some("unsloth/Qwen3-8B-GGUF:Q4_K_M")
+        );
+        assert_eq!(
+            env.get("OPENAI_COMPAT_MODEL").map(String::as_str),
+            Some("unsloth/Qwen3-8B-GGUF:Q4_K_M")
         );
     }
 
@@ -189,6 +286,74 @@ mod tests {
             env.get("BUZZ_AGENT_REQUIRE_REPLY").map(String::as_str),
             Some("0"),
             "an explicit opt-out is a user decision, not a value to re-default"
+        );
+    }
+
+    /// MeshLLM's frontend allows a backend call 600 s
+    /// (`OpenAiFrontendConfig::DEFAULT_BACKEND_TIMEOUT`). buzz-agent's 240 s
+    /// default abandons a healthy cold prefill long before the server does and
+    /// retries it, so the client budget must sit above the server's.
+    #[test]
+    fn native_provider_outlasts_the_mesh_backend_timeout() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        let seconds: u64 = env
+            .get("BUZZ_AGENT_LLM_TIMEOUT_SECS")
+            .expect("mesh seeds a client timeout")
+            .parse()
+            .expect("timeout is whole seconds");
+        assert!(
+            seconds > 600,
+            "client budget ({seconds}s) must outlast the mesh frontend's 600s backend timeout"
+        );
+    }
+
+    #[test]
+    fn native_provider_preserves_explicit_llm_timeout() {
+        let mut env =
+            BTreeMap::from([("BUZZ_AGENT_LLM_TIMEOUT_SECS".to_string(), "90".to_string())]);
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_LLM_TIMEOUT_SECS").map(String::as_str),
+            Some("90"),
+            "an explicit timeout is a user decision, not a value to re-default"
+        );
+    }
+
+    /// Same spawn-ordering hazard as the reply guard: without the copy-forward
+    /// in `relay_mesh_process_env`, the user's value is re-defaulted here.
+    #[test]
+    fn process_env_preserves_explicit_llm_timeout() {
+        let effective_env =
+            BTreeMap::from([("BUZZ_AGENT_LLM_TIMEOUT_SECS".to_string(), "90".to_string())]);
+
+        let env = relay_mesh_process_env(&effective_env, "Gemma-4");
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_LLM_TIMEOUT_SECS").map(String::as_str),
+            Some("90")
+        );
+    }
+
+    #[test]
+    fn non_mesh_provider_leaves_llm_timeout_unset() {
+        let mut env = BTreeMap::new();
+        apply_relay_mesh_env(&mut env, Some("anthropic"), Some("claude-haiku-4.5"));
+
+        assert_eq!(
+            env.get("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            None,
+            "remote providers keep buzz-agent's own default"
         );
     }
 

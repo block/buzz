@@ -1,101 +1,14 @@
 part of '../compose_bar.dart';
 
-class _SuggestionPanelMotion extends HookWidget {
-  final Duration duration;
-  final Alignment alignment;
-  final Widget child;
-
-  const _SuggestionPanelMotion({
-    required this.duration,
-    required this.alignment,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final springController = useAnimationController(
-      initialValue: 1,
-      upperBound: 1.08,
-    );
-    final springValue = useAnimation(springController);
-    final previousChildKey = useRef<Key?>(child.key);
-
-    useEffect(() {
-      if (previousChildKey.value == child.key) return null;
-      previousChildKey.value = child.key;
-      if (reducedMotion) {
-        springController.value = 1;
-      } else {
-        springController
-          ..stop()
-          ..value = 0.9
-          ..animateWith(
-            SpringSimulation(
-              SpringDescription.withDurationAndBounce(
-                duration: const Duration(milliseconds: 320),
-                bounce: 0.18,
-              ),
-              0.9,
-              1,
-              0,
-              snapToEnd: true,
-            ),
-          );
-      }
-      return null;
-    }, [child.key, reducedMotion]);
-
-    return Transform.scale(
-      scale: springValue,
-      alignment: alignment,
-      child: AnimatedSize(
-        duration: duration,
-        curve: Curves.easeInOutCubic,
-        alignment: alignment,
-        child: AnimatedSwitcher(
-          duration: duration,
-          reverseDuration: duration,
-          layoutBuilder: (currentChild, previousChildren) => Stack(
-            alignment: alignment,
-            clipBehavior: Clip.none,
-            children: [...previousChildren, ?currentChild],
-          ),
-          transitionBuilder: (child, animation) {
-            final curvedAnimation = CurvedAnimation(
-              parent: animation,
-              curve: Curves.easeOutBack,
-              reverseCurve: Curves.easeInOutCubic,
-            );
-
-            return AnimatedBuilder(
-              animation: curvedAnimation,
-              child: child,
-              builder: (context, child) => IgnorePointer(
-                ignoring: animation.status == AnimationStatus.reverse,
-                child: Opacity(
-                  opacity: animation.value.clamp(0.0, 1.0),
-                  child: Transform.translate(
-                    offset: Offset(0, Grid.xs * (1 - animation.value)),
-                    child: Transform.scale(
-                      scale: 0.92 + (0.08 * curvedAnimation.value),
-                      alignment: alignment,
-                      child: child,
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
-          child: child,
-        ),
-      ),
-    );
-  }
-}
-
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
+
+  /// Shown rows that can no longer be chosen. They stay in place, disabled.
+  final Set<String> unavailable;
+
+  /// The directory search failed: show its error and a retry below the rows.
+  final bool searchFailed;
+  final VoidCallback? onRetry;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
   final bool isDmChannel;
@@ -103,6 +16,9 @@ class _MentionSuggestions extends StatelessWidget {
 
   const _MentionSuggestions({
     required this.suggestions,
+    this.unavailable = const {},
+    this.searchFailed = false,
+    this.onRetry,
     required this.userCache,
     required this.currentPubkey,
     required this.isDmChannel,
@@ -125,15 +41,36 @@ class _MentionSuggestions extends StatelessWidget {
         child: ListView.separated(
           shrinkWrap: true,
           padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          itemCount: suggestions.length,
+          itemCount: suggestions.length + (searchFailed ? 1 : 0),
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
+            if (index == suggestions.length) {
+              return ListTile(
+                key: const ValueKey('mention-search-error'),
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                title: Text(
+                  'Could not search community people.',
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.error,
+                  ),
+                ),
+                trailing: TextButton(
+                  onPressed: onRetry == null
+                      ? null
+                      : () => _runComposerAction(onRetry!),
+                  child: const Text('Retry'),
+                ),
+              );
+            }
             final candidate = suggestions[index];
-            final name = candidate.label;
+            final name = candidate.pickerLabel;
             final avatarUrl =
                 candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
+            final available = !unavailable.contains(candidate.pubkey);
             return ListTile(
+              enabled: available,
               dense: true,
               visualDensity: VisualDensity.compact,
               leading: AvatarImage(
@@ -141,12 +78,16 @@ class _MentionSuggestions extends StatelessWidget {
                 radius: 18,
                 backgroundColor: context.colors.primaryContainer,
                 fallback: Text(
-                  name[0].toUpperCase(),
+                  // Name-derived for named candidates; keyed to the hex
+                  // public key for unnamed ones so the compact-npub label
+                  // doesn't render `N` for everyone.
+                  candidate.initial,
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onPrimaryContainer,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                isAgent: candidate.isAgent,
               ),
               title: Text(name, style: context.textTheme.titleSmall),
               subtitle: _MentionSuggestionInfo.build(
@@ -156,7 +97,9 @@ class _MentionSuggestions extends StatelessWidget {
                 isDmChannel: isDmChannel,
                 userCache: userCache,
               ),
-              onTap: () => _runComposerAction(() => onSelect(candidate)),
+              onTap: available
+                  ? () => _runComposerAction(() => onSelect(candidate))
+                  : null,
             );
           },
         ),
@@ -167,7 +110,7 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "managed by …" / "not in channel".
+/// for human admins), then "managed by …" / "not in channel" (or "not in DM").
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
@@ -179,16 +122,17 @@ abstract final class _MentionSuggestionInfo {
     final ownerLabel = candidate.isAgent
         ? formatOwnerLabel(candidate.ownerPubkey, currentPubkey, userCache)
         : null;
-    final notInChannel = !isDmChannel && !candidate.isMember;
+    final notInChannel = !candidate.isMember;
+    final outside = isDmChannel ? 'not in DM' : 'not in channel';
     final isAdmin = !candidate.isAgent && candidate.role == 'admin';
 
     final String? detail;
     if (ownerLabel != null && notInChannel) {
-      detail = 'managed by $ownerLabel \u00b7 not in channel';
+      detail = 'managed by $ownerLabel \u00b7 $outside';
     } else if (ownerLabel != null) {
       detail = 'managed by $ownerLabel';
     } else if (notInChannel) {
-      detail = 'not in channel';
+      detail = outside;
     } else {
       detail = null;
     }
@@ -202,11 +146,7 @@ abstract final class _MentionSuggestionInfo {
     return Row(
       children: [
         if (candidate.isAgent) ...[
-          Icon(
-            LucideIcons.bot,
-            size: 12,
-            color: context.colors.onSurfaceVariant,
-          ),
+          Icon(BuzzIcons.bot, size: 12, color: context.colors.onSurfaceVariant),
           const SizedBox(width: Grid.half),
           Text('agent', style: style),
         ] else if (isAdmin)
@@ -287,7 +227,7 @@ class _ChannelSuggestions extends StatelessWidget {
               leading: SizedBox.square(
                 dimension: 36,
                 child: Icon(
-                  LucideIcons.hash,
+                  BuzzIcons.hash,
                   size: 20,
                   color: context.colors.onSurfaceVariant,
                 ),

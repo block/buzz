@@ -3,6 +3,29 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
+/// Coarse Blossom denial kind for NIP-FI response shaping.
+///
+/// Callers that know the active [`crate::auth::BlossomStrictness`] use this to
+/// choose the correct HTTP response shape — NIP-FI fixed text/plain in Strict
+/// mode, legacy JSON in Permissive mode — without requiring `buzz-media` to
+/// depend on `buzz-auth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlossomDenialKind {
+    /// `Authorization` header was absent. Maps to HTTP 401 + `WWW-Authenticate: Nostr`.
+    MissingEvidence,
+    /// Authorization header or proof was present but structurally invalid,
+    /// malformed, expired, or otherwise rejected. Maps to HTTP 403.
+    EvidenceRejected,
+    /// A local-policy denial: relay membership required, community write fenced,
+    /// or similar authorization refusal that is not an auth-credential failure.
+    /// Maps to HTTP 403 with fixed `authorization denied\n` body [NIP-FI.md:764-775].
+    AuthorizationDenied,
+    /// The relay could not evaluate its access policy (membership or
+    /// restriction lookup failed). Maps to HTTP 503 with fixed
+    /// `authorization unavailable\n` body [NIP-FI.md:769-789].
+    AuthorizationUnavailable,
+}
+
 /// Errors from media operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -26,6 +49,9 @@ pub enum MediaError {
     InvalidAuthVerb,
     #[error("missing required tag: {0}")]
     MissingTag(&'static str),
+    /// A tag that must appear exactly once appeared more than once.
+    #[error("duplicate tag: {0}")]
+    DuplicateTag(&'static str),
     #[error("hash mismatch")]
     HashMismatch,
     #[error("server mismatch")]
@@ -54,6 +80,14 @@ pub enum MediaError {
     InsufficientScope,
     #[error("relay membership required")]
     RelayMembershipRequired,
+    #[error("community writes are fenced")]
+    CommunityWriteFenced,
+    #[error("media service temporarily unavailable")]
+    ServiceUnavailable,
+    /// An access-policy lookup failed. Legacy responses match
+    /// [`MediaError::ServiceUnavailable`]; Strict mode uses the NIP-FI body.
+    #[error("media service temporarily unavailable")]
+    AuthorizationUnavailable,
     #[error("token revoked")]
     TokenRevoked,
     #[error("pubkey mismatch")]
@@ -68,8 +102,10 @@ pub enum MediaError {
     /// Video duration exceeds the 600-second limit.
     #[error("video too long: duration exceeds 600 seconds")]
     DurationTooLong,
-    /// Video resolution exceeds 3840×2160.
-    #[error("video resolution too high: maximum is 3840x2160")]
+    /// Video resolution exceeds the 2160 short-edge / 3840 long-edge envelope.
+    #[error(
+        "video resolution too high: maximum is 2160 on the short edge and 3840 on the long edge"
+    )]
     ResolutionTooHigh,
     /// MP4 moov atom appears after mdat — not fast-start.
     #[error("moov atom not at front of file (not fast-start)")]
@@ -103,6 +139,47 @@ impl From<serde_json::Error> for MediaError {
     }
 }
 
+impl MediaError {
+    /// Classify this error as a Blossom denial kind for response-shape selection.
+    ///
+    /// Returns `Some(BlossomDenialKind::MissingEvidence)` when the
+    /// `Authorization` header was absent, `Some(BlossomDenialKind::EvidenceRejected)`
+    /// for any structurally present but invalid/malformed/expired proof,
+    /// `Some(BlossomDenialKind::AuthorizationDenied)` for local-policy denials
+    /// (relay membership, community write fence), and `None` for non-auth errors.
+    ///
+    /// Relay call sites that know the active `BlossomStrictness` use this to
+    /// select the appropriate response shape: NIP-FI fixed text/plain in Strict
+    /// mode, legacy JSON 401 in Permissive mode.
+    pub fn blossom_denial_kind(&self) -> Option<BlossomDenialKind> {
+        match self {
+            Self::MissingAuth => Some(BlossomDenialKind::MissingEvidence),
+            Self::InvalidAuthScheme
+            | Self::InvalidBase64
+            | Self::InvalidAuthEvent
+            | Self::InvalidAuthKind
+            | Self::InvalidAuthVerb
+            | Self::DuplicateTag(_)
+            | Self::InvalidSignature
+            | Self::TokenExpired
+            | Self::TimestampOutOfWindow
+            | Self::Unauthorized
+            | Self::TokenRevoked
+            | Self::PubkeyMismatch
+            | Self::HashMismatch
+            | Self::ServerMismatch
+            | Self::MissingTag(_) => Some(BlossomDenialKind::EvidenceRejected),
+            // Local-policy denials: identity proved, but access refused by relay policy.
+            // Maps to AuthorizationDenied per NIP-FI.md:764-775.
+            Self::RelayMembershipRequired | Self::CommunityWriteFenced => {
+                Some(BlossomDenialKind::AuthorizationDenied)
+            }
+            Self::AuthorizationUnavailable => Some(BlossomDenialKind::AuthorizationUnavailable),
+            _ => None,
+        }
+    }
+}
+
 impl IntoResponse for MediaError {
     fn into_response(self) -> Response {
         let (status, msg) = match &self {
@@ -113,9 +190,15 @@ impl IntoResponse for MediaError {
             Self::FileTooLarge { .. } | Self::ImageTooLarge => {
                 (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
             }
-            // All authentication failures return the same generic 401 to prevent oracle enumeration.
-            // InsufficientScope is intentionally 403 — it's an authorization (not authentication)
-            // failure and is safe to distinguish since it requires a valid identity first.
+            // All authentication failures return the same generic 401 to prevent oracle
+            // enumeration in the legacy/Permissive path [FI-INV-15].  Off-mode deployments
+            // preserve this pre-NIP-FI behavior.  InsufficientScope is intentionally 403
+            // below — it is an authorization (not authentication) failure and is safe to
+            // distinguish because it requires a valid identity first.
+            //
+            // Strict mode routes through MediaDenial (buzz-relay) and applies the full
+            // NIP-FI rejection table (missing_evidence → 401, evidence_rejected → 403)
+            // independently of this path.
             Self::MissingAuth
             | Self::InvalidAuthScheme
             | Self::InvalidBase64
@@ -123,6 +206,7 @@ impl IntoResponse for MediaError {
             | Self::InvalidSignature
             | Self::InvalidAuthKind
             | Self::InvalidAuthVerb
+            | Self::DuplicateTag(_)
             | Self::TokenExpired
             | Self::TimestampOutOfWindow
             | Self::Unauthorized
@@ -138,7 +222,12 @@ impl IntoResponse for MediaError {
                 )
             }
             Self::InsufficientScope => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::RelayMembershipRequired => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::RelayMembershipRequired | Self::CommunityWriteFenced => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            Self::ServiceUnavailable | Self::AuthorizationUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
             Self::UploadRateLimitExceeded | Self::UploadConcurrencyLimitReached => {
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
@@ -163,6 +252,151 @@ impl IntoResponse for MediaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── BlossomDenialKind classification ─────────────────────────────────────
+
+    #[test]
+    fn missing_auth_is_missing_evidence() {
+        assert_eq!(
+            MediaError::MissingAuth.blossom_denial_kind(),
+            Some(BlossomDenialKind::MissingEvidence)
+        );
+    }
+
+    #[test]
+    fn structural_proof_errors_are_evidence_rejected() {
+        for error in [
+            MediaError::InvalidAuthScheme,
+            MediaError::InvalidBase64,
+            MediaError::InvalidAuthEvent,
+            MediaError::InvalidAuthKind,
+            MediaError::InvalidAuthVerb,
+            MediaError::DuplicateTag("Authorization"),
+            MediaError::InvalidSignature,
+            MediaError::TokenExpired,
+            MediaError::TimestampOutOfWindow,
+            MediaError::Unauthorized,
+            MediaError::TokenRevoked,
+            MediaError::PubkeyMismatch,
+            MediaError::HashMismatch,
+            MediaError::ServerMismatch,
+            MediaError::MissingTag("t"),
+        ] {
+            assert_eq!(
+                error.blossom_denial_kind(),
+                Some(BlossomDenialKind::EvidenceRejected),
+                "expected EvidenceRejected for {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_auth_errors_have_no_denial_kind() {
+        for error in [
+            MediaError::NotFound,
+            MediaError::FileTooLarge { size: 1, max: 0 },
+            MediaError::Internal,
+            MediaError::ServiceUnavailable,
+            MediaError::InsufficientScope,
+        ] {
+            assert_eq!(
+                error.blossom_denial_kind(),
+                None,
+                "expected None for {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_policy_denials_are_authorization_denied() {
+        for error in [
+            MediaError::RelayMembershipRequired,
+            MediaError::CommunityWriteFenced,
+        ] {
+            assert_eq!(
+                error.blossom_denial_kind(),
+                Some(BlossomDenialKind::AuthorizationDenied),
+                "expected AuthorizationDenied for {error:?}"
+            );
+        }
+    }
+
+    // ── IntoResponse status code pins ──────────────────────────────────────
+    // These pins cover the legacy/Permissive path (MediaError::into_response).
+    // Strict mode overrides this via MediaDenial in buzz-relay [FI-INV-15].
+
+    #[tokio::test]
+    async fn all_auth_failures_return_json_401_in_permissive_path() {
+        // In the legacy/Permissive path all auth failures collapse to a single
+        // JSON 401 to prevent oracle enumeration [FI-INV-15].  Strict mode
+        // (MediaDenial in buzz-relay) applies the NIP-FI 401/403 split instead.
+        for error in [
+            MediaError::MissingAuth,
+            MediaError::InvalidAuthScheme,
+            MediaError::InvalidBase64,
+            MediaError::InvalidAuthEvent,
+            MediaError::InvalidAuthKind,
+            MediaError::InvalidAuthVerb,
+            MediaError::DuplicateTag("Authorization"),
+            MediaError::InvalidSignature,
+            MediaError::TokenExpired,
+            MediaError::TimestampOutOfWindow,
+            MediaError::Unauthorized,
+            MediaError::TokenRevoked,
+            MediaError::PubkeyMismatch,
+            MediaError::HashMismatch,
+            MediaError::ServerMismatch,
+            MediaError::MissingTag("t"),
+        ] {
+            let label = format!("{error:?}");
+            let resp = error.into_response();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "Permissive path: expected 401 for {label}"
+            );
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(
+                ct.contains("application/json"),
+                "expected JSON CT for {label}, got: {ct}"
+            );
+            // No WWW-Authenticate in the legacy JSON path.
+            assert!(
+                resp.headers().get("www-authenticate").is_none(),
+                "Permissive path must not include WWW-Authenticate for {label}"
+            );
+            // Exact body: legacy path emits {"error":"authentication failed"} [FI-INV-15].
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body collect");
+            assert_eq!(
+                body.as_ref(),
+                br#"{"error":"authentication failed"}"#,
+                "Permissive path: wrong body for {label}"
+            );
+        }
+    }
+
+    // ── Existing non-auth response map tests ────────────────────────────────
+
+    #[test]
+    fn serving_backend_failures_map_to_5xx_but_fences_remain_403() {
+        for error in [
+            MediaError::ServiceUnavailable,
+            MediaError::Internal,
+            MediaError::StorageError("backend".to_string()),
+        ] {
+            assert!(error.into_response().status().is_server_error());
+        }
+        assert_eq!(
+            MediaError::CommunityWriteFenced.into_response().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
 
     #[test]
     fn unsupported_media_maps_to_415() {

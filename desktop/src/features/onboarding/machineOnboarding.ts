@@ -176,6 +176,11 @@ export function useMachineOnboardingState({
         completionKey(MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
         "true",
       );
+      // Clear the "continuing" marker so completion actually settles the flow.
+      // Imported/recovered identities set continuingPubkeyRef to pin the stage
+      // to "onboarding" until setup finishes; leaving it set after complete()
+      // keeps the stage pinned forever, so Skip/Next appear to do nothing.
+      continuingPubkeyRef.current = null;
       setCompletedPubkey(pubkey);
     },
     [currentPubkey],

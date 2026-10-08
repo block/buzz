@@ -1,6 +1,7 @@
 import type { Community } from "./types";
 import { homeDir } from "@tauri-apps/api/path";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
+import { getStorageItem, removeStorageItem } from "@/shared/lib/safeStorage";
 
 const COMMUNITIES_KEY = "buzz-communities";
 const ACTIVE_COMMUNITY_KEY = "buzz-active-community-id";
@@ -34,24 +35,36 @@ export async function expandTilde(input: string): Promise<string | undefined> {
 export function migrateLegacyCommunityStorage(
   storage: Storage = localStorage,
 ): void {
-  if (storage.getItem(COMMUNITIES_KEY) === null) {
-    const legacyCommunities = storage.getItem(LEGACY_WORKSPACES_KEY);
-    if (legacyCommunities !== null) {
-      storage.setItem(COMMUNITIES_KEY, legacyCommunities);
+  try {
+    if (storage.getItem(COMMUNITIES_KEY) === null) {
+      const legacyCommunities = storage.getItem(LEGACY_WORKSPACES_KEY);
+      if (legacyCommunities !== null) {
+        storage.setItem(COMMUNITIES_KEY, legacyCommunities);
+      }
     }
-  }
-  if (storage.getItem(ACTIVE_COMMUNITY_KEY) === null) {
-    const legacyActiveCommunity = storage.getItem(LEGACY_ACTIVE_WORKSPACE_KEY);
-    if (legacyActiveCommunity !== null) {
-      storage.setItem(ACTIVE_COMMUNITY_KEY, legacyActiveCommunity);
+    if (storage.getItem(ACTIVE_COMMUNITY_KEY) === null) {
+      const legacyActiveCommunity = storage.getItem(
+        LEGACY_ACTIVE_WORKSPACE_KEY,
+      );
+      if (legacyActiveCommunity !== null) {
+        storage.setItem(ACTIVE_COMMUNITY_KEY, legacyActiveCommunity);
+      }
     }
+  } catch (error) {
+    // WebKit throws SecurityError from getItem when storage access is denied
+    // for the origin (block/buzz#5078). Fencing here so the app can still
+    // boot with an empty/default community list instead of a blank window.
+    console.warn(
+      "[communityStorage] migrateLegacyCommunityStorage failed (storage denied?):",
+      error,
+    );
   }
 }
 
 export function loadCommunities(): Community[] {
   try {
     migrateLegacyCommunityStorage();
-    const raw = localStorage.getItem(COMMUNITIES_KEY);
+    const raw = getStorageItem(COMMUNITIES_KEY);
     if (!raw) {
       return [];
     }
@@ -60,7 +73,7 @@ export function loadCommunities(): Community[] {
       return [];
     }
     if (parsed.length > 0) {
-      localStorage.removeItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY);
+      removeStorageItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY);
     }
     // Migration: older builds stored the user's `nsec` in localStorage and
     // re-applied it to the backend on every reload, which silently overwrote
@@ -100,7 +113,17 @@ export function saveCommunities(communities: Community[]): boolean {
 export function loadCommunityDiscoveryAfterLeave(
   storage: Storage = localStorage,
 ): boolean {
-  return storage.getItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY) === "1";
+  try {
+    return storage.getItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY) === "1";
+  } catch (error) {
+    // block/buzz#5078 — storage access can be denied for the origin; degrade
+    // to the default ("didn't just leave") instead of crashing the boot path.
+    console.warn(
+      "[communityStorage] loadCommunityDiscoveryAfterLeave failed:",
+      error,
+    );
+    return false;
+  }
 }
 
 export function markCommunityDiscoveryAfterLeave(
@@ -129,7 +152,10 @@ export function clearCommunityStorage(storage: Storage = localStorage): void {
 
 export function loadActiveCommunityId(): string | null {
   migrateLegacyCommunityStorage();
-  return localStorage.getItem(ACTIVE_COMMUNITY_KEY);
+  // block/buzz#5078 — WebKit can throw SecurityError from a denied-storage
+  // getItem. Fail closed so the boot path renders the default community UI
+  // instead of unmounting the root.
+  return getStorageItem(ACTIVE_COMMUNITY_KEY);
 }
 
 export function saveActiveCommunityId(id: string): boolean {
@@ -199,7 +225,10 @@ export function initFirstCommunity(
     pubkey,
     addedAt: new Date().toISOString(),
   };
-  const previousActiveCommunityId = localStorage.getItem(ACTIVE_COMMUNITY_KEY);
+  // block/buzz#5078 — read the prior active id through the throw-safe helper;
+  // a denied-storage origin would otherwise kill onboarding before a single
+  // write is attempted.
+  const previousActiveCommunityId = getStorageItem(ACTIVE_COMMUNITY_KEY);
   const didSaveActiveCommunity = saveActiveCommunityId(community.id);
   if (!didSaveActiveCommunity) {
     return null;

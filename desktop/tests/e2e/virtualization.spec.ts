@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 
 const WATERCOOLER_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
 const FORUM_THREAD_ID = "mock-forum-release-thread";
@@ -32,15 +33,69 @@ async function seedChannelSections(page: Page) {
 // the sequence dnd-kit needs to fire onDragEnd and commit the reorder.
 async function dragOver(page: Page, source: Locator, target: Locator) {
   const from = await source.boundingBox();
-  const to = await target.boundingBox();
-  if (!from || !to) throw new Error("drag handles not laid out");
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 + 10);
-  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, {
-    steps: 10,
+  if (!from) throw new Error("drag source not laid out");
+  const pointer = {
+    x: from.x + from.width / 2,
+    y: from.y + from.height / 2,
+  };
+  await source.dispatchEvent("pointerdown", {
+    button: 0,
+    buttons: 1,
+    clientX: pointer.x,
+    clientY: pointer.y,
+    isPrimary: true,
+    pointerId: 1,
+    pointerType: "mouse",
   });
-  await page.mouse.up();
+  await page.evaluate(({ x, y }) => {
+    document.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        clientX: x,
+        clientY: y + 8,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+  }, pointer);
+  await expect(page.getByTestId("sidebar-section-drag-overlay")).toBeVisible();
+
+  const to = await target.boundingBox();
+  if (!to) throw new Error("drag target not laid out");
+  const destination = {
+    x: to.x + to.width / 2,
+    y: to.y + to.height - 2,
+  };
+  await page.evaluate(async ({ x, y }) => {
+    document.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        buttons: 1,
+        clientX: x,
+        clientY: y,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    document.dispatchEvent(
+      new PointerEvent("pointerup", {
+        bubbles: true,
+        button: 0,
+        buttons: 0,
+        clientX: x,
+        clientY: y,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: "mouse",
+      }),
+    );
+  }, destination);
 }
 
 test.describe("list virtualization", () => {
@@ -160,6 +215,10 @@ test.describe("list virtualization", () => {
     const headers = page.locator('[aria-roledescription="sortable"]');
     const topHeader = headers.filter({ hasText: "Priority" });
     const bottomHeader = headers.filter({ hasText: "Archive" });
+    const topHeaderButton = topHeader.getByRole("button", {
+      name: "Priority",
+      exact: true,
+    });
     await expect(topHeader).toBeVisible();
     await expect(bottomHeader).toBeVisible();
     await expect(headers).toHaveCount(2);
@@ -176,7 +235,7 @@ test.describe("list virtualization", () => {
 
     // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and persists
     // the new order. The drop must land for the order to flip.
-    await dragOver(page, topHeader, bottomHeader);
+    await dragOver(page, topHeaderButton, bottomHeader);
 
     // The drop landed: order flipped. A no-op drag would leave it unchanged.
     await expect.poll(sectionOrder).toEqual(["Archive", "Priority"]);
@@ -808,16 +867,47 @@ test("live tail arrivals stay buffered while reading and release on jump", async
   );
   await page.getByTestId("channel-deep-history").click();
 
+  await waitForMockChannelHeadReady(
+    page,
+    "deep-history",
+    "feedf00d-0000-4000-8000-000000000007",
+  );
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await timeline.evaluate((element) => {
+    // Reader input retires the virtualizer's bottom-follow intent before
+    // moving into history; a scrollTop write alone leaves it armed.
+    element.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
     element.scrollTop = Math.max(500, element.scrollHeight / 2);
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
   await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
-  const frozenHeight = await timeline.evaluate(
-    (element) => element.scrollHeight,
-  );
+  const frozenHeight = await timeline.evaluate(async (element) => {
+    // Entering history renders and measures new virtual rows. Capture the
+    // baseline only after that layout has stopped changing across frames.
+    let previousHeight = element.scrollHeight;
+    let previousOffset = element.scrollTop;
+    let stableFrames = 0;
+    for (let frame = 0; frame < 120; frame += 1) {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      const height = element.scrollHeight;
+      const offset = element.scrollTop;
+      stableFrames =
+        height === previousHeight && offset === previousOffset
+          ? stableFrames + 1
+          : 0;
+      if (stableFrames >= 3) return height;
+      previousHeight = height;
+      previousOffset = offset;
+    }
+    throw new Error(
+      "virtual timeline layout did not settle before live arrival",
+    );
+  });
 
   await page.evaluate(() => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({

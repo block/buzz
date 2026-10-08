@@ -46,7 +46,9 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
   const section = page.getByTestId("settings-mobile");
-  const card = page.getByTestId("mobile-pairing-card");
+  const card = page
+    .getByTestId("mobile-pairing-card")
+    .locator('[data-slot="settings-section-card"]');
   const layout = card.getByTestId("mobile-pairing-layout");
   const qrContainer = page.getByTestId("mobile-pairing-qr-container");
   const steps = card.getByTestId("mobile-pairing-steps");
@@ -59,10 +61,15 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   const finalStep = card.getByTestId("mobile-pairing-final-step");
   const startButton = card.getByTestId("start-pairing-button");
   await expect(card).toBeVisible();
+  await expect(card).toHaveCSS("border-top-width", "0px");
+  await expect(card).toHaveCSS("border-radius", "16px");
+  expect(
+    await card.evaluate((element) => getComputedStyle(element).backgroundColor),
+  ).not.toBe("rgba(0, 0, 0, 0)");
   await expect(startButton).toHaveText("Start pairing");
   await expect(steps.getByText("Scan QR code", { exact: true })).toBeVisible();
   await expect(
-    steps.getByText("Confirm mobile code", { exact: true }),
+    steps.getByText("Enter code on your phone", { exact: true }),
   ).toBeVisible();
   await expect(
     finalStep.getByText("Pair your mobile app", { exact: true }),
@@ -297,9 +304,8 @@ test("pairing completion updates the final step and resets after leaving", async
   const confirmButton = confirmation.getByTestId("confirm-sas");
   const cancelButton = confirmation.getByTestId("deny-sas");
   const confirmationBox = await confirmation.boundingBox();
-  const confirmationTitleBox = await confirmation
-    .getByTestId("pairing-sas-title")
-    .boundingBox();
+  const confirmationTitle = confirmation.getByTestId("pairing-sas-title");
+  const confirmationTitleBox = await confirmationTitle.boundingBox();
   const confirmationCodeBox = await confirmationCode.boundingBox();
   const confirmationActionsBox = await confirmation
     .getByTestId("pairing-sas-actions")
@@ -338,10 +344,7 @@ test("pairing completion updates the final step and resets after leaving", async
   await expect(
     confirmation.getByText(/Only confirm if you started this pairing/),
   ).toHaveCount(0);
-  await expect(confirmation.getByTestId("pairing-sas-title")).toHaveCSS(
-    "font-size",
-    "16px",
-  );
+  await expect(confirmationTitle).toHaveCSS("font-size", "16px");
 
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
   await waitForAnimations(page);
@@ -409,12 +412,11 @@ test("late pairing events are ignored after canceling", async ({ page }) => {
   await confirmation.getByTestId("deny-sas").click();
 
   await expect(confirmation).toHaveCount(0);
-  await expect(
-    card.getByText("The codes didn't match. Pairing was canceled."),
-  ).toBeVisible();
+  await expect(card.getByText("Pairing was canceled.")).toBeVisible();
 
   await emitPairingEvent(page, "pairing-complete");
   await emitPairingEvent(page, "pairing-sas-received", { sas: "654321" });
+  await emitPairingEvent(page, "pairing-code-entered");
 
   await expect(confirmation).toHaveCount(0);
   await expect(
@@ -422,9 +424,7 @@ test("late pairing events are ignored after canceling", async ({ page }) => {
       .getByTestId("mobile-pairing-final-step")
       .getByText("Paired", { exact: true }),
   ).toHaveCount(0);
-  await expect(
-    card.getByText("The codes didn't match. Pairing was canceled."),
-  ).toBeVisible();
+  await expect(card.getByText("Pairing was canceled.")).toBeVisible();
 });
 
 test("step completion respects reduced motion", async ({ page }) => {
@@ -457,7 +457,6 @@ test("legacy pairing 404 explains how to configure the relay", async ({
   await page.getByTestId("open-settings").click();
   await page.getByTestId("profile-popover-settings").click();
   await page.getByTestId("settings-nav-mobile").click();
-
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
   const card = page.getByTestId("mobile-pairing-card");
@@ -477,4 +476,45 @@ test("legacy pairing 404 explains how to configure the relay", async ({
   await card.screenshot({
     path: `${SCREENSHOT_DIR}/pairing-legacy-404.png`,
   });
+});
+
+test("code-entry phones advance without desktop confirmation", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-mobile").click();
+  const card = page.getByTestId("mobile-pairing-card");
+  await card.getByTestId("start-pairing-button").click();
+  await expect(page.getByTestId("mobile-pairing-qr")).toBeVisible();
+  await emitPairingEvent(page, "pairing-sas-received", {
+    sas: "012345",
+    code_entry: true,
+  });
+  await expect(card.getByTestId("pairing-sas-title")).toHaveText(
+    "Enter code on your phone",
+  );
+  await expect(card.getByTestId("confirm-sas")).toHaveCount(0);
+  await expect(card.getByTestId("deny-sas")).toBeVisible();
+  await expect(card.getByTestId("pairing-status")).toContainText(
+    "Enter this code in the Buzz app on your phone.",
+  );
+  await waitForAnimations(page);
+  mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  await card.screenshot({ path: `${SCREENSHOT_DIR}/pairing-code-entry.png` });
+  await emitPairingEvent(page, "pairing-code-entered");
+  await expect(card.getByTestId("pairing-transfer-spinner")).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) => entry.command === "confirm_pairing_sas",
+        ).length,
+    ),
+  ).toBe(0);
+  await emitPairingEvent(page, "pairing-complete");
+  await expect(
+    card.getByTestId("mobile-pairing-final-step-indicator"),
+  ).toHaveAttribute("data-completed", "true");
 });

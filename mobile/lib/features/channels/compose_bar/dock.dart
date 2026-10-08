@@ -1,13 +1,48 @@
 part of '../compose_bar.dart';
 
-class _ComposerDockFrame extends StatelessWidget {
-  final double widthFactor;
+class _ComposerDockFrame extends HookWidget {
+  final Animation<double> expansionAnimation;
+  final bool forceFullWidth;
   final Widget child;
 
-  const _ComposerDockFrame({required this.widthFactor, required this.child});
+  const _ComposerDockFrame({
+    required this.expansionAnimation,
+    required this.forceFullWidth,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final recordingTransition = useAnimationController(
+      duration: reducedMotion
+          ? Duration.zero
+          : const Duration(milliseconds: 200),
+      reverseDuration: reducedMotion
+          ? Duration.zero
+          : const Duration(milliseconds: 140),
+      initialValue: forceFullWidth ? 1 : 0,
+    );
+    useEffect(() {
+      if (forceFullWidth) {
+        recordingTransition.value = math.max(
+          recordingTransition.value,
+          expansionAnimation.value.clamp(0.0, 1.0),
+        );
+        recordingTransition.forward();
+      } else {
+        recordingTransition.reverse();
+      }
+      return null;
+    }, [forceFullWidth, reducedMotion]);
+    const compactVerticalOffset = Grid.twelve + Grid.quarter;
+    final visibleBottomGutter = math.max(
+      Grid.twelve,
+      MediaQuery.viewPaddingOf(context).bottom +
+          Grid.xxs -
+          compactVerticalOffset,
+    );
+    final recordingGutterDelta = visibleBottomGutter - Grid.twelve;
     final backdropHeight = mobileTabFooterBackdropHeight(context);
     return Stack(
       clipBehavior: Clip.none,
@@ -30,10 +65,43 @@ class _ComposerDockFrame extends StatelessWidget {
           ),
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: FractionallySizedBox(
-              key: const ValueKey('composer-width-transition'),
-              widthFactor: widthFactor,
+            child: AnimatedBuilder(
+              animation: Listenable.merge([
+                expansionAnimation,
+                recordingTransition,
+              ]),
               child: child,
+              builder: (context, child) {
+                final widthProgress = math.max(
+                  expansionAnimation.value.clamp(0.0, 1.0),
+                  recordingTransition.value,
+                );
+                final expansionProgress = expansionAnimation.value.clamp(
+                  0.0,
+                  1.0,
+                );
+                final compactPositionProgress = 1 - expansionProgress;
+                return Transform.translate(
+                  key: const ValueKey('composer-position-transition'),
+                  offset: Offset(
+                    0,
+                    compactVerticalOffset * compactPositionProgress,
+                  ),
+                  child: Padding(
+                    key: const ValueKey('composer-recording-outer-gutter'),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: forceFullWidth
+                          ? recordingGutterDelta * compactPositionProgress
+                          : 0,
+                    ),
+                    child: FractionallySizedBox(
+                      key: const ValueKey('composer-width-transition'),
+                      widthFactor: 0.85 + 0.15 * widthProgress,
+                      child: child,
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ),
@@ -123,13 +191,7 @@ class _ComposerOverlayPortal extends StatelessWidget {
                   child: ClipRect(
                     child: Padding(
                       padding: const EdgeInsets.only(bottom: Grid.xxs),
-                      child: surface == _AttachmentSurface.closed
-                          ? _SuggestionPanelMotion(
-                              duration: surfaceDuration,
-                              alignment: Alignment.bottomLeft,
-                              child: buildOverlayPanel(surface),
-                            )
-                          : buildOverlayPanel(surface),
+                      child: buildOverlayPanel(surface),
                     ),
                   ),
                 ),

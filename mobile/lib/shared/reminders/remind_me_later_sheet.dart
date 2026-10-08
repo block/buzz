@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
-import '../widgets/sheet_divider.dart';
+import '../widgets/sheet_action_section.dart';
 import '../widgets/modal_presentation.dart';
 import 'reminder_service.dart';
 import 'reminder_time_presets.dart';
@@ -40,6 +40,7 @@ void showRemindMeLaterSheet({
 
   showBuzzModalBottomSheet<void>(
     context: context,
+    title: 'Remind me about this message',
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
       child: IconTheme.merge(
@@ -56,38 +57,35 @@ void showRemindMeLaterSheet({
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Padding(
-                  padding: const EdgeInsets.only(
-                    left: Grid.half,
-                    bottom: Grid.xxs,
-                  ),
-                  child: Text(
-                    'Remind me about this message',
-                    style: Theme.of(sheetContext).textTheme.titleSmall,
-                  ),
+                SheetActionSection(
+                  children: [
+                    for (final preset in reminderTimePresets)
+                      ListTile(
+                        leading: const Icon(BuzzIcons.clock),
+                        title: Text(preset.label),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          submit(preset.getTimestamp());
+                        },
+                      ),
+                  ],
                 ),
-                for (final preset in reminderTimePresets)
-                  ListTile(
-                    leading: const Icon(LucideIcons.clock),
-                    title: Text(preset.label),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      submit(preset.getTimestamp());
-                    },
-                  ),
-                const SheetDivider(),
-                ListTile(
-                  leading: const Icon(LucideIcons.calendarClock),
-                  title: const Text('Pick a date & time'),
-                  onTap: () async {
-                    final navigator = Navigator.of(sheetContext);
-                    final timestamp = await _pickCustomDateTime(context);
-                    // Cancelled or not-in-the-future: keep the preset sheet
-                    // open so retrying doesn't mean long-pressing again.
-                    if (timestamp == null) return;
-                    if (navigator.mounted) navigator.pop();
-                    await submit(timestamp);
-                  },
+                SheetActionSection(
+                  children: [
+                    ListTile(
+                      leading: const Icon(BuzzIcons.calendarClock),
+                      title: const Text('Pick a date & time'),
+                      onTap: () async {
+                        final navigator = Navigator.of(sheetContext);
+                        final timestamp = await _pickCustomDateTime(context);
+                        // Cancelled or not-in-the-future: keep the preset sheet
+                        // open so retrying doesn't mean long-pressing again.
+                        if (timestamp == null) return;
+                        if (navigator.mounted) navigator.pop();
+                        await submit(timestamp);
+                      },
+                    ),
+                  ],
                 ),
               ],
             ),

@@ -46,8 +46,7 @@ class _MessageVideoPreview extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final rawAspectRatio = imeta?.aspectRatio ?? (16 / 9);
-    final aspectRatio = rawAspectRatio.clamp(0.75, 1.91);
+    final aspectRatio = messageVideoAspectRatio(imeta?.aspectRatio);
     final posterUrl = imeta?.posterUrl;
     final loadPreviewFrame = ref.watch(videoPreviewFrameLoaderProvider);
     final previewFrameFuture = useMemoized(
@@ -97,8 +96,12 @@ class _MessageVideoPreview extends HookConsumerWidget {
                   MediaImage(
                     url: posterUrl,
                     fit: BoxFit.cover,
+                    frameBuilder: (context, child, frame, synchronous) =>
+                        frame != null || synchronous
+                        ? child
+                        : const MediaLoadingPlaceholder(label: 'Loading video'),
                     errorBuilder: (_, _, _) => const _MediaPreviewFallback(
-                      icon: LucideIcons.video,
+                      icon: BuzzIcons.video,
                       label: 'Video preview unavailable',
                     ),
                   )
@@ -107,9 +110,14 @@ class _MessageVideoPreview extends HookConsumerWidget {
                     future: previewFrameFuture,
                     builder: (context, snapshot) {
                       final frame = snapshot.data;
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const MediaLoadingPlaceholder(
+                          label: 'Loading video',
+                        );
+                      }
                       if (frame == null) {
                         return const _MediaPreviewFallback(
-                          icon: LucideIcons.video,
+                          icon: BuzzIcons.video,
                           label: 'Video attachment',
                         );
                       }
@@ -135,7 +143,7 @@ class _MessageVideoPreview extends HookConsumerWidget {
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(
-                      LucideIcons.play,
+                      BuzzIcons.play,
                       color: Colors.white,
                       size: 24,
                     ),

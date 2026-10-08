@@ -41,6 +41,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    "BUZZ_ACP_LAUNCH_PREFIX",
     // Control-plane parallelism: the Desktop resolves the effective
     // worker-pool size (applying any per-harness cap) and writes it into
     // launch.policy_env. A user-supplied BUZZ_ACP_AGENTS would bypass the
@@ -59,11 +60,20 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Remote lifetime/presence policy: user env must not disable the
     // desktop/provider-owned bounds while the saved record still promises them.
     "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
+    // Desktop-owned pool lifetime policy: user env must not disable or reset
+    // the idle worker-reclamation window while the desktop launcher sets it.
+    "BUZZ_ACP_IDLE_POOL_SLEEP",
+    // Definition-owned policy: user env cannot override whether channel
+    // threads receive independent ACP sessions.
+    "BUZZ_ACP_SESSION_POLICY",
     "BUZZ_ACP_NO_PRESENCE",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.
     "BUZZ_ACP_SETUP_PAYLOAD",
+    // Demo-build identity owns the child agent config root. A user override
+    // could silently reconnect a demo harness to production OAuth state.
+    "BUZZ_AGENT_CONFIG_DIR",
     // Desktop ownership markers: these brand every spawned harness with the
     // launching Desktop instance. A user-supplied override would let a
     // definition masquerade as a different instance or fake the nonce used
@@ -73,7 +83,28 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {
-    RESERVED_ENV_KEYS
-        .iter()
-        .any(|reserved| reserved.eq_ignore_ascii_case(key))
+    is_reserved_git_config_key(key)
+        || RESERVED_ENV_KEYS
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(key))
+}
+
+/// The complete `GIT_CONFIG*` env family — `GIT_CONFIG` plus every
+/// `GIT_CONFIG_*` var (`GIT_CONFIG_COUNT`, the indexed `GIT_CONFIG_KEY_<n>` /
+/// `GIT_CONFIG_VALUE_<n>` pairs, `GIT_CONFIG_GLOBAL` / `_SYSTEM` / `_NOSYSTEM`,
+/// `GIT_CONFIG_PARAMETERS`) — is reserved.
+///
+/// Buzz stages git config through these indexed vars: custom harnesses get
+/// only the relay credential helper (`runtime.rs`), while built-in harnesses
+/// get it plus the agent identity/signing config from `buzz-acp`'s
+/// `GitEnvironment`. A user override is layered onto
+/// the spawn command *after* the credential helper, so a single
+/// `GIT_CONFIG_COUNT=0` (or any index collision) silently orphans it, and other
+/// family members can redirect git's config resolution entirely. It is a
+/// prefix rule because the indexed keys are unbounded; matching the exact
+/// `GIT_CONFIG` name and the `GIT_CONFIG_` prefix covers the whole family
+/// without catching unrelated names like `GIT_CONFIGURATION`.
+fn is_reserved_git_config_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper == "GIT_CONFIG" || upper.starts_with("GIT_CONFIG_")
 }

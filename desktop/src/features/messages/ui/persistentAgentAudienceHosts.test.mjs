@@ -6,7 +6,7 @@ async function source(relativePath) {
   return readFile(new URL(relativePath, import.meta.url), "utf8");
 }
 
-test("supported conversation hosts opt into explicit audience contexts", async () => {
+test("only thread conversation hosts opt into persistent audiences", async () => {
   const [channelPane, threadPanel, newMessage, inboxDetail] = await Promise.all(
     [
       source("../../channels/ui/ChannelPane.tsx"),
@@ -20,12 +20,11 @@ test("supported conversation hosts opt into explicit audience contexts", async (
   assert.doesNotMatch(newMessage, /audienceContext=/);
   assert.match(
     threadPanel,
-    /type: "thread"[\s\S]*threadRootId: threadHead\.id/,
+    /audienceContext=\{\{[\s\S]*type: "thread",[\s\S]*rootTags: threadHead\.tags,[\s\S]*\}\}/,
   );
-  assert.match(
-    inboxDetail,
-    /type: "thread"[\s\S]*threadRootId: item\.conversationId/,
-  );
+  assert.match(inboxDetail, /type: "thread"/);
+  assert.doesNotMatch(threadPanel, /audienceContext=\{[\s\S]*threadRootId/);
+  assert.doesNotMatch(inboxDetail, /audienceContext=\{[\s\S]*threadRootId/);
 });
 
 test("video review remains explicitly outside persistent audience routing", async () => {
@@ -43,5 +42,5 @@ test("composer never derives audience context from draft keys", async () => {
   const composer = await source("./MessageComposer.tsx");
 
   assert.doesNotMatch(composer, /draftKey\?\.startsWith\("thread:"\)/);
-  assert.match(composer, /audienceContext\?\.threadRootId/);
+  assert.match(composer, /audienceContext && channelId && ownerPubkey/);
 });

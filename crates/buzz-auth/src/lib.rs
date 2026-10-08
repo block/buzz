@@ -25,6 +25,8 @@ pub mod nip42;
 pub mod nip98;
 /// NIP-98 replay protection — shared, community-scoped, atomic seen-set.
 pub mod nip98_replay;
+/// NIP-FI federated-identity assertion verifier and contracts.
+pub mod nip_fi;
 /// Per-connection rate limiting.
 pub mod rate_limit;
 /// OAuth scope parsing and enforcement.
@@ -43,10 +45,32 @@ pub use rate_limit::{
 };
 pub use scope::{parse_scopes, Scope};
 
+pub use nip_fi::{
+    command_replay_key, validate_nip_fi_config, AssertionKeySet, AssertionPolicyId,
+    CanonicalCapabilities, ClientSubjectPosture, CommandError, CommandIssuerPolicy,
+    CommandPolicyError, CommandReplayGuard, CommandResult, CommandVerifier, CommunityBinding,
+    CommunityBindingError, ConfidentialAssertion, CrossPodMergeResult, DenialClass, DenySetFull,
+    FederatedAssertionVerifier, FederatedIdentity, FederatedIdentityDiscovery, FreshnessClass,
+    HttpJwksFetcher, IssuerCapacity, IssuerJwksConfig, IssuerKeySource, IssuerPolicy,
+    IssuerPolicyError, IssuerRegistry, JwksFetchError, JwksFetcher, JwksSourceContract,
+    NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource, RevalidationDependencies,
+    SubjectClass, SubjectClassContract, TokenClass, TransportContractId, VerifiedAssertion,
+    VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP,
+    MAX_COMMAND_AGE_SECONDS, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
+};
+
 #[cfg(any(test, feature = "test-utils"))]
 pub use access::MockAccessChecker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use nip98_replay::AlwaysFreshReplayGuard;
+#[cfg(any(test, feature = "test-utils"))]
+pub use nip_fi::jwks::ScriptedJwksFetcher;
+#[cfg(any(test, feature = "test-utils"))]
+pub use nip_fi::InMemoryCommandReplayGuard;
+#[cfg(any(test, feature = "test-utils"))]
+pub use nip_fi::StaticIssuerKeySource;
+#[cfg(any(test, feature = "test-utils"))]
+pub use nip_fi::ToggleJwksFetcher;
 #[cfg(any(test, feature = "test-utils"))]
 pub use rate_limit::AlwaysAllowRateLimiter;
 

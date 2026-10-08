@@ -7,10 +7,31 @@ import 'app_list_inset.dart';
 /// it. Rows inside are hairline-separated and inset to the card rather than the
 /// page, via [AppListInset].
 class AppListCard extends StatelessWidget {
-  const AppListCard({super.key, this.label, required this.children});
+  const AppListCard({
+    super.key,
+    this.label,
+    this.dividerIndent,
+    this.verticalPadding = Grid.xxs,
+    this.horizontalPadding = Grid.gutter,
+    required this.children,
+  });
 
   /// Rendered above the card in sentence case, as written — no uppercasing.
   final String? label;
+
+  /// Separator inset from the card edge. Defaults to the standard row label
+  /// column, clearing a leading icon. Icon-free cards can pass [_inset] so
+  /// separators align with their row content on both sides.
+  final double? dividerIndent;
+
+  /// Outer padding above and below this section.
+  ///
+  /// Adjacent cards contribute this padding from both sides. For example,
+  /// passing [Grid.twelve] creates a 24dp rhythm between grouped surfaces.
+  final double verticalPadding;
+
+  /// Outer horizontal inset; use zero inside an already padded sheet.
+  final double horizontalPadding;
 
   final List<Widget> children;
 
@@ -29,7 +50,7 @@ class AppListCard extends StatelessWidget {
           Divider(
             height: 1,
             thickness: 1,
-            indent: _dividerIndent,
+            indent: dividerIndent ?? _dividerIndent,
             endIndent: _inset,
             // The scheme's own border tokens are derived from the page surface,
             // which lands them within a few levels of the card fill — invisible.
@@ -43,13 +64,14 @@ class AppListCard extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        Grid.gutter,
-        Grid.xxs,
-        Grid.gutter,
-        Grid.xxs,
+      padding: EdgeInsets.fromLTRB(
+        horizontalPadding,
+        verticalPadding,
+        horizontalPadding,
+        verticalPadding,
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (label != null)
@@ -70,12 +92,15 @@ class AppListCard extends StatelessWidget {
             // does. The dividers carry the group structure, so the fill only has
             // to separate the card from the page.
             color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.card),
+            borderRadius: BorderRadius.circular(Radii.container),
             // Keeps row ripples inside the rounded corners.
             clipBehavior: Clip.antiAlias,
             child: AppListInset(
               horizontal: _inset,
-              child: Column(children: separated),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: separated,
+              ),
             ),
           ),
         ],

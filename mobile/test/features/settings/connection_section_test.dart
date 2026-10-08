@@ -1,0 +1,373 @@
+import 'dart:async';
+
+import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/app_list_card.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../helpers/widget_helpers.dart';
+
+void main() {
+  testWidgets(
+    'shows a compact copyable identity row',
+    (tester) async {
+      var successFeedback = false;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/haptics'),
+        (call) async {
+          expect(call.method, 'success');
+          successFeedback = true;
+          return null;
+        },
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/haptics'),
+          null,
+        );
+      });
+      MethodCall? clipboardCall;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') clipboardCall = call;
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+            authProvider.overrideWith(_AuthNotifier.new),
+            pairingProvider.overrideWith(
+              () => _PairingNotifier(Future<bool>.value(true)),
+            ),
+            savedPrefsProvider.overrideWithValue(prefs),
+          ],
+          child: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.ensureVisible(find.text('Copy public key (npub)'));
+      await tester.pumpAndSettle();
+
+      final expectedPubkey = nostr.Keys(
+        '1111111111111111111111111111111111111111111111111111111111111111',
+      ).public;
+      // Keys('1'×64).public ↔ this npub — the NIP-19 canonical vector for the
+      // identity row, hardcoded so the codec itself stays under test.
+      const expectedNpub =
+          'npub1fu64hh9hes90w2808n8tjc2ajp5yhddjef0ctx4s7zmsgp6cwx4qgy4eg9';
+      final statusCard = find.byKey(const ValueKey('status-identity-options'));
+      expect(
+        find.descendant(of: statusCard, matching: find.text('Set status')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: statusCard,
+          matching: find.text('Copy public key (npub)'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester.getTopLeft(find.text('Copy public key (npub)')).dy,
+        lessThan(tester.getTopLeft(find.text('Display name')).dy),
+      );
+      expect(find.text('Connection'), findsNothing);
+      final sendCard = find.ancestor(
+        of: find.text('Send identity to desktop'),
+        matching: find.byType(AppListCard),
+      );
+      expect(
+        find.descendant(
+          of: sendCard,
+          matching: find.text('Copy public key (npub)'),
+        ),
+        findsNothing,
+      );
+      expect(find.text('Connected to'), findsNothing);
+      expect(find.text('https://relay.test'), findsNothing);
+      // Neither the raw hex key nor the full npub is rendered visually — the
+      // full npub is exposed through a11y and the clipboard only.
+      expect(find.text(expectedPubkey), findsNothing);
+      expect(find.text(expectedNpub), findsNothing);
+      // The identity row's a11y value carries the full npub (not raw hex).
+      expect(
+        find.ancestor(
+          of: find.text('Copy public key (npub)'),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.value == expectedNpub,
+          ),
+        ),
+        findsOneWidget,
+      );
+      final copy = tester.getRect(find.byIcon(BuzzIcons.copy));
+      final chevron = tester.getRect(find.byIcon(BuzzIcons.chevronRight).first);
+      expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
+
+      await tester.tap(find.text('Copy public key (npub)'));
+      await tester.pump();
+      expect(successFeedback, isTrue);
+      expect(clipboardCall?.method, 'Clipboard.setData');
+      expect(clipboardCall?.arguments, {'text': expectedNpub});
+      expect(find.text('Public key (npub) copied'), findsOneWidget);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets('waits for a resumed frame before navigating after auth', (
+    tester,
+  ) async {
+    final authorization = Completer<bool>();
+    final pairing = _PairingNotifier(authorization.future);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(() => pairing),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) =>
+              const Scaffold(body: Text('Identity recovery')),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Send identity to desktop'));
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    authorization.complete(true);
+    await tester.pump();
+
+    expect(find.text('Identity recovery'), findsNothing);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Identity recovery'), findsOneWidget);
+  });
+  testWidgets('resume timeout keeps identity recovery closed', (tester) async {
+    final pairing = _PairingNotifier(Future<bool>.value(true));
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(() => pairing),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) =>
+              const Scaffold(body: Text('Identity recovery')),
+        ),
+      ),
+    );
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+
+    await tester.tap(find.text('Send identity to desktop'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+
+    expect(pairing.resetCalls, 1);
+    expect(find.text('Identity recovery'), findsNothing);
+    expect(
+      find.text('Buzz did not return to the foreground. Try again.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('clears authorization when disposed during authentication', (
+    tester,
+  ) async {
+    final authorization = Completer<bool>();
+    final pairing = _PairingNotifier(authorization.future);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(() => pairing),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) =>
+              const Scaffold(body: Text('Identity recovery')),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final settingsContext = tester.element(
+      find.text('Send identity to desktop'),
+    );
+    await tester.tap(find.text('Send identity to desktop'));
+    await tester.pump();
+    unawaited(
+      Navigator.of(settingsContext).pushReplacement(
+        MaterialPageRoute<void>(builder: (_) => const SizedBox.shrink()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    authorization.complete(true);
+    await tester.pump();
+
+    expect(pairing.resetCalls, 1);
+    expect(find.text('Identity recovery'), findsNothing);
+  });
+
+  testWidgets('clears authorization when disposed during resume wait', (
+    tester,
+  ) async {
+    final pairing = _PairingNotifier(Future<bool>.value(true));
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(() => pairing),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) =>
+              const Scaffold(body: Text('Identity recovery')),
+        ),
+      ),
+    );
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+
+    final settingsContext = tester.element(
+      find.text('Send identity to desktop'),
+    );
+    await tester.tap(find.text('Send identity to desktop'));
+    await tester.pump();
+    unawaited(
+      Navigator.of(settingsContext).pushReplacement(
+        MaterialPageRoute<void>(builder: (_) => const SizedBox.shrink()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+
+    expect(pairing.resetCalls, 1);
+    expect(find.text('Identity recovery'), findsNothing);
+  });
+
+  testWidgets('denied authentication does not open identity recovery', (
+    tester,
+  ) async {
+    final pairing = _PairingNotifier(Future<bool>.value(false));
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(() => pairing),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) =>
+              const Scaffold(body: Text('Identity recovery')),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Send identity to desktop'));
+    await tester.pumpAndSettle();
+
+    expect(pairing.authorizationCalls, 1);
+    expect(find.text('Identity recovery'), findsNothing);
+  });
+}
+
+class _AuthNotifier extends AuthNotifier {
+  @override
+  Future<AuthState> build() async => AuthState(
+    status: AuthStatus.authenticated,
+    community: Community(
+      id: 'community',
+      name: 'Test',
+      relayUrl: 'https://relay.test',
+      nsec: _RelayConfigNotifier.nsec,
+      addedAt: DateTime.utc(2026),
+    ),
+  );
+}
+
+class _RelayConfigNotifier extends RelayConfigNotifier {
+  static final nsec = nostr.Keys(
+    '1111111111111111111111111111111111111111111111111111111111111111',
+  ).nsec;
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: 'https://relay.test', nsec: nsec);
+}
+
+class _PairingNotifier extends PairingNotifier {
+  _PairingNotifier(this.authorization);
+
+  final Future<bool> authorization;
+  int authorizationCalls = 0;
+  int resetCalls = 0;
+
+  @override
+  PairingState build() => const PairingState();
+
+  @override
+  Future<bool> authorizeIdentityExport({required Community community}) {
+    authorizationCalls++;
+    return authorization;
+  }
+
+  @override
+  void reset() {
+    resetCalls++;
+  }
+}

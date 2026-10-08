@@ -387,6 +387,10 @@ void main() {
           EventKind.huddleEnded,
         ]),
       );
+      expect(
+        EventKind.channelTimelineContentKinds,
+        containsAll([EventKind.huddleStarted, EventKind.huddleEnded]),
+      );
     });
 
     test('passes through text messages', () {
@@ -562,8 +566,16 @@ void main() {
       expect(result, hasLength(2));
       expect(result[0].isSystem, isTrue);
       expect(result[0].systemEvent!.type, SystemEventType.huddleStarted);
+      expect(
+        result[0].systemEvent!.ephemeralChannelId,
+        '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+      );
       expect(result[1].isSystem, isTrue);
       expect(result[1].systemEvent!.type, SystemEventType.huddleEnded);
+      expect(
+        result[1].systemEvent!.ephemeralChannelId,
+        '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+      );
     });
 
     test('huddle participant events are lifecycle metadata only', () {
@@ -1036,6 +1048,28 @@ void main() {
       );
 
       expect(entries.single.summary!.replyCount, 5);
+    });
+
+    test('relay direct replies are a lower bound for a broadcast row', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'a'),
+        _replyMsg(
+          id: 'broadcast',
+          parentId: 'a',
+          extraTags: const [
+            ['broadcast', '1'],
+          ],
+        ),
+      ]);
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          'broadcast': relaySummary(replyCount: 1, descendantCount: 0),
+        },
+      );
+      final summary = entries.last.summary!;
+      expect(summary.replyCount, 1);
+      expect(summary.isLowerBound, isTrue);
     });
 
     test('a nested reply badges the reply it answers', () {

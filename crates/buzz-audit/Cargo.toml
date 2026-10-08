@@ -9,6 +9,7 @@ description = "Hash-chain audit log for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }
+buzz-datastore-tracing = { workspace = true }
 sqlx        = { workspace = true }
 tokio       = { workspace = true }
 serde       = { workspace = true }
@@ -16,6 +17,7 @@ serde_json  = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 tracing     = { workspace = true }
+metrics     = { workspace = true }
 thiserror   = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
