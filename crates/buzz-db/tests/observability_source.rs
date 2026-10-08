@@ -1444,55 +1444,9 @@ fn strip_cfg_test_items(source: &str) -> String {
 }
 
 fn cfg_test_item_len(item: &str) -> usize {
-    let bytes = item.as_bytes();
     let mut depth = 0usize;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-                continue;
-            }
-            b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
-                && !bytes
-                    .get(index.wrapping_sub(1))
-                    .is_some_and(|prev| prev.is_ascii_alphanumeric() || *prev == b'_') =>
-            {
-                let hashes = bytes[index + 1..]
-                    .iter()
-                    .take_while(|byte| **byte == b'#')
-                    .count();
-                if bytes.get(index + 1 + hashes) == Some(&b'"') {
-                    let close = format!("\"{}", "#".repeat(hashes));
-                    let body = index + 2 + hashes;
-                    index = item[body..]
-                        .find(&close)
-                        .map_or(bytes.len(), |offset| body + offset + close.len());
-                    continue;
-                }
-            }
-            b'"' => {
-                index += 1;
-                while index < bytes.len() && bytes[index] != b'"' {
-                    index += if bytes[index] == b'\\' { 2 } else { 1 };
-                }
-            }
-            // A char literal such as '{', '"', or '\''. A lifetime has no
-            // closing quote and falls through.
-            b'\''
-                if bytes.get(index + 2) == Some(&b'\'') && bytes.get(index + 1) != Some(&b'\\') =>
-            {
-                index += 3;
-                continue;
-            }
-            b'\''
-                if bytes.get(index + 1) == Some(&b'\\') && bytes.get(index + 3) == Some(&b'\'') =>
-            {
-                index += 4;
-                continue;
-            }
+    for (index, byte) in mask_comments_and_literals(item).bytes().enumerate() {
+        match byte {
             b';' if depth == 0 => return index + 1,
             b'{' => depth += 1,
             b'}' => {
@@ -1503,9 +1457,101 @@ fn cfg_test_item_len(item: &str) -> usize {
             }
             _ => {}
         }
-        index += 1;
     }
     item.len()
+}
+
+/// `source` with every comment (`//`, `///`, nested `/* */`) and every string,
+/// raw string, and char literal replaced by spaces, byte for byte. Newlines are
+/// kept, so offsets and line structure match `source`. Scans that look for
+/// code (braces, calls) read the masked text; scans that look for SQL read
+/// the original, because the SQL lives inside string literals.
+fn mask_comments_and_literals(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut blank = |from: usize, to: usize| {
+        for byte in &mut masked[from..to.min(bytes.len())] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    };
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let start = index;
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let mut depth = 0usize;
+                while index < bytes.len() {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
+                && !bytes
+                    .get(index.wrapping_sub(1))
+                    .is_some_and(|prev| prev.is_ascii_alphanumeric() || *prev == b'_')
+                && bytes.get(
+                    index
+                        + 1
+                        + bytes[index + 1..]
+                            .iter()
+                            .take_while(|byte| **byte == b'#')
+                            .count(),
+                ) == Some(&b'"') =>
+            {
+                let hashes = bytes[index + 1..]
+                    .iter()
+                    .take_while(|byte| **byte == b'#')
+                    .count();
+                let close = format!("\"{}", "#".repeat(hashes));
+                let body = index + 2 + hashes;
+                index = source[body..]
+                    .find(&close)
+                    .map_or(bytes.len(), |offset| body + offset + close.len());
+            }
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index += 1;
+            }
+            // A char literal such as '{', '"', or '\''. A lifetime has no
+            // closing quote and falls through.
+            b'\''
+                if bytes.get(index + 2) == Some(&b'\'') && bytes.get(index + 1) != Some(&b'\\') =>
+            {
+                index += 3;
+            }
+            b'\''
+                if bytes.get(index + 1) == Some(&b'\\') && bytes.get(index + 3) == Some(&b'\'') =>
+            {
+                index += 4;
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        }
+        blank(start, index);
+    }
+    String::from_utf8(masked).expect("masking replaces whole ASCII-delimited spans")
 }
 
 /// Whether `source` inserts into `events` itself (not `event_mentions` or any
@@ -1542,10 +1588,13 @@ fn inserts_events_row(source: &str) -> bool {
 /// An events insert must run both follow-ups: the push enqueue and the
 /// pre-commit TTL refresh. `after_admitted_insert` does both; a writer that
 /// inserts inside a savepoint calls the two halves separately.
+///
+/// Only real calls count: a hook in a comment or a string literal does not.
 fn runs_event_follow_ups(function_source: &str) -> bool {
-    function_source.contains("event_follow_up::after_admitted_insert(")
-        || (function_source.contains("event_follow_up::enqueue_push_match(")
-            && function_source.contains(".record_channel_event("))
+    let code = mask_comments_and_literals(function_source);
+    code.contains("event_follow_up::after_admitted_insert(")
+        || (code.contains("event_follow_up::enqueue_push_match(")
+            && code.contains(".record_channel_event("))
 }
 
 fn event_insert_follow_up_violations(production_source: &str) -> Vec<String> {
@@ -1647,6 +1696,28 @@ pub(crate) async fn writer_with_escaped_newline(tx: &mut AdmittedTx) {
         .await
         .expect("write");
 }
+pub(crate) async fn writer_with_commented_out_hook(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    // crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+}
+pub(crate) async fn writer_with_block_commented_hook(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    /* crate::store::event_follow_up::enqueue_push_match(tx.conn(), community, id, kind)
+       /* nested */ tx.record_channel_event(channel, kind); */
+}
+pub(crate) async fn writer_with_hook_in_string(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    tracing::debug!("skipped event_follow_up::after_admitted_insert(tx, ..)");
+}
 #[cfg(test)]
 fn test_only_helper() -> (&'static str, char, &'static str, char) {
     // an unbalanced { in a comment
@@ -1679,6 +1750,9 @@ mod tests {
             "pub(crate) async fn writer_under_doc_mention(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_under_brace_mention(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_with_escaped_newline(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_commented_out_hook(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_block_commented_hook(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_hook_in_string(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
         "an events insert must run the push enqueue and record the TTL refresh"
