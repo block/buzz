@@ -158,6 +158,12 @@ async fn sidebar_ancestry_fact_matches_shared_nip10_parser() {
             .unwrap();
         // A reply marker without recorded ancestry leaves the message out.
         assert_eq!(page.channels[0].unread, !reply, "tags={tags:?}");
+        // ...and it is never the timeline's anchor.
+        assert_eq!(
+            page.channels[0].latest_id.is_some(),
+            !reply,
+            "tags={tags:?}"
+        );
     }
 }
 

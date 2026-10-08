@@ -1,5 +1,5 @@
 //! Bounded evidence projection. The cap limits evidence, not the definition of
-//! unread: an unexamined tail yields a positive lower bound or an unknown count.
+//! unread: an unexamined tail goes uncounted, so counts may undercount.
 
 use super::{model::*, participation, writes};
 use buzz_core::CommunityId;
@@ -133,8 +133,9 @@ impl Db {
                 ), threaded AS MATERIALIZED (
                     SELECT e.*, tm.root_event_id AS root, tm.parent_event_id AS parent,
                         COALESCE(tm.root_event_id<>e.id,false) AS is_reply,
-                        -- A NIP-10 reply marker without canonical ancestry: never a
-                        -- timeline anchor, since a mark cannot validate it.
+                        -- A NIP-10 reply marker without canonical ancestry: neither
+                        -- counted nor a timeline anchor, since a mark cannot validate
+                        -- it. Parity-tested against the shared NIP-10 parser.
                         tm.root_event_id IS NULL AND jsonb_typeof(e.tags)='array'
                             AND EXISTS (SELECT 1 FROM jsonb_array_elements(e.tags) t(tag)
                                 WHERE jsonb_typeof(tag)='array' AND tag->>0='e'
@@ -155,16 +156,14 @@ impl Db {
                     FROM threaded e
                     LEFT JOIN personal_read_frontiers tf ON tf.community_id=$1 AND tf.actor=$2
                         AND tf.channel_id=r.id AND tf.root_id=e.root AND e.is_reply
-                    WHERE e.pubkey<>$2
+                    WHERE e.pubkey<>$2 AND NOT e.unresolved
                 ), grouped AS (
                     SELECT CASE WHEN root IS NULL THEN NULL
                             WHEN is_reply THEN encode(root,'hex') ELSE '' END AS root,
                         CASE WHEN is_reply THEN encode(parent,'hex') END AS parent,
                         is_reply, covered, read_through_id,
                         -- ->>0 also selects scalar "p"/"e": reject nonarrays first.
-                        -- C collation matches Rust's ASCII case/hex rules. Reply
-                        -- markers matter only without canonical ancestry; otherwise
-                        -- metadata, not tag spelling, owns the context.
+                        -- C collation matches Rust's ASCII case rules.
                         CASE WHEN octet_length(tags::text)<=8192
                             AND jsonb_typeof(tags)='array' THEN
                             (SELECT CASE WHEN bool_or(jsonb_typeof(tag)<>'array'
@@ -172,10 +171,7 @@ impl Db {
                                 THEN NULL ELSE jsonb_build_object(
                                     'directed',COALESCE(bool_or(
                                         (tag->>0='p' AND lower((tag->>1) COLLATE "C")=encode($2,'hex'))
-                                        OR (tag->>0='broadcast' AND tag->>1='1')),false),
-                                    'reply_marked',root IS NULL AND COALESCE(bool_or(tag->>0='e'
-                                        AND tag->>3='reply'
-                                        AND (tag->>1) COLLATE "C" ~ '^[0123456789abcdefABCDEF]{64}$'),false)) END
+                                        OR (tag->>0='broadcast' AND tag->>1='1')),false)) END
                              FROM jsonb_array_elements(tags) t(tag)
                              WHERE tag->>0 IN ('p','broadcast','e')) ELSE NULL END AS facts,
                         count(*) AS n,
@@ -227,11 +223,6 @@ impl Db {
                 let Some(facts) = e["facts"].as_object() else {
                     continue;
                 };
-                // SQL's bounded ancestry fact is parity-tested against the shared
-                // NIP-10 parser; no raw tag payload crosses the DB boundary.
-                if facts.get("reply_marked") == Some(&Value::Bool(true)) && e["root"].is_null() {
-                    continue;
-                }
                 if e["covered"] == true {
                     continue;
                 }
