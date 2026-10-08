@@ -1114,9 +1114,27 @@ async fn emit_addressable_discovery_event(
     Ok(())
 }
 
-fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Result<Vec<Tag>> {
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
+/// Tags that identify the channel on every relay-signed group-state event:
+/// the channel type `t` first, then the creator `P`.
+fn group_state_identity_tags(
+    identity: &buzz_db::channel::ChannelIdentity,
+) -> anyhow::Result<Vec<Tag>> {
+    Ok(buzz_core::channel::group_state_identity_tags(
+        &identity.channel_type,
+        &identity.created_by,
+    )?)
+}
+
+fn group_members_tags(
+    group_id: &str,
+    identity: Option<&buzz_db::channel::ChannelIdentity>,
+    members: &[MemberRecord],
+) -> anyhow::Result<Vec<Tag>> {
+    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 3);
     tags.push(Tag::parse(["d", group_id])?);
+    if let Some(identity) = identity {
+        tags.extend(group_state_identity_tags(identity)?);
+    }
     for member in members {
         let pubkey_hex = hex::encode(&member.pubkey);
         // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
@@ -1131,7 +1149,11 @@ async fn store_group_members_event(
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
 ) -> anyhow::Result<Option<buzz_core::StoredEvent>> {
     let group_id = member_snapshot.channel_id().to_string();
-    let tags = group_members_tags(&group_id, &member_snapshot.members)?;
+    let tags = group_members_tags(
+        &group_id,
+        member_snapshot.identity.as_ref(),
+        &member_snapshot.members,
+    )?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1231,8 +1253,9 @@ pub async fn emit_group_discovery_events(
         }
         // Buzz channels always require explicit membership
         tags.push(Tag::parse(["closed"])?);
-        // Channel type tag so clients can distinguish stream/forum/dm without inference
-        tags.push(Tag::parse(["t", &channel.channel_type])?);
+        // Channel type tag so clients can distinguish stream/forum/dm without
+        // inference, then the creator. The same tags lead 39001 and 39002.
+        tags.extend(group_state_identity_tags(&channel.identity())?);
         // Optional topic / purpose for richer client UX
         if let Some(ref topic) = channel.topic {
             if !topic.is_empty() {
@@ -1268,6 +1291,7 @@ pub async fn emit_group_discovery_events(
 
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
+        tags.extend(group_state_identity_tags(&channel.identity())?);
         for m in members
             .iter()
             .filter(|m| m.role == "owner" || m.role == "admin")
@@ -3940,8 +3964,19 @@ mod tests {
             })
             .collect();
 
-        let tags = group_members_tags(&channel_id.to_string(), &members).expect("build tags");
-        assert_eq!(tags.len(), 1_502, "d tag plus every member p tag");
+        let identity = buzz_db::channel::ChannelIdentity {
+            channel_type: "forum".to_string(),
+            created_by: vec![0xab; 32],
+        };
+        let tags = group_members_tags(&channel_id.to_string(), Some(&identity), &members)
+            .expect("build tags");
+        assert_eq!(
+            tags.len(),
+            1_504,
+            "d, type and creator tags plus every member p tag"
+        );
+        assert_eq!(tags[1].as_slice(), ["t", "forum"]);
+        assert_eq!(tags[2].as_slice(), ["P".to_string(), "ab".repeat(32)]);
 
         let late_pubkey = hex::encode(&members[1_500].pubkey);
         assert!(tags.iter().any(|tag| {

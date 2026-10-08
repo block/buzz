@@ -301,11 +301,25 @@ pub async fn insert_auto_membership_in_transaction(
 
 // ── End transaction-level helpers ─────────────────────────────────────────────
 
+/// The immutable facts that every relay-signed group-state event
+/// (kinds 39000–39003) publishes about its channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelIdentity {
+    /// Channel type string (e.g. `"stream"`, `"forum"`, `"dm"`).
+    pub channel_type: String,
+    /// Public key bytes of the channel creator (the kind:9007 signer).
+    pub created_by: Vec<u8>,
+}
+
 /// An active member roster captured while holding the channel's membership
 /// serialization lock on one writer connection.
 pub struct LockedMemberSnapshot {
     /// Canonical active members captured behind the lock.
     pub members: Vec<MemberRecord>,
+    /// The channel's type and creator, read on the same connection, so the
+    /// roster carries the same identity tags as the channel's other
+    /// group-state events. `None` when no channel row exists.
+    pub identity: Option<ChannelIdentity>,
     channel_id: Uuid,
     relay_pubkey: Vec<u8>,
     tx: AdmittedTx,
@@ -477,8 +491,20 @@ pub async fn lock_member_snapshot(
         .into_iter()
         .map(row_to_member_record)
         .collect::<Result<Vec<_>>>()?;
+    let identity = sqlx::query_as::<_, (String, Vec<u8>)>(
+        "SELECT channel_type::text, created_by FROM channels WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?
+    .map(|(channel_type, created_by)| ChannelIdentity {
+        channel_type,
+        created_by,
+    });
     Ok(LockedMemberSnapshot {
         members,
+        identity,
         channel_id,
         relay_pubkey: relay_pubkey.to_vec(),
         tx,
