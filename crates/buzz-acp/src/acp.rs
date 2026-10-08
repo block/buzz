@@ -736,6 +736,13 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        // Apply this at the wire boundary as well as in the harness builder.
+        // A restricted session must never start an unmediated external server.
+        let mcp_servers = if self.deny_permission_requests {
+            Vec::new()
+        } else {
+            mcp_servers
+        };
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -761,6 +768,19 @@ impl AcpClient {
             // Merge — claude-agent-acp spreads these into the CLI's argv.
             params["_meta"]["claudeCode"]["options"]["extraArgs"]["thinking-display"] =
                 serde_json::Value::String("summarized".to_owned());
+        }
+        if self.deny_permission_requests
+            && self.standard_adapter == Some(StandardAdapterKind::Claude)
+        {
+            // Claude's SDK may permit built-in tools before its permission
+            // callback. The text-only pilot therefore disables them and all
+            // user/project settings, plugins and configured external MCPs.
+            let options = &mut params["_meta"]["claudeCode"]["options"];
+            options["tools"] = serde_json::json!([]);
+            options["settingSources"] = serde_json::json!([]);
+            options["plugins"] = serde_json::json!([]);
+            options["strictMcpConfig"] = serde_json::json!(true);
+            options["mcpServers"] = serde_json::json!({});
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -3810,6 +3830,55 @@ sys.stdin.read()
                 .await,
             Err(AcpError::AgentError { code: -32602, .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn restricted_claude_session_disables_native_tools_and_external_configuration() {
+        for restricted in [false, true] {
+            let script = r#"
+                read -t 2 _init
+                echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+                read -t 2 REQ
+                echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+                sleep 1
+            "#;
+            let mut client = spawn_script(script).await;
+            client.standard_adapter = Some(StandardAdapterKind::Claude);
+            client.set_deny_permission_requests(restricted);
+            client.initialize().await.expect("initialize");
+            let resp = client
+                .session_new_full(
+                    "/tmp",
+                    vec![McpServer {
+                        name: "unmediated".into(),
+                        command: "/bin/sh".into(),
+                        args: vec![],
+                        env: vec![],
+                    }],
+                    Some(SystemPromptTransport::ClaudeMeta("pilot")),
+                    Some("pilot session"),
+                )
+                .await
+                .expect("session/new");
+            let params = &resp.raw["_receivedRequest"]["params"];
+            assert_eq!(params["_meta"]["systemPrompt"]["append"], "pilot");
+            assert_eq!(params["_meta"]["sessionTitle"], "pilot session");
+            let options = &params["_meta"]["claudeCode"]["options"];
+            if restricted {
+                assert_eq!(params["mcpServers"], serde_json::json!([]));
+                assert_eq!(options["tools"], serde_json::json!([]));
+                assert_eq!(options["settingSources"], serde_json::json!([]));
+                assert_eq!(options["plugins"], serde_json::json!([]));
+                assert_eq!(options["strictMcpConfig"], true);
+                assert_eq!(options["mcpServers"], serde_json::json!({}));
+            } else {
+                assert_eq!(params["mcpServers"][0]["name"], "unmediated");
+                assert!(options["tools"].is_null());
+                assert!(options["settingSources"].is_null());
+                assert!(options["plugins"].is_null());
+                assert!(options["strictMcpConfig"].is_null());
+            }
+        }
     }
 
     #[tokio::test]

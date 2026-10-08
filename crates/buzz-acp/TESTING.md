@@ -69,12 +69,17 @@ The pilot uses Codex `workspace-write` or Claude `default`.
 Session creation requires advertised support and a matching current value after setting the mode.
 Every permission request receives a cancelled outcome; there is no automatic allow_once selection in this path.
 The harness supplies no external MCP servers and suppresses generated Codex network widening.
+For the supported Claude adapter, session creation also sets empty native tools,
+setting sources and plugins, and strict empty external MCP configuration.
+This prevents the text-only pilot from relying on Claude's permission callback
+to mediate tools that its SDK may otherwise permit before that callback.
 Client terminal and filesystem operations remain unimplemented and return Method not found.
 Legacy launches retain their previous behavior when the opt-in is absent.
 
 Run the full package suite above, also clearing inherited `BUZZ_ACP_SESSION_POLICY` when its default is tested.
 Regression fixtures use actual ACP stdio exchanges for grants, missing options, mode refusal and unmediated requests.
-Session-creation tests inspect the actual empty MCP-server list and requested/confirmed mode.
+Session-creation tests inspect the actual empty MCP-server list, Claude tool/configuration
+exclusions and requested/confirmed mode, with a legacy control.
 These fixtures prove harness control flow, not vendor sandbox enforcement or authenticated account access.
 The restricted pilot can prove a signed text response and shutdown; external MCP Git/Linear/Buzz CLI work is unavailable.
 Claude default mode and ACP denial are not a filesystem/network sandbox.
