@@ -2795,7 +2795,7 @@ mod postgres_tests {
         .await
         .expect("insert pre-migration owner ban");
 
-        run_migrations_through(&pool, 56)
+        run_migrations_through(&pool, 57)
             .await
             .expect("apply invite revocation migration");
 
