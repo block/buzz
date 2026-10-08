@@ -1,3 +1,10 @@
+final _markdownLinkStartPattern = RegExp(r'(!?\[[^\]\n]*\])\(');
+
+/// Escapes destination characters that the mobile Markdown renderer treats as
+/// syntax. Apply the same conversion to metadata keys to preserve media types.
+String normalizeMarkdownDestination(String url) =>
+    url.replaceAll(' ', '%20').replaceAll('(', '%28').replaceAll(')', '%29');
+
 const _markdownDelimiters = ['***', '___', '**', '__', '~~', '*', '_'];
 
 final _autolinkPattern = RegExp(
@@ -111,6 +118,50 @@ bool _hasInlineCloser(String content, int start, int delimiterLength) {
 }
 
 String _normalizeLinkSegment(String segment) {
+  final result = StringBuffer();
+  var offset = 0;
+  for (final match in _markdownLinkStartPattern.allMatches(segment)) {
+    if (match.start < offset) continue;
+    var cursor = match.end;
+    if (cursor >= segment.length) continue;
+    final angled = segment[cursor] == '<';
+    final start = angled ? ++cursor : cursor;
+    var depth = 0;
+    while (cursor < segment.length) {
+      final char = segment[cursor];
+      if (angled) {
+        if (char == '>' || char == '\n' || char == '<') break;
+      } else {
+        if (char.trim().isEmpty) break;
+        if (char == '(') depth++;
+        if (char == ')') {
+          if (depth == 0) break;
+          depth--;
+        }
+      }
+      cursor++;
+    }
+    if (cursor == start || cursor >= segment.length) continue;
+    final destination = segment.substring(start, cursor);
+    if (angled) {
+      if (segment[cursor] != '>') continue;
+      cursor++;
+    }
+    // gpt_markdown has no title parameter. Retain the label/alt text while
+    // removing an optional Markdown title from the fetch destination.
+    final suffix = RegExp(
+      r'''\s*(?:"[^"\n]*"|'[^'\n]*')?\s*\)''',
+    ).matchAsPrefix(segment, cursor);
+    if (suffix == null) continue;
+    result.write(_normalizeProseLinks(segment.substring(offset, match.start)));
+    result.write('${match[1]}(${normalizeMarkdownDestination(destination)})');
+    offset = suffix.end;
+  }
+  result.write(_normalizeProseLinks(segment.substring(offset)));
+  return result.toString();
+}
+
+String _normalizeProseLinks(String segment) {
   var normalized = segment.replaceAllMapped(
     _autolinkPattern,
     (match) => '[${match[1]}](${match[1]})',

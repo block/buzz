@@ -30,6 +30,45 @@ void main() {
     );
   });
 
+  group('attachment destinations', () {
+    const media = 'https://relay.example/media/image.png';
+    for (final prefix in ['!', '']) {
+      test('$prefix preserves angle destinations and optional titles', () {
+        for (final destination in ['<$media>', media, '<$media> "Title"']) {
+          expect(
+            normalizeBareLinks('$prefix[label]($destination)'),
+            '$prefix[label]($media)',
+          );
+        }
+      });
+    }
+    test('escapes spaces and parentheses without double-encoding URLs', () {
+      const raw = 'https://relay.example/media/photo (1).png?q=a%20b&v=2';
+      const encoded =
+          'https://relay.example/media/photo%20%281%29.png?q=a%20b&v=2';
+      expect(normalizeBareLinks('![photo](<$raw>)'), '![photo]($encoded)');
+      expect(normalizeBareLinks('![photo]($encoded)'), '![photo]($encoded)');
+      expect(
+        normalizeBareLinks('![photo](https://relay.example/a(b).png)'),
+        '![photo](https://relay.example/a%28b%29.png)',
+      );
+    });
+    test('normalizes prose surrounding multiple authored destinations', () {
+      expect(
+        normalizeBareLinks('See <$media> ![one](<$media>) [two](<$media>)'),
+        'See [$media]($media) ![one]($media) [two]($media)',
+      );
+    });
+    test('preserves attachment examples inside inline and fenced code', () {
+      const example = '![photo](<$media>)';
+      expect(normalizeBareLinks('`$example`'), '`$example`');
+      expect(
+        normalizeBareLinks('```md\n$example\n```'),
+        '```md\n$example\n```',
+      );
+    });
+  });
+
   group('code boundaries', () {
     final cases = <({String name, String input, String expected})>[
       (

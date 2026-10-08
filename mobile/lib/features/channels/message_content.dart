@@ -219,11 +219,17 @@ class MessageContent extends HookConsumerWidget {
             ..sort((a, b) => a.key.compareTo(b.key))))
         '${entry.key}\u0000${entry.value}',
     ].join('\u0001');
-    final imetaByUrl = parseImetaTags(tags);
+    final imetaByUrl = {
+      for (final entry in parseImetaTags(tags).entries)
+        normalizeMarkdownDestination(entry.key): entry.value,
+    };
+    final normalizedContent = useMemoized(() => normalizeBareLinks(content), [
+      content,
+    ]);
     final trailingGallery = maxLines == null
-        ? extractTrailingImageGallery(content, imetaByUrl)
+        ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
-    final markdownContent = trailingGallery?.content ?? content;
+    final markdownContent = trailingGallery?.content ?? normalizedContent;
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
@@ -257,17 +263,12 @@ class MessageContent extends HookConsumerWidget {
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
 
-    final linkNormalizedContent = useMemoized(
-      () => normalizeBareLinks(markdownContent),
-      [markdownContent],
-    );
-
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = linkNormalizedContent.split('`');
+      final mentionParts = markdownContent.split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
@@ -295,7 +296,7 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [linkNormalizedContent, mentionPresentationKey]);
+    }, [markdownContent, mentionPresentationKey]);
 
     final inlineComponents = _useMessageInlineComponents(
       content: content,
