@@ -31,7 +31,7 @@ class _RemindersList extends ConsumerWidget {
     }
     if (reminders.isEmpty) {
       return const _EmptySurface(
-        icon: LucideIcons.clock,
+        icon: BuzzIcons.clock,
         message: 'No reminders',
         detail: 'Reminders you set will show up here.',
       );
@@ -53,7 +53,7 @@ class _RemindersList extends ConsumerWidget {
           return ListTile(
             key: ValueKey('reminder-row-${reminder.id}'),
             leading: Icon(
-              due ? LucideIcons.bellRing : LucideIcons.clock,
+              due ? BuzzIcons.bellRing : BuzzIcons.clock,
               size: 20,
               color: due
                   ? context.colors.primary
@@ -99,7 +99,7 @@ class _DraftsList extends ConsumerWidget {
     final names = ref.watch(identityNameSourcesProvider);
     if (drafts.isEmpty) {
       return const _EmptySurface(
-        icon: LucideIcons.filePen,
+        icon: BuzzIcons.filePen,
         message: 'No drafts',
         detail: 'Unsent messages you start composing will show up here.',
       );
@@ -124,7 +124,7 @@ class _DraftsList extends ConsumerWidget {
         return ListTile(
           key: ValueKey('draft-row-${draft.key}'),
           leading: Icon(
-            LucideIcons.filePen,
+            BuzzIcons.filePen,
             size: 20,
             color: context.colors.onSurfaceVariant,
           ),
@@ -133,7 +133,7 @@ class _DraftsList extends ConsumerWidget {
             draft.threadHeadId != null ? 'Thread in $destination' : destination,
           ),
           trailing: IconButton(
-            icon: const Icon(LucideIcons.trash2, size: 18),
+            icon: const Icon(BuzzIcons.trash2, size: 18),
             tooltip: 'Delete draft',
             onPressed: () => onDelete(draft),
           ),

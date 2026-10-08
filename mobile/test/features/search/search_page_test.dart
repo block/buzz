@@ -15,7 +15,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -1085,7 +1085,7 @@ void main() {
     );
     expect(content.mentionNames, {agentPubkey: 'Helper Bot'});
     expect(content.agentMentionPubkeys, contains(agentPubkey));
-    expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+    expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
   });
 
   testWidgets('does not label an unjoined channel as having zero members', (

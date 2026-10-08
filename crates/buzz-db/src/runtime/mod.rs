@@ -1,8 +1,12 @@
+mod admitted_tx;
+mod cold_start;
 mod connection_observability;
 pub mod migration;
 pub(crate) mod observability;
 pub mod replica_fence;
 
+pub use admitted_tx::AdmittedTx;
+pub use cold_start::ColdStartError;
 pub use connection_observability::{DbConnectionOutcome, DbConnectionStep};
 pub(crate) use connection_observability::{
     CONNECTION_DURATION_STEPS, CONNECTION_RAW_SERIES_PER_POD, CONNECTION_STARTED_STEPS,
@@ -13,7 +17,7 @@ use crate::{deletion, event, DbError, EventQuery, Result};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Acquire, PgPool, QueryBuilder};
+use sqlx::{PgPool, QueryBuilder};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -41,20 +45,19 @@ pub async fn insert_mentions(
         observability::WriterOperation::EventWrite,
     )
     .await?;
-    insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
-    tx.commit().await?;
-    Ok(())
+    insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
+    tx.commit().await
 }
 
-/// Insert mention rows on the caller's transaction. Replacement writes use
-/// this so the authoritative event and its discovery index commit or roll back
-/// as one unit.
+/// Insert mention rows on the caller's admitted transaction. Replacement
+/// writes use this so the authoritative event and its discovery index commit
+/// or roll back as one unit.
 pub(crate) async fn insert_mentions_in_transaction(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
+    let community_id = tx.community();
     let p_tags: Vec<&str> = event
         .tags
         .iter()
@@ -123,7 +126,7 @@ pub(crate) async fn insert_mentions_in_transaction(
 
         qb.push(" ON CONFLICT DO NOTHING");
 
-        qb.build().execute(&mut **tx).await?;
+        qb.build().execute(tx.conn()).await?;
     }
     Ok(())
 }
@@ -135,7 +138,7 @@ async fn begin_community_event_write_transaction_with_metric_population(
     community: CommunityId,
     operation: observability::WriterOperation,
     metric_population: CommunityEventWriteMetricPopulation,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+) -> Result<AdmittedTx> {
     let connection = match metric_population {
         CommunityEventWriteMetricPopulation::TypedOnly => {
             observability::acquire_writer(pool, operation).await?
@@ -144,11 +147,8 @@ async fn begin_community_event_write_transaction_with_metric_population(
             observability::acquire_writer_with_legacy_metrics(pool, operation).await?
         }
     };
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-    deletion::DeletionStore::new(pool.clone())
-        .guard_transaction(&mut tx, community)
-        .await?;
-    Ok(tx)
+    let tx = sqlx::Transaction::begin(connection, None).await?;
+    AdmittedTx::admit(tx, &deletion::DeletionStore::new(pool.clone()), community).await
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +161,7 @@ pub(crate) async fn begin_community_event_write_transaction(
     pool: &PgPool,
     community: CommunityId,
     operation: observability::WriterOperation,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+) -> Result<AdmittedTx> {
     begin_community_event_write_transaction_with_metric_population(
         pool,
         community,
@@ -175,7 +175,7 @@ pub(crate) async fn begin_community_event_write_transaction_with_legacy_metrics(
     pool: &PgPool,
     community: CommunityId,
     operation: observability::WriterOperation,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+) -> Result<AdmittedTx> {
     begin_community_event_write_transaction_with_metric_population(
         pool,
         community,
@@ -1308,17 +1308,15 @@ impl Db {
     /// the shared community admission lock before returning, so callers that use
     /// it cannot take domain or row locks ahead of tenant admission, and a
     /// quiescing community rejects the write at entry rather than at its first
-    /// fenced statement. The compiler does not enforce this: a transaction
-    /// opened from [`Db::pool`] can still reach the public `*_in_transaction`
-    /// helpers, and only the source-policy tests and the commit-time database
-    /// fences, which remain the authoritative backstop, catch it.
-    ///
-    /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
-    /// The transaction holds an owned pool handle, not a borrow.
+    /// fenced statement. The returned [`AdmittedTx`] is the only type the
+    /// event-write `*_in_transaction` helpers accept, and it carries
+    /// `community`, so the compiler rejects a raw transaction or one admitted
+    /// for another community. Outside this crate, [`AdmittedTx::commit`] is
+    /// the only commit path; see [`AdmittedTx`] for the in-crate limit.
     pub async fn begin_event_write_transaction(
         &self,
         community: CommunityId,
-    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+    ) -> Result<AdmittedTx> {
         begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community,
@@ -1339,7 +1337,6 @@ impl Db {
         event: &nostr::Event,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let community_id = lease.community_id;
         let kind_u16 = event.kind.as_u16();
         let kind_u32 = u32::from(kind_u16);
         if kind_u32 == buzz_core::kind::KIND_AUTH {
@@ -1352,32 +1349,30 @@ impl Db {
         let connection =
             observability::acquire_writer(&self.pool, observability::WriterOperation::EventWrite)
                 .await?;
-        let mut tx = sqlx::Transaction::begin(connection, None).await?;
-        self.deletion_store()
-            .guard_transaction_with_serving_lease(&mut tx, lease)
-            .await?;
-        event::acquire_canvas_event_write_lock_if_needed(&mut tx, community_id, event, channel_id)
-            .await?;
-        let result = event::insert_event_with_thread_metadata_tx(
-            &mut tx,
-            community_id,
-            event,
-            channel_id,
-            None,
-        )
-        .await?;
+        let tx = sqlx::Transaction::begin(connection, None).await?;
+        let mut tx =
+            AdmittedTx::admit_with_serving_lease(tx, &self.deletion_store(), lease).await?;
+        event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
+        let result =
+            event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, None).await?;
         if result.1 {
             // Index mentions in the event's own transaction so a concurrent
             // deletion cannot strand an orphan row. A savepoint keeps the
             // existing best-effort contract: an indexing failure never rejects
             // an otherwise valid event.
-            let mut savepoint = tx.begin().await?;
-            match insert_mentions_in_transaction(&mut savepoint, community_id, event, channel_id)
-                .await
-            {
-                Ok(()) => savepoint.commit().await?,
+            sqlx::query("SAVEPOINT serving_write_mentions")
+                .execute(tx.conn())
+                .await?;
+            match insert_mentions_in_transaction(&mut tx, event, channel_id).await {
+                Ok(()) => {
+                    sqlx::query("RELEASE SAVEPOINT serving_write_mentions")
+                        .execute(tx.conn())
+                        .await?;
+                }
                 Err(e) => {
-                    savepoint.rollback().await?;
+                    sqlx::query("ROLLBACK TO SAVEPOINT serving_write_mentions")
+                        .execute(tx.conn())
+                        .await?;
                     tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
                 }
             }

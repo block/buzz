@@ -3,15 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
 
 const appearanceModeOptions = <({ThemeMode mode, String label, IconData icon})>[
-  (mode: ThemeMode.light, label: 'Light', icon: LucideIcons.sun),
-  (mode: ThemeMode.dark, label: 'Dark', icon: LucideIcons.moon),
-  (mode: ThemeMode.system, label: 'System', icon: LucideIcons.sunMoon),
+  (mode: ThemeMode.light, label: 'Light', icon: BuzzIcons.sun),
+  (mode: ThemeMode.dark, label: 'Dark', icon: BuzzIcons.moon),
+  (mode: ThemeMode.system, label: 'System', icon: BuzzIcons.sunMoon),
 ];
 
 String appearanceModeLabel(ThemeMode mode) =>

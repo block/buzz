@@ -374,7 +374,10 @@ pub async fn archive_community(
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
     let tenant = TenantContext::resolved(record.id, &record.host);
-    let closed = match state.disconnect_community_clusterwide(&tenant).await {
+    let closed = match state
+        .disconnect_community_clusterwide(&tenant, record.archived_at)
+        .await
+    {
         Ok(closed) => closed,
         Err(error) => {
             tracing::warn!(community = %record.id, host = %record.host, %error, "community archived but disconnect propagation is pending");
@@ -2379,6 +2382,359 @@ mod postgres_tests {
             json.get("owner_pubkey").and_then(Value::as_str),
             Some(owner_hex.as_str())
         );
+    }
+
+    /// A relay that predates the archive transition timestamp publishes a bare
+    /// `DisconnectCommunity`. A current relay must still apply it under the
+    /// lifecycle fence: never against a restored community, and with the
+    /// archive close reason against an archived one.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_disconnect_command_is_fenced_by_community_lifecycle() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let owner_hex = owner.public_key().to_hex();
+
+        // Active (for example, unarchived before the command arrived): keep sockets.
+        let active_cancel = CancellationToken::new();
+        let active_control = CommunityConnectionControl::new(active_cancel.clone());
+        let active_reason = active_control.disconnect_reason();
+        let active_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, active_control);
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            None
+        );
+        assert!(
+            !active_cancel.is_cancelled(),
+            "a legacy disconnect must not close an active community"
+        );
+        assert_eq!(*active_reason.borrow(), None);
+
+        // Archived: close with the archive reason, not `community deleted`.
+        state
+            .db
+            .archive_community_owned_by(&host, &owner_hex, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            Some(1)
+        );
+        assert!(active_cancel.is_cancelled());
+        assert_eq!(
+            *active_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        // Fenced deletion: this is the state `buzz-deletion` publishes the bare
+        // command from, so it must close with the deletion reason even though
+        // the row is also archived.
+        drop(active_guard);
+        let deleted_cancel = CancellationToken::new();
+        let deleted_control = CommunityConnectionControl::new(deleted_cancel.clone());
+        let deleted_reason = deleted_control.disconnect_reason();
+        let _deleted_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, deleted_control);
+        let mut tx = state
+            .db
+            .pool()
+            .begin()
+            .await
+            .expect("begin deletion fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+             set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(community.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("enter deletion executor scope");
+        sqlx::query("UPDATE communities SET deletion_state = 'fenced' WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("fence community deletion");
+        tx.commit().await.expect("commit deletion fixture");
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("fenced legacy disconnect"),
+            Some(1)
+        );
+        assert!(deleted_cancel.is_cancelled());
+        assert_eq!(
+            *deleted_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
+    }
+
+    /// Lifecycle revalidation runs for every live community on every pod each
+    /// tick. Active communities must be checked without the row lock, so a
+    /// conflicting lock on an active row must not stall the tick, while an
+    /// archived community is still closed under the fence.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn revalidation_skips_the_row_lock_for_active_communities() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let reason = control.disconnect_reason();
+        let guard = state
+            .community_connections
+            .register(Uuid::new_v4(), community, control);
+
+        let mut row_lock = state.db.pool().begin().await.expect("begin row lock");
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *row_lock)
+            .await
+            .expect("hold the community row lock");
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                state.revalidate_live_communities()
+            )
+            .await
+            .expect("revalidation must not wait on an active community's row lock"),
+            0
+        );
+        row_lock.rollback().await.expect("release row lock");
+        assert!(!cancel.is_cancelled());
+
+        state
+            .db
+            .archive_community_owned_by(&host, &owner.public_key().to_hex(), "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(state.revalidate_live_communities().await, 1);
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            *reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        drop(guard);
+
+        // A community fenced for deletion but never archived must not pass the
+        // unlocked active pre-check; it closes with the deletion reason.
+        let deleted_host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &deleted_host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let deleted_community = state
+            .db
+            .lookup_community_by_host(&deleted_host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let deleted_cancel = CancellationToken::new();
+        let deleted_control = CommunityConnectionControl::new(deleted_cancel.clone());
+        let deleted_reason = deleted_control.disconnect_reason();
+        let _deleted_guard = state.community_connections.register(
+            Uuid::new_v4(),
+            deleted_community,
+            deleted_control,
+        );
+        let mut tx = state
+            .db
+            .pool()
+            .begin()
+            .await
+            .expect("begin deletion fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+             set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(deleted_community.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("enter deletion executor scope");
+        sqlx::query("UPDATE communities SET deletion_state = 'fenced' WHERE id = $1")
+            .bind(deleted_community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("fence community deletion");
+        tx.commit().await.expect("commit deletion fixture");
+        assert_eq!(state.revalidate_live_communities().await, 1);
+        assert!(deleted_cancel.is_cancelled());
+        assert_eq!(
+            *deleted_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
+    }
+
+    /// The connection-control consumer serves ban disconnects and archive
+    /// disconnects from one receiver. An archive disconnect waits on the
+    /// community row lock, so a pubkey disconnect queued behind it must still
+    /// close its socket promptly, and the archive disconnect must still land
+    /// once the lock is released.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn conn_control_consumer_does_not_queue_pubkey_disconnects_behind_a_locked_archive() {
+        use crate::state::{CommunityConnectionControl, CommunityDisconnectReason};
+        use buzz_pubsub::conn_control::{ConnControl, ScopedConnControl};
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(Arc::clone(&state), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("active admission lookup")
+            .expect("active community")
+            .id;
+        let community_control = CommunityConnectionControl::new(CancellationToken::new());
+        let community_reason = community_control.disconnect_reason();
+        let _community_guard = state.community_connections.register(
+            Uuid::new_v4(),
+            community,
+            community_control.clone(),
+        );
+        let banned = [7u8; 32];
+        let banned_control = CommunityConnectionControl::new(CancellationToken::new());
+        banned_control.bind_pubkey(banned);
+        let banned_reason = banned_control.disconnect_reason();
+        let _banned_guard =
+            state
+                .community_connections
+                .register(Uuid::new_v4(), community, banned_control.clone());
+
+        let archived = state
+            .db
+            .archive_community_owned_by(&host, &owner.public_key().to_hex(), "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        let mut row_lock = state.db.pool().begin().await.expect("begin row lock");
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *row_lock)
+            .await
+            .expect("hold the community row lock");
+
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let consumer = tokio::spawn(Arc::clone(&state).run_conn_control_consumer(rx));
+        tx.send(ScopedConnControl {
+            community_id: community,
+            command: ConnControl::DisconnectCommunity {
+                archived_at: Some(archived.archived_at),
+            },
+        })
+        .expect("send community disconnect");
+        tx.send(ScopedConnControl {
+            community_id: community,
+            command: ConnControl::DisconnectPubkey {
+                pubkey: banned.to_vec(),
+                event_id: "ban".to_string(),
+                reason: "blocked: you are banned from this community".to_string(),
+                unowned_only: false,
+            },
+        })
+        .expect("send pubkey disconnect");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            banned_control.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("a pubkey disconnect must not wait behind a locked community disconnect");
+        assert_eq!(
+            *banned_reason.borrow(),
+            Some(CommunityDisconnectReason::AccessRevoked)
+        );
+        assert!(
+            !community_control.cancellation_token().is_cancelled(),
+            "the community disconnect must wait for the row lock"
+        );
+
+        row_lock.rollback().await.expect("release row lock");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            community_control.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("the community disconnect must land once the row lock is released");
+        assert_eq!(
+            *community_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityArchived)
+        );
+
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(5), consumer)
+            .await
+            .expect("the consumer must stop when the broadcast closes")
+            .expect("consumer task");
     }
 
     #[tokio::test]

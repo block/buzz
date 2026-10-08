@@ -130,7 +130,7 @@ class _ThreadMessageList extends HookWidget {
                     key: const ValueKey('thread-replies-retry'),
                     onPressed: onRetryReplies,
                     tooltip: 'Retry',
-                    icon: const Icon(LucideIcons.refreshCcw, size: 16),
+                    icon: const Icon(BuzzIcons.refreshCcw, size: 16),
                   ),
                 const SizedBox(width: Grid.xxs),
                 Expanded(child: Divider(color: context.colors.outlineVariant)),

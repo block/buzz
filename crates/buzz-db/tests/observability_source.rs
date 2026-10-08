@@ -174,7 +174,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .0;
     assert!(soft_delete_discovery.contains("WriterOperation::EventWrite"));
     assert!(soft_delete_discovery.contains("begin_community_event_write_transaction("));
-    assert!(soft_delete_discovery.contains("execute(&mut *tx)"));
+    assert!(soft_delete_discovery.contains("execute(tx.conn())"));
 
     let side_effects = include_str!("../../buzz-relay/src/handlers/side_effects.rs");
     assert!(side_effects.contains("query_events_for_event_write"));
@@ -658,17 +658,12 @@ fn pool_level_insert_mentions_opens_the_tenant_local_chokepoint() {
 
 #[test]
 fn event_write_paths_include_tenant_local_chokepoint_calls() {
-    fn has_any_tenant_local_chokepoint(source: &str) -> bool {
-        source.contains(COMMUNITY_CHOKEPOINT_MARKER)
-            || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
-    }
-
     let event = include_str!("../src/store/event.rs");
     let insert_event = event
         .split_once("pub async fn insert_event(\n")
         .expect("event store must expose pool-level insert_event")
         .1
-        .split_once("/// Insert a Nostr event in a caller-owned PostgreSQL transaction.")
+        .split_once("/// Insert a Nostr event in a caller-owned admitted transaction")
         .expect("pool insert must precede transaction-seam insert")
         .0;
     assert!(
@@ -854,7 +849,7 @@ fn legacy_compatibility_metrics_remain_pinned_to_the_preexisting_event_write_ent
         .split_once("pub async fn insert_event(\n")
         .expect("event store must expose pool-level insert_event")
         .1
-        .split_once("/// Insert a Nostr event in a caller-owned PostgreSQL transaction.")
+        .split_once("/// Insert a Nostr event in a caller-owned admitted transaction")
         .expect("pool insert must precede transaction-seam insert")
         .0;
     assert!(
@@ -884,17 +879,17 @@ fn legacy_compatibility_metrics_remain_pinned_to_the_preexisting_event_write_ent
     );
 }
 
-/// Function-level syntactic routing backstop.
+/// Function-level routing check for guarded-table writers.
 ///
 /// A file can contain both a legitimate chokepoint writer and a bypass writer.
-/// This check is intentionally source-shape only: every writing function must
-/// expose a syntactic route marker by either calling the tenant-local
-/// community chokepoint, accepting a caller-owned guarded
-/// transaction/connection, or using reviewed adapter-owned transaction state
-/// whose constructor is pinned to the same chokepoint.
+/// Every writing function must either open the tenant-local community
+/// chokepoint itself, take a caller-owned `&mut AdmittedTx` (which only the
+/// chokepoint can construct, so the compiler proves provenance), use reviewed
+/// adapter-owned transaction state whose constructor is pinned to the
+/// chokepoint, or appear in a reviewed exception list below.
 ///
-/// It does not prove transaction/connection provenance or relay-side admission;
-/// commit-time database fences remain the authoritative safety backstop.
+/// A raw `&mut Transaction` or `&mut PgConnection` parameter is not a route:
+/// nothing about its type says the transaction was admitted.
 const GUARDED_TABLE_WRITE_MARKERS: [&str; 9] = [
     "INSERT INTO events",
     "UPDATE events",
@@ -916,12 +911,7 @@ fn has_any_tenant_local_chokepoint(source: &str) -> bool {
         || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
 }
 
-const GUARDED_TX_SIGNATURE_MARKERS: [&str; 4] = [
-    "&mut sqlx::Transaction<",
-    "&mut Transaction<",
-    "&mut PgConnection",
-    "&mut sqlx::PgConnection",
-];
+const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate::AdmittedTx"];
 
 // Narrow reviewed exceptions for non-serving verification probes only.
 const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 3] = [
@@ -1005,9 +995,9 @@ fn function_is_guarded_write_exception(function_header: &str) -> bool {
         .any(|exception| function_header.starts_with(exception))
 }
 
-fn function_accepts_guarded_transaction_or_connection(function_source: &str) -> bool {
+fn function_accepts_admitted_transaction(function_source: &str) -> bool {
     let signature = function_source.split('{').next().unwrap_or(function_source);
-    GUARDED_TX_SIGNATURE_MARKERS
+    ADMITTED_TX_SIGNATURE_MARKERS
         .iter()
         .any(|marker| signature.contains(marker))
 }
@@ -1038,7 +1028,7 @@ fn function_has_syntactic_guarded_write_route(
     let header = function_header(function_source);
 
     has_any_tenant_local_chokepoint(function_source)
-        || function_accepts_guarded_transaction_or_connection(function_source)
+        || function_accepts_admitted_transaction(function_source)
         || (function_uses_guarded_tx_adapter_state(function_source)
             && adapter_constructor_is_chokepoint_pinned(production_source, header))
 }
@@ -1135,196 +1125,71 @@ pub async fn bypass_with_pool_begin(pool: &sqlx::PgPool) {
     );
 }
 
-fn should_scan_guarded_write_source_file(path: &std::path::Path) -> bool {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("");
-    path.extension().is_some_and(|ext| ext == "rs")
-        // Whole files loaded only via `#[cfg(test)] #[path = "..."] mod ...;` are
-        // entirely test code but carry no internal `#[cfg(test)]` marker of their
-        // own to slice against. Standalone `*_tests.rs` modules share that shape.
-        && file_name != "tests.rs"
-        && !file_name.ends_with("_tests.rs")
+#[test]
+fn serving_table_policy_requires_admitted_tx_not_raw_transactions() {
+    let source = r#"
+pub(crate) async fn raw_transaction_writer(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+pub(crate) async fn raw_connection_writer(conn: &mut sqlx::PgConnection) {
+    sqlx::query("INSERT INTO event_mentions (community_id, event_id) VALUES ($1, $2)")
+        .execute(conn)
+        .await
+        .expect("write");
+}
+pub(crate) async fn admitted_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .bind(tx.community().as_uuid())
+        .execute(&mut **tx)
+        .await
+        .expect("write");
+}
+"#;
+
+    let violations = syntactic_guarded_write_route_violations(source);
+    assert_eq!(
+        violations,
+        [
+            "pub(crate) async fn raw_transaction_writer(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {",
+            "pub(crate) async fn raw_connection_writer(conn: &mut sqlx::PgConnection) {",
+        ],
+        "a raw transaction or connection parameter carries no admission proof; only \
+         `&mut AdmittedTx` does"
+    );
 }
 
 #[test]
-fn serving_table_policy_skips_standalone_test_modules() {
-    use std::path::Path;
-
-    assert!(
-        !should_scan_guarded_write_source_file(Path::new("src/runtime/tests.rs")),
-        "`tests.rs` is a standalone test-only module"
-    );
-    assert!(
-        !should_scan_guarded_write_source_file(Path::new(
-            "src/store/thread_window/postgres_tests.rs",
-        )),
-        "`*_tests.rs` modules are standalone test-only sources, not production seams"
-    );
-    assert!(
-        !should_scan_guarded_write_source_file(Path::new("src/store/foo_tests.rs")),
-        "the suffix-based rule must cover other standalone test-only modules"
-    );
-    assert!(
-        should_scan_guarded_write_source_file(Path::new("src/store/event.rs")),
-        "production source must remain in scope"
-    );
-}
-
-#[test]
-fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
-    use std::path::{Path, PathBuf};
-
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let entry = entry.expect("read directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if should_scan_guarded_write_source_file(&path) {
-                out.push(path);
-            }
-        }
-    }
-
-    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    collect_rs_files(&src_root, &mut files);
-    assert!(
-        !files.is_empty(),
-        "guarded-table scan must see production source files"
-    );
-
-    let mut checked_guarded_files = 0usize;
-    for path in files {
-        let relative = path
-            .strip_prefix(&src_root)
-            .expect("file is under src root")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let source = std::fs::read_to_string(&path).expect("read source file");
-        let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
-        if production_contains_guarded_write(production) {
-            checked_guarded_files += 1;
-            let violations = syntactic_guarded_write_route_violations(production);
-            assert!(
-                violations.is_empty(),
-                "{relative} has guarded-table INSERT/UPDATE/DELETE seams without a syntactic \
-                 route marker (tenant-local chokepoint call or caller-owned guarded \
-                 transaction/connection): {violations:?}; this source policy does not prove \
-                 provenance, so database fences remain the authoritative backstop"
-            );
-        }
-    }
-    assert!(
-        checked_guarded_files > 0,
-        "guarded-table scan must exercise at least one file that writes a fenced table"
-    );
-}
-
-/// Transaction-provenance backstop for the routing check above.
-///
-/// That check accepts any function that takes a caller-owned transaction, so
-/// it cannot see who opened the transaction. This one walks one hop up: any
-/// production function in `buzz-db` or `buzz-relay` that calls a
-/// transaction-taking event-write helper without itself taking a transaction
-/// opened that transaction, so it must have admitted it. Database fences remain
-/// the authoritative backstop; this only keeps admission at entry.
-const TRANSACTION_ADMISSION_MARKERS: [&str; 5] = [
-    COMMUNITY_CHOKEPOINT_MARKER,
-    COMMUNITY_CHOKEPOINT_LEGACY_MARKER,
-    ".begin_event_write_transaction(",
-    ".guard_transaction(",
-    ".guard_transaction_with_serving_lease(",
-];
-
-fn function_name(function_source: &str) -> Option<&str> {
-    let header = function_header(function_source);
-    let after_fn = header.split_once("fn ")?.1;
-    let end = after_fn
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .unwrap_or(after_fn.len());
-    Some(&after_fn[..end])
-}
-
-fn function_body(function_source: &str) -> &str {
-    function_source.split_once('{').map_or("", |(_, body)| body)
-}
-
-fn called_helpers<'a>(body: &str, helpers: &'a std::collections::BTreeSet<String>) -> Vec<&'a str> {
-    helpers
-        .iter()
-        .filter(|helper| {
-            body.match_indices(helper.as_str()).any(|(index, _)| {
-                let preceded_by_identifier = body[..index]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-                let rest = &body[index + helper.len()..];
-                !preceded_by_identifier && (rest.starts_with('(') || rest.starts_with("::<"))
-            })
-        })
-        .map(String::as_str)
-        .collect()
-}
-
-/// Production functions that open a transaction for an event-write helper
-/// without admitting it. `sources` holds `(label, production_source)` pairs;
-/// helpers are discovered from them, so the rule follows new helpers.
-fn unadmitted_event_write_transaction_openers(sources: &[(String, String)]) -> Vec<String> {
-    let functions: Vec<(&str, &str, &str)> = sources
-        .iter()
-        .flat_map(|(label, production)| {
-            function_slices(production)
-                .into_iter()
-                .map(move |function| (label.as_str(), production.as_str(), function))
-        })
+fn admitted_tx_is_constructed_only_by_admitting_constructors() {
+    // The fields are private to `runtime/admitted_tx.rs`, so only that file can
+    // build the value. Pin that each function there that builds it also admits
+    // the transaction it wraps, so a new unguarded constructor cannot slip in.
+    let source = include_str!("../src/runtime/admitted_tx.rs");
+    let production: String = strip_cfg_test_items(source)
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        // `impl … for AdmittedTx {` headers open a block, not a value.
+        .filter(|line| !line.trim_start().starts_with("impl"))
+        .map(|line| format!("{line}\n"))
         .collect();
-
-    // Transaction-taking functions that write a fenced table, closed over
-    // transaction-taking functions that call one of them.
-    let mut helpers: std::collections::BTreeSet<String> = functions
-        .iter()
-        .filter(|(_, _, function)| {
-            function_accepts_guarded_transaction_or_connection(function)
-                && production_contains_guarded_write(function)
-        })
-        .filter_map(|(_, _, function)| function_name(function).map(str::to_owned))
+    let constructors: Vec<&str> = function_slices(&production)
+        .into_iter()
+        .filter(|function| function.contains("Self {") || function.contains("AdmittedTx {"))
         .collect();
-    loop {
-        let discovered: Vec<String> = functions
-            .iter()
-            .filter(|(_, _, function)| function_accepts_guarded_transaction_or_connection(function))
-            .filter_map(|(_, _, function)| function_name(function).map(|name| (name, function)))
-            .filter(|(name, function)| {
-                !helpers.contains(*name)
-                    && !called_helpers(function_body(function), &helpers).is_empty()
-            })
-            .map(|(name, _)| name.to_owned())
-            .collect();
-        if discovered.is_empty() {
-            break;
-        }
-        helpers.extend(discovered);
+    assert_eq!(
+        constructors.len(),
+        2,
+        "AdmittedTx must have exactly the two admitting constructors"
+    );
+    for constructor in constructors {
+        assert!(
+            constructor.contains(".guard_transaction(&mut tx, community)")
+                || constructor.contains(".guard_transaction_with_serving_lease(&mut tx, lease)"),
+            "AdmittedTx constructor must admit the transaction it wraps: {constructor}"
+        );
     }
-
-    functions
-        .iter()
-        .filter(|(_, production, function)| {
-            let header = function_header(function);
-            let admitted = TRANSACTION_ADMISSION_MARKERS
-                .iter()
-                .any(|marker| function.contains(marker))
-                || (function_uses_guarded_tx_adapter_state(function)
-                    && adapter_constructor_is_chokepoint_pinned(production, header));
-            !function_accepts_guarded_transaction_or_connection(function)
-                && !function_is_guarded_write_exception(header)
-                && !called_helpers(function_body(function), &helpers).is_empty()
-                && !admitted
-        })
-        .map(|(label, _, function)| format!("{label}: {}", function_header(function)))
-        .collect()
 }
 
 /// Remove each top-level `#[cfg(test)]` item and keep the production code
@@ -1415,13 +1280,9 @@ pub fn after_module() {}\n";
         );
     }
 
-    let raw_opener = "pub async fn raw_opener(pool: &sqlx::PgPool) {\n\
-    let mut tx = pool.begin().await.expect(\"tx\");\n\
-    insert_row_in_transaction(&mut tx).await;\n\
-}\n\
-pub(crate) async fn insert_row_in_transaction(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {\n\
+    let raw_writer = "pub(crate) async fn raw_writer(conn: &mut sqlx::PgConnection) {\n\
     sqlx::query(\"INSERT INTO events (community_id, id) VALUES ($1, $2)\")\n\
-        .execute(&mut **tx)\n\
+        .execute(conn)\n\
         .await\n\
         .expect(\"write\");\n\
 }\n";
@@ -1435,77 +1296,68 @@ pub(crate) async fn insert_row_in_transaction(tx: &mut sqlx::Transaction<'_, sql
         ),
         ("fn u() -> &'static str { \"ws://x\" } // c", "ws://x"),
     ] {
-        let production = strip_cfg_test_items(&format!("#[cfg(test)]\n{test_item}\n{raw_opener}"));
+        let production = strip_cfg_test_items(&format!("#[cfg(test)]\n{test_item}\n{raw_writer}"));
         assert!(
             !production.contains(hidden),
             "`{test_item}` is test-only and must be skipped: {production}"
         );
-        let violations =
-            unadmitted_event_write_transaction_openers(&[("fixture".to_owned(), production)]);
+        assert!(
+            production_contains_guarded_write(&production),
+            "a guarded write after `{test_item}` must stay visible: {production}"
+        );
         assert_eq!(
-            violations,
-            ["fixture: pub async fn raw_opener(pool: &sqlx::PgPool) {"],
-            "a raw opener after `{test_item}` must still be scanned"
+            syntactic_guarded_write_route_violations(&production),
+            ["pub(crate) async fn raw_writer(conn: &mut sqlx::PgConnection) {"],
+            "a raw writer after `{test_item}` must still be scanned"
         );
     }
 }
 
+fn should_scan_guarded_write_source_file(path: &std::path::Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    path.extension().is_some_and(|ext| ext == "rs")
+        // Whole files loaded only via `#[cfg(test)] #[path = "..."] mod ...;` are
+        // entirely test code but carry no internal `#[cfg(test)]` marker of their
+        // own to slice against. Standalone `*_tests.rs` modules share that shape.
+        && file_name != "tests.rs"
+        && !file_name.ends_with("_tests.rs")
+}
+
 #[test]
-fn event_write_constructor_docs_do_not_claim_compile_time_enforcement() {
-    let source = include_str!("../src/runtime/mod.rs");
-    let docs = source
-        .split_once("    /// Begin an event-write transaction admitted for `community`.")
-        .and_then(|(_, rest)| rest.split_once("    pub async fn begin_event_write_transaction("))
-        .map(|(docs, _)| docs)
-        .expect("constructor docs");
+fn serving_table_policy_skips_standalone_test_modules() {
+    use std::path::Path;
+
     assert!(
-        !docs.contains("only public way"),
-        "Db::pool() and the pub *_in_transaction helpers still allow unadmitted transactions"
+        !should_scan_guarded_write_source_file(Path::new("src/runtime/tests.rs")),
+        "`tests.rs` is a standalone test-only module"
     );
     assert!(
-        docs.contains("The compiler does not enforce this"),
-        "the docs must say that enforcement is policy plus database fences, not types"
+        !should_scan_guarded_write_source_file(Path::new(
+            "src/store/thread_window/postgres_tests.rs",
+        )),
+        "`*_tests.rs` modules are standalone test-only sources, not production seams"
+    );
+    assert!(
+        !should_scan_guarded_write_source_file(Path::new("src/store/foo_tests.rs")),
+        "the suffix-based rule must cover other standalone test-only modules"
+    );
+    assert!(
+        should_scan_guarded_write_source_file(Path::new("src/store/event.rs")),
+        "production source must remain in scope"
     );
 }
 
 #[test]
-fn event_write_provenance_rejects_unadmitted_transaction_openers() {
-    let source = r#"
-pub(crate) async fn insert_row_in_transaction(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
-    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
-        .execute(&mut **tx)
-        .await
-        .expect("write");
-}
-pub(crate) async fn forward_in_transaction(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) {
-    insert_row_in_transaction(tx).await;
-}
-pub async fn admitted_opener(db: &Db, community: CommunityId) {
-    let mut tx = db.begin_event_write_transaction(community).await.expect("tx");
-    forward_in_transaction(&mut tx).await;
-}
-pub async fn raw_opener(pool: &sqlx::PgPool) {
-    let mut tx = pool.begin().await.expect("tx");
-    crate::store::forward_in_transaction(&mut tx).await;
-}
-"#;
-    let violations =
-        unadmitted_event_write_transaction_openers(&[("fixture".to_owned(), source.to_owned())]);
-    assert_eq!(
-        violations,
-        ["fixture: pub async fn raw_opener(pool: &sqlx::PgPool) {"],
-        "an opener that hands an unadmitted transaction to an event-write helper, even through \
-         a pass-through helper, must be rejected; an admitted opener must not"
-    );
-}
-
-#[test]
-fn event_write_transactions_are_admitted_where_they_are_opened() {
+fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
     use std::path::{Path, PathBuf};
 
     fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let path = entry.expect("read directory entry").path();
+            let entry = entry.expect("read directory entry");
+            let path = entry.path();
             if path.is_dir() {
                 collect_rs_files(&path, out);
             } else if should_scan_guarded_write_source_file(&path) {
@@ -1514,15 +1366,20 @@ fn event_write_transactions_are_admitted_where_they_are_opened() {
         }
     }
 
+    // `buzz-relay` is scanned too: relay code reaches fenced tables only through
+    // `buzz-db` helpers, and a direct relay write must meet the same rule.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut sources = Vec::new();
+    let mut checked_guarded_files = 0usize;
     for (crate_name, src_root) in [
         ("buzz-db", manifest.join("src")),
         ("buzz-relay", manifest.join("../buzz-relay/src")),
     ] {
         let mut files = Vec::new();
         collect_rs_files(&src_root, &mut files);
-        assert!(!files.is_empty(), "{crate_name} source must be scanned");
+        assert!(
+            !files.is_empty(),
+            "guarded-table scan must see {crate_name} production source files"
+        );
         for path in files {
             let relative = path
                 .strip_prefix(&src_root)
@@ -1530,20 +1387,21 @@ fn event_write_transactions_are_admitted_where_they_are_opened() {
                 .to_string_lossy()
                 .replace('\\', "/");
             let source = std::fs::read_to_string(&path).expect("read source file");
-            sources.push((
-                format!("{crate_name}/src/{relative}"),
-                strip_cfg_test_items(&source),
-            ));
+            let production = strip_cfg_test_items(&source);
+            if production_contains_guarded_write(&production) {
+                checked_guarded_files += 1;
+                let violations = syntactic_guarded_write_route_violations(&production);
+                assert!(
+                    violations.is_empty(),
+                    "{crate_name}/src/{relative} has guarded-table INSERT/UPDATE/DELETE seams \
+                     that neither open the tenant-local chokepoint nor take `&mut AdmittedTx`: \
+                     {violations:?}"
+                );
+            }
         }
     }
-
-    let violations = unadmitted_event_write_transaction_openers(&sources);
     assert!(
-        violations.is_empty(),
-        "these functions open a transaction for an event-write helper without community \
-         admission; open it with Db::begin_event_write_transaction(community) or \
-         begin_community_event_write_transaction (this scan checks that admission is present, \
-         not that it precedes domain locks; per-path PostgreSQL tests pin ordering): \
-         {violations:?}"
+        checked_guarded_files > 0,
+        "guarded-table scan must exercise at least one file that writes a fenced table"
     );
 }

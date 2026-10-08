@@ -9,7 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
@@ -554,7 +554,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
                                           errorBuilder: (_, _, _) =>
                                               const _MediaLoadFailure(
                                                 message: 'Failed to load image',
-                                                icon: LucideIcons.imageOff,
+                                                icon: BuzzIcons.imageOff,
                                               ),
                                         ),
                                       ),

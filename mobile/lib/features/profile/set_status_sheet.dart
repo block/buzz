@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
@@ -154,7 +154,7 @@ class _SetStatusSheet extends HookConsumerWidget {
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
         ),
-        icon: const Icon(LucideIcons.check, size: 22),
+        icon: const Icon(BuzzIcons.check, size: 22),
       ),
     );
 
@@ -197,15 +197,15 @@ class _SetStatusSheet extends HookConsumerWidget {
                 label: 'Duration',
                 children: [
                   AppListRow(
-                    icon: LucideIcons.clock3,
+                    icon: BuzzIcons.clock3,
                     title: 'Duration',
                     value: duration.value.label,
-                    trailing: const Icon(LucideIcons.chevronDown, size: 18),
+                    trailing: const Icon(BuzzIcons.chevronDown, size: 18),
                     onTap: chooseDuration,
                   ),
                   if (duration.value == _StatusDuration.custom)
                     AppListRow(
-                      icon: LucideIcons.calendarClock,
+                      icon: BuzzIcons.calendarClock,
                       title: 'Until',
                       value: _formatUntil(customUntil.value),
                       onTap: pickCustomUntil,
@@ -241,7 +241,7 @@ class _SetStatusSheet extends HookConsumerWidget {
                 AppListCard(
                   children: [
                     AppListRow(
-                      icon: LucideIcons.trash2,
+                      icon: BuzzIcons.trash2,
                       title: 'Clear status',
                       titleColor: context.colors.error,
                       onTap: isSaving.value ? null : handleClear,
@@ -317,7 +317,7 @@ class _StatusInput extends ConsumerWidget {
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
                         icon: Icon(
-                          LucideIcons.x,
+                          BuzzIcons.x,
                           size: 14,
                           color: context.colors.onSurface,
                         ),
@@ -366,7 +366,7 @@ class _StatusEmojiPreview extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     if (emoji.isEmpty) {
       return Icon(
-        LucideIcons.smilePlus,
+        BuzzIcons.smilePlus,
         size: _emojiGlyphSize,
         color: context.colors.onSurfaceVariant,
       );
@@ -406,7 +406,7 @@ Future<_StatusDuration?> _showStatusDurationSheet(
               AppListRow(
                 title: option.label,
                 trailing: option == selected
-                    ? const Icon(LucideIcons.check, size: 18)
+                    ? const Icon(BuzzIcons.check, size: 18)
                     : null,
                 onTap: () => Navigator.of(sheetContext).pop(option),
               ),

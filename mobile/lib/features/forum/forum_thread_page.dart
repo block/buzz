@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay_closed_policy.dart';
@@ -90,7 +90,7 @@ class ForumThreadPage extends HookConsumerWidget {
               onPressed: () =>
                   _showPostActions(context, ref, threadAsync.value!),
               tooltip: 'Post actions',
-              icon: const Icon(LucideIcons.ellipsis),
+              icon: const Icon(BuzzIcons.ellipsis),
             ),
         ],
       ),
@@ -147,7 +147,7 @@ class ForumThreadPage extends HookConsumerWidget {
             child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: const Icon(LucideIcons.copy),
+                  leading: const Icon(BuzzIcons.copy),
                   title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -156,7 +156,7 @@ class ForumThreadPage extends HookConsumerWidget {
                 ),
                 ListTile(
                   leading: Icon(
-                    LucideIcons.trash2,
+                    BuzzIcons.trash2,
                     color: sheetContext.colors.error,
                   ),
                   title: Text(
@@ -274,7 +274,7 @@ class _ThreadContent extends HookConsumerWidget {
                 child: Row(
                   children: [
                     Icon(
-                      LucideIcons.messageSquare,
+                      BuzzIcons.messageSquare,
                       size: 16,
                       color: context.colors.onSurfaceVariant,
                     ),
@@ -554,7 +554,7 @@ class _ReplyRow extends ConsumerWidget {
                 child: IconButton(
                   onPressed: () => _showActions(context, ref),
                   icon: Icon(
-                    LucideIcons.ellipsis,
+                    BuzzIcons.ellipsis,
                     size: 16,
                     color: context.colors.onSurfaceVariant,
                   ),
@@ -608,7 +608,7 @@ class _ReplyRow extends ConsumerWidget {
             child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: const Icon(LucideIcons.copy),
+                  leading: const Icon(BuzzIcons.copy),
                   title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -618,7 +618,7 @@ class _ReplyRow extends ConsumerWidget {
                 if (isOwn)
                   ListTile(
                     leading: Icon(
-                      LucideIcons.trash2,
+                      BuzzIcons.trash2,
                       color: sheetContext.colors.error,
                     ),
                     title: Text(

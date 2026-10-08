@@ -9,7 +9,7 @@ import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -119,10 +119,8 @@ void main() {
         ),
         findsOneWidget,
       );
-      final copy = tester.getRect(find.byIcon(LucideIcons.copy));
-      final chevron = tester.getRect(
-        find.byIcon(LucideIcons.chevronRight).first,
-      );
+      final copy = tester.getRect(find.byIcon(BuzzIcons.copy));
+      final chevron = tester.getRect(find.byIcon(BuzzIcons.chevronRight).first);
       expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
 
       await tester.tap(find.text('Copy public key (npub)'));

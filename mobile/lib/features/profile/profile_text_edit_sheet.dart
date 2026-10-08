@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_sheet_header.dart';
@@ -96,7 +96,7 @@ class ProfileTextEditSheet extends HookWidget {
                   borderRadius: BorderRadius.circular(Radii.dialog),
                 ),
               ),
-              icon: const Icon(LucideIcons.x, size: 22),
+              icon: const Icon(BuzzIcons.x, size: 22),
             ),
           );
 

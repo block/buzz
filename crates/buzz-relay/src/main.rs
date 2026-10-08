@@ -1465,43 +1465,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // ban row is the durable backstop; even a dropped command still refuses the
     // banned member's next auth attempt at the auth seam.
     {
-        let state_for_conn_ctrl = Arc::clone(&state);
-        let mut rx = state_for_conn_ctrl.pubsub.subscribe_conn_control();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(scoped) => match scoped.command {
-                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
-                            state_for_conn_ctrl
-                                .community_connections
-                                .disconnect_community(scoped.community_id);
-                        }
-                        buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
-                            pubkey,
-                            event_id,
-                            reason,
-                            unowned_only,
-                        } => {
-                            state_for_conn_ctrl.disconnect_pubkey_local(
-                                scoped.community_id,
-                                &pubkey,
-                                &event_id,
-                                &reason,
-                                unowned_only,
-                            );
-                        }
-                    },
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_conn_control_lag_total").increment(n);
-                        tracing::warn!("Connection-control consumer lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("Connection-control broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
+        let rx = state.pubsub.subscribe_conn_control();
+        tokio::spawn(Arc::clone(&state).run_conn_control_consumer(rx));
     }
 
     // Cross-pod NIP-FI disconnect consumer: receive deny entries from remote

@@ -64,8 +64,13 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
-              - 'justfile'
+              - 'scripts/ci-apt-retry.sh'
+              - 'Justfile'
             desktop:
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/_ci-desktop.yml'
+              - 'scripts/ci-apt-retry.sh'
+              - 'Justfile'
               - 'scripts/generate-macos-icon.py'
               - 'scripts/macos-icon.sh'
               - 'bin/uv'
@@ -129,7 +134,7 @@ jobs:
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs
       - name: File size policy
         run: just file-size-check
 

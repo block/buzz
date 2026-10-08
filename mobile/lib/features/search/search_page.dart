@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
@@ -522,7 +522,7 @@ class _SearchBody extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                LucideIcons.search,
+                BuzzIcons.search,
                 size: 64,
                 color: context.colors.onSurfaceVariant,
               ),
@@ -678,7 +678,7 @@ class _RecentSearches extends StatelessWidget {
                 child: Row(
                   children: [
                     Icon(
-                      LucideIcons.clock,
+                      BuzzIcons.clock,
                       size: 18,
                       color: context.colors.onSurfaceVariant,
                     ),
@@ -692,7 +692,7 @@ class _RecentSearches extends StatelessWidget {
                       ),
                     ),
                     Icon(
-                      LucideIcons.chevronRight,
+                      BuzzIcons.chevronRight,
                       size: 16,
                       color: context.colors.onSurfaceVariant,
                     ),

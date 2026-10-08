@@ -17,7 +17,8 @@ derived from the deployment host.
 
 Only when upgrading a Postgres that already holds **pre-1321 single-community
 data** to 1321. A brand-new deployment does **not** run this — it provisions
-from `migrations/0001_initial_schema.sql` (or `schema/schema.sql`) directly.
+from `migrations/0001_initial_schema.sql` (or `schema/schema.sql`; with raw `psql`,
+run `cd schema && psql -f schema.sql` so its `\i` includes resolve) directly.
 
 ## Supported writer contract during transition
 

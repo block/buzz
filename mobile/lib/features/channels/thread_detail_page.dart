@@ -8,7 +8,7 @@ import 'package:flutter/gestures.dart'
 import 'package:flutter/semantics.dart' show OrdinalSortKey;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/identity_names/identity_names_provider.dart';

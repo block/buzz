@@ -210,7 +210,7 @@ class _MorphingQuickActionsButton extends HookWidget {
                                             onTap: onToggle,
                                             child: Center(
                                               child: Icon(
-                                                LucideIcons.plus,
+                                                BuzzIcons.plus,
                                                 color:
                                                     defaultTargetPlatform ==
                                                         TargetPlatform.iOS
@@ -295,21 +295,21 @@ class _QuickActionsMenu extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _QuickActionItem(
-            icon: LucideIcons.hash,
+            icon: BuzzIcons.hash,
             title: 'Create channel',
             key: const Key('quick-action-create-channel-card'),
             onTap: () => onSelected(_QuickAction.createChannel),
           ),
           const SizedBox(height: Grid.xxs),
           _QuickActionItem(
-            icon: LucideIcons.messagesSquare,
+            icon: BuzzIcons.messagesSquare,
             title: 'New direct message',
             key: const Key('quick-action-new-dm-card'),
             onTap: () => onSelected(_QuickAction.newDm),
           ),
           const SizedBox(height: Grid.xxs),
           _QuickActionItem(
-            icon: LucideIcons.compass,
+            icon: BuzzIcons.compass,
             title: 'Browse channels',
             key: const Key('quick-action-browse-channels-card'),
             onTap: () => onSelected(_QuickAction.browseChannels),

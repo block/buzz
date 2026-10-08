@@ -56,7 +56,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
                   children: [
                     if (!channel.isDm && channel.visibility == 'private') ...[
                       Icon(
-                        LucideIcons.lock,
+                        BuzzIcons.lock,
                         size: 14,
                         color: context.colors.onSurfaceVariant,
                         semanticLabel: 'Private channel',

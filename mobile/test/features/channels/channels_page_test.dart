@@ -20,7 +20,7 @@ import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
@@ -57,8 +57,7 @@ void main() {
     if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS')) {
       for (final font in {
         'Inter': 'assets/fonts/InterVariable.ttf',
-        'packages/lucide_icons_flutter/Lucide':
-            'packages/lucide_icons_flutter/assets/lucide.ttf',
+        'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
       }.entries) {
         await (FontLoader(
           font.key,
@@ -290,8 +289,8 @@ void main() {
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
-    expect(find.byIcon(LucideIcons.ellipsisVertical), findsWidgets);
-    expect(find.byIcon(LucideIcons.arrowUpDown), findsNothing);
+    expect(find.byIcon(BuzzIcons.ellipsisVertical), findsWidgets);
+    expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
     expect(find.byTooltip('DMs options'), findsOneWidget);
 
     // DM identity display: the unnamed counterpart tile renders its
@@ -775,10 +774,10 @@ void main() {
       );
     }
     for (final icon in [
-      LucideIcons.pencil,
-      LucideIcons.arrowUp,
-      LucideIcons.arrowDown,
-      LucideIcons.trash2,
+      BuzzIcons.pencil,
+      BuzzIcons.arrowUp,
+      BuzzIcons.arrowDown,
+      BuzzIcons.trash2,
     ]) {
       expect(
         find.descendant(of: popover, matching: find.byIcon(icon)),
@@ -814,7 +813,7 @@ void main() {
     final error = Theme.of(tester.element(popover)).colorScheme.error;
     final deleteText = tester.widget<Text>(find.text('Delete section'));
     final deleteIcon = tester.widget<Icon>(
-      find.descendant(of: popover, matching: find.byIcon(LucideIcons.trash2)),
+      find.descendant(of: popover, matching: find.byIcon(BuzzIcons.trash2)),
     );
     expect(deleteText.style?.color, error);
     expect(deleteIcon.color, error);
@@ -1482,12 +1481,12 @@ void main() {
     expect(
       find.descendant(
         of: options,
-        matching: find.byIcon(LucideIcons.ellipsisVertical),
+        matching: find.byIcon(BuzzIcons.ellipsisVertical),
       ),
       findsNothing,
     );
     expect(find.text('Edit'), findsOneWidget);
-    expect(find.byIcon(LucideIcons.trash2), findsNothing);
+    expect(find.byIcon(BuzzIcons.trash2), findsNothing);
     expect(
       tester.getSize(find.byKey(const Key('community-switcher-avatar-alpha'))),
       const Size.square(88),
@@ -1526,14 +1525,14 @@ void main() {
     expect(
       find.descendant(
         of: activeSelection,
-        matching: find.byIcon(LucideIcons.check),
+        matching: find.byIcon(BuzzIcons.check),
       ),
       findsOneWidget,
     );
     expect(
       find.descendant(
         of: inactiveSelection,
-        matching: find.byIcon(LucideIcons.check),
+        matching: find.byIcon(BuzzIcons.check),
       ),
       findsNothing,
     );
@@ -1548,7 +1547,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Done'), findsOneWidget);
-    expect(find.byIcon(LucideIcons.trash2), findsNWidgets(2));
+    expect(find.byIcon(BuzzIcons.trash2), findsNWidgets(2));
     expect(activeSelection, findsNothing);
     expect(inactiveSelection, findsNothing);
 
@@ -1698,7 +1697,7 @@ void main() {
           .transform
           .storage[0];
       expect(opacity(), 0);
-      expect(find.byIcon(LucideIcons.check), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.check), findsOneWidget);
       await tester.tap(find.text('Edit'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
@@ -1714,14 +1713,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.getCenter(badge), center);
       expect(opacity(), 0);
-      expect(find.byIcon(LucideIcons.check), findsOneWidget);
-      expect(find.byIcon(LucideIcons.trash2), findsNothing);
+      expect(find.byIcon(BuzzIcons.check), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.trash2), findsNothing);
       await tester.tap(find.text('Edit'));
       await tester.pumpAndSettle();
       expect(tester.getCenter(badge), center);
       expect(opacity(), 1);
       expect(scale(), 1);
-      expect(find.byIcon(LucideIcons.trash2), findsNWidgets(2));
+      expect(find.byIcon(BuzzIcons.trash2), findsNWidgets(2));
       expect(tester.takeException(), isNull);
     },
   );
@@ -1761,7 +1760,7 @@ void main() {
     await tester.tap(find.text('Edit'));
     await tester.pump();
 
-    expect(find.byIcon(LucideIcons.trash2), findsOneWidget);
+    expect(find.byIcon(BuzzIcons.trash2), findsOneWidget);
     expect(
       tester.getSize(find.byKey(const Key('community-switcher-badge-alpha'))),
       const Size.square(36),
@@ -2079,7 +2078,7 @@ void main() {
             expect(
               find.descendant(
                 of: find.byKey(Key('community-switcher-selection-$id')),
-                matching: find.byIcon(LucideIcons.check),
+                matching: find.byIcon(BuzzIcons.check),
               ),
               id == 'alpha' ? findsOneWidget : findsNothing,
             );
@@ -3093,7 +3092,7 @@ void main() {
       16,
     );
     expect(
-      find.descendant(of: aliceChip, matching: find.byIcon(LucideIcons.x)),
+      find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
       findsNothing,
     );
     expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);

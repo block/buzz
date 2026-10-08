@@ -214,7 +214,7 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                   radius: _huddleParticipantSpotlightRadius,
                   backgroundColor: context.colors.primaryContainer,
                   fallback: Icon(
-                    LucideIcons.userRound,
+                    BuzzIcons.userRound,
                     size: 56,
                     color: context.colors.onPrimaryContainer,
                   ),
@@ -358,7 +358,7 @@ class _HuddleParticipantRoster extends ConsumerWidget {
                                     backgroundColor:
                                         context.colors.primaryContainer,
                                     fallback: Icon(
-                                      LucideIcons.userRound,
+                                      BuzzIcons.userRound,
                                       size: 22,
                                       color: context.colors.onPrimaryContainer,
                                     ),

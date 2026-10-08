@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
 
@@ -104,7 +104,7 @@ class SettingsPage extends HookConsumerWidget {
                     Navigator.of(context).pop();
                   },
                   color: navigationPrimaryForeground(context),
-                  icon: const Icon(LucideIcons.x),
+                  icon: const Icon(BuzzIcons.x),
                 ),
               ),
         bottomHeight: Grid.xxs,
@@ -173,7 +173,7 @@ class _RowChevron extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Icon(
-      LucideIcons.chevronRight,
+      BuzzIcons.chevronRight,
       size: 18,
       color: context.colors.onSurfaceVariant,
     );

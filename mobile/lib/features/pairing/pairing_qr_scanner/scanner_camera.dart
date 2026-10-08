@@ -29,7 +29,7 @@ class _QrScannerCamera extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    LucideIcons.cameraOff,
+                    BuzzIcons.cameraOff,
                     size: 48,
                     color: Colors.white.withValues(alpha: 0.72),
                   ),

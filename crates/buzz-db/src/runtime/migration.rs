@@ -792,7 +792,7 @@ mod postgres_tests {
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
         // schema.sql (CI / isolated relay bootstrap) must carry the same index,
         // or e-tag reads there run on plans prod never sees.
-        assert!(include_str!("../../../../schema/schema.sql").contains(
+        assert!(crate::test_support::desired_state_schema_sql().contains(
             "CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops)"
         ));
 
@@ -951,7 +951,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("kind = 30179"));
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
-        assert!(include_str!("../../../../schema/schema.sql")
+        assert!(crate::test_support::desired_state_schema_sql()
             .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -1094,7 +1094,7 @@ mod postgres_tests {
             .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
+        let desired_schema = crate::test_support::desired_state_schema_sql();
         assert!(
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
@@ -1185,17 +1185,28 @@ mod postgres_tests {
         // Fresh desired-state bootstrap must install the identical executable
         // fence as migration 0032. CI and isolated relay startup use schema.sql
         // without running migrations, so drift reopens rolling-deploy races.
-        fn extract_roster_fence(sql: &str) -> &str {
-            let fence_start = "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()";
-            let fence_end = "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();";
-            let start = sql.find(fence_start).expect("roster fence function");
-            let relative_end = sql[start..].find(fence_end).expect("roster fence trigger");
-            &sql[start..start + relative_end + fence_end.len()]
+        // The desired state keeps the function and its trigger in separate
+        // files, so compare each statement rather than one contiguous span.
+        fn extract_span<'a>(sql: &'a str, start: &str, end: &str) -> &'a str {
+            let begin = sql.find(start).expect("span start");
+            let relative_end = sql[begin..].find(end).expect("span end");
+            &sql[begin..begin + relative_end + end.len()]
         }
-        assert_eq!(
-            extract_roster_fence(roster_fence),
-            extract_roster_fence(desired_schema)
-        );
+        for (start, end) in [
+            (
+                "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()",
+                "$$ LANGUAGE plpgsql;",
+            ),
+            (
+                "CREATE TRIGGER trg_events_guard_channel_roster_snapshot",
+                "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();",
+            ),
+        ] {
+            assert_eq!(
+                extract_span(roster_fence, start, end),
+                extract_span(&desired_schema, start, end)
+            );
+        }
 
         // The single-row heartbeat table is updated continuously. Prevent
         // autovacuum from truncating its heap so standby queries are not
@@ -1469,7 +1480,162 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("error_code"));
-        assert!(include_str!("../../../../schema/schema.sql").contains("error_code          TEXT"));
+        assert!(
+            crate::test_support::desired_state_schema_sql().contains("error_code          TEXT")
+        );
+    }
+
+    /// `schema/schema.sql` includes every desired-state file exactly once, and
+    /// `schema/tables/public/` (the SchemaBot schema directory's `public`
+    /// namespace) holds only one table per file: its CREATE TABLE plus the
+    /// CREATE INDEX statements on it. Types, functions, partitions, triggers
+    /// and seed rows belong in the sibling directories SchemaBot never reads.
+    #[test]
+    fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
+        use std::collections::BTreeSet;
+
+        fn sql_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read schema directory") {
+                let path = entry.expect("schema directory entry").path();
+                if path.is_dir() {
+                    sql_files(&path, root, out);
+                } else if path.extension().is_some_and(|ext| ext == "sql") {
+                    let relative = path.strip_prefix(root).expect("schema-relative path");
+                    out.push(relative.to_str().expect("utf-8 path").replace('\\', "/"));
+                }
+            }
+        }
+
+        let schema_dir = crate::test_support::desired_state_schema_dir();
+        let manifest =
+            std::fs::read_to_string(schema_dir.join("schema.sql")).expect("read schema/schema.sql");
+        let mut included = Vec::new();
+        for line in manifest.lines() {
+            if let Some(include) = line.strip_prefix("\\i ") {
+                included.push(include.trim().to_owned());
+            }
+        }
+        let included_set: BTreeSet<_> = included.iter().cloned().collect();
+        assert_eq!(
+            included.len(),
+            included_set.len(),
+            "schema.sql includes a file twice"
+        );
+
+        let mut on_disk = Vec::new();
+        sql_files(&schema_dir, &schema_dir, &mut on_disk);
+        let on_disk: BTreeSet<_> = on_disk.into_iter().filter(|f| f != "schema.sql").collect();
+        assert_eq!(
+            on_disk, included_set,
+            "every schema/ file must be included by schema/schema.sql exactly once"
+        );
+
+        fn strip_comments(text: &str) -> String {
+            text.lines()
+                .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Table and index DDL must live in its table file, where SchemaBot
+        // reads it. A merge conflict resolved by pasting DDL into the manifest,
+        // or DDL in a sibling directory, would still build and pass CI.
+        for line in strip_comments(&manifest).lines().map(str::trim) {
+            assert!(
+                line.is_empty()
+                    || line.starts_with("\\i ")
+                    || line.to_ascii_uppercase().starts_with("CREATE EXTENSION "),
+                "schema/schema.sql may only hold \\i includes and CREATE EXTENSION; \
+                 put table DDL in tables/public/<table>.sql: {line:.80}"
+            );
+        }
+        let non_table_files = std::iter::once("schema.sql").chain(
+            included
+                .iter()
+                .map(String::as_str)
+                .filter(|f| !f.starts_with("tables/public/")),
+        );
+        for file in non_table_files {
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
+            for statement in strip_comments(&text).to_ascii_uppercase().split(';') {
+                let tokens: Vec<_> = statement.split_whitespace().collect();
+                assert!(
+                    !tokens.windows(2).any(|pair| matches!(
+                        pair,
+                        ["CREATE" | "UNIQUE", "INDEX"] | ["DROP" | "ALTER", "TABLE" | "INDEX"]
+                    )),
+                    "{file} may not create, alter or drop tables or indexes; \
+                     change tables/public/<table>.sql instead"
+                );
+                let creates_table = tokens.iter().enumerate().any(|(i, token)| {
+                    *token == "CREATE"
+                        && tokens[i + 1..].iter().find(|t| {
+                            !matches!(**t, "UNLOGGED" | "TEMP" | "TEMPORARY" | "GLOBAL" | "LOCAL")
+                        }) == Some(&"TABLE")
+                });
+                assert!(
+                    !creates_table
+                        || (file.starts_with("partitions/")
+                            && tokens.windows(2).any(|pair| pair == ["PARTITION", "OF"])),
+                    "{file} may not CREATE TABLE; only partitions/ may, and only PARTITION OF. \
+                     Declare tables in tables/public/<table>.sql"
+                );
+            }
+        }
+
+        let tables_dir = schema_dir.join("tables");
+        for entry in std::fs::read_dir(&tables_dir).expect("read schema/tables") {
+            let path = entry.expect("schema/tables entry").path();
+            assert!(
+                path.is_dir() && path.file_name().is_some_and(|name| name == "public"),
+                "schema/tables may contain only the `public` namespace: {}",
+                path.display()
+            );
+        }
+        let mut tables = 0;
+        for file in included.iter().filter(|f| f.starts_with("tables/public/")) {
+            let table = file
+                .strip_prefix("tables/public/")
+                .and_then(|name| name.strip_suffix(".sql"))
+                .expect("table file name");
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read table file");
+            let code = strip_comments(&text);
+            let mut creates = 0;
+            for statement in code
+                .split(';')
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            {
+                if statement.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = statement.strip_prefix("CREATE TABLE ") {
+                    assert!(
+                        rest.starts_with(&format!("{table} (")) && !rest.contains(" PARTITION OF "),
+                        "{file} may only create table {table}: {statement:.80}"
+                    );
+                    creates += 1;
+                } else {
+                    let index = statement
+                        .strip_prefix("CREATE INDEX ")
+                        .or_else(|| statement.strip_prefix("CREATE UNIQUE INDEX "))
+                        .unwrap_or_else(|| {
+                            panic!("{file} may only hold CREATE TABLE/INDEX: {statement:.80}")
+                        });
+                    assert!(
+                        !index.starts_with("IF NOT EXISTS ")
+                            && !index.starts_with("CONCURRENTLY "),
+                        "{file} must use a plain CREATE INDEX (SchemaBot refuses IF NOT EXISTS and CONCURRENTLY): {statement:.80}"
+                    );
+                    assert!(
+                        index.contains(&format!(" ON {table} ")),
+                        "{file} may only index {table}: {statement:.80}"
+                    );
+                }
+            }
+            assert_eq!(creates, 1, "{file} must create exactly one table");
+            tables += 1;
+        }
+        assert!(tables > 0, "schema/tables/public declares no tables");
     }
 
     #[test]
@@ -1483,7 +1649,7 @@ mod postgres_tests {
         assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
         assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
+        let desired_schema = crate::test_support::desired_state_schema_sql();
         assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
         assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
     }
@@ -1754,13 +1920,7 @@ mod postgres_tests {
             .sql
             .as_ref()
             .to_ascii_lowercase();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql")
-            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
 
         for sql in [&migration, &schema] {
             assert!(sql.contains("approval_origin text not null default 'operator'"));
@@ -1782,13 +1942,7 @@ mod postgres_tests {
             .sql
             .as_ref()
             .to_ascii_lowercase();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql")
-            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
 
         for sql in [&migration, &schema] {
             assert!(sql.contains("community_deletion_requests_owner_quota_reservations"));
@@ -1918,12 +2072,7 @@ mod postgres_tests {
             .expect("embedded migration 0051")
             .sql
             .as_ref();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema_sql = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql");
+        let schema_sql = crate::test_support::desired_state_schema_sql();
 
         let migration = surface(migration_0029);
         let owner_admission_migration = surface(migration_0051);

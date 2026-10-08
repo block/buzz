@@ -57,7 +57,7 @@ class _NotificationsSection extends ConsumerWidget {
       children: [
         AppListRow(
           key: const ValueKey('push-notifications-enabled'),
-          icon: LucideIcons.bell,
+          icon: BuzzIcons.bell,
           title: 'Push notifications',
           subtitle: subtitle,
           subtitleStyle: showSettingsRecovery
@@ -89,7 +89,7 @@ class _NotificationsSection extends ConsumerWidget {
         if (showSettingsRecovery)
           AppListRow(
             key: const ValueKey('push-notifications-open-settings'),
-            icon: LucideIcons.settings,
+            icon: BuzzIcons.settings,
             title: 'Open iOS Notification Settings',
             onTap: () => unawaited(
               ref.read(buzzPushNotificationSettingsOpenerProvider)(),

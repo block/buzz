@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/theme/theme.dart';
@@ -51,7 +51,7 @@ class AgentActivityCard extends HookConsumerWidget {
                       imageUrl: profile?.avatarUrl,
                       radius: 18,
                       backgroundColor: context.colors.primaryContainer,
-                      fallback: const Icon(LucideIcons.bot, size: 18),
+                      fallback: const Icon(BuzzIcons.bot, size: 18),
                       isAgent: true,
                     ),
                     Positioned(
@@ -123,8 +123,8 @@ class AgentActivityCard extends HookConsumerWidget {
                 if (group.notes.length > 1)
                   Icon(
                     expanded.value
-                        ? LucideIcons.chevronUp
-                        : LucideIcons.chevronDown,
+                        ? BuzzIcons.chevronUp
+                        : BuzzIcons.chevronDown,
                     size: 18,
                     color: context.colors.onSurfaceVariant,
                   ),

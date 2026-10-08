@@ -2,7 +2,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
 import 'buzz_navigation_metrics.dart';
@@ -368,7 +368,7 @@ class FrostedAppBar extends StatelessWidget {
                       child: IconButton(
                         onPressed: () => Navigator.of(context).pop(),
                         color: effectiveIconColor,
-                        icon: const Icon(LucideIcons.chevronLeft),
+                        icon: const Icon(BuzzIcons.chevronLeft),
                         tooltip: 'Back',
                       ),
                     )
@@ -625,11 +625,11 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   }
   if (widget is IconButton) {
     final icon = widget.icon is Icon ? (widget.icon as Icon).icon : null;
-    final symbol = icon == LucideIcons.x
+    final symbol = icon == BuzzIcons.x
         ? 'xmark'
-        : icon == LucideIcons.chevronLeft || icon == LucideIcons.arrowLeft
+        : icon == BuzzIcons.chevronLeft || icon == BuzzIcons.arrowLeft
         ? 'chevron.backward'
-        : icon == LucideIcons.users
+        : icon == BuzzIcons.users
         ? 'person.2'
         : 'ellipsis';
     return IosNavigationAction(

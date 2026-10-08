@@ -5,10 +5,11 @@ use std::collections::HashSet;
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, TimeDelta, Utc};
 use nostr::Event;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row as _, Transaction};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row as _};
 use uuid::Uuid;
 
 use crate::error::Result;
+use crate::AdmittedTx;
 use crate::{observability, CommunityId, Db};
 
 /// Event kinds whose `p` tags represent user-visible message mentions.
@@ -87,10 +88,10 @@ fn event_targets(event: &Event) -> Vec<Vec<u8>> {
 /// Insert one outbox row for each registered listener matching the event's
 /// `p` tags. The caller owns the transaction and must commit it with the event.
 pub(crate) async fn enqueue_mentions_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     event: &Event,
 ) -> Result<u64> {
+    let community_id = tx.community();
     let kind = u32::from(event.kind.as_u16());
     if !is_listener_mention_kind(kind) {
         return Ok(0);
@@ -123,7 +124,7 @@ pub(crate) async fn enqueue_mentions_in_transaction(
     }
     separated.push_unseparated(") ON CONFLICT DO NOTHING");
 
-    Ok(query.build().execute(&mut **tx).await?.rows_affected())
+    Ok(query.build().execute(tx.conn()).await?.rows_affected())
 }
 
 /// Register target pubkeys for one deployment-global listener.
@@ -658,15 +659,16 @@ mod postgres_tests {
             .sign_with_keys(&Keys::generate())
             .expect("sign test event");
 
-        let mut tx = pool.begin().await.expect("begin event transaction");
-        let (_, inserted) = crate::event::insert_event_in_transaction(
-            &mut tx,
+        let mut tx = crate::begin_community_event_write_transaction(
+            &pool,
             CommunityId::from_uuid(community_id),
-            &event,
-            None,
+            crate::observability::WriterOperation::EventWrite,
         )
         .await
-        .expect("insert event and enqueue mention");
+        .expect("begin event transaction");
+        let (_, inserted) = crate::event::insert_event_in_transaction(&mut tx, &event, None)
+            .await
+            .expect("insert event and enqueue mention");
         assert!(inserted);
         tx.rollback().await.expect("roll back event transaction");
 
