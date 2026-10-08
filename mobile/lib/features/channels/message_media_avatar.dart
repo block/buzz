@@ -13,7 +13,7 @@ ValueNotifier<double> useMessageMediaOffset(
   String content,
   List<List<String>> tags,
 ) {
-  final gallery = extractTrailingImageGallery(normalizeBareLinks(content), {
+  final gallery = extractTrailingImageGallery(normalizeMarkdownLinks(content), {
     for (final entry in parseImetaTags(tags).entries)
       normalizeMarkdownDestination(entry.key): entry.value,
   });
