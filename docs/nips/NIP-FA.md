@@ -18,7 +18,7 @@ The adapter MAY use Auth0, Okta, SAML, LDAP, or any other upstream identity syst
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in BCP 14 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) when, and only when, they appear in all capitals, as shown here.
 
-- **adapter**: The HTTP service implementing this NIP. `{adapter_base}` is its base URL.
+- **adapter**: The HTTP service implementing this NIP. `{adapter_base}` is its base URL. The adapter is a NIP-FI assertion issuer, or fronts one: the assertions it returns are verified by relays exactly as NIP-FI assertions from that issuer.
 - **adapter session**: The opaque `session_token` the adapter issues after browser login, and the fixed lifetime it describes.
 - **handoff secret**: A high-entropy random value the client generates per login and reveals only during code exchange.
 
@@ -32,7 +32,7 @@ GET {adapter_base}/v1/login/start?return_to={callback_url}&handoff_challenge={ba
 
 The client's `callback_url` MUST use the `http` scheme with a loopback IP literal host (`127.0.0.1` or `[::1]`), as defined in [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3).
 
-The adapter authenticates the user however the operator chooses, binds the completed browser login to `handoff_challenge`, and redirects to the exact `return_to` loopback callback. Adapters SHOULD accept loopback callbacks on any port, as recommended by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3), and MUST reject non-loopback callback hosts. Success redirects to:
+The adapter authenticates the user however the operator chooses, binds the completed browser login to `handoff_challenge`, and redirects to the exact `return_to` loopback callback. Adapters SHOULD accept loopback callbacks on any port, as recommended by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3), and MUST reject any `return_to` whose host is not exactly `127.0.0.1` or `[::1]`, including `localhost` and other `127.0.0.0/8` addresses. Success redirects to:
 
 ```text
 {callback_url}?code={single_use_code}
@@ -40,7 +40,7 @@ The adapter authenticates the user however the operator chooses, binds the compl
 
 Failures MAY redirect to the same callback with `error` and optional `error_description` query parameters.
 
-The code alone is not a credential. The adapter MUST accept it only when the exchange presents the matching handoff secret.
+The code alone is not a credential. The adapter MUST accept it only when the exchange presents the matching handoff secret, MUST accept each code at most once, and SHOULD expire unexchanged codes within minutes. Adapters MUST reject any `handoff_challenge_method` other than `S256`.
 
 Browser navigation MAY follow the adapter's identity-provider redirects. The non-browser adapter calls below MUST NOT depend on redirect handling.
 
@@ -72,9 +72,9 @@ Success response:
 }
 ```
 
-`email` and `profile_projection` are OPTIONAL. See [Privacy](#privacy) for when a client may publish `profile_projection`.
+`expires_at` is an [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) timestamp. `email` and `profile_projection` are OPTIONAL. See [Privacy](#privacy) for when a client may publish `profile_projection`.
 
-The exchange `expires_at` and a later session-check `expires_at` MUST describe the same fixed adapter session. Clients MUST reject the login when the two values differ, so a code exchange cannot commit a different session than the one verified by `/v1/session`.
+The exchange `expires_at` and a later session-check `expires_at` MUST describe the same fixed adapter session. After code exchange, the client MUST call `/v1/session` before committing the login. Clients MUST compare the two values as instants, not as strings, and MUST reject the login when they differ, so a code exchange cannot commit a different session than the one verified by `/v1/session`.
 
 ## Session check
 
@@ -95,7 +95,7 @@ The success response uses the same shape as the exchange response, except `sessi
 }
 ```
 
-The adapter MUST return a non-2xx status when the token is invalid or expired. The client then MUST discard the adapter session, and only the adapter session.
+The adapter MUST return 401 `session_required` or `session_expired`, with the same body shape and meaning as in [Denials](#denials), when the token is missing, invalid, or expired. The client MUST discard the adapter session, and only the adapter session, on those responses. Clients MUST handle 429, 5xx, and network failures as in [Denials](#denials): keep the session and retry with bounded backoff. Any other response is a failed check that does not discard the session.
 
 ## Relay assertion
 
@@ -113,10 +113,10 @@ Content-Type: application/json
 }
 ```
 
-- `relay_url` selects an adapter-configured relay; the adapter MUST NOT fetch it. Clients MUST send it in the canonical form `wss://host[:port]`, with the scheme in lowercase, the host as its lowercase ASCII (A-label) form with no trailing dot, the default port omitted, and no trailing slash, path, query, or fragment. Adapters MUST configure relays in this canonical form and MUST compare `relay_url` against it exactly. An unknown relay MUST be rejected with 403 `authorization_denied`.
-- `nostr_pubkey` is the lowercase hex key the client will authenticate to the relay with. The NIP-98 event MUST be signed by this key, use kind `27235`, carry exactly one `u` tag equal to the absolute URL of this endpoint, a `method` tag of `POST`, and a `payload` tag equal to the lowercase hex SHA-256 of the exact request body bytes. Its `created_at` MUST be no more than 60 seconds old and MUST NOT be more than 5 seconds in the future.
+- `relay_url` selects an adapter-configured relay; the adapter MUST NOT fetch it. Clients MUST send it in the canonical form `wss://host[:port]`, with the scheme in lowercase, a DNS host as its lowercase ASCII (A-label) form with no trailing dot, an IPv4 host in dotted-decimal form, an IPv6 host in brackets in its [RFC 5952](https://www.rfc-editor.org/rfc/rfc5952) text form (for example `wss://[2001:db8::1]:8443`), the default port omitted, and no trailing slash, path, query, or fragment. Adapters MUST configure relays in this canonical form and MUST compare `relay_url` against it exactly. An unknown relay MUST be rejected with 403 `authorization_denied`.
+- `nostr_pubkey` is the lowercase hex key the client will authenticate to the relay with. The NIP-98 event MUST be signed by this key, use kind `27235`, carry exactly one `u` tag equal to the absolute URL of this endpoint, exactly one `method` tag of `POST`, and exactly one `payload` tag equal to the lowercase hex SHA-256 of the exact request body bytes. Its `created_at` MUST be no more than 60 seconds old and MUST NOT be more than 5 seconds in the future.
 - The request body is limited to 4096 bytes and MUST NOT be content-encoded. A content-encoded body, such as a gzipped body, MUST be rejected with 400 `invalid_request`. Unknown fields MUST be rejected with 400 `invalid_request`.
-- Clients and adapters MUST NOT log the values of the `Authorization` or `Nostr-Authorization` headers.
+- Credential handling is covered in [Security Considerations](#security-considerations).
 
 Success response (`200`, `Cache-Control: no-store`):
 
@@ -130,7 +130,7 @@ Success response (`200`, `Cache-Control: no-store`):
 
 `expires_at` is the assertion `exp` as Unix seconds. Adapters MUST issue assertions with `exp - iat <= 300` seconds and MUST NOT set `exp` later than the adapter session's expiry. Clients MAY refuse an assertion with more than 300 seconds remaining when it arrives. The 5-minute cap is a rule of this NIP, not a relay constant: the relay enforces the token `exp` and its own deployment-configured `maximum_assertion_age`.
 
-The assertion itself follows [NIP-FI](NIP-FI.md): a dedicated assertion's protected `typ` MUST be exactly `nip-fi+jwt`, and its `aud` MUST exactly match the canonical host URI of the community the relay resolves from the connection's `Host`. The assertion's `nostr_pubkey` MUST be the key that signs the NIP-42 relay login; the relay rejects any other key. Clients MUST reject a response whose `nostr_pubkey` differs from the key sent in the request.
+Adapters MUST issue dedicated [NIP-FI](NIP-FI.md) assertions whose protected `typ` is exactly `nip-fi+jwt` and that carry the NIP-FI required claims; as NIP-FI requires, `sub` is never an email address. The assertion's `aud` MUST be `https://` followed by the authority of the canonical `relay_url`, unchanged: `wss://community.example.com` maps to `https://community.example.com`, `wss://c.example.com:8443` to `https://c.example.com:8443`, and `wss://[2001:db8::1]:8443` to `https://[2001:db8::1]:8443`. This is the canonical host URI of the community the relay resolves from the connection's `Host`. The assertion's `nostr_pubkey` MUST be the key that signs the NIP-42 relay login; the relay rejects any other key. Clients MUST reject a response whose `nostr_pubkey` differs from the key sent in the request.
 
 A client that rejects a `200` response, including one it cannot parse, MUST treat it as a refusal: keep the session, show it as refused, and not retry automatically.
 
@@ -140,7 +140,7 @@ Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`.
 
 | Status | `error` | Meaning | Client action |
 |---|---|---|---|
-| 400 | `invalid_request` | Malformed body, unknown fields, a missing or repeated `Nostr-Authorization` header, a repeated `Authorization` header, or more than one kind of session credential | Keep the session, show the error, do not retry automatically |
+| 400 | `invalid_request` | Malformed body, unknown fields, a missing or repeated `Nostr-Authorization` header, a repeated `Authorization` header, or any session credential other than exactly one `Authorization: Bearer` header | Keep the session, show the error, do not retry automatically |
 | 401 | `session_required` | No adapter session was presented, or the presented one is not usable | Clear the adapter session and return to browser login |
 | 401 | `session_expired` | The adapter session ended | Clear the adapter session and return to browser login |
 | 403 | `authorization_denied` | The user or relay is not authorized for assertions | Keep the session, disconnect from that relay, show access denied, do not retry automatically; a manual retry or app restart asks again |
@@ -152,22 +152,27 @@ Denials return a JSON body `{"error": "<code>"}` with `Cache-Control: no-store`.
 
 Clients MUST retry 429 and 503 with bounded backoff whatever the `error` code. Clients MUST treat any other status, or a 400/401/403/413 with a code this NIP does not define, as a refusal: keep the session, show it as refused, and not retry automatically.
 
-A missing session MUST be reported as 401 `session_required`, never 400. Clients MUST handle network failures like 429 and 503: keep the session and retry with bounded backoff.
+A missing session MUST be reported as 401 `session_required`, never 400. Clients MUST handle network failures like 429 and 503: keep the session and retry with bounded backoff. Clients SHOULD honor `Retry-After` when present, and SHOULD show the failure to the user after a bounded number of attempts.
 
 An adapter MAY return `session_required` for an invalid, expired, or revoked credential; adapters that distinguish ended sessions MAY return `session_expired`. Clients MUST handle both identically.
 
 ## NIP-FI assertion transport
 
-The adapter session header above is only for client-to-adapter account and session requests. It is not the relay's NIP-FI proof transport.
+The adapter session header above is only for client-to-adapter requests. It is not the relay's NIP-FI proof transport, and adapter sessions MUST use only `Authorization: Bearer`.
 
-When a client later accesses a NIP-FI-protected relay or HTTP route, the relay proof uses the headers defined by [NIP-FI](NIP-FI.md):
+For HTTP routes protected by NIP-98, the relay proof uses the headers defined by [NIP-FI](NIP-FI.md):
 
 ```http
 Authorization: Nostr <base64-NIP-98-event>
 Nostr-Federated-Identity: Bearer <compact-JWS-assertion>
 ```
 
-`Authorization: Bearer <session_token>` belongs to the adapter, while the relay proof keeps the NIP-98 event in `Authorization` and carries the identity assertion in `Nostr-Federated-Identity`. Implementations MUST NOT use `Authorization` for both an adapter session and a NIP-FI assertion on the same request, and MUST NOT use the vendor-specific `X-BB-Session-Credential` header or `Authorization: BBIdentity` scheme.
+WebSocket connections send only `Nostr-Federated-Identity` on the upgrade request and then prove the key with NIP-42 AUTH. Blossom media routes carry a kind `24242` event in `Authorization`. See NIP-FI for both.
+
+## Security Considerations
+
+- Clients MUST send `session_token` only to the adapter endpoints defined in this NIP, and MUST NOT send it to a relay or any other origin. A leaked session token lets its holder request assertions for a key they control until the adapter binds the user to a key.
+- Clients and adapters MUST NOT log credentials: the `Authorization` and `Nostr-Authorization` header values on every adapter request, including `/v1/session`, and the `handoff_secret` and `session_token` values in the code exchange request and response.
 
 ## Privacy
 
