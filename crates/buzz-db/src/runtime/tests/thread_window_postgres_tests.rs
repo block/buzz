@@ -311,7 +311,16 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
         production_result.is_ok(),
         "production migrator must preserve ingestion progress: {production_result:?}"
     );
-    assert_eq!(version, 56);
+    let latest = sqlx::migrate::Migrator::new(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
+    )
+    .await
+    .unwrap()
+    .iter()
+    .map(|m| m.version)
+    .max()
+    .unwrap();
+    assert_eq!(version, latest);
     assert_eq!(final_oid, oid, "prebuild must not be replaced");
     assert_eq!(count, 4, "all writer witnesses must persist");
 }

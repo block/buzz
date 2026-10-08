@@ -296,10 +296,8 @@ is no new public account export/reset endpoint. Operator-assisted erasure/export
 must use the established authenticated operational process and explicitly scope
 both community and actor; never equate the read-time horizon with data erasure.
 
-Migrations 0056 and 0057 must be applied before this relay serves, enabled or
-not: started without them and with auto-migration off, the relay stops before
-readiness. There is no down migration, and disabling the API is not a rollback. A relay built
-before 0056 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
+There is no down migration, and disabling the API is not a rollback. A relay
+built before 0056 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
 refuses to start on the migrated schema. Whole-community deletion run from a
 build before 0056 rejects the two new tables. A deletion approved on the
 earlier schema and not yet fenced fails structural revalidation after 0056:
