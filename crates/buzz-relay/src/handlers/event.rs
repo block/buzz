@@ -1038,9 +1038,16 @@ async fn publish_channel_ephemeral(
 ) -> Result<(), IngestError> {
     // Membership refusals are client-input rejections, and the shared
     // gate's message text is surfaced verbatim.
-    super::ingest::check_channel_membership(tenant, state, ch_id, pubkey_bytes, None)
-        .await
-        .map_err(IngestError::Rejected)?;
+    super::ingest::check_channel_membership(
+        tenant.community(),
+        state,
+        ch_id,
+        pubkey_bytes,
+        None,
+        super::ingest::ChannelWrite::Post,
+    )
+    .await
+    .map_err(IngestError::Rejected)?;
 
     // Mark as local before Redis publish to prevent double-delivery when
     // the event comes back through the Redis subscriber loop.

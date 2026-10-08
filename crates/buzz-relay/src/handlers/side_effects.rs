@@ -504,6 +504,17 @@ pub async fn validate_admin_event(
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
+            if buzz_db::channel::ChannelPosting::parse_fail_closed(&channel.posting)
+                == buzz_db::channel::ChannelPosting::Members
+            {
+                channel_authz::decide_announce_put_user(
+                    actor_role,
+                    requested_role,
+                    &target_pubkey,
+                    &actor_bytes,
+                )?;
+            }
+
             // Authorization policy — visibility gate, elevated-grant gate,
             // active-member role-change gate, and last-owner demotion — lives in
             // `channel_authz`, which is pure and table-tested. The database reads
@@ -576,6 +587,7 @@ pub async fn validate_admin_event(
                 "purpose",
                 "visibility",
                 "ttl",
+                "posting",
             ];
             let has_recognized = event
                 .tags
@@ -583,7 +595,7 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, posting)"
                 ));
             }
 
@@ -637,6 +649,25 @@ pub async fn validate_admin_event(
                 }
             }
 
+            // Validate posting values before storage. NIP-29 9002 is a full
+            // replace, but Buzz's is a partial update: an absent tag leaves the
+            // rule unchanged, so turning it off must be explicit.
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "posting" {
+                    match t.content() {
+                        Some(v) if v.parse::<buzz_db::channel::ChannelPosting>().is_ok() => {}
+                        Some(v) => {
+                            return Err(anyhow::anyhow!(
+                                "invalid posting value: {v} (must be \"everyone\" or \"members\")"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow::anyhow!("posting tag must have a value"));
+                        }
+                    }
+                }
+            }
+
             // Validate ttl values before storage. Empty string clears the TTL
             // (channel becomes permanent); any other value must parse as a
             // positive integer number of seconds. A bare tag with no value is
@@ -662,11 +693,16 @@ pub async fn validate_admin_event(
                 }
             }
 
-            // name/about/archived/visibility/ttl require owner/admin;
-            // topic/purpose allow any member.
+            // name/about/archived/visibility/ttl/posting require owner/admin;
+            // topic/purpose allow any member who may post.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
-                k == "name" || k == "about" || k == "archived" || k == "visibility" || k == "ttl"
+                k == "name"
+                    || k == "about"
+                    || k == "archived"
+                    || k == "visibility"
+                    || k == "ttl"
+                    || k == "posting"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -688,19 +724,38 @@ pub async fn validate_admin_event(
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/posting changes"
                         ))
                     }
                 }
             } else {
-                // topic/purpose: any member
+                // topic/purpose: any member who may post (not a guest in an
+                // announce channel).
                 let is_member = state
                     .is_member_cached(tenant.community(), channel_id, &actor_bytes)
                     .await?;
-                if is_member {
+                if !is_member {
+                    return Err(anyhow::anyhow!("not a member"));
+                }
+                let channel = state
+                    .db
+                    .get_channel_for_event_write(tenant.community(), channel_id)
+                    .await?;
+                if super::ingest::may_post(
+                    state,
+                    tenant.community(),
+                    channel_id,
+                    &actor_bytes,
+                    &channel,
+                    true,
+                )
+                .await?
+                {
                     Ok(())
                 } else {
-                    Err(anyhow::anyhow!("not a member"))
+                    Err(anyhow::anyhow!(
+                        "only members can change topic or purpose in this channel"
+                    ))
                 }
             }
         }
@@ -755,24 +810,23 @@ pub async fn validate_admin_event(
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
             if author_delete_can_use_self_delete_path(&author, &actor_bytes, event) {
-                // Author deleting their own message: re-gate on membership/open visibility so that
-                // a removed private-channel member cannot mutate old messages after access is revoked.
-                let is_member = state
-                    .is_member_cached(tenant.community(), channel_id, &actor_bytes)
-                    .await?;
-                if is_member {
+                // Author deleting their own message: re-gate on the channel write gate so that
+                // a removed private-channel member cannot mutate old messages after access is
+                // revoked, and a guest in an announce channel cannot delete either.
+                if super::ingest::check_channel_membership(
+                    tenant.community(),
+                    state,
+                    channel_id,
+                    &actor_bytes,
+                    None,
+                    super::ingest::ChannelWrite::Post,
+                )
+                .await
+                .is_ok()
+                {
                     return Ok(());
                 }
-                let is_open = state
-                    .db
-                    .get_channel_for_event_write(tenant.community(), channel_id)
-                    .await
-                    .map(|ch| ch.visibility == "open")
-                    .unwrap_or(false);
-                if is_open {
-                    return Ok(());
-                }
-                // Not a member and channel is private — fall through to owner/admin/owner-of-agent check.
+                // Gate refused — fall through to owner/admin/owner-of-agent check.
             }
 
             // Not the author, or author who is no longer a member of a private channel —
@@ -1204,57 +1258,10 @@ pub async fn emit_group_discovery_events(
     let group_id = channel_id.to_string();
 
     {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        tags.push(Tag::parse(["name", &channel.name])?);
-        if let Some(ref desc) = channel.description {
-            if !desc.is_empty() {
-                tags.push(Tag::parse(["about", desc])?);
-            }
-        }
-        if channel.visibility == "private" {
-            tags.push(Tag::parse(["private"])?);
-        } else {
-            // Explicit "public" tag complements NIP-29's absence-of-"private" convention,
-            // making channel visibility self-describing for clients.
-            tags.push(Tag::parse(["public"])?);
-        }
-        // NIP-29 hidden tag: hint to clients not to show DMs in public group lists.
-        // Not a security boundary — access control is handled by channel-scoped storage.
-        if channel.channel_type == "dm" {
-            tags.push(Tag::parse(["hidden"])?);
-            // Include participant pubkeys in kind:39000 for DMs so clients can
-            // resolve display names without a separate kind:39002 fetch.
-            for m in &members {
-                let pubkey_hex = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pubkey_hex])?);
-            }
-        }
-        // Buzz channels always require explicit membership
-        tags.push(Tag::parse(["closed"])?);
-        // Channel type tag so clients can distinguish stream/forum/dm without inference
-        tags.push(Tag::parse(["t", &channel.channel_type])?);
-        // Optional topic / purpose for richer client UX
-        if let Some(ref topic) = channel.topic {
-            if !topic.is_empty() {
-                tags.push(Tag::parse(["topic", topic])?);
-            }
-        }
-        if let Some(ref purpose) = channel.purpose {
-            if !purpose.is_empty() {
-                tags.push(Tag::parse(["purpose", purpose])?);
-            }
-        }
-        // Archived state — clients use this to hide channels from the sidebar.
-        if channel.archived_at.is_some() {
-            tags.push(Tag::parse(["archived", "true"])?);
-        }
-        // Ephemeral channel TTL — clients use this to show countdown timers.
-        if let Some(ttl) = channel.ttl_seconds {
-            tags.push(Tag::parse(["ttl", &ttl.to_string()])?);
-        }
-        if let Some(ref deadline) = channel.ttl_deadline {
-            tags.push(Tag::parse(["ttl_deadline", &deadline.to_rfc3339()])?);
-        }
+        let tags = buzz_db::channel::group_metadata_tags(&channel, &members)
+            .into_iter()
+            .map(Tag::parse)
+            .collect::<Result<Vec<_>, _>>()?;
         emit_addressable_discovery_event(
             tenant,
             state,
@@ -1677,6 +1684,33 @@ async fn handle_edit_metadata(
                         channel_id,
                         serde_json::json!({
                             "type": "visibility_changed", "actor": actor_hex, "visibility": val
+                        }),
+                        chrono::Utc::now(),
+                    )
+                    .await?;
+                }
+                "posting" => {
+                    // Validated during authorization; parse again so a bad
+                    // value can never reach the column.
+                    let posting: buzz_db::channel::ChannelPosting =
+                        val.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                    state
+                        .db
+                        .update_channel(
+                            tenant.community(),
+                            channel_id,
+                            buzz_db::channel::ChannelUpdate {
+                                posting: Some(posting.as_str().to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    emit_system_message(
+                        tenant,
+                        state,
+                        channel_id,
+                        serde_json::json!({
+                            "type": "posting_changed", "actor": actor_hex, "posting": posting.as_str()
                         }),
                         chrono::Utc::now(),
                     )
@@ -2115,16 +2149,16 @@ async fn handle_join_request(
         return Ok(());
     }
 
-    // Add as member (idempotent — add_member handles duplicates).
+    // Add as member, or as guest in an announce channel (idempotent —
+    // add_member handles duplicates). Only owners/admins/members can turn a
+    // guest into a writer.
+    let role = match buzz_db::channel::ChannelPosting::parse_fail_closed(&channel.posting) {
+        buzz_db::channel::ChannelPosting::Everyone => buzz_db::channel::MemberRole::Member,
+        buzz_db::channel::ChannelPosting::Members => buzz_db::channel::MemberRole::Guest,
+    };
     state
         .db
-        .add_member(
-            tenant.community(),
-            channel_id,
-            &actor_bytes,
-            buzz_db::channel::MemberRole::Member,
-            None,
-        )
+        .add_member(tenant.community(), channel_id, &actor_bytes, role, None)
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
 

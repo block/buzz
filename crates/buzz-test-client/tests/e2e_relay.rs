@@ -2944,6 +2944,195 @@ async fn member_role(url: &str, keys: &Keys, channel_id: &str, pubkey_hex: &str)
     })
 }
 
+/// Submit a kind:9002 `posting` change and return the OK frame.
+async fn set_posting_ws(
+    url: &str,
+    channel_id: &str,
+    signer: &Keys,
+    posting: &str,
+) -> (bool, String) {
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id]).unwrap(),
+            Tag::parse(["posting", posting]).unwrap(),
+        ])
+        .sign_with_keys(signer)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(url, signer)
+        .await
+        .expect("connect posting actor");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+/// The latest kind:39000 tags for a channel.
+async fn group_metadata_tags(url: &str, keys: &Keys, channel_id: &str) -> Vec<Vec<String>> {
+    let mut ws = BuzzTestClient::connect(url, keys).await.expect("connect");
+    let sid = sub_id("metadata");
+    let filter = Filter::new()
+        .kind(Kind::Custom(39000))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [channel_id]);
+    ws.subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe 39000");
+    let events = ws
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("39000 EOSE");
+    ws.disconnect().await.ok();
+    events
+        .iter()
+        .max_by_key(|e| e.created_at)
+        .map(|e| e.tags.iter().map(|t| t.as_slice().to_vec()).collect())
+        .unwrap_or_default()
+}
+
+/// Announce channel (`posting = members`) through the real relay: join gives
+/// guest, guests and non-members cannot write or add writers, members can,
+/// only owners/admins change the rule, and turning it off restores writes.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let outsider = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut owner_client,
+        &channel_id,
+        &member.public_key().to_hex(),
+        "member",
+        &owner,
+    )
+    .await;
+    assert!(accepted, "owner adds member: {msg}");
+    owner_client.disconnect().await.ok();
+
+    // Only owners/admins may change the rule; unknown values are refused.
+    let (accepted, msg) = set_posting_ws(&url, &channel_id, &member, "members").await;
+    assert!(!accepted, "member must not change posting");
+    assert!(msg.contains("not authorized"), "{msg}");
+    let (accepted, msg) = set_posting_ws(&url, &channel_id, &owner, "anyone").await;
+    assert!(!accepted, "unknown posting value must be refused");
+    assert!(msg.contains("invalid posting value"), "{msg}");
+    assert_eq!(
+        set_posting_ws(&url, &channel_id, &owner, "members").await,
+        (true, String::new())
+    );
+
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(tags.contains(&vec!["restricted".to_string()]), "{tags:?}");
+    assert!(tags.contains(&vec!["posting".to_string(), "members".to_string()]));
+    assert!(tags.contains(&vec!["public".to_string()]));
+    assert!(
+        !tags.contains(&vec!["closed".to_string()]),
+        "open channels accept kind:9021 joins: {tags:?}"
+    );
+
+    // A non-member of an open announce channel cannot write, and cannot
+    // self-add as a member.
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider)
+        .await
+        .expect("connect outsider");
+    let ok = outsider_client
+        .send_text_message(&outsider, &channel_id, "outsider post", 9)
+        .await
+        .expect("send outsider post");
+    assert!(!ok.accepted, "non-member must not post");
+    assert!(
+        ok.message.contains("only members can post"),
+        "{}",
+        ok.message
+    );
+    let (accepted, _) = add_member_with_role_ws(
+        &mut outsider_client,
+        &channel_id,
+        &outsider.public_key().to_hex(),
+        "member",
+        &outsider,
+    )
+    .await;
+    assert!(!accepted, "non-member must not self-add as member");
+
+    // Join makes a guest. A guest cannot post or add people.
+    let join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&outsider)
+        .unwrap();
+    let ok = outsider_client.send_event(join).await.expect("send join");
+    assert!(ok.accepted, "join: {}", ok.message);
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &outsider.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("guest")
+    );
+    let ok = outsider_client
+        .send_text_message(&outsider, &channel_id, "guest post", 9)
+        .await
+        .expect("send guest post");
+    assert!(!ok.accepted, "guest must not post");
+    assert!(
+        ok.message.contains("only members can post"),
+        "{}",
+        ok.message
+    );
+    let (accepted, _) = add_member_with_role_ws(
+        &mut outsider_client,
+        &channel_id,
+        &Keys::generate().public_key().to_hex(),
+        "member",
+        &outsider,
+    )
+    .await;
+    assert!(!accepted, "guest must not add a member");
+    outsider_client.disconnect().await.ok();
+
+    // A member can still post.
+    let mut member_client = BuzzTestClient::connect(&url, &member)
+        .await
+        .expect("connect member");
+    let ok = member_client
+        .send_text_message(&member, &channel_id, "member post", 9)
+        .await
+        .expect("send member post");
+    assert!(ok.accepted, "member post: {}", ok.message);
+    member_client.disconnect().await.ok();
+
+    // Turning the rule off is explicit, and guests can post again.
+    assert_eq!(
+        set_posting_ws(&url, &channel_id, &owner, "everyone").await,
+        (true, String::new())
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(!tags.contains(&vec!["restricted".to_string()]), "{tags:?}");
+    let mut guest_client = BuzzTestClient::connect(&url, &outsider)
+        .await
+        .expect("reconnect guest");
+    let ok = guest_client
+        .send_text_message(&outsider, &channel_id, "guest post after", 9)
+        .await
+        .expect("send guest post after");
+    assert!(
+        ok.accepted,
+        "guest post with posting=everyone: {}",
+        ok.message
+    );
+    guest_client.disconnect().await.ok();
+
+    // A guest can always leave.
+    assert_eq!(
+        self_departure_ws(&url, &channel_id, &outsider, 9022).await,
+        (true, String::new())
+    );
+}
+
 /// SECURITY REPRO (Dawn): can an unprivileged NON-MEMBER demote the owner of an
 /// OPEN channel to `member` with a single kind:9000? Asserts the reported
 /// vulnerability is FIXED; it fails on vulnerable code.

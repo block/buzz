@@ -52,6 +52,10 @@ pub enum ChannelAuthzError {
     /// `nobody` policy — the agent has opted out of third-party adds.
     #[error("policy:nobody — this agent has disabled external channel additions")]
     PolicyNobody,
+    /// In a `posting = members` channel, a guest or non-member may only add
+    /// themselves, and only as a guest.
+    #[error("only members can add people in this channel; you may join as a guest")]
+    AnnounceGuestOnly,
 }
 
 /// Whether `pubkey` is the channel's only remaining `owner`.
@@ -164,6 +168,37 @@ pub fn decide_put_user(
     }
 
     Ok(PutUserDecision::CheckAddPolicy)
+}
+
+/// The extra kind:9000 rule for a `posting = members` (announce) channel,
+/// checked before [`decide_put_user`].
+///
+/// An actor whose role may post (owner, admin, member, bot) keeps the normal
+/// rules. Anyone else (no role, or guest) may only add themselves as a guest,
+/// or repeat a no-op self-add while already a member. Without this, a
+/// non-member could self-add as a member and bypass the posting rule, and a
+/// guest could add a friend as a member.
+pub fn decide_announce_put_user(
+    actor_role: Option<MemberRole>,
+    requested_role: Option<MemberRole>,
+    target: &[u8],
+    actor: &[u8],
+) -> Result<(), ChannelAuthzError> {
+    if actor_role.is_some_and(|role| role.can_post()) {
+        return Ok(());
+    }
+    let self_add_as_guest = target == actor
+        && match requested_role {
+            Some(role) => role == MemberRole::Guest,
+            // No role tag: no change for an existing member, but a new
+            // member would default to `member`.
+            None => actor_role.is_some(),
+        };
+    if self_add_as_guest {
+        Ok(())
+    } else {
+        Err(ChannelAuthzError::AnnounceGuestOnly)
+    }
 }
 
 /// Evaluate a target agent's `channel_add_policy` for a third-party add.
@@ -569,6 +604,47 @@ mod tests {
                 ),
                 *expected,
                 "visibility {visibility} roster {entries:?} actor {actor} target {target} requested {requested_role:?}"
+            );
+        }
+    }
+
+    /// Announce channels: only roles that may post keep the normal 9000
+    /// rules; everyone else may only add themselves as a guest.
+    #[test]
+    fn announce_put_user_table() {
+        use MemberRole::*;
+        let denied = Err(ChannelAuthzError::AnnounceGuestOnly);
+        // (actor_role, requested_role, target, expected); actor is always 1.
+        type AnnounceCase = (
+            Option<MemberRole>,
+            Option<MemberRole>,
+            u8,
+            Result<(), ChannelAuthzError>,
+        );
+        let cases: &[AnnounceCase] = &[
+            // Writers keep today's rules (decide_put_user decides the rest).
+            (Some(Owner), Some(Member), 2, Ok(())),
+            (Some(Admin), Some(Member), 2, Ok(())),
+            (Some(Member), Some(Member), 2, Ok(())),
+            (Some(Bot), Some(Guest), 2, Ok(())),
+            // Non-member: self-add as guest only.
+            (None, Some(Guest), 1, Ok(())),
+            (None, None, 1, denied.clone()),
+            (None, Some(Member), 1, denied.clone()),
+            (None, Some(Bot), 1, denied.clone()),
+            (None, Some(Guest), 2, denied.clone()),
+            // Guest: no-op self-add, but no promotion and no adding others.
+            (Some(Guest), Some(Guest), 1, Ok(())),
+            (Some(Guest), None, 1, Ok(())),
+            (Some(Guest), Some(Member), 1, denied.clone()),
+            (Some(Guest), Some(Guest), 2, denied.clone()),
+            (Some(Guest), Some(Member), 2, denied.clone()),
+        ];
+        for (actor_role, requested_role, target, expected) in cases {
+            assert_eq!(
+                decide_announce_put_user(*actor_role, *requested_role, &pk(*target), &pk(1)),
+                *expected,
+                "actor {actor_role:?} requested {requested_role:?} target {target}"
             );
         }
     }
