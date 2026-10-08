@@ -26,7 +26,7 @@ pub use crate::channel_members::{
     get_users_bulk, is_member, list_large_channel_rosters_needing_reconciliation,
     lock_member_snapshot, membership_pairs, remove_member, verify_channel_roster_fence_behavior,
     verify_channel_roster_fence_catalog, AccessibleChannel, BotChannelEntry, BotMemberRecord,
-    LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
+    ChannelIdentity, LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
 };
 
 async fn begin_event_write_transaction(
@@ -97,6 +97,16 @@ pub struct ChannelRecord {
     pub ttl_seconds: Option<i32>,
     /// Deadline by which a new message must arrive or the channel is auto-archived.
     pub ttl_deadline: Option<DateTime<Utc>>,
+}
+
+impl ChannelRecord {
+    /// The facts every group-state event publishes about this channel.
+    pub fn identity(&self) -> ChannelIdentity {
+        ChannelIdentity {
+            channel_type: self.channel_type.clone(),
+            created_by: self.created_by.clone(),
+        }
+    }
 }
 
 /// Creates a new channel, bootstraps the creator as owner, and returns the record.
