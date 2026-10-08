@@ -48,8 +48,13 @@ fn apply_identity_filters(
     filter: &mut serde_json::Value,
     labels: &[String],
     creator: Option<&str>,
+    system: bool,
 ) {
-    if !labels.is_empty() {
+    if system {
+        // The channel type tag. On group-state kinds it also opts in to the
+        // system channels, which other queries leave out.
+        filter["#t"] = serde_json::json!([buzz_sdk::ChannelKind::System.as_str()]);
+    } else if !labels.is_empty() {
         filter["#t"] = serde_json::json!(labels);
     }
     if let Some(creator) = creator {
@@ -74,25 +79,35 @@ fn validate_labels(labels: &[String]) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("--label: {e}")))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_list_channels(
     client: &BuzzClient,
     visibility: Option<&str>,
     member: Option<bool>,
     labels: &[String],
     creator: Option<&str>,
+    system: bool,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
+    if system && !labels.is_empty() {
+        return Err(CliError::Usage(
+            "--system and --label cannot be combined".into(),
+        ));
+    }
     validate_labels(labels)?;
     let creator = creator.map(parse_creator).transpose()?;
     let effective_limit = limit.unwrap_or(500);
     let events = if member == Some(true) {
         // Step 1: find channel IDs where we're a member (kind:39002)
         let my_pk = client.keys().public_key().to_hex();
-        let member_filter = serde_json::json!({
+        let mut member_filter = serde_json::json!({
             "kinds": [39002],
             "#p": [my_pk],
         });
+        if system {
+            apply_identity_filters(&mut member_filter, &[], None, true);
+        }
         let member_events = client
             .query_paginated(member_filter, effective_limit)
             .await?;
@@ -110,7 +125,8 @@ pub async fn cmd_list_channels(
             "kinds": [39000],
             "#d": channel_ids,
         });
-        apply_identity_filters(&mut metadata_filter, labels, creator.as_deref());
+        // Naming the channels with #d reads system channels too.
+        apply_identity_filters(&mut metadata_filter, labels, creator.as_deref(), false);
         client
             .query_paginated(metadata_filter, effective_limit)
             .await?
@@ -118,7 +134,7 @@ pub async fn cmd_list_channels(
         let mut filter = serde_json::json!({
             "kinds": [39000],
         });
-        apply_identity_filters(&mut filter, labels, creator.as_deref());
+        apply_identity_filters(&mut filter, labels, creator.as_deref(), system);
         client.query_paginated(filter, effective_limit).await?
     };
 
@@ -719,10 +735,10 @@ pub async fn cmd_create_channel(
     labels: &[String],
 ) -> Result<(), CliError> {
     match channel_type {
-        "stream" | "forum" => {}
+        "stream" | "forum" | "system" => {}
         _ => {
             return Err(CliError::Usage(format!(
-                "--type must be 'stream' or 'forum' (got: {channel_type})"
+                "--type must be 'stream', 'forum' or 'system' (got: {channel_type})"
             )))
         }
     }
@@ -749,6 +765,7 @@ pub async fn cmd_create_channel(
     let ct = match channel_type {
         "stream" => buzz_sdk::ChannelKind::Stream,
         "forum" => buzz_sdk::ChannelKind::Forum,
+        "system" => buzz_sdk::ChannelKind::System,
         _ => unreachable!(),
     };
     let builder = buzz_sdk::build_create_channel(
@@ -1971,6 +1988,7 @@ pub async fn dispatch(
             member,
             label,
             creator,
+            system,
             limit,
         } => {
             let vis_str = visibility.as_ref().map(|v| v.to_string());
@@ -1980,6 +1998,7 @@ pub async fn dispatch(
                 Some(member),
                 &label,
                 creator.as_deref(),
+                system,
                 limit,
                 format,
             )
@@ -2147,7 +2166,7 @@ mod tests {
     #[test]
     fn list_filters_push_labels_and_creator_to_the_relay() {
         let mut filter = json!({"kinds": [39000]});
-        apply_identity_filters(&mut filter, &[], None);
+        apply_identity_filters(&mut filter, &[], None, false);
         assert_eq!(filter, json!({"kinds": [39000]}));
 
         let creator = "ab".repeat(32);
@@ -2155,10 +2174,26 @@ mod tests {
             &mut filter,
             &["workspace".to_string(), "team:core".to_string()],
             Some(&creator),
+            false,
         );
         assert_eq!(
             filter,
             json!({"kinds": [39000], "#t": ["workspace", "team:core"], "#P": [creator]})
+        );
+    }
+
+    #[test]
+    fn list_system_sends_the_system_type_opt_in() {
+        let mut filter = json!({"kinds": [39000]});
+        apply_identity_filters(&mut filter, &[], None, true);
+        assert_eq!(filter, json!({"kinds": [39000], "#t": ["system"]}));
+
+        let creator = "ab".repeat(32);
+        let mut filter = json!({"kinds": [39000]});
+        apply_identity_filters(&mut filter, &[], Some(&creator), true);
+        assert_eq!(
+            filter,
+            json!({"kinds": [39000], "#t": ["system"], "#P": [creator]})
         );
     }
 

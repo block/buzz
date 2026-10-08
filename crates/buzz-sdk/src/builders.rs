@@ -3650,6 +3650,26 @@ mod tests {
     }
 
     #[test]
+    fn create_channel_sends_the_system_type() {
+        let ev = sign(
+            build_create_channel(
+                uuid(),
+                "attention",
+                None,
+                Some(ChannelKind::System),
+                None,
+                None,
+                &["agent-attention"],
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&ev, "channel_type", "system"));
+        assert_eq!(tag_values(&ev, "t"), vec!["agent-attention"]);
+        // Visibility is left to the relay's default, which is private.
+        assert!(tag_values(&ev, "visibility").is_empty());
+    }
+
+    #[test]
     fn set_topic_happy_path() {
         let cid = uuid();
         let ev = sign(build_set_topic(cid, "Rust async patterns").unwrap());
