@@ -684,6 +684,7 @@ mod tests {
             resources: Resources::default(),
             inactivity_seconds: Some(7200),
             service_account: None,
+            pod_options: crate::config::PodOptions::default(),
         }
     }
 

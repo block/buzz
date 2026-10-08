@@ -1395,9 +1395,24 @@ removable with `kubectl delete`.
 ### `provider_config` v1 fields
 
 `context`, `namespace`, `image`, `cpu_request`, `memory_request`,
-`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account` —
-9 of the 20-field validation cap. Node selectors, tolerations, and PVCs are
-deliberately baked out of v1 to preserve budget.
+`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account`.
+The optional `pod_options` object is the tenth top-level configuration field.
+It admits `node_selector`, `tolerations`, `workspace_size_limit`,
+`ephemeral_storage_request`, `ephemeral_storage_limit`, and
+`active_deadline_seconds`. These controls contain no credentials.
+
+Omitting the object preserves the original Pod shape and intent fingerprint.
+Configured options participate in the create-intent fingerprint. Unknown
+option names, nonpositive deadlines, and blank storage quantities are refused.
+Kubernetes validates scheduling fields and quantity syntax during creation.
+An absolute deadline includes startup time and terminates active work when
+expired; it is separate from the harness inactivity timer.
+
+Structured options can be supplied through the provider JSON protocol.
+Launchers requiring these controls must check their presence in the `info`
+schema before handing off credentials. Older providers ignore unknown fields.
+PVCs remain outside this binding. Operator kubectl diagnostics and residue
+cleanup remain separate from the desktop provider protocol.
 
 ### Distribution
 

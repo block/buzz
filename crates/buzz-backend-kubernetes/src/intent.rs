@@ -60,7 +60,7 @@ impl std::fmt::Display for Fingerprint {
 /// The non-secret, pre-binding description of the pod this deploy would
 /// create. Every field is provider-controlled and scheduling-relevant; there
 /// is deliberately no field for env values, Secret data, or the generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IntentTemplate {
     /// Schema version of the template itself. Bumping it re-fingerprints every
     /// pod, which is the intended way to roll out a pod-shape change.
@@ -83,6 +83,8 @@ pub struct IntentTemplate {
     pub workspace_mount_path: String,
     pub run_as_user: i64,
     pub run_as_group: i64,
+    #[serde(skip_serializing_if = "crate::config::PodOptions::is_default")]
+    pub pod_options: crate::config::PodOptions,
 }
 
 /// Current template schema version.
@@ -130,6 +132,7 @@ impl IntentTemplate {
             workspace_mount_path: crate::config::WORKSPACE_PATH.to_string(),
             run_as_user: crate::config::RUN_AS_UID,
             run_as_group: crate::config::RUN_AS_GID,
+            pod_options: crate::config::PodOptions::default(),
         }
     }
 }

@@ -83,7 +83,7 @@ pub fn build_pod(
     .into_iter()
     .collect();
 
-    let requests: BTreeMap<String, Quantity> = [
+    let mut requests: BTreeMap<String, Quantity> = [
         (
             "cpu".to_string(),
             Quantity(cfg.resources.cpu_request.clone()),
@@ -95,7 +95,7 @@ pub fn build_pod(
     ]
     .into_iter()
     .collect();
-    let limits: BTreeMap<String, Quantity> = [
+    let mut limits: BTreeMap<String, Quantity> = [
         ("cpu".to_string(), Quantity(cfg.resources.cpu_limit.clone())),
         (
             "memory".to_string(),
@@ -104,6 +104,13 @@ pub fn build_pod(
     ]
     .into_iter()
     .collect();
+
+    if let Some(value) = &cfg.pod_options.ephemeral_storage_request {
+        requests.insert("ephemeral-storage".into(), Quantity(value.clone()));
+    }
+    if let Some(value) = &cfg.pod_options.ephemeral_storage_limit {
+        limits.insert("ephemeral-storage".into(), Quantity(value.clone()));
+    }
 
     let container = Container {
         name: CONTAINER_NAME.to_string(),
@@ -151,6 +158,11 @@ pub fn build_pod(
         },
         spec: Some(PodSpec {
             containers: vec![container],
+            node_selector: (!cfg.pod_options.node_selector.is_empty())
+                .then(|| cfg.pod_options.node_selector.clone()),
+            tolerations: (!cfg.pod_options.tolerations.is_empty())
+                .then(|| cfg.pod_options.tolerations.clone()),
+            active_deadline_seconds: cfg.pod_options.active_deadline_seconds,
             restart_policy: Some(RESTART_POLICY.to_string()),
             termination_grace_period_seconds: Some(TERMINATION_GRACE_SECONDS),
             // The agent runs prompted, untrusted code while holding an nsec;
@@ -173,7 +185,10 @@ pub fn build_pod(
             }),
             volumes: Some(vec![Volume {
                 name: WORKSPACE_VOLUME.to_string(),
-                empty_dir: Some(EmptyDirVolumeSource::default()),
+                empty_dir: Some(EmptyDirVolumeSource {
+                    size_limit: cfg.pod_options.workspace_size_limit.clone().map(Quantity),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }]),
             ..Default::default()
@@ -187,13 +202,15 @@ pub fn intent_template(
     cfg: &ProviderConfig,
     env_keys: impl IntoIterator<Item = String>,
 ) -> IntentTemplate {
-    IntentTemplate::new(
+    let mut template = IntentTemplate::new(
         &cfg.namespace,
         &cfg.image,
         &cfg.resources,
         cfg.service_account.as_deref(),
         env_keys,
-    )
+    );
+    template.pod_options = cfg.pod_options.clone();
+    template
 }
 
 #[cfg(test)]
@@ -316,6 +333,75 @@ mod tests {
         let mount = &spec.containers[0].volume_mounts.as_ref().unwrap()[0];
         assert_eq!(mount.name, volume.name);
         assert_eq!(mount.mount_path, WORKSPACE_PATH);
+    }
+
+    #[test]
+    fn each_optional_pod_control_changes_intent() {
+        let cfg = provider_config();
+        let baseline = intent_template(&cfg, ["A".into()]).fingerprint();
+        for value in [
+            serde_json::json!({"node_selector": {"kubernetes.io/arch": "amd64"}}),
+            serde_json::json!({"tolerations": [{"key": "architecture", "operator": "Equal", "value": "x86", "effect": "NoSchedule"}]}),
+            serde_json::json!({"workspace_size_limit": "2Gi"}),
+            serde_json::json!({"ephemeral_storage_request": "3Gi"}),
+            serde_json::json!({"ephemeral_storage_limit": "4Gi"}),
+            serde_json::json!({"active_deadline_seconds": 28800}),
+        ] {
+            let mut changed = cfg.clone();
+            changed.pod_options = serde_json::from_value(value).unwrap();
+            assert_ne!(
+                intent_template(&changed, ["A".into()]).fingerprint(),
+                baseline
+            );
+        }
+        let original = serde_json::to_value(intent_template(&cfg, ["A".into()])).unwrap();
+        assert!(original.get("pod_options").is_none());
+    }
+
+    #[test]
+    fn optional_placement_storage_and_lifetime_reach_pod_and_intent() {
+        let mut cfg = provider_config();
+        let baseline = intent_template(&cfg, ["A".into()]).fingerprint();
+        cfg.pod_options = serde_json::from_value(serde_json::json!({
+            "node_selector": {"kubernetes.io/arch": "amd64"},
+            "tolerations": [{"key": "architecture", "operator": "Equal",
+                "value": "x86", "effect": "NoSchedule"}],
+            "workspace_size_limit": "2Gi",
+            "ephemeral_storage_request": "3Gi",
+            "ephemeral_storage_limit": "4Gi",
+            "active_deadline_seconds": 28800
+        }))
+        .unwrap();
+        let fp = intent_template(&cfg, ["A".into()]).fingerprint();
+        assert_ne!(fp, baseline);
+        let pod = build_pod(&identity(), &cfg, "g", &fp);
+        let spec = spec(&pod);
+        assert_eq!(
+            spec.node_selector.as_ref().unwrap()["kubernetes.io/arch"],
+            "amd64"
+        );
+        assert_eq!(
+            spec.tolerations.as_ref().unwrap()[0].value.as_deref(),
+            Some("x86")
+        );
+        assert_eq!(spec.active_deadline_seconds, Some(28800));
+        assert_eq!(
+            spec.volumes.as_ref().unwrap()[0]
+                .empty_dir
+                .as_ref()
+                .unwrap()
+                .size_limit,
+            Some(Quantity("2Gi".into()))
+        );
+        let resources = spec.containers[0].resources.as_ref().unwrap();
+        assert_eq!(
+            resources.requests.as_ref().unwrap()["ephemeral-storage"],
+            Quantity("3Gi".into())
+        );
+        assert_eq!(
+            resources.limits.as_ref().unwrap()["ephemeral-storage"],
+            Quantity("4Gi".into())
+        );
     }
 
     #[test]

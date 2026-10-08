@@ -1,12 +1,16 @@
 //! `provider_config` parsing and the `info` config schema
 //! (spec §`provider_config` v1 fields, `docs/remote-agents.md:1384-1389`).
 //!
-//! Nine fields, all optional except `image` (required at parse time; the
+//! Nine scalar fields and optional structured Pod controls. `image` is required
+//! at parse time (the
 //! schema offers the published sprig image as a prefill default — §Image).
 //! No credential field exists, by I2: cluster auth comes from ambient
 //! kubeconfig resolution and nothing else (`:196-198`).
 
 use crate::image::{self, ImageRef};
+use k8s_openapi::api::core::v1::Toleration;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Resource requests and limits (§Pod shape: 1cpu/2Gi → 2cpu/4Gi, all four
 /// configurable — `cargo build` in an agent workspace makes 500m/1Gi
@@ -61,7 +65,39 @@ pub const TERMINATION_GRACE_SECONDS: i64 = 60;
 /// the combination rather than shipping against an undefended convention.
 pub const RESTART_POLICY: &str = "Never";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Optional placement and resource bounds for a bare Pod. Defaults preserve
+/// the original Pod shape; configured fields participate in create intent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PodOptions {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Exact node labels required for scheduling.
+    pub node_selector: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Explicit taints this workload may tolerate.
+    pub tolerations: Vec<Toleration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional emptyDir size limit, in Kubernetes quantity syntax.
+    pub workspace_size_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Scheduler reservation for writable storage and container logs.
+    pub ephemeral_storage_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Eviction bound for aggregate container ephemeral storage.
+    pub ephemeral_storage_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Positive absolute Pod lifetime, including startup.
+    pub active_deadline_seconds: Option<i64>,
+}
+
+impl PodOptions {
+    /// Preserve original intent serialization when no options are set.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderConfig {
     /// kubeconfig context; `None` uses the current context.
     pub context: Option<String>,
@@ -71,6 +107,8 @@ pub struct ProviderConfig {
     /// `None` when `inactivity_seconds` was 0 — refused in v1, see [`parse`].
     pub inactivity_seconds: Option<u64>,
     pub service_account: Option<String>,
+    /// Optional Pod placement, storage, and lifetime controls.
+    pub pod_options: PodOptions,
 }
 
 /// Read an optional non-empty string field. Rejects non-string scalars rather
@@ -165,6 +203,27 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         Some(n) => Some(n),
     };
 
+    let pod_options: PodOptions = match cfg.get("pod_options") {
+        None => PodOptions::default(),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("provider_config.pod_options: {e}"))?,
+    };
+    if pod_options.active_deadline_seconds.is_some_and(|n| n <= 0) {
+        return Err("provider_config.pod_options.active_deadline_seconds must be positive".into());
+    }
+    for value in [
+        &pod_options.workspace_size_limit,
+        &pod_options.ephemeral_storage_request,
+        &pod_options.ephemeral_storage_limit,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.trim().is_empty() {
+            return Err("provider_config.pod_options storage quantities must not be empty".into());
+        }
+    }
+
     Ok(ProviderConfig {
         context: optional_string(cfg, "context")?,
         namespace,
@@ -172,6 +231,7 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         resources,
         inactivity_seconds,
         service_account: optional_string(cfg, "service_account")?,
+        pod_options,
     })
 }
 
@@ -232,6 +292,20 @@ pub fn config_schema() -> serde_json::Value {
                 "description": "The agent exits after this long with no work, and can be started again at any time.",
                 "default": DEFAULT_INACTIVITY_SECONDS
             },
+            "pod_options": {
+                "type": "object",
+                "title": "Pod placement and bounds",
+                "description": "Optional structured provider configuration; omit to preserve the original Pod shape.",
+                "additionalProperties": false,
+                "properties": {
+                    "node_selector": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "tolerations": {"type": "array", "items": {"type": "object"}},
+                    "workspace_size_limit": {"type": "string", "minLength": 1},
+                    "ephemeral_storage_request": {"type": "string", "minLength": 1},
+                    "ephemeral_storage_limit": {"type": "string", "minLength": 1},
+                    "active_deadline_seconds": {"type": "integer", "minimum": 1}
+                }
+            },
             "service_account": {
                 "type": "string",
                 "title": "Service account",
@@ -252,6 +326,22 @@ mod tests {
 
     fn minimal() -> serde_json::Value {
         serde_json::json!({"namespace": "buzz-agents-abc123", "image": digest_ref()})
+    }
+
+    #[test]
+    fn refuses_invalid_pod_options() {
+        for bad in [
+            serde_json::json!({"active_deadline_seconds": 0}),
+            serde_json::json!({"active_deadline_seconds": -1}),
+            serde_json::json!({"workspace_size_limit": " "}),
+            serde_json::json!({"unknown": true}),
+            serde_json::json!({"node_selector": "amd64"}),
+        ] {
+            let mut cfg = minimal();
+            cfg["pod_options"] = bad;
+            assert!(parse(&cfg).unwrap_err().contains("pod_options"));
+        }
+        assert!(parse(&minimal()).unwrap().pod_options.is_default());
     }
 
     #[test]
@@ -423,10 +513,10 @@ mod tests {
         );
     }
 
-    /// Nine fields exactly (§`provider_config` v1 fields). The cap is 20; the
+    /// Ten fields (§`provider_config` v1 fields). The cap is 20; the
     /// count is pinned so a field added without a spec change is caught here.
     #[test]
-    fn schema_declares_exactly_the_nine_v1_fields() {
+    fn schema_declares_scalar_fields_and_optional_pod_controls() {
         let schema = config_schema();
         let props = schema["properties"].as_object().unwrap();
         let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
@@ -442,6 +532,7 @@ mod tests {
                 "memory_limit",
                 "memory_request",
                 "namespace",
+                "pod_options",
                 "service_account"
             ]
         );
