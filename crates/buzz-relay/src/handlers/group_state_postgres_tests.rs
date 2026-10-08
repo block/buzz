@@ -94,6 +94,62 @@ pub(crate) async fn group_state_tags(
         .collect()
 }
 
+/// kind:39000 carries the channel's creation time, and an edit keeps it.
+/// Mutation: use the edit time instead of `channels.created_at` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn metadata_carries_the_channel_creation_time() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-created-at").await;
+    let creator = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &creator, &[]).await;
+
+    let created_at = |tags: &[Vec<String>]| -> Vec<String> {
+        tags.iter()
+            .filter(|tag| tag[0] == "created_at")
+            .map(|tag| tag[1].clone())
+            .collect()
+    };
+    let stored = state
+        .db
+        .get_channel_for_event_write(tenant.community(), channel_id)
+        .await
+        .expect("channel")
+        .created_at
+        .timestamp();
+    let tags = group_state_tags(&state, &tenant, channel_id, 39000).await;
+    assert_eq!(created_at(&tags), vec![stored.to_string()], "{tags:?}");
+
+    // Move the creation time far into the past, then edit. The new 39000
+    // must still report the creation time, not the time of the edit.
+    sqlx::query("UPDATE channels SET created_at = to_timestamp(1577836800) WHERE id = $1")
+        .bind(channel_id)
+        .execute(state.db.pool())
+        .await
+        .expect("backdate channel");
+    let edit = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            Tag::parse(["name", &format!("renamed-{}", channel_id.simple())]).unwrap(),
+        ])
+        .sign_with_keys(&creator)
+        .unwrap();
+    ingest_event(&state, &tenant, edit, http_auth(&creator))
+        .await
+        .expect("edit channel");
+    let tags = group_state_tags(&state, &tenant, channel_id, 39000).await;
+    assert!(
+        tags.iter()
+            .any(|tag| tag[0] == "name" && tag[1].starts_with("renamed-")),
+        "edit published: {tags:?}"
+    );
+    assert_eq!(
+        created_at(&tags),
+        vec!["1577836800".to_string()],
+        "{tags:?}"
+    );
+}
+
 /// Every group-state kind carries the channel type and the creator, so
 /// `#t` and `#P` filters match 39001 and 39002 as well as 39000.
 /// Mutation: drop the identity tags from 39001 or 39002 → RED.

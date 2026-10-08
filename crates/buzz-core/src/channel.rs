@@ -39,6 +39,17 @@ pub fn group_state_identity_tags(
     ])
 }
 
+/// Tag on kind:39000 that holds the channel's creation time in Unix seconds.
+///
+/// The event's own `created_at` is the time of the last edit, so it cannot
+/// rank channels by age.
+pub const CHANNEL_CREATED_AT_TAG: &str = "created_at";
+
+/// The [`CHANNEL_CREATED_AT_TAG`] tag for a channel created at `unix_seconds`.
+pub fn channel_created_at_tag(unix_seconds: i64) -> Result<nostr::Tag, nostr::event::tag::Error> {
+    nostr::Tag::parse([CHANNEL_CREATED_AT_TAG, &unix_seconds.to_string()])
+}
+
 /// Whether a channel is publicly visible or invite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelVisibility {
