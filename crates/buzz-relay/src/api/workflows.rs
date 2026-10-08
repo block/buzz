@@ -121,7 +121,18 @@ async fn authorize_workflow_read(
         .map_err(|error| {
             internal_error(&format!("workflow channel access lookup: {error}")).into_response()
         })?;
-    if !accessible.contains(&channel_id) {
+    // A workflow names its channel, so a readable system channel counts.
+    let readable = accessible.contains(&channel_id)
+        || state
+            .db
+            .get_readable_system_channel_ids(tenant.community(), &pubkey_bytes)
+            .await
+            .map_err(|error| {
+                internal_error(&format!("workflow system channel access lookup: {error}"))
+                    .into_response()
+            })?
+            .contains(&channel_id);
+    if !readable {
         return Err(api_error(StatusCode::FORBIDDEN, "workflow is not accessible").into_response());
     }
 

@@ -985,7 +985,8 @@ pub fn emit_live_thread_summary(
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
 ///
-/// kind:44100 = member added, kind:44101 = member removed.
+/// kind:44100 = member added, kind:44101 = member removed. System channels
+/// emit none.
 /// The p tag addresses the target pubkey; the h tag carries the channel UUID as metadata.
 /// Stored with channel_id = None so global subscribers receive it via slow-path fan-out.
 pub async fn emit_membership_notification(
@@ -996,6 +997,16 @@ pub async fn emit_membership_notification(
     actor_pubkey: &[u8],
     notification_kind: u32,
 ) -> anyhow::Result<()> {
+    // A system channel is left out of clients' channel lists, so it sends no
+    // membership notifications: a client that receives one would show it.
+    if !state
+        .db
+        .system_channel_ids_among(tenant.community(), &[channel_id])
+        .await?
+        .is_empty()
+    {
+        return Ok(());
+    }
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();

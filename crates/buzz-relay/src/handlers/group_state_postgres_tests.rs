@@ -240,7 +240,7 @@ async fn creator_tag_survives_ownership_transfer() {
 }
 
 /// Ingest a kind:9002 that `keys` signs for `channel_id` with `tags`.
-async fn edit_channel(
+pub(crate) async fn edit_channel(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     keys: &Keys,
@@ -551,15 +551,16 @@ async fn racing_creates_resolve_to_the_same_oldest_channel() {
     assert_eq!(pick(vec![&events[1], &events[0]]), Some(expected));
 }
 
-/// Run one historical REQ as `reader` and return the IDs of the events sent
-/// before EOSE.
-async fn req_event_ids(
-    state: &Arc<AppState>,
+/// An authenticated WebSocket connection for `reader`, and the receiver of
+/// the frames the relay sends on it.
+pub(crate) fn test_conn(
     tenant: &TenantContext,
     reader: &Keys,
-    filter: serde_json::Value,
-) -> Vec<String> {
-    let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(256);
+) -> (
+    Arc<crate::connection::ConnectionState>,
+    tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+) {
+    let (send_tx, send_rx) = tokio::sync::mpsc::channel(256);
     let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(4);
     let cancel = tokio_util::sync::CancellationToken::new();
     let conn = Arc::new(crate::connection::ConnectionState {
@@ -587,6 +588,18 @@ async fn req_event_ids(
         nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
         community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
     });
+    (conn, send_rx)
+}
+
+/// Run one historical REQ as `reader` and return the IDs of the events sent
+/// before EOSE.
+pub(crate) async fn req_event_ids(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+    filter: serde_json::Value,
+) -> Vec<String> {
+    let (conn, mut send_rx) = test_conn(tenant, reader);
     let filter: nostr::Filter = serde_json::from_value(filter).expect("filter");
     crate::handlers::req::handle_req("g".into(), vec![filter], vec![None], conn, state.clone())
         .await;
@@ -606,7 +619,11 @@ async fn req_event_ids(
 }
 
 /// The current kind:39000 event ID for `channel_id`.
-async fn metadata_event_id(state: &AppState, tenant: &TenantContext, channel_id: Uuid) -> String {
+pub(crate) async fn metadata_event_id(
+    state: &AppState,
+    tenant: &TenantContext,
+    channel_id: Uuid,
+) -> String {
     state
         .db
         .query_events(&EventQuery {

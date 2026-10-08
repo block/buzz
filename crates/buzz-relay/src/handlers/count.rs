@@ -99,6 +99,25 @@ pub async fn handle_count(
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
+    // System channels are outside `accessible_channels`; a filter that names
+    // one counts it in its own scope only, as in the WS REQ handler.
+    let readable_system = match super::system_channels::readable_system_channels_for_filters(
+        &state,
+        conn.tenant.community(),
+        &pubkey_bytes,
+        &filters,
+        &accessible_channels,
+        token_channel_ids.as_deref(),
+    )
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(sub_id = %sub_id, "Failed to get readable system channels: {e}");
+            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            return;
+        }
+    };
 
     // B2: acquire effect permit immediately before the first DB count query.
     // The permit is held through all count queries and the COUNT response.
@@ -145,7 +164,7 @@ pub async fn handle_count(
 
         if let Some(requested_channels) = requested_channels {
             for &ch_id in &requested_channels {
-                if accessible_channels.contains(&ch_id) {
+                if accessible_channels.contains(&ch_id) || readable_system.contains(&ch_id) {
                     continue;
                 }
                 let token_allows = token_channel_ids
@@ -174,10 +193,15 @@ pub async fn handle_count(
                     db_is_member,
                 );
             }
+            let filter_scope = super::system_channels::filter_channel_scope(
+                filter,
+                &accessible_channels,
+                &readable_system,
+            );
             let authorized_requested: Vec<_> = requested_channels
                 .iter()
                 .copied()
-                .filter(|channel_id| accessible_channels.contains(channel_id))
+                .filter(|channel_id| filter_scope.contains(channel_id))
                 .collect();
             if authorized_requested.is_empty() {
                 continue;
@@ -195,12 +219,7 @@ pub async fn handle_count(
                 conn.tenant.community(),
             )
             .await;
-            super::req::apply_channel_scope_to_query(
-                &mut query,
-                filter,
-                ch_id,
-                &accessible_channels,
-            );
+            super::req::apply_channel_scope_to_query(&mut query, filter, ch_id, &filter_scope);
             // Shared-gated visibility pushdown: pre-filter the fallback
             // query_events candidate page before ORDER/LIMIT.
             if needs_shared_gate_filtering {
@@ -279,7 +298,14 @@ pub async fn handle_count(
                 conn.tenant.community(),
             )
             .await;
-            query.channel_ids = Some(accessible_channels.to_vec());
+            query.channel_ids = Some(
+                super::system_channels::filter_channel_scope(
+                    filter,
+                    &accessible_channels,
+                    &readable_system,
+                )
+                .into_owned(),
+            );
             // Shared-gated visibility pushdown for the fallback query_events path.
             if needs_shared_gate_filtering {
                 query.shared_gated_reader = Some(pubkey_bytes.clone());
