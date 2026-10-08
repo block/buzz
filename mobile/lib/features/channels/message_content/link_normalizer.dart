@@ -131,8 +131,7 @@ String decodeMarkdownLabelSyntax(String label) => label.replaceAllMapped(
 // Scan each label character once, treating escaped brackets as label text.
 // Nested brackets are balanced without restarting at every opening bracket.
 ({int start, int end})? _findMarkdownLinkStart(String segment, int offset) {
-  var start = 0;
-  var depth = 0;
+  final openers = <int>[];
   for (var cursor = offset; cursor < segment.length; cursor++) {
     final char = segment[cursor];
     if (char == r'\' &&
@@ -142,17 +141,18 @@ String decodeMarkdownLabelSyntax(String label) => label.replaceAllMapped(
       continue;
     }
     if (char == '\n') {
-      depth = 0;
+      openers.clear();
     } else if (char == '[') {
-      if (depth == 0) {
-        start = cursor > 0 && segment[cursor - 1] == '!' ? cursor - 1 : cursor;
-      }
-      depth++;
-    } else if (char == ']' && depth > 0) {
-      depth--;
-      if (depth == 0 &&
-          cursor + 1 < segment.length &&
-          segment[cursor + 1] == '(') {
+      openers.add(cursor);
+    } else if (char == ']' && openers.isNotEmpty) {
+      final opener = openers.removeLast();
+      // A destination belongs to this matching opener even if an earlier
+      // prose bracket never closed. Inner label brackets without a destination
+      // still balance normally, preserving true nested labels.
+      if (cursor + 1 < segment.length && segment[cursor + 1] == '(') {
+        final start = opener > 0 && segment[opener - 1] == '!'
+            ? opener - 1
+            : opener;
         return (start: start, end: cursor + 2);
       }
     }

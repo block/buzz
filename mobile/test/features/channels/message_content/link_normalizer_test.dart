@@ -98,6 +98,30 @@ void main() {
         '[second &#91;Q4&#93;](https://relay.example/file.pdf)',
       );
     });
+    for (final prose in ['oops [ then ', 'oops [[ text ', 'oops [x] [ ']) {
+      for (final prefix in ['!', '']) {
+        test('$prefix recovers after unmatched prose $prose', () {
+          expect(
+            normalizeBareLinks(
+              '$prose$prefix[outer [inner] label](<$media>) '
+              r'[report \[Q4\]](<https://relay.example/report.pdf>)',
+            ),
+            '$prose$prefix[outer &#91;inner&#93; label]($media) '
+            '[report &#91;Q4&#93;](https://relay.example/report.pdf)',
+          );
+        });
+      }
+    }
+    test('near-limit unmatched prose preserves every later attachment', () {
+      const source = '[file](<https://relay.example/file.pdf>) ';
+      const expected = '[file](https://relay.example/file.pdf) ';
+      final count = (256 * 1024 - 2) ~/ source.length;
+      final watch = Stopwatch()..start();
+      final output = normalizeBareLinks('[ ${source * count}');
+      watch.stop();
+      expect(output == '[ ${expected * count}', isTrue);
+      expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+    });
     test('escapes spaces and parentheses without double-encoding URLs', () {
       const raw = 'https://relay.example/media/photo (1).png?q=a%20b&v=2';
       const encoded =

@@ -76,7 +76,8 @@ void main() {
           );
           await tester.pumpWidget(
             _app(
-              'Look\n![photo \\[Q4\\]](${angled ? '<$url>' : url})',
+              '${angled ? 'oops [ text ' : 'Look\n'}'
+              '![photo \\[Q4\\]](${angled ? '<$url>' : url})',
               tags: [
                 [
                   'imeta',
@@ -134,7 +135,7 @@ void main() {
         String? requested;
         await tester.pumpWidget(
           _app(
-            '![clip \\[Q4\\]](<$url> $title)',
+            'oops [ text ![clip \\[Q4\\]](<$url> $title)',
             tags: [
               ['imeta', 'url $url', 'm ${item.$2}'],
             ],
@@ -185,7 +186,7 @@ void main() {
             Map<String, String>? headers;
             await tester.pumpWidget(
               _app(
-                markdown,
+                '${angled ? 'oops [ then ' : ''}$markdown',
                 overrides: [
                   mediaGetAuthServiceProvider.overrideWithValue(
                     MediaGetAuthService(
@@ -229,7 +230,7 @@ void main() {
       );
       await tester.pumpWidget(
         _app(
-          'Gallery\n![first](<$first>)\n![second \\[Q4\\]]($second)',
+          'oops [ text ![inline](<$second>)\n![first](<$first>)\n![second \\[Q4\\]]($second)',
           tags: [
             [
               'imeta',
@@ -245,6 +246,10 @@ void main() {
       );
       await _waitForImages(tester);
       await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('message-media-image-preview:$second')),
+        findsOneWidget,
+      );
       expect(find.text('2 images'), findsOneWidget);
       expect(find.bySemanticsLabel('Open second [Q4]'), findsOneWidget);
       expect(find.bySemanticsLabel('Open First photo'), findsOneWidget);

@@ -67,7 +67,8 @@ List<MarkdownComponent> _useMessageInlineComponents({
         onChannelTap: channelTap,
       ),
       _MarkdownLabelEntityMd(),
-      ...MarkdownComponent.inlineComponents,
+      for (final component in MarkdownComponent.inlineComponents)
+        component is ATagMd ? _MessageLinkMd() : component,
     ],
     [inputs],
   );
@@ -157,4 +158,12 @@ class _MarkdownLabelEntityMd extends InlineMd {
     String text,
     GptMarkdownConfig config,
   ) => TextSpan(text: decodeMarkdownLabelSyntax(text), style: config.style);
+}
+
+// Labels are already normalized, including literal/nested brackets. The
+// package's permissive .*? label matcher can otherwise start at a prose '['
+// and swallow a later image or link before its own component gets to render.
+class _MessageLinkMd extends ATagMd {
+  @override
+  RegExp get exp => RegExp(r'(?<!!)\[[^\[\]\n]*\]\([^\s]*\)');
 }
