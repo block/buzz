@@ -950,19 +950,28 @@ fn fn_signature_starts_here(trimmed_line: &str) -> bool {
 /// signature to the doc comment or attributes of the next function, so a
 /// following function's docs (which may quote SQL) are never attributed to the
 /// function before it.
+///
+/// Signatures and attributes are found in the masked view (see
+/// [`mask_comments_and_literals`]), so an `fn` line inside a comment or a
+/// multiline string never splits a function. Doc comments are blank in that
+/// view, so `///` lead-ins are read from the original line.
 fn function_slices(production_source: &str) -> Vec<&str> {
+    let masked = mask_comments_and_literals(production_source);
     // (signature offset, offset where the next function's lead-in begins)
     let mut starts = Vec::new();
     let mut lead_ins = Vec::new();
     let mut lead_in: Option<usize> = None;
     let mut offset = 0usize;
-    for line in production_source.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let indent = line.len() - trimmed.len();
+    for (line, code) in production_source
+        .split_inclusive('\n')
+        .zip(masked.split_inclusive('\n'))
+    {
+        let trimmed = code.trim_start();
+        let indent = code.len() - trimmed.len();
         if fn_signature_starts_here(trimmed) {
             starts.push(offset + indent);
             lead_ins.push(lead_in.take().unwrap_or(offset + indent));
-        } else if trimmed.starts_with("///") || trimmed.starts_with("#[") {
+        } else if line.trim_start().starts_with("///") || trimmed.starts_with("#[") {
             lead_in.get_or_insert(offset);
         } else {
             lead_in = None;
@@ -1422,30 +1431,35 @@ const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
 /// its body. Braces inside comments and literals are not counted (see
 /// [`mask_comments_and_literals`]). Unlike cutting the file at the first
 /// `#[cfg(test)]`, this keeps production code that follows a test-only item.
-/// The marker counts as an attribute only when it is the first non-whitespace
-/// text on its line, so a mention in a comment or string strips nothing.
+/// The whole file is masked once and the marker is found in that view, so a
+/// mention in a comment or string (even a multiline one) strips nothing. The
+/// marker also counts only when it is the first code on its line.
 fn strip_cfg_test_items(source: &str) -> String {
     const MARKER: &str = "#[cfg(test)]";
+    let masked = mask_comments_and_literals(source);
     let mut kept = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(at) = rest.find(MARKER) {
-        let line_start = rest[..at].rfind('\n').map_or(0, |newline| newline + 1);
-        if !rest[line_start..at].trim().is_empty() {
-            kept.push_str(&rest[..at + MARKER.len()]);
-            rest = &rest[at + MARKER.len()..];
+    let mut copied = 0usize;
+    let mut search = 0usize;
+    while let Some(found) = masked[search..].find(MARKER) {
+        let at = search + found;
+        let line_start = masked[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        search = at + MARKER.len();
+        if !masked[line_start..at].trim().is_empty() {
             continue;
         }
-        kept.push_str(&rest[..at]);
-        let item = &rest[at + MARKER.len()..];
-        rest = &item[cfg_test_item_len(item)..];
+        kept.push_str(&source[copied..at]);
+        copied = search + cfg_test_item_len(&masked[search..]);
+        search = copied;
     }
-    kept.push_str(rest);
+    kept.push_str(&source[copied..]);
     kept
 }
 
-fn cfg_test_item_len(item: &str) -> usize {
+/// Length of the item that starts `masked_item`, which must already be masked
+/// so braces in comments and literals are not counted.
+fn cfg_test_item_len(masked_item: &str) -> usize {
     let mut depth = 0usize;
-    for (index, byte) in mask_comments_and_literals(item).bytes().enumerate() {
+    for (index, byte) in masked_item.bytes().enumerate() {
         match byte {
             b';' if depth == 0 => return index + 1,
             b'{' => depth += 1,
@@ -1458,7 +1472,7 @@ fn cfg_test_item_len(item: &str) -> usize {
             _ => {}
         }
     }
-    item.len()
+    masked_item.len()
 }
 
 /// Whether the `r` at `index` begins a raw literal token: `r"`, or the `br"` /
@@ -1563,6 +1577,37 @@ fn mask_comments_and_literals(source: &str) -> String {
         blank(start, index);
     }
     String::from_utf8(masked).expect("masking replaces whole ASCII-delimited spans")
+}
+
+#[test]
+fn masker_blanks_every_literal_form_and_keeps_code() {
+    for (input, expected) in [
+        // Raw strings with zero, one, or several `#`, and the `b`/`c` raw
+        // prefixes. Each body ends in `\`, which would escape the closing quote
+        // if the literal were scanned as a plain string.
+        (r#"a(r"\") {}"#, "a(    ) {}"),
+        (r###"a(r##"x"#{"##) {}"###, "a(           ) {}"),
+        (r##"a(br#"\"#) {}"##, "a(b      ) {}"),
+        (r#"a(br"\") {}"#, "a(b    ) {}"),
+        (r#"a(cr"\") {}"#, "a(c    ) {}"),
+        // Plain byte and C strings.
+        (r#"a(b"{") {}"#, "a(b   ) {}"),
+        (r#"a(c"{") {}"#, "a(c   ) {}"),
+        // Plain and escaped char literals.
+        (
+            r"a('\'', '\\', '\n', '{') {}",
+            "a(    ,     ,     ,    ) {}",
+        ),
+        // Code that only looks like a literal stays as it is.
+        ("let r#type = 1; {}", "let r#type = 1; {}"),
+        ("fn f<'a>(x: &'a str) {}", "fn f<'a>(x: &'a str) {}"),
+    ] {
+        assert_eq!(
+            mask_comments_and_literals(input),
+            expected,
+            "masking `{input}`"
+        );
+    }
 }
 
 /// Whether `source` inserts into `events` itself (not `event_mentions` or any
@@ -1750,6 +1795,26 @@ pub(crate) async fn writer_with_hook_in_raw_string(tx: &mut AdmittedTx) {
         .expect("write");
     tracing::debug!(r#""event_follow_up::after_admitted_insert(""#);
 }
+/*
+#[cfg(test)]
+*/
+pub(crate) async fn writer_after_block_commented_cfg_test(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+}
+pub(crate) async fn writer_after_raw_string_example(tx: &mut AdmittedTx) {
+    let _example = r#"
+fn example() {
+    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+}
+"#;
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+}
 #[cfg(test)]
 fn test_only_helper() -> (&'static str, char, &'static str, char, &'static [u8]) {
     // an unbalanced { in a comment
@@ -1788,6 +1853,8 @@ mod tests {
             "pub(crate) async fn writer_with_nested_block_commented_hook(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_with_hook_in_raw_string(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_after_block_commented_cfg_test(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_after_raw_string_example(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
         "an events insert must run the push enqueue and record the TTL refresh"
