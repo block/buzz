@@ -25,8 +25,10 @@ const AvatarImage = React.forwardRef<
   <AvatarPrimitive.Image
     ref={ref}
     className={cn("aspect-square h-full w-full avatar-sdr-clamp", className)}
+    // No `loading="lazy"`: Radix mounts this <img> only after its own probe
+    // image has fetched the source, so lazy loading deferred no request and
+    // made each newly mounted, cached avatar reload for a few blank frames.
     decoding="async"
-    loading="lazy"
     {...props}
   />
 ));
