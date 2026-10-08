@@ -3285,10 +3285,20 @@ async fn run_harness(
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let deny_permissions = config.deny_permission_requests;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        deny_permissions,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -5746,12 +5756,14 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let deny_permissions = config.deny_permission_requests;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result =
+            spawn_and_init(&cmd, &args, &env, has_codex, deny_permissions, i, observer).await;
         guard.send(result);
     });
 }
@@ -5988,6 +6000,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let deny_permissions = config.deny_permission_requests;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -5999,7 +6012,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            deny_permissions,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -6054,6 +6076,7 @@ async fn initialize_agent_pool(
         .await;
         match spawn_result {
             Ok(mut acp) => {
+                acp.set_deny_permission_requests(startup.deny_permission_requests);
                 acp.set_observer(startup.observer.clone(), i);
                 let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
                 let initialize_result = match shutdown.as_mut() {
@@ -6153,12 +6176,14 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    deny_permission_requests: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    acp.set_deny_permission_requests(deny_permission_requests);
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -6443,7 +6468,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
+    if config.deny_permission_requests || config.mcp_command.is_empty() {
         return vec![];
     }
     vec![McpServer {
@@ -10124,6 +10149,7 @@ mod build_mcp_servers_tests {
             effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
+            deny_permission_requests: false,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
@@ -10446,6 +10472,14 @@ mod build_mcp_servers_tests {
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
         );
+    }
+
+    #[test]
+    fn restrictive_policy_does_not_admit_external_mcp_servers() {
+        let mut config = test_config();
+        assert!(!build_mcp_servers(&config).is_empty());
+        config.deny_permission_requests = true;
+        assert!(build_mcp_servers(&config).is_empty());
     }
 
     #[test]
@@ -11221,6 +11255,7 @@ mod error_outcome_emission_tests {
             effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
+            deny_permission_requests: false,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],

@@ -128,6 +128,8 @@ pub enum PermissionMode {
     /// Agent default — permission requests per tool call.
     #[value(alias = "default")]
     Default,
+    /// Codex workspace-write sandbox; escalation still requires a permission decision.
+    WorkspaceWrite,
     /// Auto mode — fully autonomous execution; model-gated (requires a model
     /// that supports `supportsAutoMode`).  Degrades gracefully to `default`
     /// when the session's active model does not support it.
@@ -153,6 +155,7 @@ impl PermissionMode {
     pub fn as_wire_str(&self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::WorkspaceWrite => "workspace-write",
             Self::Auto => "auto",
             Self::AcceptEdits => "acceptEdits",
             Self::BypassPermissions => "bypassPermissions",
@@ -475,6 +478,11 @@ pub struct CliArgs {
     )]
     pub permission_mode: PermissionMode,
 
+    /// Deny every ACP permission request and require the advertised permission
+    /// mode to be applied and confirmed. Opt-in; legacy behavior is unchanged.
+    #[arg(long, env = "BUZZ_ACP_DENY_PERMISSION_REQUESTS")]
+    pub deny_permission_requests: bool,
+
     /// Inbound author gate: which authors' events the harness forwards.
     /// Modes: owner-only (default), allowlist, anyone, nobody.
     #[arg(
@@ -594,6 +602,8 @@ pub struct Config {
     pub session_title: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Opt-in enforced mode negotiation and denial of all permission requests.
+    pub deny_permission_requests: bool,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
@@ -1145,13 +1155,30 @@ impl Config {
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
         // for non-Codex agents or unparseable relay URLs.
-        let has_generated_codex_config =
+        let has_generated_codex_config = if !args.deny_permission_requests {
             if let Some(network_env) = codex_network_env(&agent_command, &args.relay_url) {
                 persona_env_vars.push(network_env);
                 true
             } else {
                 false
-            };
+            }
+        } else {
+            false
+        };
+
+        if args.deny_permission_requests
+            && !matches!(
+                args.permission_mode,
+                PermissionMode::Default
+                    | PermissionMode::WorkspaceWrite
+                    | PermissionMode::DontAsk
+                    | PermissionMode::Plan
+            )
+        {
+            return Err(ConfigError::ConfigFile(
+                "deny-permission-requests requires a restrictive permission mode".into(),
+            ));
+        }
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
@@ -1196,6 +1223,7 @@ impl Config {
                 .as_deref()
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
+            deny_permission_requests: args.deny_permission_requests,
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
@@ -1574,6 +1602,7 @@ mod tests {
             effort_level: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
+            deny_permission_requests: false,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
@@ -2403,6 +2432,43 @@ channels = "ALL"
             s.contains("memory=true"),
             "summary should include memory=true when enabled, got: {s}"
         );
+    }
+
+    #[test]
+    fn restrictive_policy_rejects_permissive_modes_and_keeps_codex_network_closed() {
+        for mode in [
+            "bypass-permissions",
+            "auto",
+            "accept-edits",
+            "workspace-write",
+            "default",
+        ] {
+            let args = CliArgs::try_parse_from([
+                "buzz-acp",
+                "--private-key",
+                "0000000000000000000000000000000000000000000000000000000000000001",
+                "--relay-url",
+                "ws://127.0.0.1:1",
+                "--agent-command",
+                "codex-acp",
+                "--deny-permission-requests",
+                "--permission-mode",
+                mode,
+            ])
+            .unwrap();
+            let result = Config::from_args(args);
+            if matches!(mode, "workspace-write" | "default") {
+                let config = result.unwrap();
+                assert!(config.deny_permission_requests);
+                assert!(!config.has_generated_codex_config);
+                assert!(!config
+                    .persona_env_vars
+                    .iter()
+                    .any(|(key, _)| key == "CODEX_CONFIG"));
+            } else {
+                assert!(result.is_err(), "mode={mode}");
+            }
+        }
     }
 
     #[test]

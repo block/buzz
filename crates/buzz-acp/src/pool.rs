@@ -918,6 +918,8 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Require a confirmed restrictive mode and deny permission requests.
+    pub deny_permission_requests: bool,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -1584,6 +1586,14 @@ async fn create_session_and_apply_model(
     agent_core: Option<&str>,
     channel: NewSessionChannelContext<'_>,
 ) -> Result<String, AcpError> {
+    agent
+        .acp
+        .set_deny_permission_requests(ctx.deny_permission_requests);
+    let mcp_servers = if ctx.deny_permission_requests {
+        &[][..]
+    } else {
+        &ctx.mcp_servers
+    };
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
@@ -1617,7 +1627,7 @@ async fn create_session_and_apply_model(
         )
     });
     let mcp_servers = mcp_servers_with_git_origin(
-        &ctx.mcp_servers,
+        mcp_servers,
         channel.scope.map(SessionScope::channel_id),
         channel.channel_type,
         ctx.session_title.as_deref(),
@@ -1836,7 +1846,15 @@ async fn create_session_and_apply_model(
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
     // are safely skipped — the harness auto-approves via handle_permission_request.
-    if !ctx.permission_mode.is_default()
+    if ctx.deny_permission_requests {
+        enforce_permission_mode(
+            &mut agent.acp,
+            &resp.session_id,
+            &resp.raw,
+            ctx.permission_mode,
+        )
+        .await?;
+    } else if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
         apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
@@ -2147,10 +2165,6 @@ fn patch_config_option_current_value(
     }
 }
 
-/// Set the session permission mode via `session/set_config_option`.
-///
-/// Non-fatal for most errors: logs and proceeds. The agent falls back
-/// to its default permission mode (`"default"`), which still works via
 /// Check if the agent's `session/new` response advertises a given mode ID
 /// in `result.modes.availableModes[].id`. Returns `false` if the modes
 /// field is absent or the mode isn't listed.
@@ -2167,10 +2181,53 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
         .unwrap_or(false)
 }
 
-/// per-tool auto-approval in `handle_permission_request`.
-///
-/// **Fatal exception:** if the agent process exits (e.g., goose crashes on
-/// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
+/// Enforce the pilot's restrictive mode without legacy fallback on refusal.
+async fn enforce_permission_mode(
+    acp: &mut AcpClient,
+    session_id: &str,
+    advertised: &serde_json::Value,
+    mode: PermissionMode,
+) -> Result<(), AcpError> {
+    let wire = mode.as_wire_str();
+    if !matches!(
+        mode,
+        PermissionMode::Default
+            | PermissionMode::WorkspaceWrite
+            | PermissionMode::DontAsk
+            | PermissionMode::Plan
+    ) || !agent_supports_mode(advertised, wire)
+    {
+        return Err(AcpError::Protocol(
+            "required restrictive permission mode is unavailable".into(),
+        ));
+    }
+    let result = tokio::time::timeout(
+        PERMISSION_MODE_TIMEOUT,
+        acp.session_set_config_option(session_id, "mode", wire),
+    )
+    .await
+    .map_err(|_| AcpError::Timeout(PERMISSION_MODE_TIMEOUT))??;
+    // Both pinned adapters return the current mode in configOptions. An empty
+    // acknowledgement, silent fallback, or a changed value is not confirmation.
+    let confirmed = result
+        .get("configOptions")
+        .and_then(|v| v.as_array())
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                (option.get("id").and_then(|v| v.as_str()) == Some("mode")
+                    || option.get("configId").and_then(|v| v.as_str()) == Some("mode"))
+                    && option.get("currentValue").and_then(|v| v.as_str()) == Some(wire)
+            })
+        });
+    if !confirmed {
+        return Err(AcpError::Protocol(
+            "required restrictive permission mode was not confirmed".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Apply the legacy mode with per-tool auto-approval fallback on application errors.
 async fn apply_permission_mode(
     acp: &mut AcpClient,
     session_id: &str,
@@ -10478,6 +10535,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
+            deny_permission_requests: false,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
@@ -11552,6 +11610,101 @@ done"#
             .find(|o| o["category"] == "thought_level")
             .and_then(|o| o["currentValue"].as_str())
             .map(str::to_string)
+    }
+
+    #[tokio::test]
+    async fn restrictive_policy_requires_supported_and_confirmed_mode_on_session_creation() {
+        for (mode, advertised, reply, succeeds) in [
+            (
+                PermissionMode::WorkspaceWrite,
+                "workspace-write",
+                r#""result":{"configOptions":[{"id":"mode","currentValue":"workspace-write"}]}"#,
+                true,
+            ),
+            (
+                PermissionMode::WorkspaceWrite,
+                "workspace-write",
+                r#""result":{"configOptions":[{"id":"mode","currentValue":"agent-full-access"}]}"#,
+                false,
+            ),
+            (
+                PermissionMode::WorkspaceWrite,
+                "workspace-write",
+                r#""result":{}"#,
+                false,
+            ),
+            (
+                PermissionMode::WorkspaceWrite,
+                "workspace-write",
+                r#""error":{"code":-32602,"message":"unsupported"}"#,
+                false,
+            ),
+            (
+                PermissionMode::WorkspaceWrite,
+                "agent-full-access",
+                r#""result":{}"#,
+                false,
+            ),
+            (
+                PermissionMode::Default,
+                "default",
+                r#""result":{"configOptions":[{"id":"mode","currentValue":"default"}]}"#,
+                true,
+            ),
+        ] {
+            let requested = mode.as_wire_str();
+            let script = format!(
+                r#"python3 -c '
+import json,sys
+request=json.loads(sys.stdin.readline())
+assert request["params"]["mcpServers"] == [], request
+print(json.dumps({{"jsonrpc":"2.0","id":request["id"],"result":{{"sessionId":"strict-session","modes":{{"currentModeId":"agent","availableModes":[{{"id":"{advertised}"}}]}}}}}}),flush=True)
+request=json.loads(sys.stdin.readline())
+assert request["method"] == "session/set_config_option", request
+assert request["params"] == {{"sessionId":"strict-session","configId":"mode","value":"{requested}"}}, request
+response=json.loads("""{{{reply}}}""")
+response.update({{"jsonrpc":"2.0","id":request["id"]}})
+print(json.dumps(response),flush=True)
+sys.stdin.read()
+'"#
+            );
+            let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+                .await
+                .unwrap();
+            let mut agent = effort_agent(acp, None);
+            let mut ctx = make_prompt_context_no_owner();
+            ctx.deny_permission_requests = true;
+            ctx.mcp_servers.push(McpServer {
+                name: "unrestricted-shell".into(),
+                command: "must-not-start".into(),
+                args: vec![],
+                env: vec![],
+            });
+            ctx.permission_mode = mode;
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    None,
+                    NewSessionChannelContext {
+                        huddle_instructions: None,
+                        canvas: None,
+                        name: None,
+                        scope: None,
+                        channel_type: None,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.is_ok(),
+                succeeds,
+                "advertised={advertised} reply={reply} result={result:?}"
+            );
+            agent.acp.shutdown().await;
+        }
     }
 
     const OPTS_WITH_EFFORT_DEFAULT_LOW: &str = r#"[{"configId":"effort","category":"thought_level","currentValue":"low","options":[{"value":"low"},{"value":"high"}]}]"#;

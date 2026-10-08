@@ -54,6 +54,7 @@ pub(crate) struct PoolStartup {
     pub(crate) args: Vec<String>,
     pub(crate) extra_env: Vec<(String, String)>,
     pub(crate) has_generated_codex_config: bool,
+    pub(crate) deny_permission_requests: bool,
     pub(crate) model: Option<String>,
     pub(crate) effort_level: Option<String>,
     pub(crate) observer: Option<observer::ObserverHandle>,
@@ -67,6 +68,7 @@ impl PoolStartup {
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
+            deny_permission_requests: config.deny_permission_requests,
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
             observer,
@@ -114,6 +116,7 @@ fn make_prompt_context(
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
+        deny_permission_requests: config.deny_permission_requests,
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: resolve_agent_owner(config)
             .as_deref()

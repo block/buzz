@@ -59,3 +59,23 @@ Goose and uses its provider to invoke the native developer shell. Both operate
 only on temporary local repositories, verify commit/tag signatures and identity,
 check unrelated-remote credential scoping, and assert keyfile removal. They do
 not replace authenticated relay clone/push/readback testing.
+
+
+## Restrictive account pilot
+
+`BUZZ_ACP_DENY_PERMISSION_REQUESTS=true` opts into permission-request denial.
+Select an explicit supported mode with `BUZZ_ACP_PERMISSION_MODE`.
+The pilot uses Codex `workspace-write` or Claude `default`.
+Session creation requires advertised support and a matching current value after setting the mode.
+Every permission request receives a cancelled outcome; there is no automatic allow_once selection in this path.
+The harness supplies no external MCP servers and suppresses generated Codex network widening.
+Client terminal and filesystem operations remain unimplemented and return Method not found.
+Legacy launches retain their previous behavior when the opt-in is absent.
+
+Run the full package suite above, also clearing inherited `BUZZ_ACP_SESSION_POLICY` when its default is tested.
+Regression fixtures use actual ACP stdio exchanges for grants, missing options, mode refusal and unmediated requests.
+Session-creation tests inspect the actual empty MCP-server list and requested/confirmed mode.
+These fixtures prove harness control flow, not vendor sandbox enforcement or authenticated account access.
+The restricted pilot can prove a signed text response and shutdown; external MCP Git/Linear/Buzz CLI work is unavailable.
+Claude default mode and ACP denial are not a filesystem/network sandbox.
+Trusted adapter code, model-provider networking, same-UID account authority and Kubernetes administrators remain separate boundaries.

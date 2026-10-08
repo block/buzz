@@ -167,6 +167,7 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    deny_permission_requests: bool,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -622,6 +623,7 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            deny_permission_requests: false,
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -635,6 +637,11 @@ impl AcpClient {
             standard_adapter,
             claude_thinking_summaries,
         })
+    }
+
+    /// Set the spawn-scoped opt-in policy independently of adapter mode negotiation.
+    pub(crate) fn set_deny_permission_requests(&mut self, deny: bool) {
+        self.deny_permission_requests = deny;
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -2002,7 +2009,7 @@ impl AcpClient {
         }
     }
 
-    /// Auto-approve a `session/request_permission` request from the agent.
+    /// Deny permission requests under the opt-in policy; otherwise retain legacy approval.
     ///
     /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
     /// If no `allow_once` option exists, falls back to `reject_once`.
@@ -2022,6 +2029,16 @@ impl AcpClient {
         self.pending_permission_id = Some(id.clone());
         // Mark as not yet responded — guards against double-response race.
         self.permission_responded = false;
+
+        if self.deny_permission_requests {
+            // Cancellation is a protocol-defined refusal even when the adapter
+            // offers only allow options or malformed options. Never choose a grant.
+            self.write_ndjson(&permission_response_cancelled(&id))
+                .await?;
+            self.permission_responded = true;
+            self.pending_permission_id = None;
+            return Ok(());
+        }
 
         let options = msg["params"]["options"]
             .as_array()
@@ -3196,6 +3213,81 @@ mod tests {
             msg.contains("Hard turn timeout"),
             "HardTimeout display: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn enforced_policy_cancels_permission_requests_on_the_real_read_loop() {
+        for options in [
+            serde_json::json!([{"kind":"allow_once","optionId":"grant"}, {"kind":"reject_once","optionId":"deny"}]),
+            serde_json::json!([{"kind":"allow_once","optionId":"grant"}]),
+            serde_json::json!([{"kind":"allow_always","optionId":"grant"}]),
+            serde_json::Value::Null,
+        ] {
+            let script = format!(
+                r#"python3 -c '
+import json, sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{{"options":json.loads("""{options}""")}}}}), flush=True)
+reply=json.loads(sys.stdin.readline())
+assert reply["id"] == "permission-1"
+assert reply["result"]["outcome"] == {{"outcome":"cancelled"}}, reply
+print(json.dumps({{"jsonrpc":"2.0","id":request["id"],"result":{{"protocolVersion":2,"denied":True}}}}), flush=True)
+sys.stdin.read()
+'"#
+            );
+            let mut client = spawn_script(&script).await;
+            client.set_deny_permission_requests(true);
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), client.initialize())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(result["denied"], true);
+            assert!(client.pending_permission_id.is_none());
+            client.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unmediated_terminal_and_filesystem_requests_are_refused_on_the_real_read_loop() {
+        for method in ["terminal/create", "fs/write_text_file", "fs/read_text_file"] {
+            let script = format!(
+                r#"python3 -c '
+import json,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{"jsonrpc":"2.0","id":"unmediated-1","method":"{method}","params":{{}}}}),flush=True)
+reply=json.loads(sys.stdin.readline())
+assert reply["id"] == "unmediated-1"
+assert reply["error"]["code"] == -32601, reply
+print(json.dumps({{"jsonrpc":"2.0","id":request["id"],"result":{{"protocolVersion":2}}}}),flush=True)
+sys.stdin.read()
+'"#
+            );
+            let mut client = spawn_script(&script).await;
+            client.set_deny_permission_requests(true);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), client.initialize())
+                    .await
+                    .unwrap()
+                    .is_ok()
+            );
+            client.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_policy_still_selects_allow_once_on_the_real_read_loop() {
+        let mut client = spawn_script(r#"python3 -c '
+import json,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({"jsonrpc":"2.0","id":99,"method":"session/request_permission","params":{"options":[{"kind":"allow_once","optionId":"legacy-grant"}]}}),flush=True)
+reply=json.loads(sys.stdin.readline())
+assert reply["result"]["outcome"] == {"outcome":"selected","optionId":"legacy-grant"}, reply
+print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":2}}),flush=True)
+sys.stdin.read()
+'"#).await;
+        assert!(client.initialize().await.is_ok());
+        client.shutdown().await;
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
