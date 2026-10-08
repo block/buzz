@@ -77,12 +77,15 @@ pub struct CustomEmoji {
 
 /// Return a channel name without client-rendered leading hash prefixes.
 pub use buzz_core::channel::canonical_channel_name;
+/// Pick the oldest of several matching kind:39000 events, so every reader
+/// agrees on one channel.
+pub use buzz_core::channel::oldest_channel;
 /// Channel type.
 pub use buzz_core::channel::ChannelType as ChannelKind;
 /// Channel visibility.
 pub use buzz_core::channel::ChannelVisibility as Visibility;
-/// Channel type, labels and creator read from a relay-signed group-state
-/// event (kinds 39000–39003). See [`ChannelIdentity::from_tags`].
+/// Channel type, labels, creator and creation time read from a relay-signed
+/// group-state event (kinds 39000–39003). See [`ChannelIdentity::from_tags`].
 pub use buzz_core::channel::GroupStateIdentity as ChannelIdentity;
 /// Member role.
 pub use buzz_core::channel::MemberRole;

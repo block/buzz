@@ -143,6 +143,9 @@ pub struct GroupStateIdentity {
     /// The first `P` value: the hex key that created the channel. Trust it
     /// only when the relay key signed the event.
     pub created_by: Option<String>,
+    /// The first [`CHANNEL_CREATED_AT_TAG`] value: when the channel was
+    /// created, in Unix seconds. Only kind:39000 carries it.
+    pub created_at: Option<u64>,
 }
 
 impl GroupStateIdentity {
@@ -159,19 +162,45 @@ impl GroupStateIdentity {
                 "P" if identity.created_by.is_none() => {
                     identity.created_by = Some(value.to_owned());
                 }
+                CHANNEL_CREATED_AT_TAG if identity.created_at.is_none() => {
+                    identity.created_at = value.parse().ok();
+                }
                 _ => {}
             }
         }
         identity
     }
 
-    /// Read the channel type, labels and creator from Nostr tags.
+    /// Read the channel type, labels, creator and creation time from Nostr tags.
     pub fn from_tags<'a>(tags: impl IntoIterator<Item = &'a nostr::Tag>) -> Self {
         Self::from_tag_pairs(tags.into_iter().filter_map(|tag| {
             let slice = tag.as_slice();
             Some((slice.first()?.as_str(), slice.get(1)?.as_str()))
         }))
     }
+}
+
+/// Pick the channel every reader agrees on when several kind:39000 events
+/// match the same lookup, for example two channels that one creator made at
+/// the same time for one label.
+///
+/// The oldest channel wins: the lowest [`CHANNEL_CREATED_AT_TAG`], then the
+/// lowest channel ID (`d` tag). An event without a creation time ranks after
+/// every event that has one. The caller checks that the relay key signed the
+/// events.
+pub fn oldest_channel<'a>(
+    events: impl IntoIterator<Item = &'a nostr::Event>,
+) -> Option<&'a nostr::Event> {
+    events.into_iter().min_by(|a, b| {
+        let key = |event: &'a nostr::Event| {
+            let created_at = GroupStateIdentity::from_tags(event.tags.iter()).created_at;
+            (
+                created_at.unwrap_or(u64::MAX),
+                event.tags.identifier().unwrap_or_default(),
+            )
+        };
+        key(a).cmp(&key(b))
+    })
 }
 
 /// Whether a channel is publicly visible or invite-only.
@@ -338,8 +367,9 @@ impl FromStr for MemberRole {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
-        parse_channel_labels, ChannelLabelError, GroupStateIdentity, MAX_CHANNEL_LABELS,
+        canonical_channel_name, channel_created_at_tag, channel_type_from_group_state_tags,
+        group_state_identity_tags, oldest_channel, parse_channel_labels, ChannelLabelError,
+        GroupStateIdentity, MAX_CHANNEL_LABELS,
     };
 
     #[test]
@@ -367,18 +397,57 @@ mod tests {
         let mut tags = vec![nostr::Tag::parse(["d", "channel"]).unwrap()];
         tags.extend(group_state_identity_tags("forum", &labels, &creator).unwrap());
         tags.push(nostr::Tag::parse(["p", &"cd".repeat(32), "", "member"]).unwrap());
+        tags.push(channel_created_at_tag(1_700_000_000).unwrap());
         assert_eq!(
             GroupStateIdentity::from_tags(&tags),
             GroupStateIdentity {
                 channel_type: Some("forum".to_string()),
                 labels,
                 created_by: Some("ab".repeat(32)),
+                created_at: Some(1_700_000_000),
             }
         );
         assert_eq!(
             GroupStateIdentity::from_tag_pairs([("name", "x")]),
             GroupStateIdentity::default()
         );
+    }
+
+    /// Mutation: rank by the event's own created_at, or drop the ID tiebreak
+    /// → RED.
+    #[test]
+    fn oldest_channel_ranks_by_creation_time_then_id() {
+        let keys = nostr::Keys::generate();
+        let metadata = |id: &str, created: Option<i64>, edited: u64| {
+            let mut tags = vec![nostr::Tag::parse(["d", id]).unwrap()];
+            if let Some(created) = created {
+                tags.push(channel_created_at_tag(created).unwrap());
+            }
+            nostr::EventBuilder::new(nostr::Kind::Custom(39000), "")
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(edited))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let id = |event: Option<&nostr::Event>| {
+            event.and_then(|e| e.tags.identifier()).map(str::to_owned)
+        };
+
+        // `b` was created first but edited last.
+        let a = metadata("aaaa", Some(200), 300);
+        let b = metadata("bbbb", Some(100), 900);
+        assert_eq!(id(oldest_channel([&a, &b])), Some("bbbb".into()));
+        assert_eq!(id(oldest_channel([&b, &a])), Some("bbbb".into()));
+
+        // Same creation second: the lower ID wins in any order.
+        let c = metadata("cccc", Some(100), 100);
+        assert_eq!(id(oldest_channel([&c, &b])), Some("bbbb".into()));
+        assert_eq!(id(oldest_channel([&b, &c])), Some("bbbb".into()));
+
+        // No creation time ranks last.
+        let old_relay = metadata("0000", None, 1);
+        assert_eq!(id(oldest_channel([&old_relay, &c])), Some("cccc".into()));
+        assert_eq!(id(oldest_channel(std::iter::empty())), None);
     }
 
     #[test]
