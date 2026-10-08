@@ -190,15 +190,22 @@ class ForumPostCard extends HookConsumerWidget {
               blendMode: BlendMode.dstIn,
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 120),
-                child: IgnorePointer(
-                  child: MessageContent(
-                    content: preview,
-                    mentionNames: mentionNames,
-                    mentionLabels: mentionLabels,
-                    agentMentionPubkeys: agentMentionPubkeys,
-                    tags: post.tags,
-                    baseStyle: messageBodyTextStyle.copyWith(
-                      color: context.colors.onSurface,
+                // Lay the preview out at its natural height and clip it;
+                // squeezing it instead overflows the block column.
+                child: UnconstrainedBox(
+                  constrainedAxis: Axis.horizontal,
+                  alignment: Alignment.topLeft,
+                  clipBehavior: Clip.hardEdge,
+                  child: IgnorePointer(
+                    child: MessageContent(
+                      content: preview,
+                      mentionNames: mentionNames,
+                      mentionLabels: mentionLabels,
+                      agentMentionPubkeys: agentMentionPubkeys,
+                      tags: post.tags,
+                      baseStyle: messageBodyTextStyle.copyWith(
+                        color: context.colors.onSurface,
+                      ),
                     ),
                   ),
                 ),

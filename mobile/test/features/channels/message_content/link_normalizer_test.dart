@@ -2,41 +2,13 @@ import 'package:buzz/features/channels/message_content/link_normalizer.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  const url = 'buzz://message?channel=channel-1&id=message-1';
-
-  test('normalizes supported bare and autolinked Buzz URLs', () {
-    expect(
-      normalizeBareLinks('See $url and <$url>'),
-      'See [$url]($url) and [$url]($url)',
-    );
-  });
-
-  test('keeps punctuation and open Markdown delimiters outside links', () {
-    expect(
-      normalizeBareLinks('**open $url**. and **_${url}_**!'),
-      '**open [$url]($url)**. and **_[$url]($url)_**!',
-    );
-  });
-
-  test('preserves URL suffix characters without a matching opener', () {
-    expect(
-      normalizeBareLinks(
-        'See $url'
-        '_ and $url~~',
-      ),
-      'See [$url'
-      '_]($url'
-      '_) and [$url~~]($url~~)',
-    );
-  });
-
   group('attachment destinations', () {
     const media = 'https://relay.example/media/image.png';
     for (final prefix in ['!', '']) {
       test('$prefix preserves angle destinations and optional titles', () {
         for (final destination in ['<$media>', media, '<$media> "Title"']) {
           expect(
-            normalizeBareLinks('$prefix[label]($destination)'),
+            normalizeMarkdownLinks('$prefix[label]($destination)'),
             '$prefix[label]($media)',
           );
         }
@@ -51,7 +23,7 @@ void main() {
       for (final prefix in ['!', '']) {
         test('$prefix supports title $title', () {
           expect(
-            normalizeBareLinks('$prefix[label](<$media> $title)'),
+            normalizeMarkdownLinks('$prefix[label](<$media> $title)'),
             '$prefix[label]($media)',
           );
         });
@@ -63,7 +35,7 @@ void main() {
       for (final unit in ['[x](', '[', r'[x\[', r'[x\]']) {
         final input = unit * (256 * 1024 ~/ unit.length);
         final watch = Stopwatch()..start();
-        final result = normalizeBareLinks(input);
+        final result = normalizeMarkdownLinks(input);
         watch.stop();
         expect(result == input, isTrue);
         expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
@@ -82,7 +54,7 @@ void main() {
       for (final prefix in ['!', '']) {
         test('$prefix preserves escaped label $label', () {
           expect(
-            normalizeBareLinks('$prefix[$label](<$media>)'),
+            normalizeMarkdownLinks('$prefix[$label](<$media>)'),
             '$prefix[$rendered]($media)',
           );
         });
@@ -90,7 +62,7 @@ void main() {
     }
     test('URL and title brackets do not capture a later attachment label', () {
       expect(
-        normalizeBareLinks(
+        normalizeMarkdownLinks(
           '[first](<https://relay.example/file?q=[> "Title [") '
           r'[second \[Q4\]](<https://relay.example/file.pdf>)',
         ),
@@ -102,7 +74,7 @@ void main() {
       for (final prefix in ['!', '']) {
         test('$prefix recovers after unmatched prose $prose', () {
           expect(
-            normalizeBareLinks(
+            normalizeMarkdownLinks(
               '$prose$prefix[outer [inner] label](<$media>) '
               r'[report \[Q4\]](<https://relay.example/report.pdf>)',
             ),
@@ -117,7 +89,7 @@ void main() {
       const expected = '[file](https://relay.example/file.pdf) ';
       final count = (256 * 1024 - 2) ~/ source.length;
       final watch = Stopwatch()..start();
-      final output = normalizeBareLinks('[ ${source * count}');
+      final output = normalizeMarkdownLinks('[ ${source * count}');
       watch.stop();
       expect(output == '[ ${expected * count}', isTrue);
       expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
@@ -126,65 +98,72 @@ void main() {
       const raw = 'https://relay.example/media/photo (1).png?q=a%20b&v=2';
       const encoded =
           'https://relay.example/media/photo%20%281%29.png?q=a%20b&v=2';
-      expect(normalizeBareLinks('![photo](<$raw>)'), '![photo]($encoded)');
-      expect(normalizeBareLinks('![photo]($encoded)'), '![photo]($encoded)');
+      expect(normalizeMarkdownLinks('![photo](<$raw>)'), '![photo]($encoded)');
       expect(
-        normalizeBareLinks('![photo](https://relay.example/a(b).png)'),
+        normalizeMarkdownLinks('![photo]($encoded)'),
+        '![photo]($encoded)',
+      );
+      expect(
+        normalizeMarkdownLinks('![photo](https://relay.example/a(b).png)'),
         '![photo](https://relay.example/a%28b%29.png)',
       );
     });
     test('normalizes prose surrounding multiple authored destinations', () {
       expect(
-        normalizeBareLinks('See <$media> ![one](<$media>) [two](<$media>)'),
-        'See [$media]($media) ![one]($media) [two]($media)',
+        normalizeMarkdownLinks('See <$media> ![one](<$media>) [two](<$media>)'),
+        'See <$media> ![one]($media) [two]($media)',
       );
     });
     test('preserves attachment examples inside inline and fenced code', () {
       const example = '![photo](<$media>)';
-      expect(normalizeBareLinks('`$example`'), '`$example`');
+      expect(normalizeMarkdownLinks('`$example`'), '`$example`');
       expect(
-        normalizeBareLinks('```md\n$example\n```'),
+        normalizeMarkdownLinks('```md\n$example\n```'),
         '```md\n$example\n```',
       );
     });
   });
 
   group('code boundaries', () {
+    const url = 'buzz://message?channel=channel-1&id=message-1';
+    // Marks the prose runs mapMarkdownProse hands to its transform.
+    String markProse(String prose) => prose.replaceAll(url, '<prose>');
+
     final cases = <({String name, String input, String expected})>[
       (
         name: 'single-backtick inline span',
         input: '`$url` then $url',
-        expected: '`$url` then [$url]($url)',
+        expected: '`$url` then <prose>',
       ),
       (
         name: 'matching multi-backtick inline span',
         input: '``$url`` then $url',
-        expected: '``$url`` then [$url]($url)',
+        expected: '``$url`` then <prose>',
       ),
       (
         name: 'literal shorter backtick run in inline span',
         input: '``inside ` $url`` then $url',
-        expected: '``inside ` $url`` then [$url]($url)',
+        expected: '``inside ` $url`` then <prose>',
       ),
       (
         name: 'inline closer must have equal length',
         input: '``$url``` still code`` then $url',
-        expected: '``$url``` still code`` then [$url]($url)',
+        expected: '``$url``` still code`` then <prose>',
       ),
       (
         name: 'fence accepts a longer line-start closer',
         input: '```\n$url\n````\n$url',
-        expected: '```\n$url\n````\n[$url]($url)',
+        expected: '```\n$url\n````\n<prose>',
       ),
       (
         name: 'fence ignores an inline-looking backtick run',
         input: '```\n$url ``` still code\n```\n$url',
-        expected: '```\n$url ``` still code\n```\n[$url]($url)',
+        expected: '```\n$url ``` still code\n```\n<prose>',
       ),
       (
         name: 'tilde fence indented three spaces',
         input: '   ~~~\n$url\n   ~~~\n$url',
-        expected: '   ~~~\n$url\n   ~~~\n[$url]($url)',
+        expected: '   ~~~\n$url\n   ~~~\n<prose>',
       ),
       (
         name: 'fence opens after deeper indentation',
@@ -199,61 +178,43 @@ void main() {
       (
         name: 'unclosed quoted fence ends with its quote',
         input: '> ```sh\n> $url\n\n$url',
-        expected: '> ```sh\n> $url\n\n[$url]($url)',
+        expected: '> ```sh\n> $url\n\n<prose>',
       ),
       (
         name: 'quoted fence ends at a lazy line',
         input: '> ```sh\n> $url\n$url',
-        expected: '> ```sh\n> $url\n[$url]($url)',
+        expected: '> ```sh\n> $url\n<prose>',
       ),
       (
         name: 'top-level fence does not close on a quoted fence',
         input: '```md\n> ```\n$url\n```\n$url',
-        expected: '```md\n> ```\n$url\n```\n[$url]($url)',
+        expected: '```md\n> ```\n$url\n```\n<prose>',
       ),
       (
         name: 'quoted fence closes inside the quote',
         input: '> ~~~\n> $url\n> ~~~\n$url',
-        expected: '> ~~~\n> $url\n> ~~~\n[$url]($url)',
+        expected: '> ~~~\n> $url\n> ~~~\n<prose>',
       ),
       (
         name: 'fence closer must end its line',
         input: '~~~\n$url\n~~~ x\n~~~\n$url',
-        expected: '~~~\n$url\n~~~ x\n~~~\n[$url]($url)',
+        expected: '~~~\n$url\n~~~ x\n~~~\n<prose>',
       ),
       (
         name: 'unclosed backticks remain prose',
         input: '$url then `$url',
-        expected: '[$url]($url) then `[$url]($url)',
+        expected: '<prose> then `<prose>',
       ),
     ];
 
     for (final testCase in cases) {
       test(testCase.name, () {
-        expect(normalizeBareLinks(testCase.input), testCase.expected);
+        expect(mapMarkdownProse(testCase.input, markProse), testCase.expected);
       });
     }
 
-    test('bare links leave a trailing backslash outside the destination', () {
-      expect(
-        normalizeBareLinks(r'see https://example.com/a\'),
-        r'see [https://example.com/a](https://example.com/a)\',
-      );
-      expect(
-        normalizeBareLinks(r'*https://example.com/a\**'),
-        r'*[https://example.com/a](https://example.com/a)\**',
-      );
-    });
-
-    test('a literal backslash before a bare link stays literal', () {
-      expect(
-        normalizeBareLinks(r'see \https://example.com/a'),
-        r'see \\[https://example.com/a](https://example.com/a)',
-      );
-      expect(
-        normalizeBareLinks(r'see \\https://example.com/a'),
-        r'see \\[https://example.com/a](https://example.com/a)',
-      );
+    test('an escaped backtick does not open code', () {
+      expect(mapMarkdownProse('\\`$url`', markProse), '\\`<prose>`');
     });
 
     test('near-limit fence-like runs on one line complete linearly', () {
@@ -267,34 +228,11 @@ void main() {
         '> ~~~' * (256 * 1024 ~/ 5),
       ]) {
         final watch = Stopwatch()..start();
-        final result = normalizeBareLinks(input);
+        final result = mapMarkdownProse(input, (prose) => prose);
         watch.stop();
         expect(result == input, isTrue);
         expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
       }
     });
-  });
-
-  test(
-    'preserves HTTP(S) destinations while retaining bare-link rendering',
-    () {
-      const httpUrl = 'https://example.com/search?q=why?';
-      expect(
-        normalizeBareLinks('See $httpUrl and <$httpUrl>'),
-        'See [$httpUrl]($httpUrl) and [$httpUrl]($httpUrl)',
-      );
-    },
-  );
-  test('normalizes every bare Buzz entity permalink family', () {
-    final owner = 'ab' * 32;
-    final id = 'cd' * 32;
-    final links = [
-      'buzz://repo?owner=$owner&d=buzz',
-      'buzz://pr?id=$id&owner=$owner&d=buzz',
-      'buzz://issue?id=$id&owner=$owner&d=buzz',
-    ];
-    for (final link in links) {
-      expect(normalizeBareLinks('$link.'), '[$link]($link).');
-    }
   });
 }

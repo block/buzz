@@ -40,8 +40,9 @@ void main() {
   // Regression: https://github.com/block/buzz/issues/6124
   //
   // A custom-emoji WidgetSpan inside a link's own WidgetSpan does not paint on
-  // iOS, so the whole link renders as nothing. `CustomEmojiMd` opts out of
-  // `MarkdownScope.linkLabel`; this fails if that override is removed.
+  // iOS, so the whole link renders as nothing. `CustomEmojiPattern` keeps
+  // `InlinePattern`'s default scopes, which exclude `MarkdownScope.linkLabel`;
+  // this fails if it opts back into link labels.
   testWidgets('an emoji shortcode in a link label stays link text', (
     tester,
   ) async {
@@ -70,11 +71,11 @@ void main() {
   ) async {
     await tester.pumpWidget(_testable('**hello** :unknown:'));
     final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
-    final component = markdown.inlineComponents!
-        .whereType<CustomEmojiMd>()
+    final component = markdown.inlinePatterns!
+        .whereType<CustomEmojiPattern>()
         .single;
-    expect(component.exp.hasMatch(':unused_2499:'), isFalse);
-    expect(component.exp.hasMatch(':wave:'), isFalse);
+    expect(component.pattern.hasMatch(':unused_2499:'), isFalse);
+    expect(component.pattern.hasMatch(':wave:'), isFalse);
     expect(find.byType(CustomEmojiImage), findsNothing);
     final text = tester
         .widgetList<RichText>(find.byType(RichText))
@@ -102,11 +103,11 @@ void main() {
     expect(image.shortcode, 'wave');
     expect(image.url, 'https://example.com/event-wave.png');
     final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
-    final component = markdown.inlineComponents!
-        .whereType<CustomEmojiMd>()
+    final component = markdown.inlinePatterns!
+        .whereType<CustomEmojiPattern>()
         .single;
-    expect(component.exp.hasMatch(':unused_2499:'), isFalse);
-    expect(component.exp.hasMatch(':wave:'), isTrue);
+    expect(component.pattern.hasMatch(':unused_2499:'), isFalse);
+    expect(component.pattern.hasMatch(':wave:'), isTrue);
   });
 
   testWidgets('content edits rebuild the scoped matcher', (tester) async {
@@ -125,10 +126,10 @@ void main() {
       'unused_2499',
     );
     final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
-    final component = markdown.inlineComponents!
-        .whereType<CustomEmojiMd>()
+    final component = markdown.inlinePatterns!
+        .whereType<CustomEmojiPattern>()
         .single;
-    expect(component.exp.hasMatch(':wave:'), isFalse);
+    expect(component.pattern.hasMatch(':wave:'), isFalse);
 
     await tester.pumpWidget(_testable('edited :unknown:'));
     expect(find.byType(CustomEmojiImage), findsNothing);
