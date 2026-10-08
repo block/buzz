@@ -146,6 +146,7 @@ jobs:
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
           /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
+          /bin/bash scripts/test-mobile-member-picker.sh "$device"
       - name: Build complete unsigned iOS release
         run: |
           /bin/bash scripts/test-mobile-gateway-recipes.sh

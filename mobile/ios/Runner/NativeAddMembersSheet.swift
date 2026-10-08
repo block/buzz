@@ -92,7 +92,7 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
   }
 }
 
-private final class NativeAddMembersViewController: UITableViewController, UISearchResultsUpdating {
+final class NativeAddMembersViewController: UITableViewController, UISearchResultsUpdating {
   private var state: [String: Any]
   private let send: (String, [String: Any]) -> Void
   private let loadAvatar: (String, String, @escaping (Data?) -> Void) -> Void
@@ -219,6 +219,7 @@ private final class NativeAddMembersViewController: UITableViewController, UISea
     cell.backgroundColor = rowColor
     var content = cell.defaultContentConfiguration()
     var avatarRequest: (String, String)?
+    var memberLabel: String?
     if indexPath.section == 1 && (loading || loadError || users.isEmpty) {
       content.text = loading ? "Searching…" : loadError ? "Couldn't load people or agents. Tap to retry." : "No matching people or agents."
       content.textProperties.color = .secondaryLabel
@@ -229,6 +230,8 @@ private final class NativeAddMembersViewController: UITableViewController, UISea
       let user = indexPath.section == 0 ? selected[indexPath.row] : users[indexPath.row]
       content.text = user["name"] as? String
       content.secondaryText = user["detail"] as? String
+      memberLabel = [content.text, content.secondaryText]
+        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
       content.textProperties.numberOfLines = 0
       content.secondaryTextProperties.numberOfLines = 1
       content.image = fallbackAvatar(user)
@@ -242,6 +245,11 @@ private final class NativeAddMembersViewController: UITableViewController, UISea
       if indexPath.section == 0 { cell.accessibilityTraits.insert(.selected) }
     }
     cell.contentConfiguration = content
+    if let memberLabel {
+      cell.isAccessibilityElement = true
+      cell.accessibilityLabel = memberLabel
+      cell.contentView.accessibilityElementsHidden = true
+    }
     if let (pubkey, key) = avatarRequest {
       cell.accessibilityIdentifier = key
       loadAvatar(pubkey, key) { [weak cell] data in
@@ -249,7 +257,10 @@ private final class NativeAddMembersViewController: UITableViewController, UISea
           let data, let image = UIImage(data: data),
           var configuration = cell.contentConfiguration as? UIListContentConfiguration else { return }
         configuration.image = image.withRenderingMode(.alwaysOriginal)
+        let label = cell.accessibilityLabel
         cell.contentConfiguration = configuration
+        cell.accessibilityLabel = label
+        cell.contentView.accessibilityElementsHidden = true
       }
     }
     cell.isUserInteractionEnabled = !busy

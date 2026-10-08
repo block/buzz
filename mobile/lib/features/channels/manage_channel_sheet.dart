@@ -34,17 +34,13 @@ Future<bool?> showManageChannelSheet({
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     final theme = utilitySurfaceThemeData(Theme.of(context));
     const bridge = MethodChannel('buzz/profile_text_editor');
-    String? canvasContent;
-    var canvasLoaded = false;
-    try {
-      final canvas = await container
-          .read(channelCanvasProvider(channel.id).future)
-          .timeout(const Duration(seconds: 5));
-      canvasContent = canvas.content ?? '';
-      canvasLoaded = true;
-    } catch (_) {
-      // Keep metadata editable and offer a canvas retry if loading fails.
-    }
+    // Start the provider without delaying metadata editing on relay I/O.
+    // A cold or failed canvas can be loaded/retried from its row.
+    final cachedCanvas = container
+        .read(channelCanvasProvider(channel.id))
+        .asData;
+    String? canvasContent = cachedCanvas?.value.content ?? '';
+    var canvasLoaded = cachedCanvas != null;
     while (canPresent()) {
       Map<String, dynamic>? result;
       try {

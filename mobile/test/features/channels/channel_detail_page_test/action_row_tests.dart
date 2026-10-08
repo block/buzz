@@ -241,71 +241,82 @@ void actionRowTests() {
       });
     }
 
-    testWidgets('agent headers and pills expand identity only in the profile', (
-      tester,
-    ) async {
-      final first = 'a' * 64, second = 'b' * 64;
-      final agents = {first, second};
-      final profiles = {
-        for (final key in agents)
-          key: UserProfile(pubkey: key, displayName: 'Scout'),
-      };
-      final names = IdentityNameSources(
-        profiles: profiles,
-        agentPubkeys: agents,
-      ).scope(agents);
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [
-            _textMsg(id: 'agent-message', pubkey: first, content: 'hello'),
-            _systemMsg(
-              id: 'agent-removal',
-              payload: {
-                'type': 'member_removed',
-                'actor': first,
-                'target': second,
-              },
-            ),
-          ],
-          users: profiles,
-          knownAgentPubkeys: agents,
-          members: [
-            for (final key in agents)
-              ChannelMember(pubkey: key, role: 'bot', joinedAt: DateTime(2025)),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
-      final header = find.byKey(const ValueKey('message-author-agent-message'));
-      expect(tester.widget<Text>(header).data, 'Scout');
-      expect(
-        tester
-            .widget<Text>(find.byKey(ValueKey('system-message-author-$first')))
-            .data,
-        'Scout',
-      );
-      final pill = find.widgetWithText(MessageMentionPill, 'Scout');
-      expect(pill, findsOneWidget);
-      for (final key in agents) {
-        expect(find.text(names.resolve(key)!.name), findsNothing);
-      }
-      for (final entry in [(header, first), (pill, second)]) {
-        await tester.tap(entry.$1);
-        await tester.pumpAndSettle();
-        final sheet = find.byType(UserProfileSheet);
-        expect(tester.widget<UserProfileSheet>(sheet).pubkey, entry.$2);
-        expect(
-          find.descendant(
-            of: sheet,
-            matching: find.text(names.resolve(entry.$2)!.name),
+    testWidgets(
+      'agent headers, action targets, and profiles keep distinct identities',
+      (tester) async {
+        final first = 'a' * 64, second = 'b' * 64;
+        final agents = {first, second};
+        final profiles = {
+          for (final key in agents)
+            key: UserProfile(pubkey: key, displayName: 'Scout'),
+        };
+        final names = IdentityNameSources(
+          profiles: profiles,
+          agentPubkeys: agents,
+        ).scope(agents);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(id: 'agent-message', pubkey: first, content: 'hello'),
+              _systemMsg(
+                id: 'agent-removal',
+                payload: {
+                  'type': 'member_removed',
+                  'actor': first,
+                  'target': second,
+                },
+              ),
+            ],
+            users: profiles,
+            knownAgentPubkeys: agents,
+            members: [
+              for (final key in agents)
+                ChannelMember(
+                  pubkey: key,
+                  role: 'bot',
+                  joinedAt: DateTime(2025),
+                ),
+            ],
           ),
-          findsOneWidget,
         );
-        await tester.tap(find.byTooltip('Close sheet'));
         await tester.pumpAndSettle();
-      }
-      expect(tester.takeException(), isNull);
-    });
+        final header = find.byKey(
+          const ValueKey('message-author-agent-message'),
+        );
+        expect(tester.widget<Text>(header).data, names.labelFor(first));
+        expect(
+          tester
+              .widget<Text>(
+                find.byKey(ValueKey('system-message-author-$first')),
+              )
+              .data,
+          names.labelFor(first),
+        );
+        final pill = find.widgetWithText(
+          MessageMentionPill,
+          names.labelFor(second),
+        );
+        expect(pill, findsOneWidget);
+        expect(names.labelFor(first), isNot(names.labelFor(second)));
+        expect(find.text('Scout'), findsNothing);
+        for (final entry in [(header, first), (pill, second)]) {
+          await tester.tap(entry.$1);
+          await tester.pumpAndSettle();
+          final sheet = find.byType(UserProfileSheet);
+          expect(tester.widget<UserProfileSheet>(sheet).pubkey, entry.$2);
+          expect(
+            find.descendant(
+              of: sheet,
+              matching: find.text(names.resolve(entry.$2)!.name),
+            ),
+            findsOneWidget,
+          );
+          await tester.tap(find.byTooltip('Close sheet'));
+          await tester.pumpAndSettle();
+        }
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     for (final scenario in [cases.first, cases[2]]) {
       testWidgets('wraps ${scenario.payload['type']} at large text sizes', (

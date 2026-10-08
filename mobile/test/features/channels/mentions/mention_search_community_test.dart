@@ -88,9 +88,11 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late _HeldSearchSession session;
   late ProviderContainer container;
+  var memberChoices = <ChannelMember>[];
 
   setUp(() async {
     session = _HeldSearchSession();
+    memberChoices = [];
     container = ProviderContainer(
       retry: (_, _) => null,
       overrides: [
@@ -100,7 +102,7 @@ void main() {
         channelsProvider.overrideWith(_Channels.new),
         channelMembersProvider(
           _channelId,
-        ).overrideWith((ref) async => const []),
+        ).overrideWith((ref) async => memberChoices),
         agentDirectoryProvider.overrideWith((ref) async => const []),
         agentOwnersProvider.overrideWith((ref) async => const {}),
       ],
@@ -136,6 +138,27 @@ void main() {
     for (final candidate in container.read(mentionCandidatesProvider(_args)))
       candidate.pubkey,
   ];
+
+  test('production mention chooser distinguishes same-name agents', () async {
+    memberChoices = [
+      for (final key in [_alice, _bob])
+        ChannelMember(
+          pubkey: key,
+          displayName: 'Albert',
+          role: 'bot',
+          joinedAt: DateTime(2026),
+        ),
+    ];
+    container.invalidate(channelMembersProvider(_channelId));
+    await container.read(channelMembersProvider(_channelId).future);
+    await container.pump();
+    final choices = container.read(mentionCandidatesProvider(_args));
+    expect(choices.map((choice) => choice.pubkey).toSet(), {_alice, _bob});
+    expect(choices.map((choice) => choice.pickerLabel).toSet(), hasLength(2));
+    for (final choice in choices) {
+      expect(choice.pickerLabel, startsWith('Albert · '));
+    }
+  });
 
   test('a late search result from community A is not shown in B', () async {
     await passTypingPause();

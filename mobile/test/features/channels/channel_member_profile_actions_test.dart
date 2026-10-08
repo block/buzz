@@ -115,6 +115,65 @@ Future<ProviderContainer> _pump(
 }
 
 void main() {
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    testWidgets(
+      'same-name agents have distinct ${platform.name} removal confirmations',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        const bridge = MethodChannel('buzz/confirmation_dialog');
+        final messages = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(bridge, (call) async {
+              messages.add((call.arguments as Map)['message'] as String);
+              return true;
+            });
+        final keys = ['a' * 64, 'b' * 64];
+        final actions = _Actions();
+        try {
+          for (final key in keys) {
+            await _pump(
+              tester,
+              target: key,
+              actions: actions,
+              inSheet: true,
+              load: () async => [
+                _member('self', 'owner'),
+                for (final agent in keys)
+                  ChannelMember(
+                    pubkey: agent,
+                    displayName: 'Scout',
+                    role: 'bot',
+                    joinedAt: DateTime(2025),
+                  ),
+              ],
+            );
+            await tester.tap(find.text('Remove from channel'));
+            await tester.pumpAndSettle();
+            if (platform == TargetPlatform.android) {
+              final dialog = tester.widget<AlertDialog>(
+                find.byWidgetPredicate((widget) => widget is AlertDialog),
+              );
+              messages.add((dialog.content! as Text).data!);
+              await tester.tap(find.text('Remove'));
+              await tester.pumpAndSettle();
+            }
+          }
+          expect(messages, hasLength(2));
+          expect(messages.toSet(), hasLength(2));
+          for (final message in messages) {
+            expect(message, startsWith('Remove Scout · '));
+          }
+          expect(actions.calls, [for (final key in keys) 'test:$key:remove']);
+        } finally {
+          await tester.pumpWidget(const SizedBox());
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(bridge, null);
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+  }
+
   for (final confirmed in [false, true]) {
     testWidgets('iOS removal uses native confirmation: $confirmed', (
       tester,

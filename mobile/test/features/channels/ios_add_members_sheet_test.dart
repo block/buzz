@@ -40,7 +40,11 @@ class _Actions extends Fake implements ChannelActions {
   }
 }
 
-Future<void> _pump(WidgetTester tester, _Actions actions) async {
+Future<void> _pump(
+  WidgetTester tester,
+  _Actions actions, {
+  List<DirectoryUser>? directory,
+}) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -48,16 +52,18 @@ Future<void> _pump(WidgetTester tester, _Actions actions) async {
         channelActionsProvider.overrideWithValue(actions),
         channelMembersProvider('channel').overrideWith((ref) async => []),
         relayDirectoryUsersProvider.overrideWith(
-          (ref) async => [
-            DirectoryUser(pubkey: _alice, displayName: 'Alice'),
-            DirectoryUser(
-              pubkey: _bob,
-              displayName: 'Bob',
-              isAgent: true,
-              avatarUrl: _avatar,
-            ),
-            DirectoryUser(pubkey: _existing, displayName: 'Existing'),
-          ],
+          (ref) async =>
+              directory ??
+              [
+                DirectoryUser(pubkey: _alice, displayName: 'Alice'),
+                DirectoryUser(
+                  pubkey: _bob,
+                  displayName: 'Bob',
+                  isAgent: true,
+                  avatarUrl: _avatar,
+                ),
+                DirectoryUser(pubkey: _existing, displayName: 'Existing'),
+              ],
         ),
         relayDirectorySearchProvider('bob').overrideWith(
           (ref) async => [
@@ -112,6 +118,73 @@ Future<void> _event(
 }
 
 void main() {
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    testWidgets(
+      'same-name agents remain distinct in ${platform.name} member choices',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        final states = <Map<Object?, Object?>>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_bridge, (call) async {
+              if (call.method != 'dismiss') {
+                states.add(Map<Object?, Object?>.from(call.arguments as Map));
+              }
+              return null;
+            });
+        try {
+          final actions = _Actions();
+          await _pump(
+            tester,
+            actions,
+            directory: [
+              for (final key in [_alice, _bob])
+                DirectoryUser(pubkey: key, displayName: 'Scout', isAgent: true),
+            ],
+          );
+          if (platform == TargetPlatform.iOS) {
+            final rows = states.last['users'] as List;
+            expect(rows.map((row) => row['name']).toSet(), hasLength(2));
+            for (final row in rows) {
+              expect(row['name'], startsWith('Scout · '));
+            }
+            final session = states.last['session'] as String;
+            await _event(tester, session, 'toggle', {'pubkey': _bob});
+            final selected = (states.last['selected'] as List).single as Map;
+            expect(selected['pubkey'], _bob);
+            expect(selected['name'], (rows.last as Map)['name']);
+            await _event(tester, session, 'submit');
+          } else {
+            final labels = tester
+                .widgetList<Text>(find.byType(Text))
+                .map((text) => text.data)
+                .whereType<String>()
+                .where((label) => label.startsWith('Scout · '))
+                .toList();
+            expect(labels.toSet(), hasLength(2));
+            final semantics = tester.ensureSemantics();
+            expect(
+              find.bySemanticsLabel(RegExp(RegExp.escape(labels.last))),
+              findsWidgets,
+            );
+            semantics.dispose();
+            await tester.tap(find.text(labels.last));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('Add member'));
+            await tester.pumpAndSettle();
+          }
+          expect(actions.calls, [
+            [_bob],
+          ]);
+        } finally {
+          await tester.pumpWidget(const SizedBox());
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(_bridge, null);
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+  }
+
   testWidgets(
     'iOS native search retains selections and retries only failed members',
     (tester) async {

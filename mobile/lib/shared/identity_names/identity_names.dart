@@ -161,27 +161,11 @@ class IdentityNames {
     });
   }
 
-  /// The display label for [pubkey], omitting generated agent key suffixes
-  /// unless [includeAgentQualifier] is true (for profile details). Readable
-  /// owner prefixes and human qualifiers remain visible everywhere.
+  /// The unambiguous display label for [pubkey], including any qualifier
+  /// needed to distinguish identities with the same name and owner.
   /// A malformed key keeps its plain known name and is never disambiguated.
-  String labelFor(String pubkey, {bool includeAgentQualifier = false}) {
-    final key = pubkey.toLowerCase();
-    final resolved = resolve(key);
-    if (resolved == null) return _plainName(key);
-    final qualifier = resolved.qualifier;
-    if (includeAgentQualifier ||
-        qualifier == null ||
-        _factFor(key)?.isAgent != true) {
-      return resolved.name;
-    }
-    // Only remove the suffix supplied by the resolver, never punctuation
-    // that belongs to the agent's chosen name.
-    return resolved.name.substring(
-      0,
-      resolved.name.length - ' · $qualifier'.length,
-    );
-  }
+  String labelFor(String pubkey) =>
+      resolve(pubkey)?.name ?? _plainName(pubkey.toLowerCase());
 
   String _plainName(String key) =>
       _nonBlank(_sources.profiles[key]?.displayName)?.trim() ??

@@ -64,6 +64,7 @@ Widget _modalApp({
   required Future<List<ChannelMember>> Function() loadMembers,
   required ChannelActions Function(Ref ref) createChannelActions,
   String? canvasContent,
+  Future<ChannelCanvas>? pendingCanvas,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
@@ -75,11 +76,13 @@ Widget _modalApp({
       const AsyncValue.data(<String, String>{}),
     ),
     channelCanvasProvider(channel.id).overrideWith(
-      (ref) async => ChannelCanvas(
-        content: canvasContent,
-        updatedAt: null,
-        authorPubkey: null,
-      ),
+      (ref) =>
+          pendingCanvas ??
+          ChannelCanvas(
+            content: canvasContent,
+            updatedAt: null,
+            authorPubkey: null,
+          ),
     ),
     channelActionsProvider.overrideWith(createChannelActions),
   ],
@@ -478,6 +481,63 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+
+  testWidgets('native metadata editor opens before a cold canvas finishes', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final canvas = Completer<ChannelCanvas>();
+    const bridge = MethodChannel('buzz/profile_text_editor');
+    var opened = false;
+    var saved = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(bridge, (call) async {
+          expect(canvas.isCompleted, isFalse);
+          expect((call.arguments as Map)['canvasLoaded'], isFalse);
+          opened = true;
+          return {
+            'action': 'save',
+            'name': 'renamed',
+            'description': 'New description',
+          };
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(bridge, null),
+    );
+    await tester.pumpWidget(
+      _modalApp(
+        channel: _channel(),
+        pendingCanvas: canvas.future,
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        createChannelActions: (ref) => _FakeChannelActions(
+          ref,
+          onUpdateChannel: (_, name, description) async {
+            saved = true;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Open actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage channel'));
+    await tester.pump();
+    expect(opened, isTrue);
+    expect(saved, isTrue);
+    canvas.complete(
+      const ChannelCanvas(content: null, updatedAt: null, authorPubkey: null),
+    );
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets('native canvas round trip retains both channel drafts', (
     tester,

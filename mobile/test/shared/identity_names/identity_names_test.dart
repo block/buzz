@@ -36,7 +36,7 @@ IdentityNameSources _sources() => IdentityNameSources(
 
 void main() {
   for (final source in ['directory', 'channel role', 'profile owner']) {
-    test('agent suffixes from $source appear only in profile labels', () {
+    test('agent suffixes from $source distinguish all identity labels', () {
       final keys = [_mine, _wesAgent];
       final names = IdentityNameSources(
         agentPubkeys: source == 'directory' ? keys.toSet() : {},
@@ -50,13 +50,10 @@ void main() {
         },
       ).scope(keys, agentPubkeys: source == 'channel role' ? keys.toSet() : {});
       for (final key in keys) {
-        expect(names.labelFor(key.toUpperCase()), 'Scout');
+        expect(names.labelFor(key.toUpperCase()), names.resolve(key)!.name);
         final resolved = names.resolve(key)!;
         expect(resolved.qualifier, isNotNull);
-        expect(
-          names.labelFor(key, includeAgentQualifier: true),
-          'Scout · ${resolved.qualifier}',
-        );
+        expect(names.labelFor(key), 'Scout · ${resolved.qualifier}');
       }
       expect(names.resolve(_mine)!.name, isNot(names.resolve(_wesAgent)!.name));
     });
@@ -76,12 +73,8 @@ void main() {
       },
     ).scope([_mine, _wesAgent]);
     for (final key in [_mine, _wesAgent]) {
-      expect(names.labelFor(key), 'Wes’s Scout · 1234');
+      expect(names.labelFor(key), startsWith('Wes’s Scout · 1234 · '));
       expect(names.resolve(key)!.qualifier, isNotNull);
-      expect(
-        names.labelFor(key, includeAgentQualifier: true),
-        startsWith('Wes’s Scout · 1234 · '),
-      );
     }
     expect(
       IdentityNameSources(
@@ -223,8 +216,8 @@ void main() {
     expect(candidates.map((c) => c.pubkey), [scout, myScout]);
     final names = mentionPickerNames(sources, candidates);
     expect(names.labelFor(myScout), 'Scout');
-    expect(names.labelFor(scout), 'Scout');
-    expect(names.labelFor(scout, includeAgentQualifier: true), isNot('Scout'));
+    expect(names.labelFor(scout), isNot(names.labelFor(myScout)));
+    expect(names.labelFor(scout), isNot('Scout'));
     // The owner is the viewer, whose profile is cached: nothing to load.
     expect(names.missingOwnerProfiles(), isEmpty);
   });
