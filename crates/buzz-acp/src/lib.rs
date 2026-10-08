@@ -5907,6 +5907,9 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("do **not** run `buzz projects create`"));
         assert!(prompt.contains("buzz issues create --channel"));
         assert!(prompt.contains("is not a Buzz repository"));
+        assert!(prompt.contains("publishes the card only"));
+        assert!(prompt.contains("`git ls-remote` must list the ref"));
+        assert!(prompt.contains("the repo is not done"));
     }
 
     #[test]
