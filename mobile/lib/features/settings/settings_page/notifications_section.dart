@@ -24,32 +24,44 @@ class _NotificationsSection extends ConsumerWidget {
     }
     final canToggle = hasCapability || community.pushNotificationsEnabled;
 
+    void setEnabled(bool enabled) {
+      unawaited(
+        ref
+            .read(communityListProvider.notifier)
+            .setPushNotificationsEnabled(community.id, enabled),
+      );
+    }
+
     return AppListCard(
       verticalPadding: Grid.twelve,
       children: [
-        AppListRow(
-          key: const ValueKey('push-notifications-enabled'),
-          title: 'Notifications',
-          trailing: Switch.adaptive(
-            value: community.pushNotificationsEnabled,
-            onChanged: !canToggle
-                ? null
-                : (enabled) => unawaited(
-                    ref
-                        .read(communityListProvider.notifier)
-                        .setPushNotificationsEnabled(community.id, enabled),
+        MergeSemantics(
+          key: const ValueKey('push-notifications-setting'),
+          child: Stack(
+            alignment: Alignment.centerRight,
+            children: [
+              AppListRow(
+                key: const ValueKey('push-notifications-enabled'),
+                title: 'Notifications',
+                // Reserve horizontal room without letting the switch's 48dp
+                // layout height expand this single-line row.
+                trailing: const SizedBox(width: 60),
+                onTap: canToggle
+                    ? () => setEnabled(!community.pushNotificationsEnabled)
+                    : null,
+              ),
+              Positioned.fill(
+                right: Grid.xs,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: Switch.adaptive(
+                    value: community.pushNotificationsEnabled,
+                    onChanged: canToggle ? setEnabled : null,
                   ),
-          ),
-          onTap: !canToggle
-              ? null
-              : () => unawaited(
-                  ref
-                      .read(communityListProvider.notifier)
-                      .setPushNotificationsEnabled(
-                        community.id,
-                        !community.pushNotificationsEnabled,
-                      ),
                 ),
+              ),
+            ],
+          ),
         ),
       ],
     );
