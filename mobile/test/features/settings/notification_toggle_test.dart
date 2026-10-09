@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
@@ -6,6 +7,11 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
+import 'package:buzz/shared/push/push_bootstrap.dart';
+import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
+import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/shared/relay/nostr_models.dart';
+import 'package:buzz/shared/relay/signed_event_relay.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
@@ -63,6 +69,33 @@ void main() {
         ),
       ];
       var discoveries = 0;
+      final session = _Connected();
+      apnsDeviceToken.value = 'test-apns-token';
+      addTearDown(() => apnsDeviceToken.value = null);
+      final grant = <String, Object>{
+        'relayOrigin': 'wss://relay.example',
+        'relayPubkey': _descriptor.executorPubkey,
+        'installationId': 'b' * 32,
+        'endpointGrant': 'test-endpoint-grant',
+        'endpointHash': 'c' * 64,
+        'appProfile': buzzDevPushAppProfile,
+        'endpointEpoch': 1,
+        'generation': 1,
+        'expiresAt': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+      };
+      const nativePush = MethodChannel('buzz/push');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        nativePush,
+        (call) async => switch (call.method) {
+          'enrollPush' => grant,
+          'endpointGrants' => [grant],
+          'startRegistration' || 'syncPushSnapshot' => null,
+          _ => throw StateError('Unexpected native call ${call.method}'),
+        },
+      );
+      addTearDown(() => messenger.setMockMethodCallHandler(nativePush, null));
       final community =
           Community.create(
             name: 'Team',
@@ -73,13 +106,14 @@ void main() {
               data: '1' * 64,
             ),
             pushNotificationsEnabled: true,
+            pushLeaseInstallationId: 'd' * 32,
             pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
               desired: subscriptions,
             ).withAccepted(subscriptions: subscriptions, generation: 7),
           );
       await storage.save(community);
       await storage.saveActiveId(community.id);
-      final pending = Completer<BuzzPushLeaseDescriptor>();
+
       final cleanup = Completer<void>();
       final showingSettings = ValueNotifier(true);
       addTearDown(showingSettings.dispose);
@@ -103,14 +137,25 @@ void main() {
               tombstones.add(generation);
               if (outcome == 'failed') throw StateError('relay unavailable');
               if (outcome == 'pending') await cleanup.future;
+              await publishBuzzPushLeaseTombstone(
+                descriptor: _descriptor,
+                installationId: community.pushLeaseInstallationId!,
+                generation: generation!,
+                nsec: community.nsec!,
+                memberPubkey: pubkeyFromNsec(community.nsec)!,
+                submit: SignedEventRelay(
+                  session: session,
+                  nsec: community.nsec,
+                ).submit,
+              );
             }),
-            relaySessionProvider.overrideWith(_Connected.new),
-            myPubkeyProvider.overrideWithValue('a' * 64),
+            buzzPushLeaseRevocationStorageProvider.overrideWithValue(
+              BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
+            ),
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue(nostr.Keys('1' * 64).public),
             buzzPushDescriptorFetcherProvider.overrideWithValue((_) async {
               discoveries++;
-              if (discoveries > 1) {
-                return pending.future;
-              }
               return _descriptor;
             }),
             appLifecycleProvider.overrideWith(_Lifecycle.new),
@@ -118,17 +163,19 @@ void main() {
               () async => BuzzPushAuthorizationStatus.denied,
             ),
           ],
-          child: MaterialApp(
-            theme: AppTheme.light(),
-            home: ValueListenableBuilder(
-              valueListenable: showingSettings,
-              builder: (_, showing, _) => showing
-                  ? SettingsPage(
-                      profileHeader: const SizedBox.shrink(),
-                      identityRecoveryPageBuilder: (_) =>
-                          const SizedBox.shrink(),
-                    )
-                  : const SizedBox.shrink(),
+          child: BuzzPushBootstrap(
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: ValueListenableBuilder(
+                valueListenable: showingSettings,
+                builder: (_, showing, _) => showing
+                    ? SettingsPage(
+                        profileHeader: const SizedBox.shrink(),
+                        identityRecoveryPageBuilder: (_) =>
+                            const SizedBox.shrink(),
+                      )
+                    : const SizedBox.shrink(),
+              ),
             ),
           ),
         ),
@@ -143,12 +190,9 @@ void main() {
         reason:
             '${container.read(activeCommunityProvider)} / ${container.read(communityListProvider)}',
       );
-      // Bootstrap also observes capability while Settings is closed.
-      final capabilitySubscription = container.listen(
-        currentRelayPushDescriptorProvider,
-        (_, _) {},
-      );
-      addTearDown(capabilitySubscription.close);
+      expect(session.leases.single['active'], isTrue);
+      // Capability discovery plus the active publication.
+      expect(discoveries, 2);
       expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
       expect(
         tester.getSemantics(
@@ -182,9 +226,17 @@ void main() {
       expect(stored.pushNotificationsEnabled, isFalse);
       expect(
         stored.pushSubscriptionState.pendingTombstoneGeneration,
-        outcome == 'failed' || outcome == 'pending' ? 8 : isNull,
+        outcome == 'failed' || outcome == 'pending'
+            ? greaterThanOrEqualTo(9)
+            : isNull,
       );
-      expect(tombstones, [8]);
+      expect(tombstones.first, 9);
+      expect(
+        tombstones.length,
+        lessThanOrEqualTo(2),
+        reason: 'failed cleanup must not defeat the retry backoff',
+      );
+      expect(discoveries, 2);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
       final offSwitch = tester.widget<Switch>(find.byType(Switch));
       expect(offSwitch.value, isFalse);
@@ -199,6 +251,13 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
       expect((await storage.loadAll()).single.pushNotificationsEnabled, isTrue);
+      expect(
+        session.leases.where((lease) => lease['active'] == true).length,
+        2,
+        reason:
+            're-enabling must publish an active lease before the renewal timer',
+      );
+      expect(session.leases.last['generation'], greaterThan(tombstones.last!));
       if (outcome == 'pending') {
         cleanup.complete();
         await tester.pumpAndSettle();
@@ -207,7 +266,15 @@ void main() {
           isTrue,
         );
       }
-      expect(discoveries, 1);
+      final latestLease = session.leases.reduce(
+        (a, b) => (a['generation'] as int) > (b['generation'] as int) ? a : b,
+      );
+      expect(
+        latestLease['active'],
+        isTrue,
+        reason: 'a delayed old tombstone cannot supersede the new active lease',
+      );
+      expect(discoveries, 3);
       // A real reconnect must still discover capability again.
       (container.read(relaySessionProvider.notifier) as _Connected).setStatus(
         SessionStatus.disconnected,
@@ -217,12 +284,12 @@ void main() {
       (container.read(relaySessionProvider.notifier) as _Connected).setStatus(
         SessionStatus.connected,
       );
-      await tester.pump();
-      expect(discoveries, 2);
-      pending.complete(_descriptor);
       await tester.pumpAndSettle();
+      expect(discoveries, 4);
       expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
       expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
       semantics.dispose();
       debugDefaultTargetPlatformOverride = null;
     });
@@ -241,17 +308,32 @@ class _Auth extends AuthNotifier {
 }
 
 class _Connected extends RelaySessionNotifier {
+  final leases = <Map<String, dynamic>>[];
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    expect(event.kind, buzzPushLeaseKind);
+    final plaintext = nip44Decrypt(
+      getConversationKey('2' * 64, event.pubkey),
+      event.content,
+    );
+    leases.add(jsonDecode(plaintext) as Map<String, dynamic>);
+    return event;
+  }
+
   void setStatus(SessionStatus status) => state = SessionState(status: status);
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 }
 
-const _descriptor = BuzzPushLeaseDescriptor(
+final _descriptor = BuzzPushLeaseDescriptor(
   origin: 'wss://relay.example',
   executorKeyId: 'relay-v1',
-  executorPubkey:
-      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  executorPubkey: nostr.Keys('2' * 64).public,
   transport: 'apns',
   maxLeaseTtlSeconds: 3600,
   maxContentLength: 4096,
