@@ -705,7 +705,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 57);
+        assert_eq!(migrations.len(), 58);
+        // 0058 is reserved by the independently reviewed trigger retirement.
+        assert_eq!(migrations[57].version, 59);
+        assert!(migrations[57].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
