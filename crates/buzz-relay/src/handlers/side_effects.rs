@@ -406,12 +406,8 @@ pub async fn validate_standard_deletion_event(
             .await?
             .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
 
-        if matches!(target_event.event.kind.as_u16(), 45010 | 45011) {
-            anyhow::bail!(
-                "artifacts cannot be deleted with kind 5; use op=delete or kind 9005 redaction"
-            );
-        }
-        check_deletion_privacy_k_tag(event, event_kind_u32(&target_event.event))?;
+        // Ownership first: every later error depends on the target's kind,
+        // which a non-owner must not learn.
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
         if target_author != actor_bytes
@@ -422,6 +418,12 @@ pub async fn validate_standard_deletion_event(
         {
             return Err(anyhow::anyhow!("must be event author"));
         }
+        if matches!(target_event.event.kind.as_u16(), 45010 | 45011) {
+            anyhow::bail!(
+                "artifacts cannot be deleted with kind 5; use op=delete or kind 9005 redaction"
+            );
+        }
+        check_deletion_privacy_k_tag(event, event_kind_u32(&target_event.event))?;
     }
 
     Ok(())
