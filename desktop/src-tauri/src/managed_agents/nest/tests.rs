@@ -42,23 +42,13 @@ fn nest_skill_contains_safe_mention_workflow() {
 }
 
 #[test]
-fn nest_agents_template_separates_commit_attribution_claims() {
+fn nest_agents_template_defers_commit_policy_to_repositories() {
     assert_eq!(AGENTS_MD.matches("## Git Commit Attribution").count(), 1);
-    assert!(AGENTS_MD.contains(
-        "Git authorship, co-authorship, DCO sign-off, and cryptographic signing are separate claims"
-    ));
-    assert!(AGENTS_MD
-        .contains("Request, approval, review, or accountability alone is not co-authorship"));
-    assert!(AGENTS_MD.contains("A sign-off is not an approval marker"));
-    assert!(AGENTS_MD.contains("Never use another person's signing key"));
-    assert!(AGENTS_MD.contains("inspect every outgoing commit against the actual upstream or base"));
-    assert!(AGENTS_MD.contains("An agent-owned repository may use the agent as author"));
+    assert!(AGENTS_MD.contains("the runtime sets your git identity and signing"));
+    assert!(AGENTS_MD.contains("`BUZZ_GIT_IDENTITY=user`"));
+    assert!(AGENTS_MD.contains("Credit the other party with a `Co-authored-by` trailer"));
+    assert!(AGENTS_MD.contains("Follow each repository's own `AGENTS.md` for sign-off (DCO)"));
     assert!(!AGENTS_MD.contains("every commit MUST include a `Signed-off-by`"));
-    // Managed-runtime delta: describes the default agent identity and the
-    // `user` opt-out without reintroducing mandatory human-trailer policy.
-    assert!(AGENTS_MD.contains("### Managed runtime default"));
-    assert!(AGENTS_MD.contains("`BUZZ_GIT_IDENTITY` unset or `agent`"));
-    assert!(AGENTS_MD.contains("The operator can opt out per-agent with `BUZZ_GIT_IDENTITY=user`"));
 }
 
 #[test]
