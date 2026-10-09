@@ -339,6 +339,11 @@ run_unit_tests() {
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
 
+  run_test_step "buzz-relay invitation token and cutoff contracts" \
+    cargo test -p buzz-relay --lib invite_token::tests:: -- --nocapture
+  run_test_step "buzz-relay invitation cutoff configuration" \
+    cargo test -p buzz-relay --lib config::invite_cutoff_tests:: -- --nocapture
+
   run_test_step "buzz-relay boot lifecycle tests" \
     cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 }

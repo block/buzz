@@ -27,14 +27,18 @@ async fn legacy_fixture() -> (PgPool, Vec<Uuid>) {
                 .execute(&pool).await.unwrap();
         }
         if index == 1 || index == 2 {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("SELECT set_config('buzz.deletion_executor_community',$1,true),set_config('buzz.deletion_fence_generation','7',true)")
+                .bind(community.to_string()).execute(&mut *tx).await.unwrap();
             sqlx::query(
                 "UPDATE communities SET deletion_state=$2,deletion_fence_generation=7 WHERE id=$1",
             )
             .bind(community)
             .bind(if index == 1 { "quiescing" } else { "tombstone" })
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
+            tx.commit().await.unwrap();
         }
         communities.push(community);
     }
