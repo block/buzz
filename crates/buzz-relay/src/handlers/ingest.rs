@@ -2263,6 +2263,27 @@ pub(crate) async fn enforce_write_restriction(
     write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
 }
 
+/// [`enforce_write_restriction`] over a 30-second cached restriction row, for
+/// the WebSocket ephemeral and observer paths. Those run per typing pulse and
+/// observer frame; persistent ingest keeps the uncached read. The verdict is
+/// still taken at `now`, so a cached timeout lifts on time.
+pub(crate) async fn enforce_cached_write_restriction(
+    state: &AppState,
+    tenant: &TenantContext,
+    kind: u32,
+    pubkey: &nostr::PublicKey,
+) -> Result<(), IngestError> {
+    let restriction = state
+        .restriction_state_cached(tenant.community(), pubkey.as_bytes())
+        .await
+        .map_err(|e| {
+            IngestError::Internal(format!(
+                "error: internal error checking restriction state: {e}"
+            ))
+        })?;
+    write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -3563,7 +3584,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn check_channel_write_denies_when_channel_lookup_fails() {
         let state = crate::state::tests::test_state_with_database_url(
-            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1 -- local test fixture
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1
         )
         .await;
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
