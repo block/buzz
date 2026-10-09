@@ -11,7 +11,6 @@ import 'push_bridge.dart';
 import 'push_subscription.dart';
 
 const buzzPushLeaseKind = 30350;
-const buzzDevPushAppProfile = 'buzz-ios-dogfood';
 const buzzPushTransport = 'apns';
 const _maxSafeJsonInteger = 9007199254740991;
 const _maxLeaseLifetimeSeconds = 2592000;
@@ -48,8 +47,8 @@ class BuzzPushLeaseDescriptor {
       information['supported_extensions'],
       name: 'supported_extensions',
     );
-    if (!extensions.contains('nip-pl')) {
-      throw const FormatException('NIP-11 does not advertise nip-pl');
+    if (!extensions.contains('buzz-push-v1')) {
+      throw const FormatException('NIP-11 does not advertise buzz-push-v1');
     }
 
     final push = _stringMap(information['push'], name: 'push');
@@ -58,7 +57,6 @@ class BuzzPushLeaseDescriptor {
       required: const {
         'origin',
         'keys',
-        'app_profiles',
         'push_kinds',
         'h_grammar',
         'class_support',
@@ -67,7 +65,6 @@ class BuzzPushLeaseDescriptor {
       allowed: const {
         'origin',
         'keys',
-        'app_profiles',
         'push_kinds',
         'h_grammar',
         'class_support',
@@ -109,31 +106,7 @@ class BuzzPushLeaseDescriptor {
     }
     final currentKey = currentKeys.single;
 
-    final profiles = _mapList(push['app_profiles'], name: 'app_profiles');
-    final profileIds = <String>{};
-    String? transport;
-    for (final profile in profiles) {
-      _requireExactKeys(
-        profile,
-        required: const {'id', 'transport'},
-        allowed: const {'id', 'transport'},
-        name: 'app profile',
-      );
-      final id = _nonEmptyString(profile['id'], name: 'app profile id');
-      if (!profileIds.add(id)) {
-        throw FormatException('Duplicate app profile id: $id');
-      }
-      final candidate = _nonEmptyString(
-        profile['transport'],
-        name: 'app profile transport',
-      );
-      if (id == buzzDevPushAppProfile) transport = candidate;
-    }
-    if (transport != buzzPushTransport) {
-      throw const FormatException(
-        'NIP-11 does not advertise the dogfood APNs profile',
-      );
-    }
+    const transport = buzzPushTransport;
 
     final pushKinds = _intList(push['push_kinds'], name: 'push_kinds');
     if (!buzzPushEligibleKinds.every(pushKinds.contains)) {
@@ -214,7 +187,7 @@ class BuzzPushLeaseDescriptor {
       origin: origin,
       executorKeyId: currentKey['id'] as String,
       executorPubkey: currentKey['pubkey'] as String,
-      transport: transport!,
+      transport: transport,
       maxLeaseTtlSeconds: maxLeaseTtl,
       maxContentLength: limitation['max_content_len'] as int,
       maxPlaintextLength: limitation['max_plaintext_len'] as int,
@@ -327,7 +300,6 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   final plaintextMap = <String, dynamic>{
     'v': 1,
     'origin': descriptor.origin,
-    'app_profile': grant.appProfile,
     'transport': descriptor.transport,
     'endpoint': grant.endpointGrant,
     'generation': effectiveLeaseGeneration,
@@ -500,9 +472,6 @@ void _validateGrant(
     throw const FormatException(
       'Stored endpoint grant is delegated to a different relay key',
     );
-  }
-  if (grant.appProfile != buzzDevPushAppProfile) {
-    throw const FormatException('Endpoint grant is not for buzz-ios-dogfood');
   }
   if (grant.endpointGrant.isEmpty ||
       utf8.encode(grant.endpointGrant).length > descriptor.maxEndpointLength) {

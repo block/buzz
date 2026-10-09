@@ -287,12 +287,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires the exported dogfood Apple Push Services PEM"]
+    #[ignore = "requires the exported configured Apple Push Services PEM"]
     async fn live_sandbox_probe_reports_literal_status_and_body() {
         let cert_path = std::env::var("BUZZ_PUSH_LIVE_APNS_CERT_PATH")
-            .expect("set BUZZ_PUSH_LIVE_APNS_CERT_PATH to the dogfood identity PEM");
+            .expect("set BUZZ_PUSH_LIVE_APNS_CERT_PATH to the configured identity PEM");
         let topic = std::env::var("BUZZ_PUSH_LIVE_APNS_TOPIC")
-            .expect("set BUZZ_PUSH_LIVE_APNS_TOPIC to the dogfood bundle id");
+            .expect("set BUZZ_PUSH_LIVE_APNS_TOPIC to the configured bundle id");
         let identity = std::fs::read(cert_path).unwrap();
         let transport =
             ApnsTransport::certificate(&identity, topic, ApnsEnvironment::Sandbox).unwrap();

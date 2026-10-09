@@ -12,8 +12,6 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let endpoint: String
   /// Lowercase SHA-256 digest of the binary APNs device token.
   public let endpointHash: String
-  /// Server-owned application identity used for enrollment.
-  public let appProfile: String
   /// Unix expiration time of the installation or delegation authority.
   public let expiresAt: Int64
   /// Unlinkable per-relay lease address, distinct from the gateway handle.
@@ -38,7 +36,6 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     relayPubkey: String,
     endpoint: String,
     endpointHash: String,
-    appProfile: String,
     expiresAt: Int64,
     installationId: String,
     gatewayInstallationHandle: String? = nil,
@@ -53,7 +50,6 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     self.relayPubkey = relayPubkey
     self.endpoint = endpoint
     self.endpointHash = endpointHash
-    self.appProfile = appProfile
     self.expiresAt = expiresAt
     self.installationId = installationId
     self.gatewayInstallationHandle = gatewayInstallationHandle

@@ -9,7 +9,7 @@ blocking retry or restart flow.
 Production enforcement remains disabled. Dogfood builds can opt in with the
 Flutter define `BUZZ_AGE_GATING_ENABLED=true`. This enables the same notifier used
 by the native-channel and app tests. No real-device build is a PR prerequisite;
-actual OS prompts, signing, and account behavior will be checked in dogfood.
+actual OS prompts, signing, and account behavior will be checked in pre-release testing.
 
 ## Automated evidence
 
@@ -33,11 +33,11 @@ actual OS prompts, signing, and account behavior will be checked in dogfood.
   presentation. Process exit releases restriction without cleanup. Missing, stale,
   and inaccessible lock files cannot establish a restriction.
 
-Run the Flutter age-gate suite both with and without the dogfood define. A test
+Run the Flutter age-gate suite both with and without the pre-release testing define. A test
 must fail if pending/error becomes restricted or an expired request can restrict.
 The implementation was mutation-tested for pending and error blocking.
 
 An already-running platform consent dialog cannot be proven dismissible by Dart
-unit tests. That behavior remains part of dogfood validation before general
+unit tests. That behavior remains part of pre-release testing validation before general
 re-enablement. Old releases that permanently saved push opt-out preferences did
 not record their cause; this change does not guess which opt-outs to reverse.

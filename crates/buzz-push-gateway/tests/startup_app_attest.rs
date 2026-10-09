@@ -20,10 +20,7 @@ fn parsed_configuration_reaches_executable_verifier() {
             ),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000".into()),
             ("DATABASE_URL", "unused".into()),
-            (
-                "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
-                "TEAM.test.app".into(),
-            ),
+            ("BUZZ_PUSH_APP_ATTEST_APP_ID", "TEAM.test.app".into()),
             (
                 "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH",
                 format!(
@@ -32,15 +29,12 @@ fn parsed_configuration_reaches_executable_verifier() {
                 ),
             ),
             // Startup stops immediately after configuring the real verifier.
-            ("BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH", "".into()),
-            ("BUZZ_PUSH_DOGFOOD_APNS_TOPIC", "test.app".into()),
+            ("BUZZ_PUSH_APNS_CERT_PATH", "".into()),
+            ("BUZZ_PUSH_APNS_TOPIC", "test.app".into()),
             ("RUST_LOG", "info".into()),
         ]);
         // A directory cannot be read as an APNs certificate, on every platform.
-        command.env(
-            "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
-            env!("CARGO_MANIFEST_DIR"),
-        );
+        command.env("BUZZ_PUSH_APNS_CERT_PATH", env!("CARGO_MANIFEST_DIR"));
         if let Some(setting) = setting {
             command.env("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT", setting);
         }

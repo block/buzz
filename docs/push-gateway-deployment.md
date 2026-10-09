@@ -16,31 +16,20 @@
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
-| `BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID` | Exact server-owned Apple App Attest application identifier (`TEAMID.bundle-id`). |
-| `BUZZ_PUSH_DOGFOOD_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
-| `BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
-| `BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
+| `BUZZ_PUSH_APP_ATTEST_APP_ID` | Exact server-owned Apple App Attest application identifier (`TEAMID.bundle-id`). |
+| `BUZZ_PUSH_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
+| `BUZZ_PUSH_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
+| `BUZZ_PUSH_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
 
-The current MVP serves the dogfood application identity
-(`xyz.block.buzz.dogfood.mobile`). App Attest must cryptographically validate
-the configured application ID before enrollment. Assertions and delivery use
-the server-owned APNs topic, certificate-backed connection pool, and
-environment. No client request or relay grant can supply or override an APNs
-topic.
+Each gateway serves one configured Apple application. App Attest validates
+`application.appAttestAppId` (`TEAMID.bundle-id`) before enrollment. APNs uses
+the configured topic, certificate and environment. Clients and relay grants
+cannot select or override that identity. Separate applications use separate
+gateway deployments and authority databases.
 
-This MVP has exactly one compiled-in application profile,
-`buzz-ios-dogfood`. The chart value
-`profiles.dogfood.appAttestAppId` is rendered as
-`BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID`; the gateway rejects startup when it is
-missing or empty. The exact `TEAMID.bundle-id` is environment-owned,
-non-secret deployment configuration. The chart's production values file leaves
-it empty deliberately so a production renderer must supply it from the GitOps
-environment rather than baking a Block team identifier into this repository.
-Supporting another application identity requires an explicit code, schema,
-chart, credential, and deployment change; this gateway does not currently
-select among multiple application profiles.
+See [Buzz push notes](buzz-push.md) for the current experimental contract.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
@@ -56,12 +45,11 @@ The gateway accepts exactly the selected AAGUID and still verifies the pinned
 Apple root, certificate chain, nonce, application identity, public key,
 credential ID, and counter. This is not a simulator or attestation bypass.
 
-Set `BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID` to the personal `TEAMID.bundle-id`,
-`BUZZ_PUSH_DOGFOOD_APNS_TOPIC` to that same bundle ID,
-`BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT=sandbox`, and supply its APNs certificate.
-This isolated stack reuses the single `buzz-ios-dogfood` wire profile for its
-server-owned personal identity; it does not add a production application profile.
-Do not point distributed dogfood clients at this personal gateway.
+Set `BUZZ_PUSH_APP_ATTEST_APP_ID` to the personal `TEAMID.bundle-id`,
+`BUZZ_PUSH_APNS_TOPIC` to that same bundle ID,
+`BUZZ_PUSH_APNS_ENVIRONMENT=sandbox`, and supply its APNs certificate.
+This isolated stack uses its own server-configured application identity.
+Do not point distributed clients at this personal gateway.
 
 Build the mobile client with the personal team and parent bundle ID, its matching
 `.NotificationService` extension, development APNs/App Attest entitlements, and
@@ -156,7 +144,7 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 | Alert | Fires when | Severity | Action |
 |---|---|---|---|
-| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | The APNs certificate/topic/environment is unhealthy. Check `BUZZ_PUSH_DOGFOOD_APNS_*` configuration. No endpoints are being invalidated. |
+| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | The APNs certificate/topic/environment is unhealthy. Check `BUZZ_PUSH_APNS_*` configuration. No endpoints are being invalidated. |
 | `PushGatewayAdmissionUnavailable` | any admission `unavailable` for 5m | critical | PostgreSQL authority store is unreachable. Check DB connectivity and the pod's `postgresEgressCidrs` NetworkPolicy. |
 | `PushGatewayReadinessAuthorityFailing` | readiness `authority` failures for 5m | warning | Replicas are being pulled from the Service on DB check failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
 | `PushGatewayReaperFailing` | reaper failed ≥2 times within 30m (runs every 5m) | warning | Expired reservations aren't being swept, growing the bounded-until-expiry window. Check DB write availability. |
@@ -199,43 +187,17 @@ delivery run only when `BUZZ_PUSH_ENABLED=true`. End-to-end use still requires
 the client App Attest enrollment/delegation flow to place a gateway-issued opaque
 capability—not a raw APNs token—into the encrypted relay lease.
 
-## Internal dogfood evaluation and rollback
+## Evaluation and rollout
 
-The MVP is ready to enable only when the configured gateway's sole dogfood
-profile is configured with its server-owned App Attest app ID, APNs topic,
-production certificate identity, and production APNs environment, and only the
-selected internal relay deployments set `BUZZ_PUSH_ENABLED=true`. Every iOS
-artifact contains the native push bridge and Notification Service Extension,
-but the client remains inactive until its current authenticated relay
-advertises a fully valid NIP-11 `nip-pl` descriptor. There is no App Store
-gateway profile in this MVP.
+Enable push only after a physical-device test with the deployment's configured
+application identity, APNs topic, certificate and environment. Updated clients
+require the NIP-11 `buzz-push-v1` capability. Keep `nip-pl` disabled on production
+relays throughout the cutover.
 
-Physical-device validation must use an application whose App Attest identity
-and APNs topic match the configured dogfood profile. The current gateway cannot
-enroll `xyz.block.buzz.mobile` or another bundle identifier merely by changing
-deployment values: adding another identity requires the explicit multi-profile
-work described above.
-
-Dogfood end-to-end release validation starts after this feature reaches `main`:
-publish the next immutable `mobile-vX.Y.Z-rc.N` candidate from the exact current
-`origin/main` commit, build that tag through the normal Block release pipeline,
-and wait for the signed `xyz.block.buzz.dogfood.mobile` artifact to appear in
-Mobile Releases/Comp Portal before installing it on a physical device. Verify
-APNs delivery, fetched and signature-verified notification content, and
-exact-message tap routing against the configured gateway and a push-enabled
-internal relay before widening the internal evaluation.
-
-Before that first candidate, the private dogfood builder's manual signing and
-export configuration must map separate distribution
-profiles for both `xyz.block.buzz.dogfood.mobile` and
-`xyz.block.buzz.dogfood.mobile.NotificationService`; an app-only profile does
-not provision the extension. App Store rollout remains off through relay and
-gateway deployment configuration until separately approved.
-Before enabling rich message presentation, enable Apple's Communication
-Notifications capability on the parent dogfood App ID and regenerate its app
-provisioning profile. The extension profile does not need that capability.
-Apply the same parent-App-ID prerequisite to the eventual App Store rollout;
-updating Block Apple portal records is a separately authorized release step.
+Build a signed release candidate with both the app and Notification Service
+Extension provisioned. Verify APNs delivery, fetched and signature-verified
+notification content, and exact-message tap routing. Enable Apple's Communication
+Notifications capability on the parent App ID for rich message presentation.
 
 For each evaluation cohort, measure relay receipt-to-match, wake queue, relay-to-
 gateway, and gateway-to-APNs latencies from the histograms above. Track the
@@ -273,7 +235,7 @@ the environment's GitOps values; the chart then renders
 `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
-dogfood Apple application identifier and the actual PostgreSQL network. Set
+distributed Apple application identifier and the actual PostgreSQL network. Set
 `gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
 the routing hostname and is not passed to the gateway binary. In an
 environment with an existing ingress or service mesh route, keep

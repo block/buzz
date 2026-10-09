@@ -31,8 +31,6 @@ public struct BuzzPushEndpointGrantRecord: Codable, Equatable, Sendable {
   public let endpointGrant: String
   /// Lowercase SHA-256 digest of the binary APNs device token.
   public let endpointHash: String
-  /// Server-owned application identity used for enrollment.
-  public let appProfile: String
   /// Monotonic endpoint version bound into the gateway grant.
   public let endpointEpoch: Int64
   /// Monotonic delegation version bound into the gateway grant.
@@ -51,7 +49,6 @@ public struct BuzzPushEndpointGrantRecord: Codable, Equatable, Sendable {
     installationId: String,
     endpointGrant: String,
     endpointHash: String,
-    appProfile: String,
     endpointEpoch: Int64,
     generation: Int64,
     expiresAt: Int64
@@ -66,7 +63,6 @@ public struct BuzzPushEndpointGrantRecord: Codable, Equatable, Sendable {
     self.installationId = installationId
     self.endpointGrant = endpointGrant
     self.endpointHash = endpointHash
-    self.appProfile = appProfile
     self.endpointEpoch = endpointEpoch
     self.generation = generation
     self.expiresAt = expiresAt
@@ -78,21 +74,19 @@ public struct BuzzPushEndpointGrantRecord: Codable, Equatable, Sendable {
 public protocol BuzzPushEndpointGrantStore {
   /// Returns durable grants across configured origins without migrating them.
   func records() throws -> [BuzzPushEndpointGrantRecord]
-  /// Atomically replaces the grant for its gateway, relay origin, and app profile.
+  /// Atomically replaces the grant for its gateway and relay origin.
   func save(_ record: BuzzPushEndpointGrantRecord) throws
-  /// Loads the exact retry journal for a gateway, relay origin, and app profile.
+  /// Loads the exact retry journal for a gateway and relay origin.
   func pendingEnrollment(
     gatewayOrigin: String,
-    relayOrigin: String,
-    appProfile: String
+    relayOrigin: String
   ) throws -> BuzzPushPendingEnrollmentRecord?
   /// Persists the retry journal before any enrollment or delegation mutation.
   func savePendingEnrollment(_ record: BuzzPushPendingEnrollmentRecord) throws
   /// Removes a journal only after success or authoritative terminal failure.
   func removePendingEnrollment(
     gatewayOrigin: String,
-    relayOrigin: String,
-    appProfile: String
+    relayOrigin: String
   ) throws
 }
 
@@ -331,7 +325,6 @@ struct BuzzDCAppAttestProvider: BuzzDevAppAttesting {
 
 /// Enrollment and delegation driver for real App Attest and the gated debug bypass.
 public final class BuzzDevPushEnrollmentDriver {
-  public static let appProfile = "buzz-ios-dogfood"
   public static let endpointEpoch: Int64 = 1
 
   private let gatewayBaseURL: URL
@@ -418,12 +411,10 @@ public final class BuzzDevPushEnrollmentDriver {
     let storedRecords = try store.records()
     let storedForOrigin = storedRecords.first {
       $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin.text
-        && $0.appProfile == Self.appProfile
     }
     let pendingEnrollment = try store.pendingEnrollment(
       gatewayOrigin: gatewayOrigin,
-      relayOrigin: relayOrigin.text,
-      appProfile: Self.appProfile
+      relayOrigin: relayOrigin.text
     )
     if let pending = pendingEnrollment,
       pending.relayPubkey != relayPubkey || pending.endpointHash != endpointHash
@@ -441,15 +432,13 @@ public final class BuzzDevPushEnrollmentDriver {
       } else {
         try store.removePendingEnrollment(
           gatewayOrigin: gatewayOrigin,
-          relayOrigin: relayOrigin.text,
-          appProfile: Self.appProfile
+          relayOrigin: relayOrigin.text
         )
       }
       return try await enroll(deviceToken: deviceToken, relayURL: relayURL)
     }
     let newestSharedGrant = storedRecords.filter {
       $0.gatewayOrigin == gatewayOrigin && $0.relayPubkey == relayPubkey
-        && $0.appProfile == Self.appProfile
         && $0.endpointHash == endpointHash && $0.endpointEpoch == Self.endpointEpoch
         && $0.expiresAt > nowSeconds + 300
     }.max { $0.generation < $1.generation }
@@ -465,7 +454,6 @@ public final class BuzzDevPushEnrollmentDriver {
         installationId: try storedForOrigin?.installationId ?? makeInstallationId(),
         endpointGrant: reusableGrant.endpointGrant,
         endpointHash: endpointHash,
-        appProfile: Self.appProfile,
         endpointEpoch: reusableGrant.endpointEpoch,
         generation: reusableGrant.generation,
         expiresAt: reusableGrant.expiresAt
@@ -473,8 +461,7 @@ public final class BuzzDevPushEnrollmentDriver {
       try store.save(record)
       try store.removePendingEnrollment(
         gatewayOrigin: gatewayOrigin,
-        relayOrigin: relayOrigin.text,
-        appProfile: Self.appProfile
+        relayOrigin: relayOrigin.text
       )
       return record
     }
@@ -485,7 +472,6 @@ public final class BuzzDevPushEnrollmentDriver {
     // its final five minutes is renewed by the authenticated delegation.
     let reusableInstallation = storedRecords.first { record in
       guard record.gatewayOrigin == gatewayOrigin,
-        record.appProfile == Self.appProfile,
         record.endpointHash == endpointHash,
         record.endpointEpoch == Self.endpointEpoch,
         record.expiresAt > nowSeconds,
@@ -517,7 +503,6 @@ public final class BuzzDevPushEnrollmentDriver {
         relayPubkey: relayPubkey,
         endpoint: endpoint,
         endpointHash: endpointHash,
-        appProfile: Self.appProfile,
         expiresAt: expiresAt,
         installationId: try storedForOrigin?.installationId ?? makeInstallationId(),
         gatewayInstallationHandle: existing.uuidString.lowercased(),
@@ -533,7 +518,6 @@ public final class BuzzDevPushEnrollmentDriver {
         challengeId: enrollmentChallenge.id,
         challenge: enrollmentChallenge.value,
         keyId: preparedAttestation.keyId,
-        appProfile: Self.appProfile,
         endpoint: endpoint,
         endpointEpoch: Self.endpointEpoch,
         expiresAt: expiresAt
@@ -551,7 +535,6 @@ public final class BuzzDevPushEnrollmentDriver {
         relayPubkey: relayPubkey,
         endpoint: endpoint,
         endpointHash: endpointHash,
-        appProfile: Self.appProfile,
         expiresAt: expiresAt,
         installationId: try storedForOrigin?.installationId ?? makeInstallationId(),
         challengeId: enrollmentChallenge.id.uuidString.lowercased(),
@@ -599,8 +582,7 @@ public final class BuzzDevPushEnrollmentDriver {
       // request's failure propagates instead of recursively retrying forever.
       try store.removePendingEnrollment(
         gatewayOrigin: gatewayOrigin,
-        relayOrigin: pending.relayOrigin,
-        appProfile: pending.appProfile
+        relayOrigin: pending.relayOrigin
       )
       return nil
     }
@@ -649,7 +631,6 @@ public final class BuzzDevPushEnrollmentDriver {
         relayPubkey: pending.relayPubkey,
         endpoint: pending.endpoint,
         endpointHash: pending.endpointHash,
-        appProfile: pending.appProfile,
         expiresAt: pending.expiresAt,
         installationId: pending.installationId,
         gatewayInstallationHandle: installation.uuidString.lowercased(),
@@ -667,7 +648,7 @@ public final class BuzzDevPushEnrollmentDriver {
       storedRecords
       .filter {
         $0.gatewayOrigin == gatewayOrigin && $0.gatewayInstallationHandle == installationHandle
-          && $0.relayPubkey == relayPubkey && $0.appProfile == Self.appProfile
+          && $0.relayPubkey == relayPubkey
       }
       .map(\.generation)
       .max()
@@ -688,7 +669,6 @@ public final class BuzzDevPushEnrollmentDriver {
       relayPubkey: pending.relayPubkey,
       endpoint: pending.endpoint,
       endpointHash: pending.endpointHash,
-      appProfile: pending.appProfile,
       expiresAt: pending.expiresAt,
       installationId: pending.installationId,
       gatewayInstallationHandle: installationHandle,
@@ -741,7 +721,6 @@ public final class BuzzDevPushEnrollmentDriver {
       installationId: pending.installationId,
       endpointGrant: endpointGrant,
       endpointHash: pending.endpointHash,
-      appProfile: Self.appProfile,
       endpointEpoch: Self.endpointEpoch,
       generation: generation,
       expiresAt: pending.expiresAt
@@ -749,8 +728,7 @@ public final class BuzzDevPushEnrollmentDriver {
     try store.save(record)
     try store.removePendingEnrollment(
       gatewayOrigin: gatewayOrigin,
-      relayOrigin: pending.relayOrigin,
-      appProfile: Self.appProfile
+      relayOrigin: pending.relayOrigin
     )
     return record
   }
@@ -796,7 +774,6 @@ public final class BuzzDevPushEnrollmentDriver {
         challenge: challenge.value,
         keyId: attestation.keyId,
         attestation: attestation.attestation,
-        appProfile: Self.appProfile,
         endpoint: endpoint,
         endpointEpoch: Self.endpointEpoch,
         expiresAt: expiresAt
@@ -1006,7 +983,6 @@ private struct InstallationRequest: Encodable {
   let challenge: String
   let keyId: String
   let attestation: String
-  let appProfile: String
   let endpoint: String
   let endpointEpoch: Int64
   let expiresAt: Int64
@@ -1016,7 +992,6 @@ private struct InstallationRequest: Encodable {
     case challenge
     case keyId = "key_id"
     case attestation
-    case appProfile = "app_profile"
     case endpoint
     case endpointEpoch = "endpoint_epoch"
     case expiresAt = "expires_at"

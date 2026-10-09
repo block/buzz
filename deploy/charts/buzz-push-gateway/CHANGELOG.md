@@ -1,5 +1,9 @@
 # Chart release notes
 
+## 0.4.0
+
+- Replace `profiles.dogfood` with `application` and use unprefixed application/APNs environment variables. Requires the matching buzz-push-v1 gateway image and fresh authority store.
+
 ## 0.3.5
 
 Adds optional string-valued `deploymentAnnotations` for Deployment metadata,

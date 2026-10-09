@@ -292,11 +292,7 @@ class BuzzPushLeaseRevocationOutbox {
     final relayOrigin = canonicalBuzzPushRelayOrigin(relayUrl);
     final grants = await (readGrants ?? readBuzzPushEndpointGrants)();
     final matching = grants
-        .where(
-          (grant) =>
-              grant.relayOrigin == relayOrigin &&
-              grant.appProfile == buzzDevPushAppProfile,
-        )
+        .where((grant) => grant.relayOrigin == relayOrigin)
         .toList();
     if (matching.length != 1) {
       throw StateError(

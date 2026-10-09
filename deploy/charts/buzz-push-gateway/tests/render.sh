@@ -15,7 +15,7 @@ helm template push deploy/charts/buzz-push-gateway >"$out"
 production_args=(
   -f deploy/charts/buzz-push-gateway/values-production.yaml
   --set 'image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-  --set 'profiles.dogfood.appAttestAppId=REALTEAM.xyz.block.buzz.dogfood.mobile'
+  --set 'application.appAttestAppId=REALTEAM.com.example.buzz'
   --set 'networkPolicy.postgresEgressCidrs[0]=10.42.0.0/16'
 )
 helm lint deploy/charts/buzz-push-gateway "${production_args[@]}" >/dev/null
@@ -77,14 +77,14 @@ assert!(j.dig("metadata", "annotations") == {
 env_names = d.dig("spec", "template", "spec", "containers", 0, "env")
   .map { |entry| entry["name"] }.to_set
 required = Set.new(%w[
-  DATABASE_URL BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH
-  BUZZ_PUSH_DOGFOOD_APNS_TOPIC BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID
+  DATABASE_URL BUZZ_PUSH_APNS_CERT_PATH
+  BUZZ_PUSH_APNS_TOPIC BUZZ_PUSH_APP_ATTEST_APP_ID
   BUZZ_PUSH_GRANT_KEYS BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS
 ])
 assert!(required.subset?(env_names))
 assert!(!env_names.include?("BUZZ_PUSH_GATEWAY_ORIGIN"))
 assert!(!env_names.any? { |name| name.include?("APP_STORE") })
-apns_volume = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns-dogfood" }
+apns_volume = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns" }
 assert!(apns_volume.dig("secret", "defaultMode") == 0o400, apns_volume.inspect)
 assert!(d.dig("spec", "replicas") >= 2)
 assert!(!xs.any? { |x| x["kind"] == "HTTPRoute" })
