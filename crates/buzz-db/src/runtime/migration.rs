@@ -705,7 +705,35 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 57);
+        assert_eq!(migrations.len(), 58);
+        // The app owns the NIP-RS watermark, retention-free purge and
+        // mention liveness, so 0058 drops the migration-only triggers that
+        // 0009, 0010, 0011 and 0019 installed. Those files stay frozen.
+        assert_eq!(migrations[57].version, 58);
+        let retire_nip_rs = strip_sql_comments(migrations[57].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP TRIGGER trg_events_nip_rs_watermark ON events;",
+            "DROP TRIGGER trg_events_guard_nip_rs_hard_delete ON events;",
+            "DROP TRIGGER trg_events_purge_soft_deleted_nip_rs ON events;",
+            "DROP TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status ON events;",
+            "DROP TRIGGER trg_event_mentions_require_live_event ON event_mentions;",
+            "DROP FUNCTION guard_nip_rs_watermark();",
+            "DROP FUNCTION guard_nip_rs_hard_delete();",
+            "DROP FUNCTION purge_soft_deleted_nip_rs();",
+            "DROP FUNCTION purge_soft_deleted_buzz_mesh_status();",
+            "DROP FUNCTION guard_event_mention_live();",
+        ] {
+            assert!(
+                retire_nip_rs.contains(statement),
+                "0058 must run {statement}"
+            );
+        }
+        assert!(
+            retire_nip_rs.find("SET LOCAL lock_timeout").unwrap()
+                < retire_nip_rs.find("DROP TRIGGER").unwrap(),
+            "0058 must bound its ACCESS EXCLUSIVE lock on events before the first DROP"
+        );
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -2556,6 +2584,10 @@ mod postgres_tests {
     /// drift this test guards against. `indoption` (not just `indexdef` text) is
     /// asserted so a resurrected `NULLS FIRST` in a migration that `pgschema`
     /// cannot represent is caught.
+    ///
+    /// It then finishes the migrations and asserts the `events` and
+    /// `event_mentions` row triggers match `schema/` exactly, so no
+    /// migration-only trigger survives on the event write path.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_schema_parity_between_desired_state_and_migrations() {
@@ -2603,6 +2635,25 @@ mod postgres_tests {
             .fetch_all(pool)
             .await
             .expect("read index shapes")
+        }
+
+        // Row triggers on a parent table (partition clones follow the parent):
+        // name, function, enable mode and the tgtype bitmask.
+        async fn trigger_shapes(pool: &PgPool, table: &str) -> Vec<(String, String, String, i16)> {
+            sqlx::query_as(
+                "SELECT trigger.tgname::text, procedure.proname::text, \
+                 trigger.tgenabled::text, trigger.tgtype \
+                 FROM pg_trigger trigger \
+                 JOIN pg_class c ON c.oid = trigger.tgrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+                 WHERE n.nspname = 'public' AND c.relname = $1 AND NOT trigger.tgisinternal \
+                 ORDER BY trigger.tgname",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .expect("read trigger shapes")
         }
 
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -2698,6 +2749,20 @@ mod postgres_tests {
                  state (including per-key indoption) has drifted from the migrations. If a \
                  migration uses a construct pgschema cannot represent (e.g. NULLS FIRST), the \
                  migration and schema.sql must both use a representable shape."
+            );
+        }
+
+        // Every migration-only trigger on the event tables is retired, so a
+        // fully migrated database carries exactly the desired-state triggers.
+        run_migrations(&migrated)
+            .await
+            .expect("apply remaining migrations");
+        for table in ["events", "event_mentions"] {
+            assert_eq!(
+                trigger_shapes(&desired, table).await,
+                trigger_shapes(&migrated, table).await,
+                "trigger parity mismatch for {table}: a migration installs a trigger that \
+                 schema/ does not declare (or the reverse)"
             );
         }
 
