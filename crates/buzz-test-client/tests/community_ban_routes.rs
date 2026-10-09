@@ -28,6 +28,8 @@ const BANNED_MESSAGE: &str = "blocked: you are banned from this community";
 
 const COMMUNITY_BAN_MATRIX_CASES: &[&str] = &[
     "events",
+    "buzz_sidebar",
+    "buzz_read_state",
     "moderation_command",
     "query",
     "count",
@@ -268,7 +270,7 @@ fn request_body(case: &str, actor: &Principal) -> Vec<u8> {
             "limit": 1
         }]))
         .expect("serialize Nostr filter"),
-        "gif_search" | "gif_share" | "invite_mint" => b"{".to_vec(),
+        "gif_search" | "gif_share" | "invite_mint" | "buzz_read_state" => b"{".to_vec(),
         "media_upload" => b"not an image file".to_vec(),
         "git_upload_pack" | "git_receive_pack" => Vec::new(),
         "git_default_post" => serde_json::to_vec(&serde_json::json!({
@@ -405,6 +407,12 @@ fn assert_ban_denial(
             "{} {} must preserve Git's ban denial contract; body: {body}",
             route.method,
             route.path
+        );
+    } else if route.id.starts_with("buzz_") {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).expect("accessory denial JSON")
+                ["error"]["code"],
+            "forbidden"
         );
     } else if route.method == "HEAD" {
         assert!(
