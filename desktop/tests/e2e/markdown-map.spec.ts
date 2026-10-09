@@ -17,9 +17,12 @@ const spec = {
   ],
 };
 
-// Keep the test hermetic: serve a blank style instead of remote tiles.
+// Keep the test hermetic: serve a blank style instead of Mapbox tiles.
 async function stubTiles(page: Page) {
-  await page.route("https://tiles.openfreemap.org/**", (route) =>
+  await page.route("https://events.mapbox.com/**", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+  await page.route("https://api.mapbox.com/styles/**", (route) =>
     route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -70,8 +73,8 @@ test("```map blocks render an interactive map and report bad specs", async ({
   const map = message.getByTestId("markdown-map-block");
   await expect(map).toBeVisible();
   await expect(map).toHaveCSS("height", "320px");
-  await expect(map.locator("canvas.maplibregl-canvas")).toBeVisible();
-  await expect(map.locator(".maplibregl-marker")).toHaveCount(2);
+  await expect(map.locator("canvas.mapboxgl-canvas")).toBeVisible();
+  await expect(map.locator(".mapboxgl-marker")).toHaveCount(2);
   await expect(map.locator('[title="Store A"]')).toBeVisible();
   await expect(message.locator("[data-code-block]")).toHaveCount(0);
 

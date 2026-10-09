@@ -1,15 +1,16 @@
-import maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
+import mapboxgl from "mapbox-gl";
+import "mapbox-gl/dist/mapbox-gl.css";
 import * as React from "react";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 
 import { type MapSpec, mapSpecPoints, parseMapSpec } from "./mapSpec";
 
-// OpenFreeMap: free vector tiles, no API key.
+// Same Mapbox styles as wondershop. Public (pk.) token from VITE_MAPBOX_TOKEN.
+const MAPBOX_TOKEN: string | undefined = import.meta.env.VITE_MAPBOX_TOKEN;
 const STYLE_URL = {
-  light: "https://tiles.openfreemap.org/styles/liberty",
-  dark: "https://tiles.openfreemap.org/styles/dark",
+  light: "mapbox://styles/mapbox/light-v11",
+  dark: "mapbox://styles/mapbox/dark-v11",
 };
 const DEFAULT_COLOR = "#3b82f6";
 const DEFAULT_HEIGHT = 360;
@@ -18,14 +19,14 @@ function safeColor(color: string | undefined) {
   return color && CSS.supports("color", color) ? color : DEFAULT_COLOR;
 }
 
-function addOverlays(map: maplibregl.Map, spec: MapSpec) {
+function addOverlays(map: mapboxgl.Map, spec: MapSpec) {
   for (const marker of spec.markers) {
-    const pin = new maplibregl.Marker({ color: safeColor(marker.color) })
+    const pin = new mapboxgl.Marker({ color: safeColor(marker.color) })
       .setLngLat([marker.lng, marker.lat])
       .addTo(map);
     if (marker.label) {
       pin.getElement().title = marker.label;
-      pin.setPopup(new maplibregl.Popup({ offset: 24 }).setText(marker.label));
+      pin.setPopup(new mapboxgl.Popup({ offset: 24 }).setText(marker.label));
     }
   }
   if (spec.lines.length === 0) return;
@@ -57,17 +58,19 @@ function MapView({ spec }: { spec: MapSpec }) {
     const container = containerRef.current;
     if (!container) return;
     const points = mapSpecPoints(spec);
-    const map = new maplibregl.Map({
+    const map = new mapboxgl.Map({
+      accessToken: MAPBOX_TOKEN,
       container,
       style: STYLE_URL[isDark ? "dark" : "light"],
       center: spec.center ?? points[0],
       zoom: spec.zoom ?? 12,
-      attributionControl: { compact: true },
+      attributionControl: false,
       cooperativeGestures: true,
     });
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.addControl(new mapboxgl.AttributionControl({ compact: true }));
+    map.addControl(new mapboxgl.NavigationControl(), "top-right");
     if (!spec.center && points.length > 1) {
-      const bounds = new maplibregl.LngLatBounds(points[0], points[0]);
+      const bounds = new mapboxgl.LngLatBounds(points[0], points[0]);
       for (const point of points) bounds.extend(point);
       map.fitBounds(bounds, {
         padding: 48,
@@ -89,14 +92,17 @@ function MapView({ spec }: { spec: MapSpec }) {
   );
 }
 
+function MapError({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      {children}
+    </p>
+  );
+}
+
 export default function MapBlock({ code }: { code: string }) {
   const result = React.useMemo(() => parseMapSpec(code), [code]);
-  if (!result.ok) {
-    return (
-      <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-        {result.error}
-      </p>
-    );
-  }
+  if (!result.ok) return <MapError>{result.error}</MapError>;
+  if (!MAPBOX_TOKEN) return <MapError>Map needs VITE_MAPBOX_TOKEN.</MapError>;
   return <MapView spec={result.spec} />;
 }

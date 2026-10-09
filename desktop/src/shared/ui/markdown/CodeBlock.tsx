@@ -32,7 +32,7 @@ export const CODE_BLOCK_CLASS =
   "code-block-lines block min-w-full whitespace-pre font-mono text-sm font-medium text-foreground";
 const DIFF_ADD_RE = /\s*\/\/\s*\[!code\s*\+\+\]\s*$/;
 const DIFF_REMOVE_RE = /\s*\/\/\s*\[!code\s*--\]\s*$/;
-// maplibre is heavy; only load it when a message or canvas contains a map.
+// mapbox-gl is heavy; only load it when a message or canvas contains a map.
 const MapBlock = React.lazy(() => import("./MapBlock"));
 
 function ensureHighlighter(): Promise<void> {
