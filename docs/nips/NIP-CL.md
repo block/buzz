@@ -176,6 +176,30 @@ The relay MUST NOT send push notifications or kind:44100/44101 membership
 notifications for system channels. A client that received one would show the
 channel.
 
+### Asking for system channels
+
+A filter whose kinds are all 39000–39003 also returns the system channels that
+the reader can read when it has:
+
+- `"#t"` with the value `system`; or
+- any `"#P"`. A query for the channels of named creators returns a small
+  result, so it does not fill generic channel lists.
+
+The filter then matches as usual. A label alone does not ask for system
+channels.
+
+| To find | Filter |
+| --- | --- |
+| My system channels | `{"kinds": [39002], "#p": ["<me>"], "#t": ["system"]}`, then their kind:39000 by `#d` |
+| Open system channels | `{"kinds": [39000], "#t": ["system"]}` |
+| One creator's channel with a label, system or not | `{"kinds": [39000], "#P": ["<creator>"], "#t": ["<label>"]}` |
+
+`"#t": ["system", "<label>"]` means `system` **or** the label. It does not
+mean "a system channel with this label". Use `#P` and the label instead.
+
+Private system channels stay hidden from non-members, as for every private
+channel.
+
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the

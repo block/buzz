@@ -9,6 +9,12 @@
 //! - `#h` lists the channel, on any kinds;
 //! - `#d` lists the channel, on a filter whose kinds are all 39000–39003.
 //!
+//! A filter whose kinds are all 39000–39003 also opts in to every readable
+//! system channel when it has `#t:["system"]` (the channel type tag) or any
+//! `#P` (the creator tag). The filter then matches as usual, so
+//! `{kinds:[39000], #P:[creator], #t:[label]}` finds one creator's labeled
+//! channel, system or not. Existing clients send neither on these kinds.
+//!
 //! The addition is per filter. Another filter in the same request keeps the
 //! implicit set, so naming one system channel cannot widen a sibling filter.
 
@@ -52,13 +58,34 @@ fn named_channels(filter: &Filter) -> impl Iterator<Item = Uuid> + '_ {
         .filter_map(|value| value.parse::<Uuid>().ok())
 }
 
+/// Whether `filter` opts in to every readable system channel: its kinds are
+/// all group-state kinds, and it has `#t:["system"]` or any `#P`.
+fn filter_opts_in(filter: &Filter) -> bool {
+    if !filter_is_group_state_only(filter) {
+        return false;
+    }
+    let system_type = filter
+        .generic_tags
+        .get(&SingleLetterTag::lowercase(Alphabet::T))
+        .is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| value == buzz_core::channel::ChannelType::System.as_str())
+        });
+    let creator = filter
+        .generic_tags
+        .get(&SingleLetterTag::uppercase(Alphabet::P))
+        .is_some_and(|values| !values.is_empty());
+    system_type || creator
+}
+
 /// Whether `filter` could need a system channel added to its scope.
 fn filter_needs_system_channels(filter: &Filter, implicit: &[Uuid]) -> bool {
-    named_channels(filter).any(|id| !implicit.contains(&id))
+    filter_opts_in(filter) || named_channels(filter).any(|id| !implicit.contains(&id))
 }
 
 /// The channels `filter` may read: the implicit set, plus the readable
-/// system channels the filter names.
+/// system channels the filter names, or all of them when it opts in.
 pub(crate) fn filter_channel_scope<'a>(
     filter: &Filter,
     implicit: &'a [Uuid],
@@ -67,8 +94,14 @@ pub(crate) fn filter_channel_scope<'a>(
     if readable_system.is_empty() {
         return Cow::Borrowed(implicit);
     }
+    let opted_in = filter_opts_in(filter);
     let mut extra: Vec<Uuid> = Vec::new();
-    for id in named_channels(filter) {
+    let candidates: Vec<Uuid> = if opted_in {
+        readable_system.to_vec()
+    } else {
+        named_channels(filter).collect()
+    };
+    for id in candidates {
         if readable_system.contains(&id) && !implicit.contains(&id) && !extra.contains(&id) {
             extra.push(id);
         }
@@ -83,8 +116,8 @@ pub(crate) fn filter_channel_scope<'a>(
 
 /// Load the system channels the reader can read, narrowed to the token's
 /// channel scope, when at least one filter could use them. Returns an empty
-/// set, without a database read, when no filter names a channel outside the
-/// implicit set.
+/// set, without a database read, when no filter opts in or names a channel
+/// outside the implicit set.
 pub(crate) async fn readable_system_channels_for_filters(
     state: &AppState,
     community: CommunityId,
@@ -112,6 +145,7 @@ pub(crate) async fn readable_system_channels_for_filters(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::Keys;
 
     fn filter(json: serde_json::Value) -> Filter {
         serde_json::from_value(json).expect("filter")
@@ -158,6 +192,45 @@ mod tests {
             filter_channel_scope(&other, &implicit, &readable).as_ref(),
             &[open]
         );
+    }
+
+    #[test]
+    fn system_type_or_creator_on_group_state_kinds_opts_in() {
+        let open = Uuid::new_v4();
+        let system = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let implicit = vec![open];
+        let all = [vec![open], system.clone()].concat();
+        let creator = Keys::generate().public_key().to_hex();
+
+        for opt_in in [
+            serde_json::json!({"kinds": [39000], "#t": ["system"]}),
+            serde_json::json!({"kinds": [39002], "#p": [creator], "#t": ["system", "x"]}),
+            serde_json::json!({"kinds": [39000, 39003], "#P": [creator]}),
+            serde_json::json!({"kinds": [39000], "#P": [creator], "#t": ["agent-attention"]}),
+        ] {
+            let f = filter(opt_in.clone());
+            assert!(filter_needs_system_channels(&f, &implicit), "{opt_in}");
+            assert_eq!(
+                filter_channel_scope(&f, &implicit, &system).as_ref(),
+                all.as_slice(),
+                "{opt_in}"
+            );
+        }
+        for no_opt_in in [
+            // Labels alone, or other kinds, do not opt in.
+            serde_json::json!({"kinds": [39000], "#t": ["agent-attention"]}),
+            serde_json::json!({"kinds": [39000, 9], "#t": ["system"]}),
+            serde_json::json!({"kinds": [9], "#P": [creator]}),
+            serde_json::json!({"#t": ["system"]}),
+        ] {
+            let f = filter(no_opt_in.clone());
+            assert!(!filter_needs_system_channels(&f, &implicit), "{no_opt_in}");
+            assert_eq!(
+                filter_channel_scope(&f, &implicit, &system).as_ref(),
+                &[open],
+                "{no_opt_in}"
+            );
+        }
     }
 
     #[test]
