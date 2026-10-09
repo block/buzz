@@ -48,6 +48,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - 'bin/hermit.hcl'
               - '.config/nextest.toml'
               - 'scripts/postgres-test-*.sh'
               - 'scripts/reconcile-schema-after-pgschema.sql'
@@ -65,10 +66,12 @@ jobs:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'scripts/ci-apt-retry.sh'
+              - 'scripts/check-rust-cache-workspace-root.mjs'
               - 'Justfile'
             desktop:
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-desktop.yml'
+              - 'bin/hermit.hcl'
               - 'scripts/ci-apt-retry.sh'
               - 'Justfile'
               - 'scripts/generate-macos-icon.py'
@@ -134,7 +137,7 @@ jobs:
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs scripts/check-rust-cache-workspace-root.test.mjs
       - name: File size policy
         run: just file-size-check
 

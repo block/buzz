@@ -64,6 +64,12 @@ jobs:
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
         with:
           tool: cargo-nextest@0.9.136
+      # Every Hermit + rust-cache job resolves the same CARGO_HOME (Hermit
+      # re-applies bin/hermit.hcl on each exec), so checking once here covers
+      # them. Runs on PRs too, and on main fails before rust-cache's
+      # success()-gated post-save can store an empty root-workspace cache.
+      - name: Rust cache workspace-root contract
+        run: cargo metadata --all-features --format-version 1 | node scripts/check-rust-cache-workspace-root.mjs
       - name: Unit tests
         run: just test-unit
 

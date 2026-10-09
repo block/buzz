@@ -398,155 +398,146 @@ test-unit:
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
-        cargo nextest run -p buzz-core -p buzz-auth --lib
-        cargo nextest run -p buzz-audit --lib
-        # Cross-pod disconnect payload tests (NIP-FI and community archive
-        # fence); all infra-free.
-        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/)'
-        # buzz-auth NIP-FI verifier doctests. The sealed-authority
-        # `compile_fail` doctests prove the default-feature public API alone
-        # cannot forge the issuer→JWKS authority; nextest does not run
-        # doctests, hence this separate step. The verifier's regression suite
-        # lives in the in-crate `#[cfg(test)] mod tests`, so `--lib` above
-        # already runs it.
-        cargo test -p buzz-auth --doc
-        cargo nextest run -p buzz-voice --lib
-        cargo nextest run -p buzz-cli
-        # buzz-sdk builder/validation unit tests: pure event-builder and input
-        # validation (e.g. the canvas writer-discipline/skew guard and the
-        # canvas_write_survived predicate), no infra. `--lib` runs all unit
-        # tests without the rustdoc dependency-resolution flake the full-package
-        # invocation hits. Enumerated explicitly because nothing in CI runs
-        # `cargo test --workspace` — membership buys clippy/check, not tests.
-        cargo nextest run -p buzz-sdk --lib
-        # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
-        # forged relay events cannot regain a path into agent routing unnoticed.
-        cargo nextest run -p buzz-acp
-        # Exercise the real MCP server for modern and legacy clients.
-        cargo nextest run -p buzz-dev-mcp
-        # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
-        # They guard the embedded-migrator invariant (the complete checked-in
-        # additive migration set; legacy cutover/backfill remains an operator
-        # script, not startup state) and the tenant-scoping lints. The
-        # Postgres-backed buzz-db tests are
-        # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
-        # stray file in migrations/ or a broken lint ships green.
-        cargo nextest run -p buzz-db --lib
-        # buzz-db source-policy tests: infra-free scans of the crate sources
-        # that enforce the event-write admission chokepoint, metric/provenance
-        # contracts, and their fixtures. They live in an integration-test
-        # binary, so `--lib` above does not run them.
-        cargo nextest run -p buzz-db --test observability_source
-        # buzz-db `AdmittedTx` doctests. The `compile_fail` cases prove code
-        # outside the crate can neither construct an admitted transaction nor
-        # pass a raw `sqlx::Transaction` to an event-write helper; nextest
-        # does not run doctests, hence this separate step.
-        cargo test -p buzz-db --doc
-        # Storage accounting crosses three crates whose focused regression
-        # suites are otherwise absent from the infra-free unit lane.
-        cargo nextest run -p buzz-media --lib \
-            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
-        # buzz-admin: storage-snapshot worker plus the community archive
-        # command parser, validation, and propagation-evidence tests.
-        cargo nextest run -p buzz-admin \
-            -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/)'
-        # Multi-tenant conformance gate (buzz-conformance): the independent
-        # replay checker + golden fixtures. No infra — pure in-process trace
-        # replay — so it belongs in the unit job. Run all targets (lib + the
-        # tests/replay_fixtures.rs integration test), not just --lib.
-        cargo nextest run -p buzz-conformance
-        # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
-        # contract/race tests run in the dedicated CI job below.
-        cargo nextest run -p buzz-push-gateway
-        cargo nextest run -p buzz-push-gateway --features personal-dev-app-attest
-        # Kubernetes backend provider: the decision layers (state machine, GC
-        # planner, env precedence, naming, wire) are pure functions with a fake
-        # substrate, so they belong in the unit job. Enumerated explicitly
-        # because nothing in CI runs `cargo test --workspace` — workspace
-        # membership alone buys clippy/check, not a single executed test.
-        cargo nextest run -p buzz-backend-kubernetes
-        # Feature-flag crate coverage: run once with LaunchDarkly enabled.
-        # This includes all default tests plus the cfg(feature="launchdarkly")
-        # tests, avoiding duplicate default-only execution in the unit lane.
-        cargo nextest run -p buzz-feature-flags --features launchdarkly
-        # buzz-agent: two infra-free concerns run together by executing the
-        # whole crate (lib + integration tests), because nothing in CI runs
-        # `cargo test --workspace`, so without this stanza neither the crate's
-        # library tests nor its integration tests execute remotely.
-        #   * model-capabilities corpus (lib): the Rust half of the
-        #     cross-language drift guard. `model_capabilities.rs` embeds
-        #     scripts/model-capabilities.json + scripts/normative-corpus.json via
-        #     include_str! and replays the full locked corpus as pure in-process
-        #     tests; without it a manifest edit that diverges Rust from the
-        #     corpus ships green.
-        #   * OAuth auth coordinator (lib concurrency matrix + databricks
-        #     integration tests): lock single-flight, cooldown, cross-process
-        #     crash recovery — infra-free via a stub OIDC provider and an
-        #     injected browser opener, no network or Postgres.
-        cargo nextest run -p buzz-agent
-        # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
-        # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
-        # the admin.localhost origin/advertisement/canonical-URL pins, and the
-        # host-oracle/credential-first checks. These are the regression guard for
-        # the /api/admin/v1 moderation auth surface. Enumerated explicitly because
-        # nothing in CI runs `cargo test --workspace`, `just test-unit` did not
-        # enumerate `buzz-relay --lib`, and Backend Integration selects only the
-        # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
-        # and a red one could ship green (exactly how a broken admin test slipped
-        # past every gate once). Scoped to api::admin, not the whole buzz-relay
-        # --lib, because api::media has non-ignored tests that require Postgres.
-        # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
-        # lane; the non-ignored ones reject before touching the database. Any
-        # new non-ignored test here must stay DB-free: without a database, a
-        # DB fallthrough only "passes" by waiting out the ~30s sqlx acquire
-        # timeout.
-        # The second clause adds the relay's pure authorization-decision tests:
-        # the NIP-29 channel membership grid (handlers::channel_authz), the
-        # moderation capability grid (handlers::moderation_authz), and the pure
-        # helpers in handlers::side_effects. They ran in NO lane before —
-        # `test(/^api::admin::/)` never matched them, and the PostgreSQL lane
-        # pairs `--run-ignored ignored-only` with a `postgres_tests::`
-        # default-filter — so a red one shipped green, exactly the gap the
-        # api::admin clause above was added to close.
-        # Deliberately scoped to these three modules instead of all of
-        # `handlers::`: the wider set is mostly Postgres-backed, and five of its
-        # non-postgres_tests cases only "pass" without a database by waiting out
-        # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
-        # unit job either. The REQ subscription-lifecycle tests are picked by
-        # exact name for the same reason: the rest of handlers::req needs a DB.
-        # The third clause adds the NIP-FI HTTP ingress and its router/config
-        # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
-        # and the Git transport off_mode_precedence_tests. All are infra-free
-        # and finish in well under a second with no DATABASE_URL, so none wait
-        # out the sqlx acquire timeout. `--bin buzz-relay` adds main.rs's
-        # `tests::` module (JWKS refresh cadence) and `composition_tests::`
-        # (JWKS source + refresh-loop composition), which `--lib` cannot reach
-        # because they live in the binary target; the nested
-        # `tests::postgres_tests::` stays in the PostgreSQL lane.
-        # The fourth clause adds the startup step timers (startup_steps) and the
-        # env- and log-capture tests in telemetry and config. All three modules
-        # are infra-free; config parses env into a struct and never connects.
-        # `^config::` is anchored so it does not also select nip_fi_config.
-        cargo nextest run -p buzz-relay --lib --bin buzz-relay \
-            -E 'test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_core::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^readiness::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + test(/^nip_fi_shadow::tests::/) + test(/^nip_fi_shadow_session::tests::/) + test(/^startup_steps::tests::/) + test(/^telemetry::tests::/) + test(/^config::tests::/) + test(=state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket) + test(=state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback) + test(=state::tests::bare_community_disconnect_fails_closed_when_the_fence_is_unavailable) + test(=connection::tests::send_loop_sends_policy_close_when_community_is_archived) + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason) + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/))'
-        # Note on audio::join::tests scope: the full suite is infra-free (no DB,
-        # no Redis). The infra-free audio/FI regression witnesses — bootstrap
-        # ordering barrier, CommitConfirmed arm, pending-close invisibility,
-        # abnormal-stream-close fanout, and never-ready-sink writer witnesses —
-        # are all selected by audio::join::tests and audio::handler::tests.
-        # DB-backed audio join tests use #[ignore] and run in the postgres lane.
-        # NIP-FI (S3/S4) relay witnesses: the wholly-new nip_fi_upgrade and
-        # api::nip_fi modules,
-        # the auth metrics contract module, plus the exact NIP-FI tests added,
-        # or whose assertions changed, in mixed modules (audio::room,
-        # connection, handlers::*, state). nip_fi_config and router are
-        # selected whole by the command above. Mixed modules are listed by exact
-        # name so main's unselected tests (several wait out the ~30s sqlx
-        # acquire timeout) stay out. NIP-FI tests that need Postgres live in
-        # postgres_tests and
-        # run in the PostgreSQL lane. Keep scripts/run-tests.sh in step.
-        cargo nextest run -p buzz-relay --lib -E '
-                test(/^nip_fi_upgrade::/)
+        # One nextest invocation resolves features once, so shared crates and
+        # dependencies compile once instead of once per package run. Each
+        # clause below is scoped to one package and to the targets its old
+        # per-package command selected (`--lib` -> kind(lib), `--test X` ->
+        # binary_id(pkg::X)); the -p list is derived from those clauses.
+        # Feature-flagged runs and doctests stay separate below: enabling a
+        # feature here would unify it into every crate in this build.
+        unit_filters=(
+            'package(buzz-core) & kind(lib)'
+            'package(buzz-auth) & kind(lib)'
+            'package(buzz-audit) & kind(lib)'
+            # Cross-pod disconnect payload tests (NIP-FI and community archive
+            # fence); all infra-free.
+            'package(buzz-pubsub) & kind(lib) & (test(/^conn_control::tests::/))'
+            'package(buzz-voice) & kind(lib)'
+            'package(buzz-cli)'
+            # buzz-sdk builder/validation unit tests: pure event-builder and input
+            # validation (e.g. the canvas writer-discipline/skew guard and the
+            # canvas_write_survived predicate), no infra. kind(lib) runs all unit
+            # tests without the rustdoc dependency-resolution flake the full-package
+            # invocation hits. Enumerated explicitly because nothing in CI runs
+            # `cargo test --workspace` — membership buys clippy/check, not tests.
+            'package(buzz-sdk) & kind(lib)'
+            # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
+            # forged relay events cannot regain a path into agent routing unnoticed.
+            # This includes the infra-free author-gate and queue lib tests; ignored
+            # lifecycle tests remain excluded and run in their integration lanes.
+            'package(buzz-acp)'
+            # Exercise the real MCP server for modern and legacy clients.
+            'package(buzz-dev-mcp)'
+            # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
+            # They guard the embedded-migrator invariant (the complete checked-in
+            # additive migration set; legacy cutover/backfill remains an operator
+            # script, not startup state) and the tenant-scoping lints. The
+            # Postgres-backed buzz-db tests are
+            # #[ignore]d, so kind(lib) runs only the infra-free set. Without this gate a
+            # stray file in migrations/ or a broken lint ships green.
+            'package(buzz-db) & kind(lib)'
+            # buzz-db source-policy tests: infra-free scans of the crate sources
+            # that enforce the event-write admission chokepoint, metric/provenance
+            # contracts, and their fixtures. They live in an integration-test
+            # binary, so kind(lib) above does not run them.
+            'package(buzz-db) & binary_id(buzz-db::observability_source)'
+            # Storage accounting crosses three crates whose focused regression
+            # suites are otherwise absent from the infra-free unit lane.
+            'package(buzz-media) & kind(lib) & (test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys))'
+            # buzz-admin: storage-snapshot worker plus the community archive
+            # command parser, validation, and propagation-evidence tests.
+            'package(buzz-admin) & (test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/))'
+            # Multi-tenant conformance gate (buzz-conformance): the independent
+            # replay checker + golden fixtures. No infra — pure in-process trace
+            # replay — so it belongs in the unit job. Run all targets (lib + the
+            # tests/replay_fixtures.rs integration test), not just kind(lib).
+            'package(buzz-conformance)'
+            # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
+            # contract/race tests run in the dedicated CI job below.
+            'package(buzz-push-gateway)'
+            # Kubernetes backend provider: the decision layers (state machine, GC
+            # planner, env precedence, naming, wire) are pure functions with a fake
+            # substrate, so they belong in the unit job. Enumerated explicitly
+            # because nothing in CI runs `cargo test --workspace` — workspace
+            # membership alone buys clippy/check, not a single executed test.
+            'package(buzz-backend-kubernetes)'
+            # buzz-agent: two infra-free concerns run together by executing the
+            # whole crate (lib + integration tests), because nothing in CI runs
+            # `cargo test --workspace`, so without this stanza neither the crate's
+            # library tests nor its integration tests execute remotely.
+            #   * model-capabilities corpus (lib): the Rust half of the
+            #     cross-language drift guard. `model_capabilities.rs` embeds
+            #     scripts/model-capabilities.json + scripts/normative-corpus.json via
+            #     include_str! and replays the full locked corpus as pure in-process
+            #     tests; without it a manifest edit that diverges Rust from the
+            #     corpus ships green.
+            #   * OAuth auth coordinator (lib concurrency matrix + databricks
+            #     integration tests): lock single-flight, cooldown, cross-process
+            #     crash recovery — infra-free via a stub OIDC provider and an
+            #     injected browser opener, no network or Postgres.
+            'package(buzz-agent)'
+            # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
+            # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
+            # the admin.localhost origin/advertisement/canonical-URL pins, and the
+            # host-oracle/credential-first checks. These are the regression guard for
+            # the /api/admin/v1 moderation auth surface. Enumerated explicitly because
+            # nothing in CI runs `cargo test --workspace`, `just test-unit` did not
+            # enumerate `buzz-relay --lib`, and Backend Integration selects only the
+            # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
+            # and a red one could ship green (exactly how a broken admin test slipped
+            # past every gate once). Scoped to api::admin, not the whole buzz-relay
+            # kind(lib), because api::media has non-ignored tests that require Postgres.
+            # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
+            # lane; the non-ignored ones reject before touching the database. Any
+            # new non-ignored test here must stay DB-free: without a database, a
+            # DB fallthrough only "passes" by waiting out the ~30s sqlx acquire
+            # timeout.
+            # The second clause adds the relay's pure authorization-decision tests:
+            # the NIP-29 channel membership grid (handlers::channel_authz), the
+            # moderation capability grid (handlers::moderation_authz), and the pure
+            # helpers in handlers::side_effects. They ran in NO lane before —
+            # `test(/^api::admin::/)` never matched them, and the PostgreSQL lane
+            # pairs `--run-ignored ignored-only` with a `postgres_tests::`
+            # default-filter — so a red one shipped green, exactly the gap the
+            # api::admin clause above was added to close.
+            # Deliberately scoped to these three modules instead of all of
+            # `handlers::`: the wider set is mostly Postgres-backed, and five of its
+            # non-postgres_tests cases only "pass" without a database by waiting out
+            # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
+            # unit job either. The REQ subscription-lifecycle tests are picked by
+            # exact name for the same reason: the rest of handlers::req needs a DB.
+            # The third clause adds the NIP-FI HTTP ingress and its router/config
+            # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
+            # and the Git transport off_mode_precedence_tests. All are infra-free
+            # and finish in well under a second with no DATABASE_URL, so none wait
+            # out the sqlx acquire timeout. binary_id(buzz-relay::bin/buzz-relay)
+            # adds main.rs's `tests::` module (JWKS refresh cadence) and
+            # `composition_tests::` (JWKS source + refresh-loop composition),
+            # which kind(lib) cannot reach
+            # because they live in the binary target; the nested
+            # `tests::postgres_tests::` stays in the PostgreSQL lane.
+            # The fourth clause adds the startup step timers (startup_steps) and the
+            # env- and log-capture tests in telemetry and config. All three modules
+            # are infra-free; config parses env into a struct and never connects.
+            # `^config::` is anchored so it does not also select nip_fi_config.
+            'package(buzz-relay) & (kind(lib) | binary_id(buzz-relay::bin/buzz-relay)) & (test(/^api::admin::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_core::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^readiness::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + test(/^nip_fi_shadow::tests::/) + test(/^nip_fi_shadow_session::tests::/) + test(/^startup_steps::tests::/) + test(/^telemetry::tests::/) + test(/^config::tests::/) + test(=state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket) + test(=state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback) + test(=state::tests::bare_community_disconnect_fails_closed_when_the_fence_is_unavailable) + test(=connection::tests::send_loop_sends_policy_close_when_community_is_archived) + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason) + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/)))'
+            # Note on audio::join::tests scope: the full suite is infra-free (no DB,
+            # no Redis). The infra-free audio/FI regression witnesses — bootstrap
+            # ordering barrier, CommitConfirmed arm, pending-close invisibility,
+            # abnormal-stream-close fanout, and never-ready-sink writer witnesses —
+            # are all selected by audio::join::tests and audio::handler::tests.
+            # DB-backed audio join tests use #[ignore] and run in the postgres lane.
+            # NIP-FI (S3/S4) relay witnesses: the wholly-new nip_fi_upgrade and
+            # api::nip_fi modules,
+            # the auth metrics contract module, plus the exact NIP-FI tests added,
+            # or whose assertions changed, in mixed modules (audio::room,
+            # connection, handlers::*, state). nip_fi_config and router are
+            # selected whole by the clause above. Mixed modules are listed by exact
+            # name so main's unselected tests (several wait out the ~30s sqlx
+            # acquire timeout) stay out. NIP-FI tests that need Postgres live in
+            # postgres_tests and
+            # run in the PostgreSQL lane. Keep scripts/run-tests.sh in step.
+            'package(buzz-relay) & kind(lib) & (test(/^nip_fi_upgrade::/)
                 + test(/^metrics::contract_tests::/)
                 + test(=audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative)
                 + test(=connection::tests::auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge)
@@ -590,17 +581,51 @@ test-unit:
                 + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason)
                 + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
-                + test(/^api::nip_fi::/)'
-        # boot_lifecycle spawns the real relay binary and asserts its startup
-        # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
-        # non-ignored tests need no Postgres or Redis; the Postgres cases are
-        # #[ignore]d and stay in the PostgreSQL lane. Keep
-        # scripts/run-tests.sh in step.
-        cargo nextest run -p buzz-relay --test boot_lifecycle
-        # ACP author-gate and queue tests protect the trust boundary between
-        # relay events and agent prompts. They are infra-free; ignored lifecycle
-        # tests remain excluded and run in their dedicated integration lanes.
-        cargo nextest run -p buzz-acp --lib
+                + test(/^api::nip_fi::/))'
+            # boot_lifecycle spawns the real relay binary and asserts its startup
+            # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
+            # non-ignored tests need no Postgres or Redis; the Postgres cases are
+            # #[ignore]d and stay in the PostgreSQL lane. Keep
+            # scripts/run-tests.sh in step.
+            'package(buzz-relay) & binary_id(buzz-relay::boot_lifecycle)'
+        )
+        unit_packages=()
+        for clause in "${unit_filters[@]}"; do
+            package=${clause#package(}
+            unit_packages+=(-p "${package%%)*}")
+        done
+        # Each old per-package command failed when its selection went empty
+        # (nextest exits 4 on zero tests, cargo on a missing --test target).
+        # In the union an empty clause would be absorbed silently, so check
+        # every clause still selects a test. Same -p list: no rebuild.
+        # A list failure (compile or filterset error) aborts under set -e
+        # with its own error rather than being reported as an empty clause.
+        for clause in "${unit_filters[@]}"; do
+            listed=$(cargo nextest list "${unit_packages[@]}" -E "$clause" \
+                --message-format oneline --cargo-quiet)
+            [[ -n $listed ]] || { echo "test-unit: clause selects no tests: $clause" >&2; exit 1; }
+        done
+        unit_expr=$(printf ' | (%s)' "${unit_filters[@]}")
+        cargo nextest run "${unit_packages[@]}" -E "${unit_expr# | }"
+        # buzz-auth NIP-FI verifier doctests. The sealed-authority
+        # `compile_fail` doctests prove the default-feature public API alone
+        # cannot forge the issuer→JWKS authority; nextest does not run
+        # doctests, hence this separate step. The verifier's regression suite
+        # lives in the in-crate `#[cfg(test)] mod tests`, so kind(lib) above
+        # already runs it.
+        cargo test -p buzz-auth --doc
+        # buzz-db `AdmittedTx` doctests. The `compile_fail` cases prove code
+        # outside the crate can neither construct an admitted transaction nor
+        # pass a raw `sqlx::Transaction` to an event-write helper; nextest
+        # does not run doctests, hence this separate step.
+        cargo test -p buzz-db --doc
+        # The gateway's default-feature tests run above; this adds the
+        # personal-dev App Attest build.
+        cargo nextest run -p buzz-push-gateway --features personal-dev-app-attest
+        # Feature-flag crate coverage: run once with LaunchDarkly enabled.
+        # This includes all default tests plus the cfg(feature="launchdarkly")
+        # tests, avoiding duplicate default-only execution in the unit lane.
+        cargo nextest run -p buzz-feature-flags --features launchdarkly
     else
         ./scripts/run-tests.sh unit
     fi

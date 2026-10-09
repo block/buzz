@@ -12,6 +12,8 @@ for workflow in "$root"/.github/workflows/*.yaml; do
   cp "$workflow" "$tmp/.github/workflows/"
 done
 cp "$root/renovate.json" "$tmp/renovate.json"
+mkdir -p "$tmp/bin"
+cp "$root/bin/hermit.hcl" "$tmp/bin/hermit.hcl"
 
 run_contract() {
   BUZZ_RUST_CACHE_CONTRACT_ROOT="$tmp" "$root/scripts/test-rust-cache-contract.sh"
@@ -138,6 +140,32 @@ runs:
 YAML
 run_contract >/dev/null
 rm -rf "$tmp/.github/actions" "$tmp/.github/workflows/new-cache-user.yaml"
+
+write_hermit_config() {
+  cat > "$tmp/bin/hermit.hcl"
+}
+
+write_hermit_config <<'HCL'
+manage-git = true
+HCL
+expect_failure 'bin/hermit.hcl must set CARGO_HOME once'
+
+write_hermit_config <<'HCL'
+env = {
+  "CARGO_HOME": "${HERMIT_ENV}/.cargo",
+  "PATH": "${HERMIT_ENV}/.cargo/bin:${PATH}",
+}
+HCL
+expect_failure 'bin/hermit.hcl must set CARGO_HOME once'
+
+write_hermit_config <<'HCL'
+env = {
+  "CARGO_HOME": "${HOME}/.cargo-hermit",
+}
+HCL
+expect_failure 'must put ${HOME}/.cargo-hermit/bin on PATH'
+cp "$root/bin/hermit.hcl" "$tmp/bin/hermit.hcl"
+run_contract >/dev/null
 
 python3 - "$tmp/.github/workflows/_ci-rust.yml" <<'PY'
 import pathlib
