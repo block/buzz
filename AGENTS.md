@@ -313,7 +313,9 @@ Filters and queries must scope to `h` tags when operating within a channel.
 This applies to events *inside* a channel. Addressable events that describe a
 channel carry its id in their `d` tag instead: kind:39000 (metadata),
 kind:39001, kind:39002 (membership). `get_channels` resolves a user's channels
-from the `d` tag of their kind:39002 events, not from `h`.
+from the `d` tag of their kind:39002 events, not from `h`. The relay leaves
+system channels out of these reads unless the filter asks for them (see
+`docs/nips/NIP-CL.md`).
 
 **Agent-facing operations go in `buzz-cli`**: New agent-facing features belong in `buzz-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `buzz-dev-mcp` (shell + file tools for `buzz-agent`) is separate.
 
