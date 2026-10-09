@@ -36,17 +36,21 @@ async fn open(
     let mut request = url.into_client_request().unwrap();
     request.headers_mut().insert("host", host.parse().unwrap());
     let (mut socket, _) = connect_async(request).await.expect("real relay connection");
-    let challenge = loop {
+    let mut challenge = None;
+    for _ in 0..32 {
         if let Message::Text(text) = frame(&mut socket).await {
             let value: Value = serde_json::from_str(&text).unwrap();
             if channel.is_some() && value["type"] == "challenge" {
-                break value["challenge"].as_str().unwrap().to_owned();
+                challenge = Some(value["challenge"].as_str().unwrap().to_owned());
+                break;
             }
             if channel.is_none() && value[0] == "AUTH" {
-                break value[1].as_str().unwrap().to_owned();
+                challenge = Some(value[1].as_str().unwrap().to_owned());
+                break;
             }
         }
-    };
+    }
+    let challenge = challenge.expect("bounded authentication challenge");
     let mut event = EventBuilder::new(Kind::Authentication, "")
         .tag(Tag::parse(["relay", &format!("ws://{host}")]).unwrap())
         .tag(Tag::parse(["challenge", &challenge]).unwrap());
@@ -164,12 +168,15 @@ async fn external_infra_durable_ban_and_database_failure_close_real_root_and_aud
         .send(Message::Ping(vec![1, 2, 3].into()))
         .await
         .unwrap();
-    loop {
+    let mut pong = false;
+    for _ in 0..32 {
         if let Message::Pong(data) = frame(&mut control).await {
             assert_eq!(data.as_ref(), [1, 2, 3]);
+            pong = true;
             break;
         }
     }
+    assert!(pong, "clear bystander responds within the frame bound");
     println!("clear bystander remains responsive after durable bans");
     let audio_control = open(&base, &host, Some(channel), &bystander, None).await;
     // This test owns a disposable database. Restore the schema even on failure.
