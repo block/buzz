@@ -13,6 +13,11 @@
 //! ```text
 //! RELAY_URL=ws://localhost:3001 cargo test -p buzz-test-client --test e2e_author_only_deletion -- --ignored
 //! ```
+//!
+//! On a database built from the desired-state schema (`schema/schema.sql`),
+//! which indexes kind:5 content, also set `BUZZ_TEST_SEARCH_INDEXES_DELETIONS=1`.
+//! Without it, the search test only checks that results stay within the
+//! permitted sets, not that search actually returns them.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
