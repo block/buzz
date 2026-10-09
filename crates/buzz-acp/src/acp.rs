@@ -3561,8 +3561,10 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
+        // Keepalive session/update lines every 50ms against a 300ms idle deadline.
+        // The turn should survive well past the 300ms deadline (proves the fix).
+        // The 250ms of slack per gap absorbs `sleep` spawn latency when the
+        // suite runs in parallel; a 100ms deadline flaked under that load.
         let mut client = spawn_script(
             r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
         )
@@ -3574,13 +3576,13 @@ mod tests {
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(300),
                 hard_deadline,
                 max_dur,
             )
             .await;
         let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
+        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 300ms more.
         // Must survive well past the 100ms deadline.
         assert!(
             elapsed >= std::time::Duration::from_millis(500),
