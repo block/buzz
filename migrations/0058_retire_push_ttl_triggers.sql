@@ -6,6 +6,11 @@
 -- Dropping a trigger on the partitioned parent also drops its partition
 -- clones. Published migrations 0018, 0022, 0023, 0024 and 0040 stay
 -- checksum-frozen.
+--
+-- DROP TRIGGER takes ACCESS EXCLUSIVE on events and every partition. Fail
+-- quickly rather than queueing ingestion behind long transactions; the
+-- triggers are redundant, so retrying startup later is safe.
+SET LOCAL lock_timeout = '5s';
 
 DROP TRIGGER events_enqueue_push_match ON events;
 DROP TRIGGER events_refresh_channel_ttl ON events;

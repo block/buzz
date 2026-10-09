@@ -709,6 +709,7 @@ mod postgres_tests {
         assert_eq!(migrations[57].version, 58);
         let retire_follow_ups = strip_sql_comments(migrations[57].sql.as_str());
         for statement in [
+            "SET LOCAL lock_timeout = '5s';",
             "DROP TRIGGER events_enqueue_push_match ON events;",
             "DROP TRIGGER events_refresh_channel_ttl ON events;",
             "DROP FUNCTION enqueue_push_match_job();",
