@@ -1014,10 +1014,10 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
         .unwrap();
     sqlx::query(
         "INSERT INTO push_leases (community_id, author, installation_id, source_event_id, \
-         source_created_at, generation, active, endpoint_enabled, app_profile, endpoint_hash, \
+         source_created_at, generation, active, endpoint_enabled, endpoint_hash, \
          endpoint_grant, max_class, subscriptions, expires_at, updated_at) \
          SELECT $1, author, installation_id, source_event_id, source_created_at, generation, \
-         active, endpoint_enabled, app_profile, endpoint_hash, endpoint_grant, max_class, \
+         active, endpoint_enabled, endpoint_hash, endpoint_grant, max_class, \
          subscriptions, expires_at, clock_timestamp() FROM push_leases WHERE community_id=$2",
     )
     .bind(later.as_uuid())
