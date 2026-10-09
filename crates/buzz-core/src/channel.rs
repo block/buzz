@@ -182,6 +182,10 @@ pub enum ChannelType {
     Dm,
     /// Internal workflow execution channel.
     Workflow,
+    /// Access-control channel. The relay leaves it out of queries unless a
+    /// filter names it, or asks for system channels with `#t:["system"]` on
+    /// kinds 39000-39003.
+    System,
 }
 
 impl ChannelType {
@@ -192,6 +196,7 @@ impl ChannelType {
             Self::Forum => "forum",
             Self::Dm => "dm",
             Self::Workflow => "workflow",
+            Self::System => "system",
         }
     }
 }
@@ -211,6 +216,7 @@ impl FromStr for ChannelType {
             "forum" => Ok(Self::Forum),
             "dm" => Ok(Self::Dm),
             "workflow" => Ok(Self::Workflow),
+            "system" => Ok(Self::System),
             other => Err(format!("unknown channel type: {other:?}")),
         }
     }
@@ -309,18 +315,20 @@ mod tests {
     /// until its name is in `RESERVED_CHANNEL_LABELS`.
     #[test]
     fn every_channel_type_name_is_a_reserved_label() {
-        const ALL: [ChannelType; 4] = [
+        const ALL: [ChannelType; 5] = [
             ChannelType::Stream,
             ChannelType::Forum,
             ChannelType::Dm,
             ChannelType::Workflow,
+            ChannelType::System,
         ];
         for channel_type in ALL {
             match channel_type {
                 ChannelType::Stream
                 | ChannelType::Forum
                 | ChannelType::Dm
-                | ChannelType::Workflow => {}
+                | ChannelType::Workflow
+                | ChannelType::System => {}
             }
             assert!(
                 RESERVED_CHANNEL_LABELS.contains(&channel_type.as_str()),
