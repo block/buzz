@@ -2136,6 +2136,7 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn durable_ban_revalidates_real_root_admission_without_delivery() {
+            use std::sync::Arc;
             let state = auth_test_state_real_db_expect().await;
             let community = seeded_community(&state).await;
             let (member, owner, agent, bystander) = (
