@@ -7667,6 +7667,7 @@ pub(crate) mod postgres_tests {
                     None,
                     author.public_key().to_bytes().as_slice(),
                     None,
+                    &[],
                 )
                 .await
                 .expect("create channel");
@@ -7905,6 +7906,7 @@ pub(crate) mod postgres_tests {
                 None,
                 author.public_key().to_bytes().as_slice(),
                 None,
+                &[],
             )
             .await
             .expect("create channel");

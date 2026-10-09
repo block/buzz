@@ -3078,6 +3078,10 @@ async fn ingest_event_inner(
             channel_type_str.parse().map_err(|_| {
                 IngestError::Rejected(format!("invalid channel_type: {channel_type_str}"))
             })?;
+        let labels = super::side_effects::channel_labels_from_tags(&event)
+            .transpose()
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?
+            .unwrap_or_default();
 
         if let Some(client_uuid) = channel_id {
             let name = create_name.unwrap_or_default();
@@ -3096,7 +3100,7 @@ async fn ingest_event_inner(
             let actor_bytes = event.pubkey.to_bytes().to_vec();
             let (_, was_created) = state
                 .db
-                .create_channel_with_id(
+                .create_labeled_channel_with_id(
                     tenant.community(),
                     client_uuid,
                     name,
@@ -3105,6 +3109,7 @@ async fn ingest_event_inner(
                     description.as_deref(),
                     &actor_bytes,
                     ttl_seconds,
+                    &labels,
                 )
                 .await
                 .map_err(|e| IngestError::Internal(format!("error: {e}")))?;

@@ -32,6 +32,10 @@ CREATE TABLE channels (
     participant_hash BYTEA,
     ttl_seconds     INT,
     ttl_deadline    TIMESTAMPTZ,
+    -- Labels, published as ["t", <label>] after the channel type tag on the
+    -- relay-signed group-state events. The relay validates their shape.
+    labels          TEXT[] NOT NULL DEFAULT '{}'
+        CONSTRAINT channels_labels_bounded CHECK (cardinality(labels) <= 8),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

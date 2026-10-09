@@ -238,3 +238,218 @@ async fn creator_tag_survives_ownership_transfer() {
         );
     }
 }
+
+/// Ingest a kind:9002 that `keys` signs for `channel_id` with `tags`.
+async fn edit_channel(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    keys: &Keys,
+    channel_id: Uuid,
+    tags: &[&[&str]],
+) -> Result<(), String> {
+    let mut built = vec![Tag::parse(["h", &channel_id.to_string()]).unwrap()];
+    for tag in tags {
+        built.push(Tag::parse(tag.iter().copied()).unwrap());
+    }
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags(built)
+        .sign_with_keys(keys)
+        .expect("sign 9002");
+    match ingest_event(state, tenant, event, http_auth(keys)).await {
+        Ok(result) if result.accepted => Ok(()),
+        Ok(result) => Err(result.message),
+        Err(error) => Err(format!("{error:?}")),
+    }
+}
+
+/// The `t` values of a group-state event, in tag order.
+async fn t_values(
+    state: &AppState,
+    tenant: &TenantContext,
+    channel_id: Uuid,
+    kind: i32,
+) -> Vec<String> {
+    group_state_tags(state, tenant, channel_id, kind)
+        .await
+        .into_iter()
+        .filter(|tag| tag[0] == "t")
+        .map(|tag| tag[1].clone())
+        .collect()
+}
+
+/// Labels from kind:9007 follow the type tag on every group-state kind,
+/// in the order given, without duplicates, and the creator `P` stays.
+/// Mutation: publish labels before the type, or drop them from 39002 → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn create_publishes_labels_after_the_type() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-labels").await;
+    let creator = Keys::generate();
+    let channel_id = create_channel(
+        &state,
+        &tenant,
+        &creator,
+        &[
+            &["channel_type", "forum"],
+            &["t", "workspace"],
+            &["t", "team:core"],
+            &["t", "workspace"],
+        ],
+    )
+    .await;
+
+    let record = state
+        .db
+        .get_channel(tenant.community(), channel_id)
+        .await
+        .expect("channel");
+    assert_eq!(record.labels, vec!["workspace", "team:core"]);
+    for kind in [39000, 39001, 39002] {
+        assert_eq!(
+            t_values(&state, &tenant, channel_id, kind).await,
+            vec!["forum", "workspace", "team:core"],
+            "kind:{kind}"
+        );
+        let tags = group_state_tags(&state, &tenant, channel_id, kind).await;
+        assert!(
+            tags.iter()
+                .any(|tag| tag[0] == "P" && tag[1] == creator.public_key().to_hex()),
+            "kind:{kind} keeps the creator: {tags:?}"
+        );
+    }
+}
+
+/// kind:9002 `t` tags replace the whole set, a lone `["t", ""]` clears
+/// it, and an edit without `t` tags leaves it alone.
+/// Mutation: append instead of replace, or treat `""` as a label → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn edit_replaces_and_clears_labels() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-label-edit").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["t", "old"]]).await;
+
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["t", "new-a"], &["t", "new-b"]],
+    )
+    .await
+    .expect("replace labels");
+    for kind in [39000, 39001, 39002] {
+        assert_eq!(
+            t_values(&state, &tenant, channel_id, kind).await,
+            vec!["stream", "new-a", "new-b"],
+            "kind:{kind} after replace"
+        );
+    }
+
+    edit_channel(&state, &tenant, &owner, channel_id, &[&["about", "x"]])
+        .await
+        .expect("edit about");
+    assert_eq!(
+        t_values(&state, &tenant, channel_id, 39000).await,
+        vec!["stream", "new-a", "new-b"],
+        "an edit without t tags keeps the labels"
+    );
+
+    edit_channel(&state, &tenant, &owner, channel_id, &[&["t", ""]])
+        .await
+        .expect("clear labels");
+    for kind in [39000, 39001, 39002] {
+        assert_eq!(
+            t_values(&state, &tenant, channel_id, kind).await,
+            vec!["stream"],
+            "kind:{kind} after clear"
+        );
+    }
+}
+
+/// Bad label sets are refused before storage, on create and on edit.
+/// Mutation: skip validation in either path → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invalid_labels_are_refused() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-label-invalid").await;
+    let owner = Keys::generate();
+
+    for bad in [vec!["t", "Upper"], vec!["t", "forum"], vec!["t"]] {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9007), "")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["name", "bad-labels"]).unwrap(),
+                Tag::parse(bad.clone()).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let accepted = ingest_event(&state, &tenant, event, http_auth(&owner))
+            .await
+            .is_ok_and(|result| result.accepted);
+        assert!(!accepted, "create with {bad:?} must fail");
+        assert!(
+            state
+                .db
+                .get_channel(tenant.community(), channel_id)
+                .await
+                .is_err(),
+            "no channel row for {bad:?}"
+        );
+    }
+
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["t", "keep"]]).await;
+    let nine: Vec<String> = (0..9).map(|i| format!("l{i}")).collect();
+    let too_many: Vec<[&str; 2]> = nine.iter().map(|l| ["t", l.as_str()]).collect();
+    let too_many: Vec<&[&str]> = too_many.iter().map(|t| t.as_slice()).collect();
+    for tags in [
+        vec![&["t", "workflow"][..]],
+        vec![&["t", ""][..], &["t", "x"][..]],
+        too_many,
+    ] {
+        assert!(
+            edit_channel(&state, &tenant, &owner, channel_id, &tags)
+                .await
+                .is_err(),
+            "edit with {tags:?} must fail"
+        );
+    }
+    assert_eq!(
+        t_values(&state, &tenant, channel_id, 39000).await,
+        vec!["stream", "keep"]
+    );
+}
+
+/// Only an owner or admin may change labels; a plain member may not.
+/// Mutation: drop `t` from the privileged tag list → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn members_cannot_change_labels() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-label-auth").await;
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["t", "keep"]]).await;
+    let join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+        .sign_with_keys(&member)
+        .unwrap();
+    ingest_event(&state, &tenant, join, http_auth(&member))
+        .await
+        .expect("member joins");
+
+    assert!(
+        edit_channel(&state, &tenant, &member, channel_id, &[&["t", "mine"]])
+            .await
+            .is_err(),
+        "a member must not set labels"
+    );
+    assert_eq!(
+        t_values(&state, &tenant, channel_id, 39000).await,
+        vec!["stream", "keep"]
+    );
+}
