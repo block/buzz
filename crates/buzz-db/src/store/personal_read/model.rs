@@ -54,8 +54,9 @@ pub(super) struct ReadAccount {
 
 /// Maximum channel summaries in one sidebar page.
 pub const MAX_CHANNELS: usize = 20;
-/// Maximum thread rows per channel row.
-pub const MAX_THREAD_SUMMARIES: usize = 5;
+/// Maximum thread rows per channel row. A POST can return rows for
+/// `MAX_INTENTS` channels, and they must fit the 1 MiB response limit.
+pub const MAX_THREAD_SUMMARIES: usize = 25;
 /// Latest-probe event budget per channel, before eligibility filtering.
 pub const MAX_CHANNEL_SCAN: usize = 256;
 /// Unread-window work budget per channel, before eligibility/ancestry joins.

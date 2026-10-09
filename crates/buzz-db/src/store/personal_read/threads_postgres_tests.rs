@@ -197,8 +197,10 @@ async fn thread_summaries_order_cap_and_anchor() {
     let (db, pool, community, channel, actor, fixture_root) = fixture().await;
     // After the fixture root, so marking the newest root covers every root.
     let base = fixture_root.created_at.as_secs() + 1;
+    // One more thread than the cap.
+    let n = MAX_THREAD_SUMMARIES as u64 + 1;
     let mut roots = Vec::new();
-    for i in 0..6 {
+    for i in 0..n {
         let root = post(&db, community, channel, base + i, vec![]).await;
         join(&db, &pool, community, channel, &actor, &root).await;
         roots.push(root);
@@ -211,11 +213,13 @@ async fn thread_summaries_order_cap_and_anchor() {
         channel_mark(channel, newest_root.id.to_hex()),
     )
     .await;
-    // Threads 0 and 1 tie on newest reply time; thread 2 has one directed
-    // reply and two that arrive last, together.
+    // Threads 0 and 1 tie on newest reply time and the rest follow, newest
+    // first. Thread 2 has one directed reply and two that arrive last,
+    // together.
+    let offset = |i: u64| if i < 2 { n * 10 } else { (n - i) * 10 };
     let mut anchors = Vec::new();
-    for (i, root) in roots.iter().enumerate() {
-        let at = base + 100 + [50, 50, 40, 30, 20, 10][i];
+    for (i, root) in (0..).zip(&roots) {
+        let at = base + 100 + offset(i);
         anchors.push(reply(&db, &pool, community, channel, root, at, vec![]).await);
     }
     reply(
@@ -234,7 +238,7 @@ async fn thread_summaries_order_cap_and_anchor() {
         community,
         channel,
         &roots[2],
-        base + 140,
+        base + 100 + offset(2),
         vec![],
     )
     .await;
@@ -257,17 +261,10 @@ async fn thread_summaries_order_cap_and_anchor() {
     let order = |row: &ChannelReadSummary| -> Vec<_> {
         row.threads.iter().map(|t| t.root_id.clone()).collect()
     };
-    // Six unread threads exceed the cap of five.
-    assert_eq!(
-        order(&row),
-        vec![
-            tied[0].clone(),
-            tied[1].clone(),
-            roots[2].id.to_hex(),
-            roots[3].id.to_hex(),
-            roots[4].id.to_hex(),
-        ]
-    );
+    let ids = |roots: &[nostr::Event]| roots.iter().map(|r| r.id.to_hex()).collect::<Vec<_>>();
+    let last = roots.len() - 1;
+    // The oldest unread thread is past the cap.
+    assert_eq!(order(&row), [tied.to_vec(), ids(&roots[2..last])].concat());
     let third = &row.threads[2];
     assert_eq!(third.mentions, 3);
     assert_eq!(
@@ -276,7 +273,7 @@ async fn thread_summaries_order_cap_and_anchor() {
         "equal arrivals break toward the smaller ID"
     );
 
-    // Reading one listed thread through its anchor lists the sixth.
+    // Reading one listed thread through its anchor lists the oldest.
     let first = row.threads[0].clone_target(channel);
     assert_eq!(
         apply(&db, community, &actor, first).await,
@@ -285,16 +282,12 @@ async fn thread_summaries_order_cap_and_anchor() {
     let row = sidebar(&db, community, &actor).await;
     assert_eq!(
         order(&row),
-        vec![
-            tied[1].clone(),
-            roots[2].id.to_hex(),
-            roots[3].id.to_hex(),
-            roots[4].id.to_hex(),
-            roots[5].id.to_hex(),
-        ]
+        [vec![tied[1].clone()], ids(&roots[2..])].concat()
     );
     let mentions: Vec<_> = row.threads.iter().map(|t| t.mentions).collect();
-    assert_eq!(mentions, [1, 3, 1, 1, 1]);
+    let mut expected = vec![1; MAX_THREAD_SUMMARIES];
+    expected[1] = 3;
+    assert_eq!(mentions, expected);
 }
 
 impl ThreadReadSummary {

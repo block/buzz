@@ -89,7 +89,7 @@ bounded scans found no top-level message, not that the channel is empty.
 `read_through_id` may name a message that has since been deleted.
 
 `threads` lists threads with unread replies that count, newest unread reply
-first by author time (then `root_id`), at most 5. Threads past the fifth are
+first by author time (then `root_id`), at most 25. Threads past the 25th are
 omitted with their mentions, and nothing signals the omission: after marking
 the listed threads read, a refresh can list the next ones. A thread row's
 `unread` is always true in this version. No message bytes are included.
@@ -201,7 +201,8 @@ device-local.
 
 ## Bounds and deployment
 
-- 20 sidebar rows and 100 intents per request; 5 thread rows per channel.
+- 20 sidebar rows and 100 intents per request; 25 thread rows per channel, so
+  a POST's rows for 100 channels fit the response limit.
 - 64 KiB write body; 1 MiB serialized API response.
 - 4096 raw events per channel inside the horizon, before eligibility.
 - The latest fallback probes 256 events; a long ineligible or reply-only tail
@@ -232,10 +233,13 @@ local seed is not a DAU/concurrency or p95/p99 production acceptance result.
 
 ## Compatibility and extension rules
 
-Within `/buzz/v1`, clients must ignore unknown response object fields. Existing
-required fields, status variants and their meanings remain stable; additive
-fields do not authorize silently changing `mentions` or frontier semantics.
-Breaking changes require an explicitly negotiated contract or a new API version.
+Within `/buzz/v1`, clients must ignore unknown response object fields. The
+shape is stable: existing fields, their types, status variants and what a
+`mark_through` does remain. What the counts include is not yet: which messages
+are unread or directed, which threads are listed, and the bounds may change
+while v1 is pre-release. A client therefore replaces its rows with each
+response rather than reconciling them with its own counts. Breaking shape
+changes require an explicitly negotiated contract or a new API version.
 Requests remain strict: send new parameters or intent types only after the relay
 advertises the corresponding capability. Missing optional data means unsupported
 or not requested, never an empty list, zero count or unchanged revision.

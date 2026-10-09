@@ -208,3 +208,39 @@ pub(super) async fn write_intent(
         Err(_) => json!({"status":"unknown","retryable":true}),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_db::personal_read::{ThreadReadSummary, MAX_THREAD_SUMMARIES};
+
+    /// A POST that applied to `MAX_INTENTS` channels, each with a full thread
+    /// list, must still fit: an oversized body is a 503 that hides committed
+    /// outcomes.
+    #[test]
+    fn largest_write_response_fits_the_response_limit() {
+        let id = || Some("f".repeat(64));
+        let channels: Vec<_> = (0..MAX_INTENTS)
+            .map(|_| ChannelReadSummary {
+                channel_id: Uuid::max(),
+                unread: true,
+                mentions: u32::MAX,
+                read_through_id: id(),
+                latest_id: id(),
+                threads: (0..MAX_THREAD_SUMMARIES)
+                    .map(|_| ThreadReadSummary {
+                        root_id: "f".repeat(64),
+                        unread: true,
+                        mentions: u32::MAX,
+                        read_through_id: id(),
+                        latest_id: "f".repeat(64),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let outcomes = vec![json!({"status":"unknown","retryable":true}); MAX_INTENTS];
+        let body = json!({ "outcomes": outcomes, "channels": channels });
+        let bytes = serde_json::to_vec(&body).unwrap().len();
+        assert!(bytes <= auth::MAX_RESPONSE_BYTES, "{bytes} bytes");
+    }
+}

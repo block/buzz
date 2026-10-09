@@ -433,11 +433,12 @@ async fn threads_are_capped_after_replies_that_do_not_count_are_removed() {
     let w = World::new().await;
     let c = w.channel().await;
     let old = w.now - 40 * DAY;
-    // The actor's thread has the oldest unread reply. Five unjoined threads
-    // are newer and would fill the list if the cap came first.
+    // The actor's thread has the oldest unread reply. A cap's worth of
+    // unjoined threads are newer and would fill the list if the cap came
+    // first.
     let mine = w.post(c, &w.actor, old, vec![]).await;
     let answer = w.reply(c, &w.peer, &mine, Some(&mine), w.now, vec![]).await;
-    for i in 1..=5 {
+    for i in 1..=MAX_THREAD_SUMMARIES as u64 {
         let root = w.post(c, &w.peer, old, vec![]).await;
         w.reply(c, &w.peer, &root, Some(&root), w.now + i, vec![])
             .await;
