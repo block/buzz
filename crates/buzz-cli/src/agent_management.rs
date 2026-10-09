@@ -306,6 +306,38 @@ mod tests {
         assert!(payload["payload"]["request"].get("respondTo").is_none());
     }
 
+    /// The desktop's self-update policy (#6287) decides per field, so the
+    /// wire must distinguish "set" from "absent": only the requested field
+    /// may appear, never an explicit null for the rest.
+    #[test]
+    fn update_with_only_a_system_prompt_omits_every_other_field() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let built = build_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: Some("Be terse.".into()),
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+            },
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["action"], "update");
+        let request = payload["payload"]["request"].as_object().unwrap();
+        let mut keys: Vec<&str> = request.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["agentName", "channelId", "systemPrompt"]);
+        assert_eq!(request["systemPrompt"], "Be terse.");
+    }
+
     #[test]
     fn update_requires_a_change() {
         let error = build_update(
