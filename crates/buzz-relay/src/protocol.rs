@@ -38,17 +38,17 @@ pub enum ClientMessage {
     Auth(Event),
 }
 
-/// Artifact queries are HTTP-only; reject rather than silently drop their
-/// predicates on the generic WebSocket path.
+pub(crate) const COUNT_CURSOR_REJECTED: &str = "before_id is not supported on COUNT";
+
 /// COUNT has no page to resume, so a history cursor (`before_id`) is
 /// rejected outright rather than dropped by `nostr::Filter` deserialization.
 /// Shared by WS COUNT and HTTP `/count`.
-pub(crate) const COUNT_CURSOR_REJECTED: &str = "before_id is not supported on COUNT";
-
 pub(crate) fn count_filters_have_cursor(filters: &[serde_json::Value]) -> bool {
     filters.iter().any(|f| f.get("before_id").is_some())
 }
 
+/// Artifact queries are HTTP-only; reject rather than silently drop their
+/// predicates on the generic WebSocket path.
 fn reject_artifact_query_filters(filters: &[serde_json::Value]) -> Result<()> {
     use buzz_core::artifact::{route_filter, FilterRoute};
     for filter in filters {
