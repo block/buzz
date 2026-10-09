@@ -2148,12 +2148,18 @@ mod tests {
                 .expect("owner proof");
             let tag = serde_json::from_str(&tag).expect("owner tag JSON");
             let mut connections = Vec::new();
+            let mut lifecycle_guards = Vec::new();
             for (keys, tag, challenge) in [
                 (&member, None, "durable-member"),
                 (&agent, Some(tag), "durable-agent"),
                 (&bystander, None, "durable-bystander"),
             ] {
                 let (conn, _control) = registered_pending_conn(&state, community, challenge);
+                lifecycle_guards.push(state.community_connections.register(
+                    conn.conn_id,
+                    community,
+                    conn.community_control.clone(),
+                ));
                 handle_auth(
                     signed_auth(keys, challenge, tag),
                     Arc::clone(&conn),
