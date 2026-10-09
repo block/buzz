@@ -64,7 +64,11 @@ fn build_reminder(keys: &Keys) -> nostr::Event {
 }
 
 fn build_deletion(keys: &Keys, tags: Vec<Tag>) -> nostr::Event {
-    EventBuilder::new(Kind::EventDeletion, "")
+    build_deletion_with_reason(keys, tags, "")
+}
+
+fn build_deletion_with_reason(keys: &Keys, tags: Vec<Tag>, reason: &str) -> nostr::Event {
+    EventBuilder::new(Kind::EventDeletion, reason)
         .tags(tags)
         .sign_with_keys(keys)
         .unwrap()
@@ -95,21 +99,34 @@ async fn submit_ok(client: &Client, keys: &Keys, event: &nostr::Event) {
     assert!(accepted, "setup event rejected: {msg}");
 }
 
-/// Store a reminder as `author`, then delete it with a `k`-tagged kind:5.
-async fn store_deleted_reminder(client: &Client, author: &Keys) -> nostr::Event {
+/// Store a reminder as `author`, then delete it with a `k`-tagged kind:5
+/// whose reason is a unique search term. Returns the reminder and deletion.
+async fn store_deleted_reminder(client: &Client, author: &Keys) -> (nostr::Event, nostr::Event) {
     let reminder = build_reminder(author);
     submit_ok(client, author, &reminder).await;
-    let deletion = build_deletion(
+    let deletion = build_deletion_with_reason(
         author,
         vec![
             tag(&["e", &reminder.id.to_hex()]),
             tag(&["k", &KIND_EVENT_REMINDER.to_string()]),
         ],
+        &search_term(author),
     );
     submit_ok(client, author, &deletion).await;
-    deletion
+    let reminder_reads = http_query_ids(client, author, &Filter::new().id(reminder.id)).await;
+    assert!(reminder_reads.is_empty(), "the reminder must be deleted");
+    (reminder, deletion)
 }
 
+/// A search term unique to `author`'s deletion reason.
+fn search_term(author: &Keys) -> String {
+    format!("aodreason{}", &author.public_key().to_hex()[..16])
+}
+
+/// Filters that each match only the deletion `store_deleted_reminder` left:
+/// by kind, mixed kinds, and id. The id filter is the kindless COUNT case;
+/// broader kindless filters can match `#p`-gated kinds, so the relay closes
+/// them before any read runs.
 fn deletion_filters(author: &Keys, deletion: EventId) -> Vec<Filter> {
     vec![
         Filter::new()
@@ -196,8 +213,8 @@ async fn ws_count(ws: &mut BuzzTestClient, filter: &Filter) -> u64 {
 }
 
 /// Every historical read surface returns the deletion to `reader` iff
-/// `visible`: WS REQ (by author and by id), WS COUNT, HTTP `/query` (by
-/// author and by id), and HTTP `/count`.
+/// `visible`: WS REQ, WS COUNT, HTTP `/query` and HTTP `/count`, by author
+/// and by id; search never returns it to anyone else.
 async fn assert_deletion_visibility(
     reader: &Keys,
     author: &Keys,
@@ -226,6 +243,31 @@ async fn assert_deletion_visibility(
             }
         }
     }
+    // Search, through reads: databases created before migration 0008 index
+    // kind:5 content and fresh ones do not, so the author may or may not get
+    // a hit. Nobody else ever does.
+    let search = Filter::new()
+        .kind(Kind::EventDeletion)
+        .search(search_term(author));
+    let searched = [
+        (
+            "WS REQ search",
+            ws_query_ids(&mut ws, &search)
+                .await
+                .iter()
+                .map(EventId::to_hex)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "HTTP /query search",
+            http_query_ids(&client, reader, &search).await,
+        ),
+    ];
+    for (surface, ids) in searched {
+        if ids.iter().any(|id| *id != deletion.to_hex()) || (!visible && !ids.is_empty()) {
+            mismatches.push(format!("{surface}: {ids:?}, visible={visible}"));
+        }
+    }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     ws.disconnect().await.expect("disconnect");
 }
@@ -235,7 +277,7 @@ async fn assert_deletion_visibility(
 async fn author_only_deletion_hidden_from_other_readers() {
     let client = http_client();
     let author = Keys::generate();
-    let deletion = store_deleted_reminder(&client, &author).await;
+    let (_, deletion) = store_deleted_reminder(&client, &author).await;
     assert_deletion_visibility(&Keys::generate(), &author, deletion.id, false).await;
 }
 
@@ -244,7 +286,7 @@ async fn author_only_deletion_hidden_from_other_readers() {
 async fn author_only_deletion_visible_to_author() {
     let client = http_client();
     let author = Keys::generate();
-    let deletion = store_deleted_reminder(&client, &author).await;
+    let (_, deletion) = store_deleted_reminder(&client, &author).await;
     assert_deletion_visibility(&author, &author, deletion.id, true).await;
 }
 
@@ -336,6 +378,40 @@ async fn deletion_of_author_only_event_requires_matching_k_tag() {
         ),
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn untagged_deletion_of_soft_deleted_author_only_event_rejected() {
+    let client = http_client();
+    let author = Keys::generate();
+    let (reminder, _) = store_deleted_reminder(&client, &author).await;
+    let untagged = build_deletion(&author, vec![tag(&["e", &reminder.id.to_hex()])]);
+    let (accepted, msg) = submit(&client, &author, &untagged).await;
+    assert!(
+        !accepted,
+        "an untagged deletion of a soft-deleted reminder must be rejected (got: {msg})"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn non_canonical_k_tag_is_not_a_private_marker() {
+    let client = http_client();
+    let author = Keys::generate();
+    let reminder = build_reminder(&author);
+    submit_ok(&client, &author, &reminder).await;
+    for k in ["030300", "+30300"] {
+        let deletion = build_deletion(
+            &author,
+            vec![tag(&["e", &reminder.id.to_hex()]), tag(&["k", k])],
+        );
+        let (accepted, msg) = submit(&client, &author, &deletion).await;
+        assert!(
+            !accepted,
+            "k={k} must not satisfy the k=30300 rule (got: {msg})"
+        );
+    }
 }
 
 #[tokio::test]

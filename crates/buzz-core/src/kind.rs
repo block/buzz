@@ -148,9 +148,15 @@ pub fn is_author_only_event_kind(event: &nostr::Event) -> bool {
 }
 
 /// Kinds named by an event's well-formed `["k", "<kind>"]` tags.
+///
+/// Only canonical decimal values count (`"30300"`, not `"030300"` or
+/// `"+30300"`), so this agrees with SQL that matches the tag value as text.
 pub fn k_tag_kinds(event: &nostr::Event) -> impl Iterator<Item = u32> + '_ {
     event.tags.iter().filter_map(|tag| match tag.as_slice() {
-        [name, value, ..] if name == "k" => value.parse().ok(),
+        [name, value, ..] if name == "k" => value
+            .parse::<u32>()
+            .ok()
+            .filter(|kind| kind.to_string() == *value),
         _ => None,
     })
 }
@@ -1009,6 +1015,10 @@ mod tests {
             &[][..],
             &[&["k", "1"][..]][..],
             &[&["k", "not-a-kind"][..]][..],
+            // Non-canonical spellings are not markers; SQL matches text.
+            &[&["k", "030300"][..]][..],
+            &[&["k", "+30300"][..]][..],
+            &[&["k", " 30300"][..]][..],
         ] {
             assert!(!is_author_only_event_kind(&make_event_of_kind(
                 KIND_DELETION,

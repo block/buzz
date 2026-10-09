@@ -7308,9 +7308,30 @@ mod postgres_tests {
         assert!(banned, "the stored author must be banned");
     }
 
-    /// Seed an event report in the `admin.example` community whose target is a
-    /// hidden (shared-gated) kind authored by `author`. Returns the report id.
-    async fn seed_hidden_kind_event_report(pool: &sqlx::PgPool, author: &[u8]) -> Uuid {
+    /// Targets admin reads must hide but enforcement must still reach: a
+    /// hidden (shared-gated) kind, and a deletion of an author-only event,
+    /// which is private by its `k` tag alone.
+    fn hidden_targets() -> [(i32, serde_json::Value); 2] {
+        [
+            (
+                buzz_core::kind::SHARED_GATED_KINDS[0] as i32,
+                serde_json::json!([["shared", "true"]]),
+            ),
+            (
+                buzz_core::kind::KIND_DELETION as i32,
+                serde_json::json!([["k", buzz_core::kind::KIND_EVENT_REMINDER.to_string()]]),
+            ),
+        ]
+    }
+
+    /// Seed an event report in the `admin.example` community whose target is
+    /// authored by `author` and stored with `kind` and `tags`. Returns the
+    /// report id.
+    async fn seed_hidden_kind_event_report(
+        pool: &sqlx::PgPool,
+        author: &[u8],
+        (kind, tags): &(i32, serde_json::Value),
+    ) -> Uuid {
         let host_report = seed_admin_host_report(pool, "open").await;
         let community_id: Uuid =
             sqlx::query_scalar("SELECT community_id FROM moderation_reports WHERE id = $1")
@@ -7321,16 +7342,14 @@ mod postgres_tests {
         cleanup_admin_host_report(pool, host_report).await;
         let (report_id, _channel_id, target_event_id) =
             e2e_event_report_with_author(pool, community_id, author).await;
-        sqlx::query(
-            r#"UPDATE events SET kind = $3, tags = '[["shared","true"]]'::jsonb
-               WHERE community_id = $1 AND id = $2"#,
-        )
-        .bind(community_id)
-        .bind(target_event_id.as_slice())
-        .bind(buzz_core::kind::SHARED_GATED_KINDS[0] as i32)
-        .execute(pool)
-        .await
-        .expect("make target a hidden kind");
+        sqlx::query("UPDATE events SET kind = $3, tags = $4 WHERE community_id = $1 AND id = $2")
+            .bind(community_id)
+            .bind(target_event_id.as_slice())
+            .bind(kind)
+            .bind(tags)
+            .execute(pool)
+            .await
+            .expect("make target a hidden kind");
         report_id
     }
 
@@ -7339,11 +7358,17 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres — resolve ban on a hidden-kind target bans the author, detail stays hidden"]
     async fn resolve_ban_on_hidden_kind_target_bans_author_without_revealing_it() {
+        for target in hidden_targets() {
+            resolve_ban_on_hidden_target(&target).await;
+        }
+    }
+
+    async fn resolve_ban_on_hidden_target(target: &(i32, serde_json::Value)) {
         let keys = nostr::Keys::generate();
         let state = nip98_state(vec![keys.public_key().to_hex()]).await;
         let pool = e2e_pool().await;
         let author = nostr::Keys::generate().public_key().to_bytes().to_vec();
-        let report_id = seed_hidden_kind_event_report(&pool, &author).await;
+        let report_id = seed_hidden_kind_event_report(&pool, &author, target).await;
 
         let path = format!("/reports/{report_id}/resolve");
         let body = serde_json::json!({ "action": "ban", "requestId": Uuid::new_v4() }).to_string();
@@ -7424,9 +7449,15 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres — stranded ban on a hidden-kind target recovers"]
     async fn stranded_ban_on_hidden_kind_target_recovers_via_worker() {
+        for target in hidden_targets() {
+            stranded_ban_on_hidden_target_recovers(&target).await;
+        }
+    }
+
+    async fn stranded_ban_on_hidden_target_recovers(target: &(i32, serde_json::Value)) {
         let pool = e2e_pool().await;
         let author = nostr::Keys::generate().public_key().to_bytes().to_vec();
-        let report_id = seed_hidden_kind_event_report(&pool, &author).await;
+        let report_id = seed_hidden_kind_event_report(&pool, &author, target).await;
         let (community_id, channel_id): (Uuid, Option<Uuid>) =
             sqlx::query_as("SELECT community_id, channel_id FROM moderation_reports WHERE id = $1")
                 .bind(report_id)
