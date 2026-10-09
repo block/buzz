@@ -672,11 +672,19 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 
     // Observer frames and ephemeral kinds return before ingest, so they take
-    // the ban / timeout write-block here. Persistent kinds get it in ingest.
-    if kind_u32 == KIND_AGENT_OBSERVER_FRAME || is_ephemeral(kind_u32) {
-        if let Err(e) =
-            super::ingest::enforce_write_restriction(&state, &conn.tenant, kind_u32, &auth_pubkey)
-                .await
+    // the ban / timeout write-block here, over a short-TTL cache because it
+    // runs per frame. Persistent kinds get the uncached check in ingest, and
+    // so does NIP-43 leave (28936), which is ephemeral-range but ingested.
+    if kind_u32 == KIND_AGENT_OBSERVER_FRAME
+        || (is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST)
+    {
+        if let Err(e) = super::ingest::enforce_cached_write_restriction(
+            &state,
+            &conn.tenant,
+            kind_u32,
+            &auth_pubkey,
+        )
+        .await
         {
             let (message, reason) = match e {
                 IngestError::Internal(_) => (
@@ -750,8 +758,10 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        match buzz_deletion::store(&state.db)
-            .is_serving_active(conn.tenant.community())
+        // Cached (10s): this runs per ephemeral event. Persistent ingest keeps
+        // the uncached read as its durable write fence.
+        match state
+            .is_serving_active_cached(conn.tenant.community())
             .await
         {
             Ok(true) => {}
@@ -3341,6 +3351,105 @@ mod tests {
             assert!(
                 frame.contains("false") && frame.contains("blocked: you are banned"),
                 "banned owner's agent observer frame must be refused; got {frame}"
+            );
+        }
+
+        /// Fresh community with one unrestricted user.
+        async fn unrestricted_fixture() -> (
+            std::sync::Arc<crate::state::AppState>,
+            buzz_core::tenant::TenantContext,
+            nostr::Keys,
+        ) {
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-cache-gate-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let user = nostr::Keys::generate();
+            state
+                .db
+                .ensure_user(community, user.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+            (state, tenant, user)
+        }
+
+        fn typing_event(keys: &nostr::Keys) -> nostr::Event {
+            nostr::EventBuilder::new(nostr::Kind::Custom(20_555), "typing")
+                .sign_with_keys(keys)
+                .expect("sign ephemeral")
+        }
+
+        /// The ephemeral gate reads the cached restriction row: a cached ban
+        /// refuses a sender Postgres has never restricted, and a cached
+        /// timeout that has since expired admits (the verdict is taken now).
+        /// Mutation: call the uncached `enforce_write_restriction` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_gate_uses_cached_restriction_row() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            let key = (tenant.community(), user.public_key().to_bytes().to_vec());
+
+            state.restriction_cache.insert(
+                key.clone(),
+                buzz_db::moderation::RestrictionState {
+                    banned: true,
+                    muted_until: None,
+                },
+            );
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "a cached ban must refuse the ephemeral event; got {frame}"
+            );
+
+            state.restriction_cache.insert(
+                key,
+                buzz_db::moderation::RestrictionState {
+                    banned: false,
+                    muted_until: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                },
+            );
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains(",true,"),
+                "a cached timeout that has expired must not refuse; got {frame}"
+            );
+        }
+
+        /// The ephemeral community fence reads the cached serving state.
+        /// Mutation: call the uncached `is_serving_active` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_fence_uses_cached_serving_state() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.serving_active_cache.insert(tenant.community(), false);
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains("false") && frame.contains("community writes are fenced"),
+                "a cached fenced community must refuse the ephemeral event; got {frame}"
+            );
+        }
+
+        /// A miss fills both caches from Postgres, so the next pulse skips it.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_gates_fill_caches_on_miss() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert_eq!(
+                state.serving_active_cache.get(&tenant.community()),
+                Some(true)
+            );
+            assert_eq!(
+                state
+                    .restriction_cache
+                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
+                Some(buzz_db::moderation::RestrictionState::default())
             );
         }
 

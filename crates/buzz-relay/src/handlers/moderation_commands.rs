@@ -176,6 +176,7 @@ async fn handle_ban(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     // Live enforcement: close open sessions for the banned principal now —
     // this pod's sockets synchronously (fenced to this community) and every
@@ -261,6 +262,7 @@ async fn handle_unban(
     if !lifted {
         return Err(invalid("member is not banned"));
     }
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     insert_audit(state, tenant, actor, "unban", Some(&target), None, None).await?;
 
@@ -303,6 +305,7 @@ async fn handle_timeout(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     let action_id = insert_audit(
         state,
@@ -366,6 +369,7 @@ async fn handle_untimeout(
     if !cleared {
         return Err(invalid("member is not timed out"));
     }
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
 
