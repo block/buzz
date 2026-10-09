@@ -78,7 +78,7 @@ export function markVisibleThreadRepliesRead({
  *
  * Extracted from ChannelScreen so the screen stays under the file-size cap and
  * the NIP-RS read-state machinery lives as one cohesive unit. Behavior is
- * unchanged â the only inputs are the formatted timeline plus the AppShell
+ * unchanged — the only inputs are the formatted timeline plus the AppShell
  * read-state accessors, and the hook owns the refs/effects that snapshot the
  * "what was unread on open" frontiers.
  */
@@ -102,7 +102,7 @@ export function useChannelUnreadState({
   // Capture the read frontier as it stood the instant this channel was opened,
   // BEFORE the mark-read effect (in ChannelScreen) advances it to latest.
   // Written during render (not in an effect) so the value is read prior to any
-  // effect for this commit â the divider must reflect "what was unread on
+  // effect for this commit — the divider must reflect "what was unread on
   // open", not the post-open frontier. Keyed per channel and recomputed only
   // when the channel id changes, never when the frontier advances, or the
   // divider would vanish the moment the open marks the channel read.
@@ -117,8 +117,8 @@ export function useChannelUnreadState({
     ? (openFrontierRef.current.get(activeChannelId) ?? null)
     : null;
   // Channels the user manually marked unread this session. A deliberate
-  // mark-unread has no meaningful "new" boundary inside the timeline â the
-  // open-time snapshot already covers every message â so the pill and divider
+  // mark-unread has no meaningful "new" boundary inside the timeline — the
+  // open-time snapshot already covers every message — so the pill and divider
   // would otherwise render nothing while the sidebar dot says unread. Suppress
   // the marker for such channels to avoid that visible contradiction. The flag
   // is cleared on re-open (a fresh snapshot is recomputed for the channel).
@@ -130,7 +130,7 @@ export function useChannelUnreadState({
   // Per-message analog of forcedUnreadRef (LP4 v3 mark-unread). A monotonic
   // grow-only msg:<id> marker cannot move the read-line backward, so a
   // deliberate mark-unread lives in this session-local set, read ONLY as an
-  // OR-overlay by the badge predicates below â never written to the marker
+  // OR-overlay by the badge predicates below — never written to the marker
   // store. Cleared on channel-leave (same lifecycle as the channel set), so
   // it does not survive reload, exactly like channel mark-unread today.
   const forcedUnreadMsgRef = React.useRef(new Set<string>());
@@ -243,10 +243,10 @@ export function useChannelUnreadState({
   // Snapshot the per-message read state for the open thread's visible replies
   // the instant the thread opens, BEFORE the on-open mark-read effect advances
   // those markers. This anchors the in-thread "New" divider to "what was unread
-  // when I opened this thread" â the exact thread-level analog of the channel
+  // when I opened this thread" — the exact thread-level analog of the channel
   // divider's openFrontierRef. Read ONLY by the divider below; the badge
   // predicates read effective(msg:<id>) live, so this snapshot is a separate
-  // concern (divider position) from the badge read-line â not a second source
+  // concern (divider position) from the badge read-line — not a second source
   // of truth for the same read-line. Keyed per thread root so switching threads
   // captures a fresh snapshot; cleared on close so re-opening re-snapshots.
   const threadOpenReadSnapshotRef = React.useRef(
@@ -256,7 +256,7 @@ export function useChannelUnreadState({
   // first time we observe it, before any marker advance. Idempotent per reply
   // (the first capture wins), so a value taken before a mark-read is never
   // overwritten by the post-mark value. Keyed to the current open thread so a
-  // stale entry from a previous open cannot leak across a closeâreopen cycle
+  // stale entry from a previous open cannot leak across a close→reopen cycle
   // (the snapshot is dropped on close by the effect below).
   const captureDividerReadState = React.useCallback(
     (replyId: string) => {
@@ -273,7 +273,7 @@ export function useChannelUnreadState({
     [getMessageReadAt, openThreadHeadId],
   );
   if (openThreadHeadId) {
-    // Capture each visible reply's read state the first render it appears â
+    // Capture each visible reply's read state the first render it appears —
     // before the on-open mark-read effect advances its marker. Replies revealed
     // by expanding a branch are captured eagerly in markRevealedRepliesRead
     // (before that path's synchronous mark-read), so this render-time pass
@@ -323,7 +323,7 @@ export function useChannelUnreadState({
     const replies = threadMessages.map((entry) => entry.message);
     return computeThreadUnreadMarker(
       replies,
-      // Use the snapshot value when the reply was captured â even when it is
+      // Use the snapshot value when the reply was captured — even when it is
       // null (never read on open). Distinguish "captured null" from "never
       // captured" with `has`, not `??`: a never-read reply snapshots to null,
       // and a nullish-coalescing fallthrough would discard that and re-read the
@@ -341,7 +341,7 @@ export function useChannelUnreadState({
   // per-message read state (getMessageReadAt): each collapsed row's badge
   // counts unread replies anywhere beneath it. Expanding a branch marks only
   // its revealed direct children read, so a collapsed grandchild keeps its
-  // badge â the per-message marker distinguishes the read parent from the
+  // badge — the per-message marker distinguishes the read parent from the
   // unread descendant with no separate expanded-subtree gate. readStateVersion
   // is an intentional recompute trigger so the counts re-read after any marker
   // advances.
@@ -374,7 +374,7 @@ export function useChannelUnreadState({
   );
   // Per-thread unread counts for the main-timeline summary rows. Unread is
   // decided per-reply against the live per-message read state: each reply
-  // lights iff createdAt > effective(msg:<id>), folded channelâmessage only by
+  // lights iff createdAt > effective(msg:<id>), folded channel→message only by
   // the parent resolver, so reading an ancestor never clears a descendant
   // (LP4 Issue 2 by construction). readStateVersion is an intentional recompute
   // trigger so the badge re-reads after any marker advances.
@@ -407,16 +407,16 @@ export function useChannelUnreadState({
   const threadUnreadCounts = useStableMap(threadUnreadCountsRaw);
 
   // Per-message unread predicate for the mark-read/unread menu toggle. Reuses
-  // computeThreadUnreadMarker â the exact function the badge counts call
-  // (computeThreadBadgeCounts) â over a single-message array, so the menu label
+  // computeThreadUnreadMarker — the exact function the badge counts call
+  // (computeThreadBadgeCounts) — over a single-message array, so the menu label
   // and the badge can never disagree: one source of truth, no re-derived
   // predicate to drift. A message absent from the timeline (never loaded) is
   // treated as read, matching the badge, which only tallies loaded messages.
   // readStateVersion recomputes on marker advances; forcedUnreadVersion bumps
   // on every mark-read/unread so the callback identity changes and the value
   // re-flows through the memoized message subtree (forcedUnreadMsgRef is a ref,
-  // invisible to React on its own). Both keep the menu label and the badge â
-  // which read the same computeThreadUnreadMarker predicate â from drifting.
+  // invisible to React on its own). Both keep the menu label and the badge —
+  // which read the same computeThreadUnreadMarker predicate — from drifting.
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and forcedUnreadVersion are intentional recompute triggers
   const isMessageUnread = React.useCallback(
     (messageId: string): boolean => {
@@ -456,7 +456,7 @@ export function useChannelUnreadState({
   //
   // Capture each child's pre-read state into the divider snapshot BEFORE
   // advancing its marker. This path runs synchronously in the expand event
-  // handler, before React re-renders with the child visible â so without the
+  // handler, before React re-renders with the child visible — so without the
   // pre-capture the render-time pass above would snapshot the child as already
   // read (this mark-read having won the race) and the "New" divider would never
   // anchor to a reply first revealed by expansion.
@@ -479,7 +479,7 @@ export function useChannelUnreadState({
   );
 
   // Mark a message and its whole subtree READ (LP4 v3 menu action). Writes a
-  // msg:<id> marker at each message's createdAt â a real, persisted advance â
+  // msg:<id> marker at each message's createdAt — a real, persisted advance —
   // and clears those same ids from the forced-unread overlay, so mark-read is
   // the exact inverse of mark-unread over the same id set.
   const handleMarkMessageRead = React.useCallback(
