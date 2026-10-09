@@ -576,6 +576,9 @@ pub enum DbReadinessOutcome {
 /// Configuration for the Postgres connection pool.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
+    /// Enable push producers on every writer connection. Defaults to false.
+    /// Relay startup copies `BUZZ_PUSH_ENABLED`; auxiliary writers stay off.
+    pub push_enabled: bool,
     /// Postgres connection URL (usually sourced from `DATABASE_URL`).
     pub database_url: String,
     /// Optional read-replica connection URL (usually sourced from
@@ -627,6 +630,7 @@ impl Default for DbConfig {
     /// At 20 main + 5 audit = 25/pod, four relay pods fit within the PG limit.
     fn default() -> Self {
         Self {
+            push_enabled: false,
             database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
             read_database_url: None,
             max_connections: 20,
@@ -726,6 +730,7 @@ impl Db {
             classify_pool_outcome, record_milestone, DbConnectionStep, DbConnectionStepAttempt,
         };
 
+        let push_enabled = config.push_enabled;
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
         let statement_timeout_ms = config.statement_timeout_ms;
@@ -775,7 +780,8 @@ impl Db {
                         "SELECT set_config('lock_timeout', $1, false), \
                                 set_config('idle_in_transaction_session_timeout', $2, false), \
                                 set_config('statement_timeout', $3, false), \
-                                set_config('default_transaction_read_only', $4, false)",
+                                set_config('default_transaction_read_only', $4, false), \
+                                set_config('buzz.push_enabled', $5, false)",
                     )
                     .bind(lock_timeout_ms.to_string())
                     .bind(idle_txn_timeout_ms.to_string())
@@ -785,6 +791,7 @@ impl Db {
                     } else {
                         "off"
                     })
+                    .bind(if push_enabled { "on" } else { "off" })
                     .execute(&mut *conn)
                     .await
                     {

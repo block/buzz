@@ -1193,6 +1193,8 @@ pub struct AppState {
     pub community_connections: Arc<CommunityConnectionRegistry>,
     /// Stops only the periodic lifecycle revalidator during graceful shutdown.
     pub community_revalidator_cancel: CancellationToken,
+    /// Cancels push claims and in-flight delivery on process shutdown.
+    pub push_cancel: CancellationToken,
     /// Test/telemetry counter for archive disconnect publication attempts.
     pub community_disconnect_publish_attempts: Arc<AtomicU64>,
     /// Semaphore limiting total concurrent connections.
@@ -1479,6 +1481,7 @@ impl AppState {
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
             community_revalidator_cancel: CancellationToken::new(),
+            push_cancel: CancellationToken::new(),
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
@@ -1585,6 +1588,7 @@ impl AppState {
     /// the readiness gauge on its next request.
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.push_cancel.cancel();
     }
 
     #[cfg(test)]

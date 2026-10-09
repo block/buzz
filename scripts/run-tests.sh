@@ -172,6 +172,9 @@ run_unit_tests() {
   # Mirror the relay filters from `just test-unit`: the three handler modules,
   # storage-snapshot helpers, readiness and router unit suites, and the single
   # scoped admission regression in state::tests, plus the REQ lifecycle tests.
+  run_test_step "buzz-relay push runtime tests" \
+    cargo test -p buzz-relay --lib push_runtime:: -- --nocapture
+
   run_test_step "buzz-relay channel authorization tests" \
     cargo test -p buzz-relay --lib handlers::channel_authz:: -- --nocapture
 

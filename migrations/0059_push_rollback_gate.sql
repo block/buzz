@@ -1,8 +1,14 @@
+-- Only update a surviving overlap trigger function. Never resurrect the
+-- function after the independent trigger-retirement migration has removed it.
+DO $migration$
+BEGIN
+    IF to_regprocedure('enqueue_push_match_job()') IS NOT NULL THEN
+        EXECUTE $function$
 -- T1b push gate (migrations 0023 and 0059). Enqueue only when the
 -- community has an active, endpoint-enabled, unexpired lease; the shared
 -- advisory lock pairs with the exclusive lock taken by lease activations
 -- (crates/buzz-db/src/push.rs) to close the lost-wake race.
-CREATE FUNCTION enqueue_push_match_job() RETURNS trigger
+CREATE OR REPLACE FUNCTION enqueue_push_match_job() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
     -- Legacy connections without the setting preserve their existing behavior.
@@ -32,3 +38,7 @@ BEGIN
     RETURN NEW;
 END
 $$;
+$function$;
+    END IF;
+END
+$migration$;

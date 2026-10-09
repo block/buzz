@@ -76,6 +76,16 @@ pub(crate) async fn enqueue_push_match(
     if !PUSH_MATCH_KINDS.contains(&kind) {
         return Ok(());
     }
+    // Missing means a legacy writer during rollout overlap. New writer pools
+    // always set this explicitly, including replacement connections.
+    let enabled: bool = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(current_setting('buzz.push_enabled', true), '')::boolean, true)",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if !enabled {
+        return Ok(());
+    }
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::PushGate,
         sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")

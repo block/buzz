@@ -249,12 +249,49 @@ triggering message. Keep fallback-to-channel and placeholder/failure cases as
 explicit counts in the manual sample until privacy-preserving client telemetry
 is designed.
 
-Rollback does not require deleting credentials or mutating existing leases.
-Set `BUZZ_PUSH_ENABLED=false` on the enabled relays to stop advertisement, lease
-acceptance, matching, workers, and new gateway traffic. If the gateway itself
-is unhealthy, disable the gateway deployment only after relay delivery is off.
-Existing leases and gateway authorities then expire naturally. Adding an App
-Store application profile is outside this internal evaluation.
+### Relay rollback and reactivation
+
+Set `BUZZ_PUSH_ENABLED=false` in the approved configuration for **every writer
+workload in the affected database scope**, then replace all previously enabled
+relay processes. This is a startup setting, not a live configuration reload.
+Keep the delivery URL, image, relay keys, schema, leases, client preferences and
+gateway grants unchanged. Do not stop a shared gateway as part of relay rollback.
+
+The relay copies the flag into `DbConfig::push_enabled`. Every physical writer
+connection, including the audit pool and replacement connections, sets the
+`buzz.push_enabled` PostgreSQL session setting. Other `DbConfig` callers default
+to disabled. Both the application producer and the surviving overlap trigger
+return before push locks, lease scans or queue writes when this setting is off.
+The overlap migration updates only an existing trigger function; it does not
+recreate a retired trigger or function. Deploy that migration before relying on
+the flag with a surviving trigger. Older images and raw SQL writers with a
+missing setting retain legacy enqueue behavior; inventory and replace or
+explicitly disable all such connections before declaring rollback complete.
+
+On SIGTERM/Ctrl-C, the relay cancels matcher and delivery futures immediately,
+before its listener drain. Uncommitted transactions roll back; committed claims
+remain leased until their normal expiry. No cancellation cleanup deletes or
+acknowledges queue entries. An HTTP request already accepted by the gateway may
+still produce a notification. The process shutdown deadline remains the hard
+backstop; a stalled replacement with old workers alive is incomplete rollback.
+
+Verify all old writer sessions and workers have exited, eligible messages still
+store and arrive in chat, no new matcher jobs appear, and gateway attempts stop
+once in-flight work settles. Inspect enqueue activity as well as queue counts:
+a stable count alone can conceal additions and removals. Ordinary reads, writes,
+authentication and reconnects must remain healthy. Enabled enqueue still runs
+inside the message transaction and propagates errors; this change does not
+isolate enabled message storage from push failures.
+
+Pending matcher jobs and pending/claimed delivery jobs remain dormant. Do not
+process or delete them during urgent rollback. **Before re-enabling**, inspect
+retained work across the full affected scope and record an explicit disposition
+decision. Cleanup size, batching and scoped commands are an operator decision;
+preserve leases and handle completed records through retention policy. There is
+no automatic purge or startup queue interlock: enabling workers resumes eligible
+retained work under existing expiry/retry rules. Thus an unchecked nonempty queue
+must not be silently reactivated. Messages stored while disabled are not
+backfilled on lease activation or re-enablement.
 
 ## Helm production inputs
 

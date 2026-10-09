@@ -25,6 +25,7 @@ async fn connect(migration_schema: bool) -> Db {
         Ok(expected_mode)
     );
     let config = DbConfig {
+        push_enabled: true,
         database_url,
         ..DbConfig::default()
     };
@@ -251,6 +252,25 @@ async fn apply_arm(pool: &PgPool, arm: Arm) {
             remaining, 0,
             "app-only arm must leave no trigger on any partition"
         );
+        sqlx::query("DROP FUNCTION enqueue_push_match_job()")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0059_push_rollback_gate.sql"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+        let absent: bool =
+            sqlx::query_scalar("SELECT to_regprocedure('enqueue_push_match_job()') IS NULL")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert!(
+            absent,
+            "rollback migration must not resurrect a retired function"
+        );
     }
 }
 
@@ -263,6 +283,8 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     let channel = create_channel(pool, community, &keys.public_key().to_bytes()).await;
     let now = Utc::now().timestamp();
     activate_lease(pool, community, &keys, 11, now + 3600).await;
+
+    assert_rollback(&db, community, channel, &keys).await;
 
     for kind in [9, 40002, 45001, 45003] {
         let deadline_before_first_insert = reset_deadline(pool, community, channel).await;
@@ -770,4 +792,138 @@ async fn migration_schema_event_follow_up_contract_dual() {
 #[ignore = "requires Postgres"]
 async fn migration_schema_event_follow_up_contract_app_only() {
     assert_contract(true, Arm::AppOnly).await;
+}
+
+// Runs with both schema sources and with/without the overlap trigger.
+async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &Keys) {
+    let pool = db.pool();
+    let retained = signed_event(keys, 9, "queued-before-rollback");
+    db.insert_event(community, &retained, Some(channel))
+        .await
+        .unwrap();
+    assert_eq!(match_count(pool, community, &retained).await, 1);
+    let lease_before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(p) FROM push_leases p WHERE community_id=$1")
+            .bind(community.as_uuid())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
+    // Include pending, claimed, and completed delivery records: rollback is
+    // not a queue cleanup or a retention operation.
+    for (marker, state) in [(81_u8, "pending"), (82, "sending"), (83, "delivered")] {
+        sqlx::query(
+            "INSERT INTO push_wake_outbox (community_id, author, installation_id, \
+             lease_generation, endpoint_hash, event_id, class, expires_at, state, \
+             claim_id, lease_until) \
+             SELECT community_id, author, installation_id, generation, endpoint_hash, \
+             $2, 'default', expires_at, $3, gen_random_uuid(), now() + interval '30 seconds' \
+             FROM push_leases WHERE community_id=$1",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![marker; 32])
+        .bind(state)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let wakes_before: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(w) ORDER BY id) FROM push_wake_outbox w WHERE community_id=$1",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    let disabled = Db::new(&DbConfig {
+        database_url: std::env::var("BUZZ_TEST_DATABASE_URL").unwrap(),
+        push_enabled: false,
+        max_connections: 1,
+        min_connections: 0,
+        ..DbConfig::default()
+    })
+    .await
+    .unwrap();
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(push::push_gate_lock_key(community))
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let mut disabled_events = Vec::new();
+    for kind in [9, 40002, 45001, 45003] {
+        // Force a fresh physical connection each time, proving after_connect
+        // reapplies the flag instead of relying on a single startup session.
+        disabled
+            .pool()
+            .acquire()
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let message = signed_event(keys, kind, &format!("disabled-{kind}"));
+        timeout(
+            Duration::from_secs(2),
+            disabled.insert_event(community, &message, Some(channel)),
+        )
+        .await
+        .expect("disabled write must not wait for the push gate")
+        .unwrap();
+        assert_eq!(event_count(pool, community, &message).await, 1);
+        assert_eq!(match_count(pool, community, &message).await, 0);
+        disabled_events.push(message);
+    }
+    holder.rollback().await.unwrap();
+    assert_eq!(match_count(pool, community, &retained).await, 1);
+    let lease_after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(p) FROM push_leases p WHERE community_id=$1")
+            .bind(community.as_uuid())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        lease_before, lease_after,
+        "rollback preserves leases and subscriptions"
+    );
+
+    let wakes_after: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(w) ORDER BY id) FROM push_wake_outbox w WHERE community_id=$1",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        wakes_before, wakes_after,
+        "rollback preserves all delivery records"
+    );
+
+    // An old connection with no GUC retains the legacy producer behavior.
+    // It must be replaced before operators declare rollback complete.
+    let legacy_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("BUZZ_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let legacy = Db::from_pool(legacy_pool);
+    let message = signed_event(keys, 9, "legacy-overlap-writer");
+    legacy
+        .insert_event(community, &message, Some(channel))
+        .await
+        .unwrap();
+    assert_eq!(match_count(pool, community, &message).await, 1);
+    legacy.pool().close().await;
+
+    // Reactivation is an operator decision about retained queues. Reopening
+    // an enabled writer produces only new work, with no lease backfill.
+    let message = signed_event(keys, 9, "new-after-reactivation");
+    db.insert_event(community, &message, Some(channel))
+        .await
+        .unwrap();
+    assert_eq!(match_count(pool, community, &message).await, 1);
+    for message in disabled_events {
+        assert_eq!(match_count(pool, community, &message).await, 0);
+    }
+    disabled.pool().close().await;
 }
