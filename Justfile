@@ -593,6 +593,8 @@ test-unit:
                 + test(/^api::nip_fi::/)'
         # Invitation drain/cutoff boundary contracts are infra-free.
         cargo nextest run -p buzz-relay --lib -E 'test(/^invite_token::/) + test(/^config::invite_cutoff_tests::/)'
+        # Retain partially consumed mesh receives across housekeeping ticks.
+        cargo nextest run -p buzz-relay --lib -E 'test(=mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks)'
         # boot_lifecycle spawns the real relay binary and asserts its startup
         # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
         # non-ignored tests need no Postgres or Redis; the Postgres cases are

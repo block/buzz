@@ -344,6 +344,9 @@ run_unit_tests() {
   run_test_step "buzz-relay invitation cutoff configuration" \
     cargo test -p buzz-relay --lib config::invite_cutoff_tests:: -- --nocapture
 
+  run_test_step "buzz-relay mesh receive lifetime regression" \
+    cargo test -p buzz-relay --lib mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks -- --exact --nocapture
+
   run_test_step "buzz-relay boot lifecycle tests" \
     cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 }
