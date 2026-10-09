@@ -295,7 +295,7 @@ pub async fn remove_relay_member(
 ) -> Result<RemoveResult> {
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    if delete_member_with_acceptances(&mut *connection, community, pubkey, None).await? {
+    if delete_member_with_acceptances(&mut connection, community, pubkey, None).await? {
         return Ok(RemoveResult::Removed);
     }
 
@@ -334,7 +334,7 @@ pub async fn remove_relay_member_if_role(
 ) -> Result<RemoveResult> {
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    if delete_member_with_acceptances(&mut *connection, community, pubkey, Some(expected_role))
+    if delete_member_with_acceptances(&mut connection, community, pubkey, Some(expected_role))
         .await?
     {
         return Ok(RemoveResult::Removed);

@@ -416,9 +416,9 @@ async fn workflow_deletion_removes_children_without_cascades() {
         "scheduled_workflow_fires",
         "workflow_runs",
     ] {
-        let left: i64 = sqlx::query_scalar(&format!(
+        let left: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT count(*) FROM {table} WHERE community_id = $1 AND workflow_id = $2"
-        ))
+        )))
         .bind(community.as_uuid())
         .bind(id)
         .fetch_one(&db.pool)
