@@ -79,6 +79,12 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i functions/enforce_community_tombstone.sql
 \i functions/attach_community_write_fence.sql
 
+\i functions/invite_admission_lock.sql
+\i functions/lock_invite_restrictions.sql
+\i functions/revoke_banned_issuer_invites.sql
+\i functions/revoke_restricted_agent_invites.sql
+\i functions/backfill_invite_revocations.sql
+
 -- tables
 \i tables/public/communities.sql
 \i tables/public/channels.sql

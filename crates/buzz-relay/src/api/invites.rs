@@ -251,15 +251,42 @@ async fn authenticate(
     let bridge::VerifiedBridgeAuth {
         pubkey,
         event_id_bytes,
-        ..
+        signed_created_at,
     } = bridge::verify_nip98_exempt_invite_claim(headers, "POST", &url, Some(body))?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
 
+    materialize_invite_owner(state, &tenant, &pubkey, headers, signed_created_at).await?;
     Ok((tenant, pubkey))
+}
+
+async fn materialize_invite_owner(
+    state: &AppState,
+    tenant: &buzz_core::TenantContext,
+    pubkey: &nostr::PublicKey,
+    headers: &HeaderMap,
+    signed_created_at: Option<u64>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    // The claim remains membership-exempt. Only cryptographically verified
+    // owner provenance is persisted, so the transactional restriction lookup
+    // also covers an agent onboarding for the first time.
+    if let Some(owner) = super::relay_members::extract_nip_oa_owner(
+        pubkey.as_bytes(),
+        super::relay_members::extract_auth_tag_header(headers),
+        signed_created_at,
+    ) {
+        if !super::relay_members::materialize_nip_oa_owner(state, tenant, pubkey, &owner).await {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "restriction lookup unavailable",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     match error {
+        buzz_db::DbError::InviteRestricted => api_error(StatusCode::FORBIDDEN, "invite_restricted"),
         buzz_db::DbError::InvalidData(message) | buzz_db::DbError::DeletionSafety(message) => {
             api_error(StatusCode::BAD_REQUEST, &message)
         }
@@ -340,6 +367,12 @@ async fn mint_invite_checked(
     .await
     {
         return e.into_response();
+    }
+
+    if let Err(error) =
+        materialize_invite_owner(&state, &tenant, &pubkey, &headers, signed_created_at).await
+    {
+        return error.into_response();
     }
 
     match mint_invite_inner(&state, body, tenant, pubkey).await {
@@ -516,6 +549,12 @@ pub async fn claim_invite(
             buzz_db::relay_invite::ClaimOutcome::Exhausted => {
                 Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
             }
+            buzz_db::relay_invite::ClaimOutcome::Revoked => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Restricted => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_restricted"))
+            }
             buzz_db::relay_invite::ClaimOutcome::Invalid => {
                 Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
             }
@@ -523,16 +562,18 @@ pub async fn claim_invite(
     }
 
     // --- v1 HMAC path (stateless tokens, drain window) ---
-    let payload = invite_token::verify_invite(&key, tenant.community(), &request.code).map_err(
-        |e| match e {
-            // Expired is post-MAC: revealing it helps the UX without helping a forger.
-            invite_token::InviteError::Expired => {
-                api_error(StatusCode::FORBIDDEN, "invite_expired")
-            }
-            // Everything else stays coarse so the endpoint is a poor oracle.
-            _ => api_error(StatusCode::FORBIDDEN, "invite_invalid"),
-        },
-    )?;
+    let payload = invite_token::verify_invite_with_cutoff(
+        &key,
+        tenant.community(),
+        &request.code,
+        state.config.invite_v1_invalid_after,
+    )
+    .map_err(|e| match e {
+        // Expired is post-MAC: revealing it helps the UX without helping a forger.
+        invite_token::InviteError::Expired => api_error(StatusCode::FORBIDDEN, "invite_expired"),
+        // Everything else stays coarse so the endpoint is a poor oracle.
+        _ => api_error(StatusCode::FORBIDDEN, "invite_invalid"),
+    })?;
 
     if let Some(policy) = &state.config.join_policy {
         let receipt = request
@@ -556,7 +597,12 @@ pub async fn claim_invite(
                 .map(|policy| policy.version.as_str()),
         )
         .await
-        .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
+        .map_err(|e| match e {
+            buzz_db::DbError::InviteRestricted => {
+                api_error(StatusCode::FORBIDDEN, "invite_restricted")
+            }
+            e => internal_error(&format!("invite claim insert: {e}")),
+        })?;
 
     if was_inserted {
         tracing::info!(
@@ -608,6 +654,7 @@ fn claim_key_rate_limited(
 
 #[cfg(test)]
 mod postgres_tests {
+    mod restriction_tests;
     use std::sync::Arc;
     use std::time::Duration;
 

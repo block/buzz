@@ -379,6 +379,9 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
+    /// Absolute UTC Unix-second cutoff for legacy v1 invites; unset drains naturally.
+    pub invite_v1_invalid_after: Option<u64>,
+
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
 
@@ -403,6 +406,28 @@ pub struct Config {
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.parse::<SocketAddr>()
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+fn parse_invite_v1_cutoff(raw: Option<&str>) -> Result<Option<u64>, ConfigError> {
+    raw.map(|value| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .filter(|time| time.offset().local_minus_utc() == 0 && time.timestamp_subsec_nanos() == 0)
+            .and_then(|time| u64::try_from(time.timestamp()).ok())
+            .ok_or_else(|| ConfigError::InvalidValue(
+                "BUZZ_INVITE_V1_INVALID_AFTER must be a UTC RFC3339 timestamp with whole seconds".into(),
+            ))
+    }).transpose()
+}
+
+fn invite_v1_cutoff_from_env() -> Result<Option<u64>, ConfigError> {
+    match std::env::var("BUZZ_INVITE_V1_INVALID_AFTER") {
+        Ok(raw) => parse_invite_v1_cutoff(Some(&raw)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(
+            "BUZZ_INVITE_V1_INVALID_AFTER must be valid Unicode".into(),
+        )),
+    }
 }
 
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
@@ -1433,6 +1458,7 @@ impl Config {
             push_gateway_timeout,
             operator_listener_timeout,
             join_policy,
+            invite_v1_invalid_after: invite_v1_cutoff_from_env()?,
             admin,
             web_dir,
             serve_git_web_gui,
@@ -2869,5 +2895,29 @@ mod tests {
             matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_GIT_REPO_PATH")),
             "expected InvalidValue mentioning BUZZ_GIT_REPO_PATH, got {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod invite_cutoff_tests {
+    use super::*;
+
+    #[test]
+    fn cutoff_configuration_is_optional_and_strict() {
+        assert_eq!(parse_invite_v1_cutoff(None).unwrap(), None);
+        assert_eq!(
+            parse_invite_v1_cutoff(Some("1970-01-01T00:01:40Z")).unwrap(),
+            Some(100)
+        );
+        for raw in [
+            "",
+            "tomorrow",
+            "100",
+            "2026-10-10T00:00:00+01:00",
+            "1969-12-31T23:59:59Z",
+            "2026-10-10T00:00:00.1Z",
+        ] {
+            assert!(parse_invite_v1_cutoff(Some(raw)).is_err(), "{raw}");
+        }
     }
 }
