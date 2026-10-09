@@ -202,3 +202,22 @@ async fn typing_without_channel_is_rejected() {
         "{body}"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn oversized_typing_is_rejected() {
+    let f = Fixture::new().await;
+    let event = EventBuilder::new(Kind::Custom(20002), "x".repeat(2048))
+        .tags([Tag::parse(["h".to_string(), f.channel.to_string()]).unwrap()])
+        .sign_with_keys(&f.member)
+        .unwrap();
+    let (status, body) = f.post(&f.member, &event).await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("too large"),
+        "{body}"
+    );
+}

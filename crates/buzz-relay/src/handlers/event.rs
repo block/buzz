@@ -1056,6 +1056,12 @@ async fn publish_channel_ephemeral(
     Ok(())
 }
 
+/// Upper bound on content plus tag values for an HTTP typing indicator.
+/// Real indicators carry empty content and at most three short tags (`h`,
+/// root `e`, reply `e`, roughly 250 bytes). Without a cap a member could post
+/// up to the HTTP body limit and have it fanned out to every subscriber.
+const MAX_HTTP_TYPING_BYTES: usize = 1024;
+
 /// Publishes a typing indicator (kind:20002) submitted through HTTP
 /// `POST /events`, for clients that sign but hold no WebSocket, such as
 /// app-hosted agents. Applies the gates the WebSocket path applies to
@@ -1075,6 +1081,18 @@ pub(crate) async fn publish_http_typing(
     let ch_id = super::ingest::extract_channel_id(&event).ok_or_else(|| {
         IngestError::Rejected("invalid: typing indicator needs a channel UUID h tag".into())
     })?;
+    let size = event.content.len()
+        + event
+            .tags
+            .iter()
+            .flat_map(|tag| tag.as_slice())
+            .map(String::len)
+            .sum::<usize>();
+    if size > MAX_HTTP_TYPING_BYTES {
+        return Err(IngestError::Rejected(format!(
+            "invalid: typing indicator too large (max {MAX_HTTP_TYPING_BYTES} bytes of content and tags)"
+        )));
+    }
     let event_clone = event.clone();
     match tokio::task::spawn_blocking(move || verify_event(&event_clone)).await {
         Ok(Ok(())) => {}
