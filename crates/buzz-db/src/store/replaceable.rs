@@ -380,6 +380,10 @@ async fn replace_parameterized_event_in_transaction_impl(
     sqlx::query("RELEASE SAVEPOINT parameterized_replace")
         .execute(tx.conn())
         .await?;
+    if status == ParameterizedReplaceStatus::Inserted {
+        crate::store::event_follow_up::after_admitted_insert(tx, incoming_id, kind_i32, channel_id)
+            .await?;
+    }
 
     Ok(ParameterizedReplaceResult::new(
         event,
@@ -424,6 +428,7 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         let transaction_timer = observability::TransactionTimer::start(
             observability::TransactionOperation::ReplaceAddressableEvent,
         );
@@ -535,6 +540,14 @@ impl Db {
                     ));
                 }
 
+                crate::store::event_follow_up::after_admitted_insert(
+                    &mut tx,
+                    event.id.as_bytes().as_slice(),
+                    kind_i32,
+                    channel_id,
+                )
+                .await?;
+
                 // The replaceable event and its denormalized mention index are one
                 // authoritative discovery write. An indexing error must roll back the
                 // new event and restore the previously-live event.
@@ -590,6 +603,7 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         let transaction_timer =
             observability::TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent);
         transaction_timer

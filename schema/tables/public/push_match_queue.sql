@@ -1,7 +1,7 @@
--- Durable event-to-push matching follower. The trigger runs in the event insert
--- transaction, so every accepted persistent event has a crash-safe match job and
--- rejected/rolled-back events never do. Processing is idempotent through the
--- push_wake_outbox endpoint/event unique key.
+-- Durable jobs after best-effort post-commit enqueue. Updated application
+-- writers may drop push work on overload/failure/shutdown; messages remain
+-- authoritative. Legacy writers may still enqueue in their event transaction.
+-- Processing is idempotent through the outbox endpoint/event unique key.
 CREATE TABLE push_match_queue (
     community_id UUID NOT NULL REFERENCES communities(id),
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),

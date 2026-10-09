@@ -413,6 +413,9 @@ pub async fn huddle_started_link_exists_in_transaction(
 
 /// Insert a Nostr event. Rejects AUTH and ephemeral kinds.
 ///
+/// This raw-pool helper does not start application push production. Serving
+/// callers should use [`Db::insert_event`] with a configured [`Db`].
+///
 /// Returns `(StoredEvent, was_inserted)` — `was_inserted` is `false` on duplicate.
 pub async fn insert_event(
     pool: &PgPool,
@@ -500,6 +503,15 @@ async fn insert_event_on(
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
+    if was_inserted {
+        crate::store::event_follow_up::after_admitted_insert(
+            tx,
+            id_bytes.as_slice(),
+            kind_i32,
+            channel_id,
+        )
+        .await?;
+    }
 
     Ok((
         StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
@@ -1744,6 +1756,14 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let was_inserted = result.rows_affected() > 0;
 
     if was_inserted {
+        crate::store::event_follow_up::after_admitted_insert(
+            tx,
+            id_bytes.as_slice(),
+            kind_i32,
+            channel_id,
+        )
+        .await?;
+
         if let Some(ref meta) = thread_meta {
             let broadcast_val: bool = meta.broadcast;
 
@@ -2099,6 +2119,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         let result = crate::event::insert_event_in_transaction(&mut tx, event, channel_id).await?;
         if result.1 {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
@@ -2624,6 +2645,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result = crate::event::insert_event_with_thread_metadata_tx(
             &mut tx,

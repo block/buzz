@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart'
+    show Drag, GestureBinding, PointerScrollEvent;
+import 'package:flutter/semantics.dart' show OrdinalSortKey;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -55,11 +59,13 @@ import 'timeline_message.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_page/message_list.dart';
+part 'thread_detail_page/head_layout.dart';
 part 'thread_detail_page/sticky_date.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
+part 'thread_detail_page/read_state.dart';
 part 'thread_detail_page/app_bar.dart';
 
 const _landingHighlightDuration = Duration(seconds: 3);
@@ -257,6 +263,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final didJumpToInitialMessage = useRef(false);
     final initialHighlightTargetIndex = useState<int?>(null);
     final initialViewportReady = useState(false);
+    final headHeight = useState<double?>(null);
     final followsThreadTail = useRef(false);
     final userOptedOutOfTailFollow = useRef(false);
     final userDragDetachedTailFollow = useRef(false);
@@ -287,9 +294,9 @@ class ThreadDetailPage extends HookConsumerWidget {
             ? settledImeLift
             : 0);
     final navigationBottomInset = composerDockHeight.value + settledImeLift;
-    // Keep the route snapshot usable while the relay query is pending. Once
-    // authoritative replies arrive, suppress only the frame(s) used to place
-    // the hydrated target, then reveal the settled viewport.
+    // Keep the route snapshot usable during loading. While the hydrated list
+    // settles, the message-list view keeps the original message visible and
+    // reveals the positioned list in one frame, for empty and populated threads.
     final threadViewportVisible =
         !relayRepliesAvailable || initialViewportReady.value;
 
@@ -523,7 +530,11 @@ class ThreadDetailPage extends HookConsumerWidget {
         // error before consuming the one-shot jump. During loading, the fallback
         // main-timeline list can contain only the linked reply; after an error,
         // that hydrated snapshot is the best available target list.
-        if (messageId == null || !canUseMessagesForInitialTarget) return null;
+        if (messageId == null ||
+            !canUseMessagesForInitialTarget ||
+            headHeight.value == null) {
+          return null;
+        }
         final chronologicalIndex = replies.indexWhere(
           (reply) => reply.id == messageId,
         );
@@ -563,6 +574,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       },
       [
         initialMessageId,
+        headHeight.value,
         canUseMessagesForInitialTarget,
         fetchedReplies,
         replies.length,
@@ -616,7 +628,11 @@ class ThreadDetailPage extends HookConsumerWidget {
       viewportHeight,
     );
     useEffect(() {
-      if (!hasFetchedReplies || viewportHeight <= 0) return null;
+      if (!hasFetchedReplies ||
+          viewportHeight <= 0 ||
+          headHeight.value == null) {
+        return null;
+      }
       if (initialMessageId != null) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
@@ -688,23 +704,8 @@ class ThreadDetailPage extends HookConsumerWidget {
         action: correctThreadTailInstantly,
       );
       return null;
-    }, [hasFetchedReplies, replies.length, settleGeometry]);
-    final readState = ref.watch(readStateProvider);
-    final visibleReplyReadKey = replies
-        .map((reply) => '${reply.id}:${reply.createdAt}')
-        .join(',');
-
-    useEffect(() {
-      if (!readState.isReady || replies.isEmpty) return null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        for (final reply in replies) {
-          ref
-              .read(readStateProvider.notifier)
-              .markContextRead(msgContextKey(reply.id), reply.createdAt);
-        }
-      });
-      return null;
-    }, [threadHead.id, readState.isReady, visibleReplyReadKey]);
+    }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
+    _useThreadReplyReadState(ref, threadHead.id, replies);
 
     // Thread-scoped typing indicators (exclude self).
     final allTyping = ref.watch(channelTypingProvider(channelId));
@@ -840,6 +841,10 @@ class ThreadDetailPage extends HookConsumerWidget {
             children: [
               Expanded(
                 child: _ThreadMessageList(
+                  headHeight: headHeight.value ?? 0,
+                  onHeadHeightChanged: (height) {
+                    if (context.mounted) headHeight.value = height;
+                  },
                   viewport: listViewport,
                   onUserScrollStart: () {
                     hidesLatestForInitialTailSettle.value = false;

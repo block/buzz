@@ -441,6 +441,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     );
 
     let db_config = DbConfig {
+        push_enabled: config.push_enabled,
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
         replica_read_max_age_ms: config.replica_read_max_age_ms,
@@ -1214,15 +1215,17 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     // NIP-PL matcher and worker are enabled as one unit behind the explicit
     // deployment opt-in. The gateway URL alone never enables push.
-    if state.config.push_enabled {
-        tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
-        tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
+    let push_workers = if state.config.push_enabled {
+        let matcher = tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
+        let delivery = tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
             &state,
         )));
         info!("NIP-PL push matcher and delivery worker started");
+        Some((matcher, delivery))
     } else {
         info!("NIP-PL push disabled by BUZZ_PUSH_ENABLED");
-    }
+        None
+    };
 
     // Registration cleanup is independent of configured routes. Delivery is
     // opt-in, while accepted events populate the outbox transactionally.
@@ -1668,6 +1671,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         jwks_refresh_handle,
     )
     .await?;
+    state.push_cancel.cancel();
+    state.db.cancel_push_enqueue();
+    state.db.join_push_enqueue().await;
+    if let Some((matcher, delivery)) = push_workers {
+        for result in [matcher.await, delivery.await] {
+            if let Err(error) = result {
+                tracing::warn!(%error, "push worker failed during shutdown");
+            }
+        }
+    }
     state.community_revalidator_cancel.cancel();
     state.dependency_sampler_cancel.cancel();
     state.dependency_completion_publisher_cancel.cancel();
@@ -3082,6 +3095,11 @@ mod tests {
         assert_eq!(lock, "500ms");
         assert_eq!(idle, "1min");
         assert_eq!(statement, "0");
+        let push: String = sqlx::query_scalar("SELECT current_setting('buzz.push_enabled')")
+            .fetch_one(&pool)
+            .await
+            .expect("audit pool push setting");
+        assert_eq!(push, "off");
 
         let lock_key = i64::from_be_bytes(
             Uuid::new_v4().as_bytes()[..8]

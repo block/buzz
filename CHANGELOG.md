@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.5.28
+
+### Desktop and shared changes
+
+- test(desktop): move CSP guards from Rust to the desktop JS suite ([#8172](https://github.com/block/buzz/pull/8172)) ([`5142cf6b2a0f44686eeda1ed07905ee3560fd78e`](https://github.com/block/buzz/commit/5142cf6b2a0f44686eeda1ed07905ee3560fd78e))
+- fix(desktop): repair the Windows notification shim's false denial on read ([#5600](https://github.com/block/buzz/pull/5600)) ([`99924a5a69200d34f5cc67e9b76748d7ece72705`](https://github.com/block/buzz/commit/99924a5a69200d34f5cc67e9b76748d7ece72705))
+- feat: raise hosted community limit to fifty ([#8186](https://github.com/block/buzz/pull/8186)) ([`8f66f7051c68560feb27dbc74b069c851bc018bd`](https://github.com/block/buzz/commit/8f66f7051c68560feb27dbc74b069c851bc018bd))
+- feat(desktop): browse and moderate every community in the Admin Console ([#8027](https://github.com/block/buzz/pull/8027)) ([`836e7d0d06789765b4d98a93c2b509a2a0fbd1bf`](https://github.com/block/buzz/commit/836e7d0d06789765b4d98a93c2b509a2a0fbd1bf))
+- Use Silo for bundled object storage ([#8023](https://github.com/block/buzz/pull/8023)) ([`d742fc5f304a430e94e89b0d4a427d17adc1a47f`](https://github.com/block/buzz/commit/d742fc5f304a430e94e89b0d4a427d17adc1a47f))
+- fix(desktop): address workflow deletions at the workflow's actual owner ([#2669](https://github.com/block/buzz/pull/2669)) ([`5ff83d82f852edb50a96cab4cb67a13baa8bf830`](https://github.com/block/buzz/commit/5ff83d82f852edb50a96cab4cb67a13baa8bf830))
+- fix(desktop): show OpenAI-compatible endpoint settings in the baked-env UI ([#8117](https://github.com/block/buzz/pull/8117)) ([`403c19f6734259cc22ef8ac0c90162ffceeec796`](https://github.com/block/buzz/commit/403c19f6734259cc22ef8ac0c90162ffceeec796))
+- feat(buzz-agent): send User-Agent on LLM requests ([#8116](https://github.com/block/buzz/pull/8116)) ([`1e2281fd45f0a18da95924fa445cd34080d349ea`](https://github.com/block/buzz/commit/1e2281fd45f0a18da95924fa445cd34080d349ea))
+
+### Other repository changes
+
+- fix(mobile): normalize relay URL before disabling push ([#8201](https://github.com/block/buzz/pull/8201)) ([`394d4a434b70f6c14587174bc9942b3ba1d0eb59`](https://github.com/block/buzz/commit/394d4a434b70f6c14587174bc9942b3ba1d0eb59))
+- feat(buzz-db): run push enqueue and channel TTL refresh in app code ([#8135](https://github.com/block/buzz/pull/8135)) ([`16eb0b6685a9ea5cd06275aed172903dac69f225`](https://github.com/block/buzz/commit/16eb0b6685a9ea5cd06275aed172903dac69f225))
+- fix(mobile): keep thread content visible while positioning replies ([#8134](https://github.com/block/buzz/pull/8134)) ([`b6d97a69f0aeed53d58689c57a9939f8fab52093`](https://github.com/block/buzz/commit/b6d97a69f0aeed53d58689c57a9939f8fab52093))
+- fix(mobile): simplify notification settings ([#8199](https://github.com/block/buzz/pull/8199)) ([`e9269cbdf66b0e2fdb588aa20aad65bcba3ca622`](https://github.com/block/buzz/commit/e9269cbdf66b0e2fdb588aa20aad65bcba3ca622))
+- fix(push): stop backfilling messages on lease activation ([#8178](https://github.com/block/buzz/pull/8178)) ([`4db7bb0e7f904b2f0ea232aacae6cd7f6b8a3b39`](https://github.com/block/buzz/commit/4db7bb0e7f904b2f0ea232aacae6cd7f6b8a3b39))
+- docs(nip-ap): add teams and kind:44300 instructions versions ([#8191](https://github.com/block/buzz/pull/8191)) ([`acf1ede20288f5c31e1aae351c1559764b614c1f`](https://github.com/block/buzz/commit/acf1ede20288f5c31e1aae351c1559764b614c1f))
+- feat(db): advance an empty partition catch-all under bounded locks ([#7993](https://github.com/block/buzz/pull/7993)) ([`a8fe2b612c1c83de8f0983fa7a5cc1cb81ac7be8`](https://github.com/block/buzz/commit/a8fe2b612c1c83de8f0983fa7a5cc1cb81ac7be8))
+- fix(chart): own the Datadog version label on every workload Pod ([#7876](https://github.com/block/buzz/pull/7876)) ([`5a93e862ee28b8804f681ae15997a00bdc45d1bf`](https://github.com/block/buzz/commit/5a93e862ee28b8804f681ae15997a00bdc45d1bf))
+- fix(mobile): polish channel management and iOS Settings ([#8171](https://github.com/block/buzz/pull/8171)) ([`7e8aac44034a19a8ea845dbc5484e53eed7d02ef`](https://github.com/block/buzz/commit/7e8aac44034a19a8ea845dbc5484e53eed7d02ef))
+- fix(mobile): preserve Markdown attachment destinations ([#8168](https://github.com/block/buzz/pull/8168)) ([`1ac0a1271bfabe5a5af5578e2860c15fc8b0991e`](https://github.com/block/buzz/commit/1ac0a1271bfabe5a5af5578e2860c15fc8b0991e))
+- docs(nips): add NIP-FA federated identity adapter spec ([#8148](https://github.com/block/buzz/pull/8148)) ([`a918e605cae84789d7ec47df152219b4c341a1c7`](https://github.com/block/buzz/commit/a918e605cae84789d7ec47df152219b4c341a1c7))
+- feat(relay): record when a read-state account starts ([#8157](https://github.com/block/buzz/pull/8157)) ([`7afdc2aac930cd02001825d0b528f6f48595cd4a`](https://github.com/block/buzz/commit/7afdc2aac930cd02001825d0b528f6f48595cd4a))
+- ci: shorten the PR critical path (desktop lanes, smoke shards, parallel relay artifacts) ([#8156](https://github.com/block/buzz/pull/8156)) ([`d34c9c2c9b2e8e81675e8635c6b101481d561a97`](https://github.com/block/buzz/commit/d34c9c2c9b2e8e81675e8635c6b101481d561a97))
+- Preview Tabler icons in the mobile app ([#8109](https://github.com/block/buzz/pull/8109)) ([`bbcbd7ce139ccd24b39eb13df85bd294346a609c`](https://github.com/block/buzz/commit/bbcbd7ce139ccd24b39eb13df85bd294346a609c))
+- fix(deletion): give the scheduled drain the cold-start DB connector ([#8146](https://github.com/block/buzz/pull/8146)) ([`c6340a45a072c1793280cdcaec793d4a5dd82d97`](https://github.com/block/buzz/commit/c6340a45a072c1793280cdcaec793d4a5dd82d97))
+- refactor(schema): fan desired-state schema out to one file per table ([#8131](https://github.com/block/buzz/pull/8131)) ([`745501962e68041b3aee5c83fd3ea3bf5a496dbc`](https://github.com/block/buzz/commit/745501962e68041b3aee5c83fd3ea3bf5a496dbc))
+- refactor(db): type-level admitted event-write transactions (AdmittedTx) ([#8130](https://github.com/block/buzz/pull/8130)) ([`f8bf2c529cdf2c193ad0be6cf333def124d182f2`](https://github.com/block/buzz/commit/f8bf2c529cdf2c193ad0be6cf333def124d182f2))
+- fix(mobile): tolerate unrelated NIP-11 relay metadata ([#8160](https://github.com/block/buzz/pull/8160)) ([`70d2ca7760f5f6d5217e73d4921555bb3ce0c0e8`](https://github.com/block/buzz/commit/70d2ca7760f5f6d5217e73d4921555bb3ce0c0e8))
+- feat(admin): add community archive commands ([#7107](https://github.com/block/buzz/pull/7107)) ([`1972b7d256a5d0bb90eea6ef78e93d6b55bb1a12`](https://github.com/block/buzz/commit/1972b7d256a5d0bb90eea6ef78e93d6b55bb1a12))
+- feat(relay): add community reads to the admin API ([#8011](https://github.com/block/buzz/pull/8011)) ([`032198ce43680947c288bfd219d6a9b81d882348`](https://github.com/block/buzz/commit/032198ce43680947c288bfd219d6a9b81d882348))
+- fix(ios): use the shared glass capsule for thread titles ([#8150](https://github.com/block/buzz/pull/8150)) ([`f260ad7f957ab0d4e491cc75bffefce321ee9430`](https://github.com/block/buzz/commit/f260ad7f957ab0d4e491cc75bffefce321ee9430))
+- perf(relay): bound fleet usage metrics collection ([#7176](https://github.com/block/buzz/pull/7176)) ([`6d07a291376477942b70ba44489a47c9f6bfe006`](https://github.com/block/buzz/commit/6d07a291376477942b70ba44489a47c9f6bfe006))
+- fix(ios): let channel titles use available navigation space ([#8137](https://github.com/block/buzz/pull/8137)) ([`c96d707f6efd359e6cfdc34bd93c8b5fb36f1d5d`](https://github.com/block/buzz/commit/c96d707f6efd359e6cfdc34bd93c8b5fb36f1d5d))
+- buzz-db: purge retention-free deletions in the app and index mentions in the event transaction ([#8128](https://github.com/block/buzz/pull/8128)) ([`da651ad6726154ff1fe314fc64462031970f1106`](https://github.com/block/buzz/commit/da651ad6726154ff1fe314fc64462031970f1106))
+- feat(relay): time post-metrics-bind startup steps ([#8132](https://github.com/block/buzz/pull/8132)) ([`e097c42996c9a634209fd46df86998ee4a71ea48`](https://github.com/block/buzz/commit/e097c42996c9a634209fd46df86998ee4a71ea48))
+- release: push gateway chart 0.3.5 ([#8141](https://github.com/block/buzz/pull/8141)) ([`bd1ff00e487d473bb60691f023a360d4d89e3079`](https://github.com/block/buzz/commit/bd1ff00e487d473bb60691f023a360d4d89e3079))
+- feat(push): support Deployment metadata annotations ([#8136](https://github.com/block/buzz/pull/8136)) ([`9f5a25a41ed292576e27be59f902270e63636eaf`](https://github.com/block/buzz/commit/9f5a25a41ed292576e27be59f902270e63636eaf))
+- fix(buzz-pair): install rustls ring CryptoProvider before WSS ([#7998](https://github.com/block/buzz/pull/7998)) ([`b9e851d7be0af4f7f13294a8cb41de257f0dcf12`](https://github.com/block/buzz/commit/b9e851d7be0af4f7f13294a8cb41de257f0dcf12))
+- fix(buzz-acp): bound sibling-gate lookup failures instead of caching them ([#7216](https://github.com/block/buzz/pull/7216)) ([`003770cb7961adb8dd4905823dfe76dfcf5e07c7`](https://github.com/block/buzz/commit/003770cb7961adb8dd4905823dfe76dfcf5e07c7))
+- feat(relay): private read-state accessory API ([#7906](https://github.com/block/buzz/pull/7906)) ([`1a2ddf9eaa87031a0d49ca1d882a46b5b89beb8d`](https://github.com/block/buzz/commit/1a2ddf9eaa87031a0d49ca1d882a46b5b89beb8d))
+- fix(acp): keep agent-to-agent thread replies in the thread ([#8124](https://github.com/block/buzz/pull/8124)) ([`46dcc01873aae7ef926c2c9be7c5d360f296ac94`](https://github.com/block/buzz/commit/46dcc01873aae7ef926c2c9be7c5d360f296ac94))
+- release: push gateway chart 0.3.4 ([#8126](https://github.com/block/buzz/pull/8126)) ([`c6dd587e2ae3ee7c0abb15a93437edf1ecb52860`](https://github.com/block/buzz/commit/c6dd587e2ae3ee7c0abb15a93437edf1ecb52860))
+- feat(push): support platform-managed gateway runtime pods ([#8113](https://github.com/block/buzz/pull/8113)) ([`73a2a05c973bb97593f2d456c23a2ccdfe1a7bec`](https://github.com/block/buzz/commit/73a2a05c973bb97593f2d456c23a2ccdfe1a7bec))
+
+[Compare desktop-v0.5.27...desktop-v0.5.28](https://github.com/block/buzz/compare/desktop-v0.5.27...desktop-v0.5.28)
+
 ## v0.5.27
 
 ### Desktop and shared changes
