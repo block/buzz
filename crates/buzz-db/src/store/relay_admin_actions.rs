@@ -143,7 +143,12 @@ pub async fn resolve_report_decision_atomic(
     channel_id: Option<Uuid>,
     reason: Option<&str>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     // CAS: open → terminal. The update count tells us whether the report was open.
     let updated = sqlx::query(
@@ -157,7 +162,7 @@ pub async fn resolve_report_decision_atomic(
     .bind(report_id)
     .bind(terminal_status)
     .bind(actor_pubkey)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if updated.rows_affected() == 0 {
@@ -182,7 +187,7 @@ pub async fn resolve_report_decision_atomic(
     .bind(channel_id)
     .bind(reason)
     .bind(actor_authority)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -221,7 +226,12 @@ pub async fn claim_report(
     target_event_id: Option<&[u8]>,
     channel_id: Option<Uuid>,
 ) -> Result<ClaimResult> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     // Lock the report row to serialize concurrent claims on the same report.
     let report_row = sqlx::query(
@@ -234,7 +244,7 @@ pub async fn claim_report(
     )
     .bind(community_id.as_uuid())
     .bind(report_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     let Some(report_row) = report_row else {
@@ -258,7 +268,7 @@ pub async fn claim_report(
         .bind(community_id.as_uuid())
         .bind(report_id)
         .bind(request_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(tx.conn())
         .await?;
 
         if let Some(row) = existing {
@@ -296,7 +306,7 @@ pub async fn claim_report(
     .bind(timeout_until)
     .bind(target_pubkey)
     .bind(channel_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     let action_id: Uuid = action_row.try_get("id")?;
@@ -318,7 +328,7 @@ pub async fn claim_report(
     .bind(channel_id)
     .bind(reason)
     .bind(actor_authority)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     // CAS: set report to processing with active_action_id.
@@ -332,7 +342,7 @@ pub async fn claim_report(
     .bind(community_id.as_uuid())
     .bind(report_id)
     .bind(action_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if updated.rows_affected() == 0 {
@@ -457,7 +467,12 @@ pub async fn execute_ban_with_marker(
     actor_pubkey: &[u8],
     reason: Option<&str>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     // Verify lease ownership first — abort without touching domain rows if the
     // lease is already gone. This prevents the commit entirely on a stale worker.
@@ -474,7 +489,7 @@ pub async fn execute_ban_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     if !owned {
@@ -488,7 +503,7 @@ pub async fn execute_ban_with_marker(
     // under the lock, not before it.
     sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
         .bind(action_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(tx.conn())
         .await?;
 
     sqlx::query(
@@ -505,7 +520,7 @@ pub async fn execute_ban_with_marker(
     .bind(target_pubkey)
     .bind(actor_pubkey)
     .bind(reason)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     let marker = sqlx::query(
@@ -521,7 +536,7 @@ pub async fn execute_ban_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if marker.rows_affected() == 0 {
@@ -548,7 +563,12 @@ pub async fn execute_timeout_with_marker(
     until: DateTime<Utc>,
     reason: Option<&str>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     let owned: bool = sqlx::query_scalar(
         r#"
@@ -563,7 +583,7 @@ pub async fn execute_timeout_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     if !owned {
@@ -574,7 +594,7 @@ pub async fn execute_timeout_with_marker(
     // Acquire the action-row lock before evaluating the wall-clock expiry check.
     sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
         .bind(action_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(tx.conn())
         .await?;
 
     sqlx::query(
@@ -593,7 +613,7 @@ pub async fn execute_timeout_with_marker(
     .bind(until)
     .bind(actor_pubkey)
     .bind(reason)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     let marker = sqlx::query(
@@ -609,7 +629,7 @@ pub async fn execute_timeout_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if marker.rows_affected() == 0 {
@@ -648,7 +668,12 @@ pub async fn execute_kick_with_marker(
     target_pubkey: &[u8],
     actor_pubkey: &[u8],
 ) -> Result<KickWithMarkerResult> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     let owned: bool = sqlx::query_scalar(
         r#"
@@ -663,7 +688,7 @@ pub async fn execute_kick_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     if !owned {
@@ -676,7 +701,7 @@ pub async fn execute_kick_with_marker(
     // Acquire the action-row lock before evaluating the wall-clock expiry check.
     sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
         .bind(action_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(tx.conn())
         .await?;
 
     let kick = sqlx::query(
@@ -690,7 +715,7 @@ pub async fn execute_kick_with_marker(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(target_pubkey)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if kick.rows_affected() == 0 {
@@ -711,7 +736,7 @@ pub async fn execute_kick_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if marker.rows_affected() == 0 {
@@ -855,7 +880,12 @@ pub async fn finalize_success(
     reason: Option<&str>,
     timeout_until: Option<DateTime<Utc>>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     // Require step_marker = 'mutation_committed' to prevent premature finalization.
     let updated_action = sqlx::query(
@@ -866,7 +896,7 @@ pub async fn finalize_success(
         "#,
     )
     .bind(action_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if updated_action.rows_affected() == 0 {
@@ -893,7 +923,7 @@ pub async fn finalize_success(
         .bind(terminal_status)
         .bind(actor_pubkey)
         .bind(action_id)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         if updated_report.rows_affected() == 0 {
@@ -930,7 +960,7 @@ pub async fn finalize_success(
             .bind(action_id)
             .bind(payload)
             .bind(format!("tombstone:{action_str}"))
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
         }
     }
@@ -953,7 +983,7 @@ pub async fn finalize_success(
             .bind(action_id)
             .bind(payload)
             .bind(format!("system_message:{action_str}"))
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
         }
     }
@@ -975,7 +1005,7 @@ pub async fn finalize_success(
         .bind(action_id)
         .bind(notice_payload)
         .bind(format!("reporter_notice:{action_str}"))
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -1024,7 +1054,7 @@ pub async fn finalize_success(
         .bind(action_id)
         .bind(affected_payload)
         .bind(format!("affected_user_notice:{action_str}"))
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -1124,7 +1154,12 @@ pub async fn cancel_action(
     report_id: Uuid,
     cancelled_by: &[u8],
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     // Cancel only a pre-mutation `failed` action that BELONGS to the path
     // report and community. Fencing on report_id + report_community_id is what
@@ -1146,7 +1181,7 @@ pub async fn cancel_action(
     .bind(report_id)
     .bind(community_id.as_uuid())
     .bind(cancelled_by)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if updated.rows_affected() != 1 {
@@ -1171,7 +1206,7 @@ pub async fn cancel_action(
     .bind(community_id.as_uuid())
     .bind(report_id)
     .bind(action_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if reopened.rows_affected() != 1 {
@@ -1219,7 +1254,12 @@ pub async fn reopen_report(
     actor_role: &str,
     reason: Option<&str>,
 ) -> Result<ReopenResult> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     // Lock the report row to serialize concurrent reopen/resolve on it.
     let report_row = sqlx::query(
@@ -1232,7 +1272,7 @@ pub async fn reopen_report(
     )
     .bind(community_id.as_uuid())
     .bind(report_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     let Some(report_row) = report_row else {
@@ -1252,7 +1292,7 @@ pub async fn reopen_report(
     .bind(community_id.as_uuid())
     .bind(report_id)
     .bind(request_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     if existing.is_some() {
@@ -1280,7 +1320,7 @@ pub async fn reopen_report(
     )
     .bind(community_id.as_uuid())
     .bind(report_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     // Durable audit row. Inserted as 'succeeded' so the recovery worker never
@@ -1299,7 +1339,7 @@ pub async fn reopen_report(
     .bind(actor_pubkey)
     .bind(actor_role)
     .bind(reason)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -1643,6 +1683,12 @@ pub async fn deploy_kick_member(
     target_pubkey: &[u8],
     actor_pubkey: &[u8],
 ) -> Result<KickResult> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     // Use a direct UPDATE to avoid the tenant ownership check in channel::remove_member.
     // This is the deployment-authority primitive: no actor role check.
     let result = sqlx::query(
@@ -1656,8 +1702,9 @@ pub async fn deploy_kick_member(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(target_pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     if result.rows_affected() > 0 {
         Ok(KickResult::Removed)
@@ -1765,7 +1812,12 @@ pub async fn claim_direct_action(
     pool: &PgPool,
     input: &DirectActionInput<'_>,
 ) -> Result<DirectClaim> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        input.community_id,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let inserted = sqlx::query(
         r#"
         INSERT INTO relay_admin_actions (
@@ -1788,7 +1840,7 @@ pub async fn claim_direct_action(
     .bind(input.target_pubkey)
     .bind(input.target_event_id)
     .bind(input.channel_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     let Some(row) = inserted else {
@@ -1818,7 +1870,7 @@ pub async fn claim_direct_action(
     .bind(input.channel_id)
     .bind(input.reason)
     .bind(input.actor_authority)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
     let rec = row_to_action(row)?;
     tx.commit().await?;

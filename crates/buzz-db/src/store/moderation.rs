@@ -188,6 +188,12 @@ pub async fn insert_report(
     community: CommunityId,
     report: NewReport<'_>,
 ) -> Result<Uuid> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let (target_kind, target_event_id, target_pubkey, target_blob_sha256) = match &report.target {
         ReportTarget::Event(id) => ("event", Some(id.as_slice()), None, None),
         ReportTarget::Pubkey(pubkey) => ("pubkey", None, Some(pubkey.as_slice()), None),
@@ -223,8 +229,9 @@ pub async fn insert_report(
     .bind(report.report_type)
     .bind(report.note)
     .bind(initial_status)
-    .fetch_one(pool)
+    .fetch_one(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(row.try_get("id")?)
 }
@@ -313,6 +320,12 @@ pub async fn resolve_report(
     resolved_by: &[u8],
     action_id: Option<Uuid>,
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE moderation_reports
@@ -325,8 +338,9 @@ pub async fn resolve_report(
     .bind(status)
     .bind(resolved_by)
     .bind(action_id)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -340,6 +354,12 @@ pub async fn ban_member(
     reason: Option<&str>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO community_bans (
@@ -358,8 +378,9 @@ pub async fn ban_member(
     .bind(expires_at)
     .bind(reason)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -371,6 +392,12 @@ pub async fn unban_member(
     pubkey: &[u8],
     actor: &[u8],
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE community_bans
@@ -383,8 +410,9 @@ pub async fn unban_member(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -404,7 +432,12 @@ pub async fn unban_member_with_audit(
     actor: &[u8],
     actor_authority: &str,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     let result = sqlx::query(
         r#"
@@ -418,7 +451,7 @@ pub async fn unban_member_with_audit(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() == 0 {
@@ -438,7 +471,7 @@ pub async fn unban_member_with_audit(
     .bind(actor)
     .bind(pubkey)
     .bind(actor_authority)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -456,7 +489,12 @@ pub async fn untimeout_member_with_audit(
     actor: &[u8],
     actor_authority: &str,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
 
     let result = sqlx::query(
         r#"
@@ -469,7 +507,7 @@ pub async fn untimeout_member_with_audit(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() == 0 {
@@ -488,7 +526,7 @@ pub async fn untimeout_member_with_audit(
     .bind(actor)
     .bind(pubkey)
     .bind(actor_authority)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -504,6 +542,12 @@ pub async fn timeout_member(
     muted_until: DateTime<Utc>,
     reason: Option<&str>,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO community_bans (
@@ -521,8 +565,9 @@ pub async fn timeout_member(
     .bind(muted_until)
     .bind(reason)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -534,6 +579,12 @@ pub async fn untimeout_member(
     pubkey: &[u8],
     actor: &[u8],
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE community_bans
@@ -545,8 +596,9 @@ pub async fn untimeout_member(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(actor)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -704,6 +756,12 @@ pub async fn insert_action(
     community: CommunityId,
     action: NewAction<'_>,
 ) -> Result<Uuid> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         INSERT INTO moderation_actions (
@@ -725,8 +783,9 @@ pub async fn insert_action(
     .bind(action.private_reason)
     .bind(action.matched_principal)
     .bind(action.actor_authority.unwrap_or("community"))
-    .fetch_one(pool)
+    .fetch_one(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(row.try_get("id")?)
 }

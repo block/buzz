@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
-use futures_util::FutureExt as _;
-use sqlx::{Acquire, PgPool, Row};
+use sqlx::{PgPool, Row};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -17,16 +16,14 @@ use crate::{
 /// The `created_at` stamped on a new entry.
 ///
 /// Reduced to the precision Postgres round-trips before it is hashed — see
-/// [`to_storage_precision`]. Split out from [`AuditService::log_inner`] so the
+/// [`to_storage_precision`]. Split out from [`AuditService::log`] so the
 /// invariant is testable without a database.
 fn log_timestamp() -> DateTime<Utc> {
     to_storage_precision(Utc::now())
 }
 
-/// Per-community advisory lock key. Derived in Postgres from the community UUID
-/// so two communities never serialize each other's audit writes (which would be
-/// both a throughput bottleneck and a cross-tenant timing oracle). The lock is
-/// taken with `pg_advisory_lock(hashtextextended(...))` — see [`AuditService::log`].
+/// Per-community audit-chain advisory lock key. Admission takes the community
+/// deletion lock first; this key then serializes appends within that community.
 const AUDIT_LOCK_NAMESPACE: &str = "buzz_audit:";
 
 /// Append-only, per-community hash-chain audit log backed by Postgres.
@@ -47,49 +44,23 @@ impl AuditService {
 
     /// Append a new entry to the calling community's chain.
     ///
-    /// Serialized per-community via `pg_advisory_lock`. Postgres advisory locks
-    /// are session-scoped, so we acquire before the transaction and release
-    /// after commit (or on any error path).
+    /// Community admission precedes the transaction-scoped audit-chain lock.
+    /// Both locks are released on commit or rollback, including a dropped future.
     #[datastore_span(
         name = "audit_log",
         system = "postgresql",
         fields(action = %entry.action)
     )]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
-        let mut conn = self.pool.acquire().await?;
-
-        // Per-community advisory lock: hash the namespaced community id to an
-        // i64 lock key inside Postgres. Communities lock independently.
-        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", entry.community_id);
-        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
-            .bind(&lock_key)
-            .execute(&mut *conn)
+        let mut tx = self.pool.begin().await?;
+        buzz_db::deletion::DeletionStore::new(self.pool.clone())
+            .guard_transaction(&mut tx, entry.community_id)
             .await?;
-
-        // Run the chain append and release the lock regardless of outcome.
-        // catch_unwind so a panic still releases the lock before the connection
-        // returns to the pool.
-        let result = std::panic::AssertUnwindSafe(self.log_inner(&mut conn, entry))
-            .catch_unwind()
-            .await;
-
-        let _ = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", entry.community_id);
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(&lock_key)
-            .execute(&mut *conn)
-            .await;
-
-        match result {
-            Ok(inner_result) => inner_result,
-            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
-        }
-    }
-
-    async fn log_inner(
-        &self,
-        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
-        entry: NewAuditEntry,
-    ) -> Result<AuditEntry, AuditError> {
-        let mut tx = conn.begin().await?;
+            .execute(&mut *tx)
+            .await?;
 
         // The stored row keys on the raw UUID; the typed `CommunityId` on the
         // input is the provenance fence, dereferenced here at the DB boundary.
@@ -319,6 +290,58 @@ mod postgres_tests {
             .await
             .expect("insert test community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn audit_append_requires_application_admission_with_triggers_bypassed() {
+        let _g = db_lock().lock().await;
+        let url = std::env::var("DATABASE_URL").expect("Postgres lane must provide DATABASE_URL");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect test database");
+        let active = make_community(&pool).await;
+        for state in ["quiescing", "fenced"] {
+            let id = make_community(&pool).await;
+            let mut tx = pool.begin().await.expect("begin lifecycle transition");
+            sqlx::query(
+                "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                        set_config('buzz.deletion_fence_generation', \
+                            (SELECT deletion_fence_generation::text FROM communities WHERE id = $2), true)",
+            )
+            .bind(id.to_string())
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .expect("authorize lifecycle transition");
+            sqlx::query("UPDATE communities SET deletion_state = $2 WHERE id = $1")
+                .bind(id)
+                .bind(state)
+                .execute(&mut *tx)
+                .await
+                .expect("set lifecycle state");
+            tx.commit().await.expect("commit lifecycle state");
+
+            sqlx::query("SET session_replication_role = replica")
+                .execute(&pool)
+                .await
+                .expect("disable ordinary triggers");
+            let error = AuditService::new(pool.clone())
+                .log(new_entry(id, AuditAction::EventCreated))
+                .await
+                .expect_err("fenced audit append must reject before chain lock");
+            assert!(
+                matches!(error, AuditError::Admission(buzz_db::DbError::AccessDenied(message)) if message.contains("write-fenced")),
+                "expected application admission failure"
+            );
+        }
+        let entry = AuditService::new(pool.clone())
+            .log(new_entry(active, AuditAction::EventCreated))
+            .await
+            .expect("active audit append succeeds");
+        assert_eq!(entry.seq, 1);
     }
 
     fn new_entry(community_id: Uuid, action: AuditAction) -> NewAuditEntry {

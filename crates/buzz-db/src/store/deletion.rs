@@ -806,7 +806,7 @@ impl Db {
 
 impl DeletionStore {
     /// Construct from the writer pool used by [`crate::Db`].
-    pub(crate) fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 

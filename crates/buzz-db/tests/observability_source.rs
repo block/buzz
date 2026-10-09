@@ -207,48 +207,47 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(!thread_metadata.contains("fetch_optional(pool)"));
 
     let channel = include_str!("../src/store/channel.rs");
-    assert!(channel.contains("async fn begin_event_write_transaction("));
-    assert!(channel.contains("async fn acquire_event_write_connection("));
+    assert!(channel.contains("begin_community_write_transaction("));
     for (start, end, expected) in [
         (
             "pub async fn create_channel(\n",
             "/// Creates a channel with a client-supplied UUID",
-            "begin_event_write_transaction(pool)",
+            "begin_community_write_transaction(",
         ),
         (
             "pub async fn create_channel_with_id(\n",
             "/// Fetches a channel record by `(community_id, id)`",
-            "begin_event_write_transaction(pool)",
+            "begin_community_write_transaction(",
         ),
         (
             "pub async fn update_channel(\n",
             "/// Sets the topic for a channel",
-            "begin_event_write_transaction(pool)",
+            "begin_community_write_transaction(",
         ),
         (
             "pub async fn set_topic(\n",
             "/// Sets the purpose for a channel",
-            "acquire_event_write_connection(pool)",
+            "begin_community_write_transaction(",
         ),
         (
             "pub async fn set_purpose(\n",
             "/// Archives a channel",
-            "acquire_event_write_connection(pool)",
+            "begin_community_write_transaction(",
         ),
         (
             "pub async fn archive_channel(\n",
             "/// Unarchives a channel",
-            "acquire_event_write_connection(pool)",
+            "begin_community_write_transaction(",
         ),
         (
             "pub async fn unarchive_channel(\n",
             "/// Soft-delete a channel",
-            "acquire_event_write_connection(pool)",
+            "begin_community_write_transaction(",
         ),
         (
             "pub async fn soft_delete_channel(\n",
             "/// Archive ephemeral channels",
-            "acquire_event_write_connection(pool)",
+            "begin_community_write_transaction(",
         ),
     ] {
         let function = channel
@@ -903,11 +902,13 @@ const GUARDED_TABLE_WRITE_MARKERS: [&str; 9] = [
 ];
 
 const COMMUNITY_CHOKEPOINT_MARKER: &str = "begin_community_event_write_transaction(";
+const GENERAL_COMMUNITY_CHOKEPOINT_MARKER: &str = "begin_community_write_transaction(";
 const COMMUNITY_CHOKEPOINT_LEGACY_MARKER: &str =
     "begin_community_event_write_transaction_with_legacy_metrics(";
 
 fn has_any_tenant_local_chokepoint(source: &str) -> bool {
     source.contains(COMMUNITY_CHOKEPOINT_MARKER)
+        || source.contains(GENERAL_COMMUNITY_CHOKEPOINT_MARKER)
         || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
 }
 

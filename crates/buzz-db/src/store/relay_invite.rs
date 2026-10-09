@@ -116,15 +116,12 @@ pub async fn mint_relay_invite(
     // community-scoped database write. The trigger remains the final backstop,
     // but this typed guard keeps a quiescing community from surfacing as an
     // opaque SQLSTATE/HTTP 500 at the API boundary.
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-    crate::deletion::DeletionStore::new(pool.clone())
-        .guard_transaction(&mut tx, community)
-        .await?;
     let row = sqlx::query(
         "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by) \
          VALUES ($1, $2, $3, $4, $5) \
@@ -135,7 +132,7 @@ pub async fn mint_relay_invite(
     .bind(max_uses)
     .bind(expires_at)
     .bind(created_by)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
     tx.commit().await?;
 
@@ -226,12 +223,12 @@ pub async fn claim_relay_invite(
     claimer_pubkey: &str,
     policy_version: Option<&str>,
 ) -> Result<ClaimOutcome> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
     let row = sqlx::query(
@@ -242,7 +239,7 @@ pub async fn claim_relay_invite(
     )
     .bind(community.as_uuid())
     .bind(token_hash)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     // 3. No matching invite.
@@ -279,7 +276,7 @@ pub async fn claim_relay_invite(
         sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
             .bind(community.as_uuid())
             .bind(claimer_pubkey)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(tx.conn())
             .await?;
 
     if existing.is_some() {
@@ -292,7 +289,7 @@ pub async fn claim_relay_invite(
             .bind(community.as_uuid())
             .bind(claimer_pubkey)
             .bind(version)
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
         }
         tx.commit().await?;
@@ -334,7 +331,7 @@ pub async fn claim_relay_invite(
     )
     .bind(community.as_uuid())
     .bind(claimer_pubkey)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .rows_affected()
         > 0;
@@ -349,7 +346,7 @@ pub async fn claim_relay_invite(
         .bind(community.as_uuid())
         .bind(claimer_pubkey)
         .bind(version)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -374,7 +371,7 @@ pub async fn claim_relay_invite(
         .bind(new_use_count)
         .bind(community.as_uuid())
         .bind(invite_id)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
     // 11. Commit.

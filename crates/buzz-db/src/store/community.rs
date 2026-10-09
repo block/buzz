@@ -563,6 +563,12 @@ impl Db {
                 return Ok(CreateCommunityWithOwnerResult::LimitReached);
             }
 
+            // The community row was just created in this transaction. Admit
+            // its first tenant row before inserting the initial owner.
+            self.deletion_store()
+                .guard_transaction(&mut tx, CommunityId::from_uuid(id))
+                .await?;
+
             sqlx::query(
                 "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
             )

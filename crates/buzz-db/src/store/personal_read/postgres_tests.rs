@@ -258,7 +258,13 @@ async fn personal_read_intent_does_not_lock_shared_conversation_rows() {
         .execute(&pool)
         .await
         .unwrap();
-    let mut held = pool.begin().await.unwrap();
+    let mut held = crate::begin_community_write_transaction(
+        &pool,
+        community,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await
+    .unwrap();
     super::writes::lock_account(&mut held, community, &actor.public_key().to_bytes())
         .await
         .unwrap();
