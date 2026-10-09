@@ -6068,7 +6068,7 @@ pub(crate) mod postgres_tests {
     }
 
     // All accessory methods must preserve the shared admission wire contract.
-    // Keep each route independent so the unfixed adapter fails all three tests.
+    // Keep each route independent so the unfixed adapter fails both tests.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn nip_fi_buzz_v1_sidebar_wire_contract() {
@@ -6077,26 +6077,9 @@ pub(crate) mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_fi_buzz_v1_contexts_wire_contract() {
-        let targets = serde_json::json!([{"target":{"channel_id":uuid::Uuid::new_v4()}}]);
-        let encoded: String = targets
-            .to_string()
-            .bytes()
-            .map(|b| format!("%{b:02X}"))
-            .collect();
-        buzz_v1_wire_contract(
-            "GET",
-            &format!("/buzz/v1/me/read-state?targets={encoded}"),
-            b"",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn nip_fi_buzz_v1_write_wire_contract() {
         let body = serde_json::to_vec(&serde_json::json!({"intents":[{
-            "type":"mark_channel_read", "channel_id":uuid::Uuid::new_v4(),
+            "type":"mark_through", "target":{"channel_id":uuid::Uuid::new_v4()},
             "message_id":"ab".repeat(32)
         }]}))
         .expect("serialize intent");
@@ -6145,25 +6128,13 @@ pub(crate) mod postgres_tests {
         assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("control JSON");
         if method == "POST" {
+            // A blocked intent applies to no channel, so no row is refreshed.
             assert_eq!(
                 body.as_ref(),
-                br#"{"outcomes":[{"status":"blocked"}],"projection_status":"not_requested"}"#
+                br#"{"channels":[],"outcomes":[{"status":"blocked"}]}"#
             );
         } else {
-            assert!(value["account"]["cutoff_ms"].is_i64());
-            assert_eq!(
-                value["account"]["retention_seconds"],
-                state.config.buzz_v1_retention_seconds
-            );
-            if path.contains("sidebar") {
-                assert_eq!(value["channels"], serde_json::json!([]));
-                assert_eq!(value["next_cursor"], serde_json::Value::Null);
-            } else {
-                assert_eq!(
-                    value["contexts"],
-                    serde_json::json!([{"status":"unavailable"}])
-                );
-            }
+            assert_eq!(value, serde_json::json!({"channels":[],"next_cursor":null}));
         }
 
         for case in [

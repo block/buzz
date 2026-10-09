@@ -12,8 +12,7 @@ application/nostr+json`, or `GET /info`) includes `buzz_v1` only when enabled:
 
 ```json
 {"buzz_v1":{"version":1,"base_path":"/buzz/v1","retention_seconds":2592000,
-"max_channels":20,"max_intents":100,"max_contexts":20,"max_context_messages":100,
-"max_thread_summaries":5,"eligible_kinds":[9,40002,45001,45003]}}
+"max_channels":20,"max_intents":100,"eligible_kinds":[9,40002,45001,45003]}}
 ```
 
 Use the requesting origin plus this relative prefix. Discovery is a configured
@@ -50,14 +49,9 @@ Unknown request fields are rejected. Never turn a transport failure into read.
 ## Sidebar
 
 `GET /buzz/v1/me/sidebar?limit=20&cursor=<exclusive-channel-uuid>` returns
-`account`, `channels`, and `next_cursor`. Omit the cursor on the first request.
-Each channel includes identity/name/type, archived and hidden flags, `unread`,
-`attention`, `latest_message_id` (the last eligible message to arrive: the
-row's read anchor, see [Order](#order)), `latest_message_at` (the greatest
-author time among eligible messages, in seconds: display activity, not
-necessarily that message's own time; null exactly when the ID is null),
-`latest_message_complete`, and `threads`. Only joined, nondeleted channels are
-listed. Hidden/archived presentation remains client-owned. Each page has a
+`channels` and `next_cursor`. Omit the cursor on the first request. Only
+joined, nondeleted channels are listed; names, types, archived and hidden state
+come from Nostr channel metadata, not this API. Each page has a
 writer-consistent snapshot; separate pages do not share a snapshot, and an
 unfinished traversal cannot prove channel removal.
 
@@ -67,65 +61,63 @@ combined with `limit` or `cursor`. A requested ID absent from the result was not
 a joined, nondeleted, accessible sidebar row at that snapshot: remove its row.
 Absence says nothing else about access to an open channel.
 
-`threads` lists unread threads in the row, newest unread reply first:
-
 ```json
-{"items":[{"root_id":"<64-hex>","unread":{"status":"exact","value":2},
-  "latest_reply_id":"<64-hex>","latest_reply_at":1700000000}],"complete":true}
+{"channels":[{"channel_id":"<uuid>","unread":true,"mentions":1,
+  "read_through_id":"<64-hex>","latest_id":"<64-hex>",
+  "threads":[{"root_id":"<64-hex>","unread":true,"mentions":2,
+    "read_through_id":null,"latest_id":"<64-hex>"}]}],
+ "next_cursor":null}
 ```
 
-Items are canonical roots with unread replies that count (see below), ordered
-by `latest_reply_at` descending, then `root_id`; at most 5. `latest_reply_id` is
-the last such reply to arrive (equal arrivals prefer the smaller ID), so a
-thread `mark_through` at it reads every reply listed; `latest_reply_at` is its
-author time. Replies that do not count are filtered out before the count, the
-latest reply and the cap are chosen. `unread` uses the row's
-definition; every counted reply is also attention, so items carry no separate
-attention count. `complete=true` means the unread window was exhausted, no
-evidence had unresolved ancestry, unusable tags or undecided membership, and no
-thread was omitted; then item unread counts sum to the row's unread replies.
-Otherwise the list is a cut of observed evidence and counts may be lower bounds
-or unknown. No message bytes are included.
+A channel's timeline and each of its threads keep independent read positions;
+marking one never moves another.
 
-Counts have exactly three representations:
+| Field | Channel row | Thread row |
+|---|---|---|
+| `unread` | an unread top-level message counts | an unread reply counts |
+| `mentions` | unread top-level messages directed at you | unread replies that count |
+| `read_through_id` | the anchor of the timeline's frontier, or null | the anchor of the thread's frontier, or null |
+| `latest_id` | the last eligible top-level message to arrive, or null | the last counted unread reply to arrive |
 
-```json
-[{"status":"exact","value":0},{"status":"at_least","value":7},{"status":"unknown"}]
-```
+A thread reply never makes the channel row unread and never becomes its
+`latest_id`, including a reply carrying `broadcast=1`: it shows on its thread
+row. `latest_id` is the anchor that reads its scope: "mark channel read" sends a
+channel `mark_through` at the channel's `latest_id`, plus one thread
+`mark_through` at each listed thread's `latest_id` to clear those too. The
+channel `latest_id` counts any author and ignores read progress. Null means the
+bounded scans found no top-level message, not that the channel is empty.
+`read_through_id` may name a message that has since been deleted.
 
-Only exact zero proves absence. Unknown has no numeric value. A message is
-eligible when it is non-own, nondeleted, of the advertised `eligible_kinds` and
-inside the horizon. The same kinds alone define latest activity, so an edit,
-reaction or diff (40008) neither makes a channel unread nor moves it. Classify
-live arrivals with the advertised set, not a client copy.
+`threads` lists threads with unread replies that count, newest unread reply
+first by author time (then `root_id`), at most 25. Threads past the 25th are
+omitted with their mentions, and nothing signals the omission: after marking
+the listed threads read, a refresh can list the next ones. A thread row's
+`unread` is always true in this version. No message bytes are included.
 
-An eligible message beyond the matching context frontier counts as unread for
-the first reason that holds:
+A message is eligible when it is non-own, nondeleted, of the advertised
+`eligible_kinds` and inside the horizon. The same kinds alone define latest
+activity, so an edit, reaction or diff (40008) neither makes a channel unread
+nor moves it. Classify live arrivals with the advertised set, not a client copy.
 
-| `reason` | Holds when |
-|---|---|
-| `direct` | its channel is a DM |
-| `mention` | it tags the actor with `p` |
-| `conversation` | it is a reply, and the actor wrote its direct parent or has a reply to that same parent, in that channel |
-| `broadcast` | it carries `broadcast=1` |
-| null | it is top-level |
+A top-level message is directed at you when its channel is a DM, it tags you
+with `p`, or it carries `broadcast=1`. A reply counts only when it is directed
+in the same way, or it is in one of your conversations: you wrote its direct
+parent or have a reply to that same parent, in that channel. Conversation
+membership uses only your live eligible messages (a deleted parent proves
+nothing; a surviving reply to it still does), looks at the direct parent only
+(owning the root or replying elsewhere in the thread proves nothing), and is
+independent of read progress and retention. This is not Desktop notification
+policy: follows and mutes do not affect these counts.
 
-A reply with no reason does not count: it is not unread and appears in no
-thread list. `unread` counts the messages that count; `attention` is the subset
-with a reason. Conversation membership uses only the actor's live eligible
-messages (a deleted parent proves nothing; a surviving reply to it still does),
-looks at the direct parent only (owning the root or replying elsewhere in the
-thread proves nothing), and is independent of read progress and retention. A
-reply whose membership is undecided is left out, and the row's counts become
-lower bounds or unknown. The sidebar counts a broadcast reply without asking
-which of the two reasons applies. This is not Desktop notification policy:
-follows and mutes do not affect these counts.
+Counts are what the bounded scans could establish, and may undercount. A message
+whose tags are unusable, whose ancestry is unresolved, or whose conversation
+membership is undecided is left out, as are messages beyond the scan bounds
+(see [Bounds](#bounds-and-deployment)).
 
 The unread horizon defaults to 30 days (`BUZZ_V1_RETENTION_SECONDS`) and is
-measured in author time (`created_at`): a message counts while its author time
-is at or after `account.cutoff_ms`. It filters unread/attention, not latest
-activity, event storage or frontier state. Frontiers use a different clock,
-relay arrival (see [Order](#order)). Three consequences:
+measured in author time (`created_at`). It filters unread and mentions, not
+latest activity, event storage or frontier state. Frontiers use a different
+clock, relay arrival (see [Order](#order)). Three consequences:
 
 - A message accepted late with an author time beyond the horizon (an import, a
   backfill, a long-offline sender) is excluded under the current horizon,
@@ -137,33 +129,6 @@ relay arrival (see [Order](#order)). Three consequences:
   frontier, and author time at or after the cutoff.
 
 A later configuration expansion can change counts without having lost progress.
-Latest activity is independent of actor and frontiers. A null latest ID proves
-an empty eligible history only when `latest_message_complete=true`.
-
-## Explicit contexts
-
-`GET /buzz/v1/me/read-state?targets=<URL-encoded-JSON-array>` accepts up to 20
-contexts and 100 total concrete message selectors. It is not event history or a
-global export of frontiers. Example decoded `targets`:
-
-```json
-[{"target":{"channel_id":"<uuid>","root_id":"<64-hex-root>"},
-  "message_ids":["<64-hex-event>"]}]
-```
-
-Omitting `root_id` selects the channel timeline. The result contains `account`
-and one `contexts` entry per request entry, in order. Context status is
-`available` (with `messages`), `unknown`, or `unavailable`. A thread context's
-frontier includes any whole-channel cut. Message status is `read`, `not_counted`,
-`unread` (with `reason`), `unknown`, or `unavailable`. Wrong-context, missing
-and forbidden selectors share unavailable. Status is decided in this order:
-ancestry and context; eligibility (`not_counted` for own, deleted, other kinds
-and outside the horizon); the frontier (`read`, with no membership lookup); then
-the reason. A reply past the frontier with no reason is `not_counted` when it is
-proven outside the actor's conversations and `unknown` when membership is
-undecided. A broadcast reply whose membership is undecided is `unread` with
-reason `broadcast` and may report `conversation` on a later request.
-Conversation bytes must still come from the existing Nostr path.
 
 ## Fixed-operand writes
 
@@ -172,33 +137,30 @@ Conversation bytes must still come from the existing Nostr path.
 ```json
 {"intents":[
  {"type":"mark_through","target":{"channel_id":"<uuid>"},"message_id":"<64-hex-event>"},
- {"type":"mark_through","target":{"channel_id":"<uuid>","root_id":"<64-hex-root>"},"message_id":"<64-hex-event>"},
- {"type":"mark_channel_read","channel_id":"<uuid>","message_id":"<64-hex-event>"}
+ {"type":"mark_through","target":{"channel_id":"<uuid>","root_id":"<64-hex-root>"},"message_id":"<64-hex-event>"}
 ]}
 ```
 
-Each intent commits atomically and returns its own `applied`, `blocked` or
-`invalid` outcome. An ambiguous timeout/storage failure returns
+The response is `{"outcomes":[...],"channels":[...]}`. Each intent commits
+atomically and returns its own `applied`, `blocked` or `invalid` outcome, in
+request order. An ambiguous timeout/storage failure returns
 `{"status":"unknown","retryable":true}`. Earlier committed outcomes survive
-later failures. `projection_status` is `not_requested`; a successful write does
-not assert a client has refreshed. Retry the same operands, never substitute
-latest. Keep pending intent durably on the client until its outcome is resolved.
+later failures. `channels` holds the updated sidebar row of each distinct
+channel with an applied intent, in the sidebar's row shape and ordered by ID;
+a channel you have not joined has no row. Replace those rows rather than
+re-deriving them. `channels` is omitted when the rows could not be read within
+the request's deadline after the writes committed: refresh them with `?channel_ids=`. Retry the same
+operands, never substitute latest. Keep pending intent durably on the client
+until its outcome is resolved.
 
 A mark-through validates a fixed message and advances its context's monotone
-frontier to that message's relay arrival (see [Order](#order)). Channel and
-thread frontiers never inherit in either direction. Opening a view is not
-itself a reading action; client dwell/focus policy determines when to send an
-actual observed anchor. Old or deleted valid anchors may advance a frontier.
-
-`mark_channel_read` is the one whole-channel cut: it advances the channel
-timeline and every thread in that channel, including unlisted ones, through the
-anchor's arrival. The anchor must be an accessible eligible-kind message in
-the channel, top-level or reply, deleted or not; ancestry is not checked. A
-reply is read at or below the greater of its thread frontier and this cut. An
-anchor that no longer exists is `blocked`. `latest_message_id` is the anchor
-that reads the whole row. A null ID with `latest_message_complete=false` does
-not prove empty history; it only leaves the client without an anchor. Thread
-marks and channel `mark_through` never set the cut.
+frontier to that message's relay arrival (see [Order](#order)). A channel
+anchor must be a top-level message; a thread anchor must be the thread's root
+or one of its replies. The frontier records the anchor as `read_through_id`
+when it advances; an anchor that arrived at or before the current frontier
+changes nothing. Opening a view is not itself a reading action; client
+dwell/focus policy determines when to send an actual observed anchor. Old or
+deleted valid anchors may advance a frontier.
 
 ### Order
 
@@ -209,11 +171,11 @@ before the anchor is read, whatever its author time. A message that arrives
 later is unread even when backdated, and a future-dated anchor reads nothing
 that arrives after it.
 
-The order is the relay's and is not exposed: no response carries a frontier,
-and no field lets a client compute what a mark will cover. Send the anchors the
-user actually saw, let the relay take the greatest, and ask a context which
-messages are read. Do not compare author times, IDs or local receipt order to
-drop one pending anchor in favor of another.
+The order is the relay's and is not exposed: a response carries the anchor
+message (`read_through_id`), never its arrival time, and no field lets a client
+compute what a mark will cover. Send the anchors the user actually saw and let
+the relay take the greatest. Do not compare author times, IDs or local receipt
+order to drop one pending anchor in favor of another.
 
 Arrival is the accepting relay process's clock, read just before the insert, at
 microsecond resolution. Three limits follow, none of which strands a badge:
@@ -224,10 +186,11 @@ microsecond resolution. Three limits follow, none of which strands a badge:
   skew.
 - Messages with the identical stamp are read together.
 
-`latest_message_id` is the last message to arrive among those the unread count
-examined: the 4,096 most recent events by author time inside the horizon. So
-marking through it reads everything counted. When the horizon holds no message,
-it is the last to arrive among the channel's 256 most recent events.
+A channel's `latest_id` is the last top-level message to arrive among those the
+unread count examined: the 4,096 most recent events by author time inside the
+horizon. So marking through it reads every top-level message counted. When
+that scan holds no top-level message, it is the last top-level message to
+arrive among the channel's 256 most recent events.
 
 There is no import of earlier client read state. The relay records the
 account's `started_at` at its first applied read intent and never moves it.
@@ -238,40 +201,45 @@ device-local.
 
 ## Bounds and deployment
 
-- 20 sidebar rows, 100 intents, 20 contexts / 100 selectors per request.
-- 64 KiB write body; 16 KiB context URL; 1 MiB serialized API response.
-- 4096 raw events per channel inside the horizon plus one exhaustion sentinel,
-  before eligibility.
-- Latest activity probes 256 events plus a sentinel; long ineligible tails may
-  leave latest incomplete even when unread is exact.
-- Tag documents over 8192 bytes or malformed relevant tags yield uncertainty.
-  Compact boolean facts cross the database boundary, never raw tag payloads.
+- 20 sidebar rows and 100 intents per request; 25 thread rows per channel, so
+  a POST's rows for 100 channels fit the response limit.
+- 64 KiB write body; 1 MiB serialized API response.
+- 4096 raw events per channel inside the horizon, before eligibility.
+- The latest fallback probes 256 events; a long ineligible or reply-only tail
+  can leave `latest_id` null.
+- Tag documents over 8192 bytes or malformed relevant tags leave the message
+  out. Compact boolean facts cross the database boundary, never raw tag
+  payloads.
 - Conversation membership: at most 1024 unique parents per request, with a
   500 ms savepoint budget. The lookup is exact, so its work grows with the
-  replies under each parent. Past either bound a reply is undecided, never
-  absent: counts become lower bounds or unknown and a context reports `unknown`.
-- DB statement/lock deadlines and HTTP read deadlines bound work; writes use a
-  shared eight-second intent-processing deadline after admission. Limits are
+  replies under each parent. Past either bound a reply is undecided and left
+  out.
+- DB statement/lock deadlines and HTTP read deadlines bound work; a write's intents
+  and its row refresh share one eight-second deadline after admission. Limits are
   containment, not a production capacity claim.
 
-Apply migrations 0056 and 0057 (or the equivalent desired schema). 0056
-creates two empty private tables and no index on `events`, and 0057 adds the
-nullable `personal_read_accounts.started_at` column. Both sidebar scans are
+Apply migrations 0056 through 0058 (or the equivalent desired schema). 0056
+creates two empty private tables and no index on `events`, 0057 adds the
+nullable `personal_read_accounts.started_at` column, and 0058 adds the nullable
+`personal_read_frontiers.through_message_id` column and drops
+`threads_through_timestamp`. Both sidebar scans are
 served by the existing `idx_events_community_channel_created`. No new
 per-message ingest write path or stored unread counters are introduced.
 
 Use existing HTTP route/status/latency metrics for `/buzz/v1/me/sidebar` and
-`/buzz/v1/me/read-state`, plus database pool/statement metrics. Inspect exact /
-lower-bound / unknown proportions in controlled acceptance captures; no payload,
+`/buzz/v1/me/read-state`, plus database pool/statement metrics. No payload,
 actor, channel or frontier values should become metric labels. The measured
 local seed is not a DAU/concurrency or p95/p99 production acceptance result.
 
 ## Compatibility and extension rules
 
-Within `/buzz/v1`, clients must ignore unknown response object fields. Existing
-required fields, status variants and their meanings remain stable; additive
-fields do not authorize silently changing `attention` or frontier semantics.
-Breaking changes require an explicitly negotiated contract or a new API version.
+Within `/buzz/v1`, clients must ignore unknown response object fields. The
+shape is stable: existing fields, their types, status variants and what a
+`mark_through` does remain. What the counts include is not yet: which messages
+are unread or directed, which threads are listed, and the bounds may change
+while v1 is pre-release. A client therefore replaces its rows with each
+response rather than reconciling them with its own counts. Breaking shape
+changes require an explicitly negotiated contract or a new API version.
 Requests remain strict: send new parameters or intent types only after the relay
 advertises the corresponding capability. Missing optional data means unsupported
 or not requested, never an empty list, zero count or unchanged revision.

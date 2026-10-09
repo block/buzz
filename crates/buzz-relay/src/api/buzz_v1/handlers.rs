@@ -6,10 +6,12 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
-use buzz_db::personal_read::{ReadIntent, MAX_CHANNELS, MAX_INTENTS};
+use buzz_db::personal_read::{
+    ChannelReadSummary, ReadIntent, SidebarPage, MAX_CHANNELS, MAX_INTENTS,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 /// 1..=MAX_CHANNELS unique UUIDs, comma-separated; anything else is invalid.
@@ -72,24 +74,61 @@ pub(super) async fn sidebar(
             }
         }
         .map_err(|_| Error::unavailable())?;
-        auth::recheck(&state, &headers, &principal).await?;
-        let channels: Vec<_> = page.channels.iter().map(|c| c.channel_id).collect();
-        let memberships = state
-            .db
-            .membership_pairs(
-                principal.tenant.community(),
-                &channels,
-                &[principal.actor.to_bytes().to_vec()],
-            )
-            .await
-            .map_err(|_| Error::unavailable())?;
-        if memberships.len() != channels.len() {
-            return Err(Error::unavailable());
-        }
-        auth::response(page)
+        auth::response(release(&state, &headers, &principal, page).await?)
     })
     .await
     .map_err(|_| Error::unavailable())?
+}
+
+/// Release projected rows only after admission and the actor's membership of
+/// every row are rechecked outside the projection snapshot.
+async fn release(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &auth::Principal,
+    page: SidebarPage,
+) -> Result<SidebarPage, Error> {
+    auth::recheck(state, headers, principal).await?;
+    let channels: Vec<_> = page.channels.iter().map(|c| c.channel_id).collect();
+    let memberships = state
+        .db
+        .membership_pairs(
+            principal.tenant.community(),
+            &channels,
+            &[principal.actor.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(|_| Error::unavailable())?;
+    if memberships.len() != channels.len() {
+        return Err(Error::unavailable());
+    }
+    Ok(page)
+}
+
+/// Updated rows for the channels a batch applied to. A channel the actor has
+/// not joined has no row.
+async fn refreshed(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &auth::Principal,
+    channels: &BTreeSet<Uuid>,
+) -> Result<Vec<ChannelReadSummary>, Error> {
+    let channels: Vec<_> = channels.iter().copied().collect();
+    let mut rows = Vec::with_capacity(channels.len());
+    for chunk in channels.chunks(MAX_CHANNELS) {
+        let page = state
+            .db
+            .personal_read_sidebar_channels(
+                principal.tenant.community(),
+                &principal.actor,
+                state.config.buzz_v1_retention_seconds,
+                chunk,
+            )
+            .await
+            .map_err(|_| Error::unavailable())?;
+        rows.extend(release(state, headers, principal, page).await?.channels);
+    }
+    Ok(rows)
 }
 
 #[derive(Deserialize)]
@@ -114,6 +153,7 @@ pub(super) async fn write(
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     let mut outcomes = Vec::with_capacity(batch.intents.len());
+    let mut applied = BTreeSet::new();
     for item in batch.intents {
         let Ok(intent) = serde_json::from_value::<ReadIntent>(item) else {
             outcomes.push(json!({"status":"invalid"}));
@@ -121,83 +161,27 @@ pub(super) async fn write(
         };
         // A deadline/DB failure after commit is ambiguous, not a false failure.
         // Earlier acknowledged commits survive all later projection/item failures.
-        outcomes.push(
-            tokio::time::timeout_at(
-                deadline,
-                write_intent(&state, &headers, &principal, &intent),
-            )
-            .await
-            .unwrap_or_else(|_| json!({"status":"unknown","retryable":true})),
-        );
+        let outcome = tokio::time::timeout_at(
+            deadline,
+            write_intent(&state, &headers, &principal, &intent),
+        )
+        .await
+        .unwrap_or_else(|_| json!({"status":"unknown","retryable":true}));
+        if outcome["status"] == "applied" {
+            let ReadIntent::MarkThrough { target, .. } = &intent;
+            applied.insert(target.channel_id);
+        }
+        outcomes.push(outcome);
     }
-    auth::response(json!({"outcomes":outcomes,"projection_status":"not_requested"}))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ContextQuery {
-    // JSON array carried as one URL-encoded, signed query parameter.
-    targets: String,
-}
-
-pub(super) async fn contexts(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    OriginalUri(uri): OriginalUri,
-    query: Result<Query<ContextQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Response, Error> {
-    use buzz_db::personal_read::{
-        ContextQuery as Target, ContextState, MAX_CONTEXTS, MAX_CONTEXT_MESSAGES,
-    };
-    tokio::time::timeout(Duration::from_secs(8), async {
-        if uri.to_string().len() > 16 * 1024 {
-            return Err(Error::invalid());
-        }
-        let principal = auth::authorize(&state, &headers, &uri, "GET", None).await?;
-        let Query(query) = query.map_err(|_| Error::invalid())?;
-        let targets: Vec<Target> =
-            serde_json::from_str(&query.targets).map_err(|_| Error::invalid())?;
-        let valid_id = |id: &str| id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit());
-        if targets.is_empty()
-            || targets.len() > MAX_CONTEXTS
-            || targets.iter().map(|t| t.message_ids.len()).sum::<usize>() > MAX_CONTEXT_MESSAGES
-            || targets.iter().any(|t| {
-                t.message_ids.iter().any(|id| !valid_id(id))
-                    || t.target.root_id.as_deref().is_some_and(|id| !valid_id(id))
-            })
-        {
-            return Err(Error::invalid());
-        }
-        let mut page = state
-            .db
-            .personal_read_contexts(
-                principal.tenant.community(),
-                &principal.actor,
-                state.config.buzz_v1_retention_seconds,
-                &targets,
-            )
-            .await
-            .map_err(|_| Error::unavailable())?;
-        auth::recheck(&state, &headers, &principal).await?;
-        let channels: Vec<_> = targets.iter().map(|t| t.target.channel_id).collect();
-        let allowed = state
-            .db
-            .personal_read_accessible_contexts(
-                principal.tenant.community(),
-                &principal.actor,
-                &channels,
-            )
-            .await
-            .map_err(|_| Error::unavailable())?;
-        for (target, result) in targets.iter().zip(&mut page.contexts) {
-            if !allowed.contains(&target.target.channel_id) {
-                *result = ContextState::Unavailable;
-            }
-        }
-        auth::response(page)
-    })
-    .await
-    .map_err(|_| Error::unavailable())?
+    let mut body = json!({ "outcomes": outcomes });
+    // Committed outcomes stand even when their rows cannot be read in the
+    // remaining budget: omit them.
+    if let Ok(Ok(channels)) =
+        tokio::time::timeout_at(deadline, refreshed(&state, &headers, &principal, &applied)).await
+    {
+        body["channels"] = json!(channels);
+    }
+    auth::response(body)
 }
 
 // Preserve earlier committed outcomes while distinguishing a definite denial
@@ -222,5 +206,41 @@ pub(super) async fn write_intent(
     {
         Ok(outcome) => json!(outcome),
         Err(_) => json!({"status":"unknown","retryable":true}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_db::personal_read::{ThreadReadSummary, MAX_THREAD_SUMMARIES};
+
+    /// A POST that applied to `MAX_INTENTS` channels, each with a full thread
+    /// list, must still fit: an oversized body is a 503 that hides committed
+    /// outcomes.
+    #[test]
+    fn largest_write_response_fits_the_response_limit() {
+        let id = || Some("f".repeat(64));
+        let channels: Vec<_> = (0..MAX_INTENTS)
+            .map(|_| ChannelReadSummary {
+                channel_id: Uuid::max(),
+                unread: true,
+                mentions: u32::MAX,
+                read_through_id: id(),
+                latest_id: id(),
+                threads: (0..MAX_THREAD_SUMMARIES)
+                    .map(|_| ThreadReadSummary {
+                        root_id: "f".repeat(64),
+                        unread: true,
+                        mentions: u32::MAX,
+                        read_through_id: id(),
+                        latest_id: "f".repeat(64),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let outcomes = vec![json!({"status":"unknown","retryable":true}); MAX_INTENTS];
+        let body = json!({ "outcomes": outcomes, "channels": channels });
+        let bytes = serde_json::to_vec(&body).unwrap().len();
+        assert!(bytes <= auth::MAX_RESPONSE_BYTES, "{bytes} bytes");
     }
 }
