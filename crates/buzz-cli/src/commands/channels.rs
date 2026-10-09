@@ -109,7 +109,9 @@ pub async fn cmd_list_channels(
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
-        crate::OutputFormat::Json => serde_json::to_string(&channels).unwrap_or_default(),
+        crate::OutputFormat::Json | crate::OutputFormat::Agent => {
+            serde_json::to_string(&channels).unwrap_or_default()
+        }
     };
     println!("{output}");
     Ok(())

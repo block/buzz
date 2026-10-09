@@ -1,30 +1,10 @@
 use std::cmp::Reverse;
 
 use crate::client::{normalize_events, BuzzClient};
+use crate::commands::event_output::format_events;
 use crate::error::CliError;
 
 const VALID_FEED_TYPES: &[&str] = &["mentions", "needs_action", "activity", "agent_activity"];
-
-fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
-    match format {
-        crate::OutputFormat::Compact => {
-            let events: Vec<serde_json::Value> =
-                serde_json::from_str(normalized).unwrap_or_default();
-            let compact: Vec<serde_json::Value> = events
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "id": e.get("id").cloned().unwrap_or_default(),
-                        "content": e.get("content").cloned().unwrap_or_default(),
-                        "created_at": e.get("created_at").cloned().unwrap_or_default(),
-                    })
-                })
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
-        }
-        crate::OutputFormat::Json => normalized.to_string(),
-    }
-}
 
 /// Get activity feed — query events mentioning our pubkey (via p-tag).
 pub async fn cmd_get_feed(
@@ -79,37 +59,5 @@ pub async fn dispatch(
             limit,
             types,
         } => cmd_get_feed(client, since, limit, types.as_deref(), format).await,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_events;
-
-    #[test]
-    fn compact_event_format_remains_the_three_key_contract() {
-        let normalized = serde_json::json!([{
-            "id": "a".repeat(64),
-            "pubkey": "b".repeat(64),
-            "kind": 9,
-            "content": "compact content",
-            "created_at": 1_787_754_972_u64,
-            "tags": [["p", "c".repeat(64)]],
-            "sig": "d".repeat(128),
-        }])
-        .to_string();
-
-        let output: Vec<serde_json::Value> =
-            serde_json::from_str(&format_events(&normalized, &crate::OutputFormat::Compact))
-                .unwrap();
-
-        assert_eq!(
-            output[0],
-            serde_json::json!({
-                "id": "a".repeat(64),
-                "content": "compact content",
-                "created_at": 1_787_754_972_u64,
-            })
-        );
     }
 }
