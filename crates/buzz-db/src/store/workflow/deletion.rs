@@ -155,10 +155,21 @@ async fn delete_workflow_in_transaction(
 }
 
 /// Delete a locked workflow and the rows that hang off it, children first, so
-/// no foreign-key action is needed: approvals (of the workflow or any of its
-/// runs), scheduled fires, then runs. Returns the workflow's `channel_id`.
+/// no foreign-key action is needed: scheduled fires, approvals (of the workflow
+/// or any of its runs), then runs. Returns the workflow's `channel_id`.
 async fn delete_workflow_with_children(tx: &mut AdmittedTx, id: Uuid) -> Result<Option<Uuid>> {
     let community = *tx.community().as_uuid();
+    // Fires go before the run lock. A new fire must key-share lock the workflow,
+    // which is already locked. Attaching a run to a fire locks the fire row and
+    // then the run, so taking the run lock first would invert that order and can
+    // deadlock; deleting the fire first waits for any in-flight attach instead.
+    sqlx::query(
+        "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND workflow_id = $2",
+    )
+    .bind(community)
+    .bind(id)
+    .execute(tx.conn())
+    .await?;
     // The workflow lock stops new runs, but an approval naming another workflow
     // can still reference one of these runs; it key-share locks only that run.
     // Lock the runs (in a fixed order) so such an insert either commits before
@@ -175,13 +186,6 @@ async fn delete_workflow_with_children(tx: &mut AdmittedTx, id: Uuid) -> Result<
         "DELETE FROM workflow_approvals WHERE community_id = $1 AND (workflow_id = $2 \
              OR run_id IN (SELECT id FROM workflow_runs \
              WHERE community_id = $1 AND workflow_id = $2))",
-    )
-    .bind(community)
-    .bind(id)
-    .execute(tx.conn())
-    .await?;
-    sqlx::query(
-        "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND workflow_id = $2",
     )
     .bind(community)
     .bind(id)

@@ -557,3 +557,83 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_appro
     }
     assert!(get_workflow(&db.pool, community, other).await.is_ok());
 }
+
+/// Attaching a run to a scheduled fire locks the fire row, then key-share
+/// locks the run for its foreign key. The delete must take those two in the
+/// same order (fire before run), so an attach in flight when the delete
+/// starts completes and is then removed, rather than deadlocking with it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_waits_for_concurrent_fire_attach_without_deadlock() {
+    let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    seed(&db, community, &keys, id, &d_tag, now).await;
+    let run_id = create_workflow_run(&db.pool, community, id, None, None)
+        .await
+        .expect("run");
+    let scheduled_for: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "INSERT INTO scheduled_workflow_fires (community_id, workflow_id, scheduled_for) \
+         VALUES ($1, $2, date_trunc('second', NOW())) RETURNING scheduled_for",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("unlinked scheduled claim");
+
+    // Hold the fire row as an attach does before its foreign-key check runs.
+    let mut attacher = db.pool.begin().await.expect("begin fire attach");
+    sqlx::query(
+        "SELECT 1 FROM scheduled_workflow_fires \
+         WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .bind(scheduled_for)
+    .execute(&mut *attacher)
+    .await
+    .expect("lock fire row");
+
+    let name = format!("workflow-delete-{}", Uuid::new_v4().simple());
+    let deleter = Db::from_pool(crate::test_support::named_pool(&name).await);
+    let deletion = tokio::spawn(async move {
+        deleter
+            .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+            .await
+    });
+    crate::test_support::wait_for_lock_wait(&db.pool, &name).await;
+    let attached = sqlx::query(
+        "UPDATE scheduled_workflow_fires SET workflow_run_id = $4 \
+         WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .bind(scheduled_for)
+    .bind(run_id)
+    .execute(&mut *attacher)
+    .await
+    .expect("attach run to fire without deadlock");
+    assert_eq!(attached.rows_affected(), 1);
+    attacher.commit().await.expect("commit fire attach");
+
+    let outcome = deletion
+        .await
+        .expect("join deletion")
+        .expect("delete after concurrent fire attach");
+    assert!(outcome.changed);
+    for (table, column, key) in [
+        ("scheduled_workflow_fires", "workflow_id", id),
+        ("workflow_runs", "workflow_id", id),
+    ] {
+        assert_eq!(
+            count_where(&db, table, column, community, key).await,
+            0,
+            "{table}"
+        );
+    }
+}
