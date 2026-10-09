@@ -1104,12 +1104,17 @@ pub(crate) async fn publish_http_typing(
         Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
         Err(_) => return Err(IngestError::Internal("error: internal error".into())),
     }
-    super::ingest::enforce_write_restriction(state, tenant, KIND_TYPING_INDICATOR, &auth_pubkey)
-        .await?;
+    // Same short-TTL caches as the WebSocket ephemeral path: this runs per
+    // typing pulse, and persistent ingest keeps the uncached durable fence.
+    super::ingest::enforce_cached_write_restriction(
+        state,
+        tenant,
+        KIND_TYPING_INDICATOR,
+        &auth_pubkey,
+    )
+    .await?;
     super::ingest::map_serving_fence_state(
-        buzz_deletion::store(&state.db)
-            .is_serving_active(tenant.community())
-            .await,
+        state.is_serving_active_cached(tenant.community()).await,
     )?;
     publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }

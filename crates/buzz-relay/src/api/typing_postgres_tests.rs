@@ -156,6 +156,46 @@ async fn timed_out_member_typing_is_rejected() {
     assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
 }
 
+/// HTTP typing reads the same short-TTL restriction cache as the WebSocket
+/// ephemeral path: a cached ban refuses a member Postgres never restricted.
+/// Mutation: call the uncached `enforce_write_restriction` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn typing_uses_cached_restriction_row() {
+    let f = Fixture::new().await;
+    f.state.restriction_cache.insert(
+        (f.community, f.member.public_key().to_bytes().to_vec()),
+        buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        },
+    );
+    let (status, body) = f
+        .post(&f.member, &f.typing(&f.member, Some(f.channel)))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
+}
+
+/// HTTP typing reads the cached serving state, like the WebSocket path.
+/// Mutation: call the uncached `is_serving_active` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn typing_uses_cached_serving_state() {
+    let f = Fixture::new().await;
+    f.state.serving_active_cache.insert(f.community, false);
+    let (status, body) = f
+        .post(&f.member, &f.typing(&f.member, Some(f.channel)))
+        .await;
+    assert_ne!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("community writes are fenced"),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn typing_signed_by_someone_else_is_rejected() {
