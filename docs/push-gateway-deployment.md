@@ -297,7 +297,9 @@ jobs with no eligible lease. Database enqueue is conditional on a live event and
 an eligible lease whose recorded update timestamp is no later than event receipt.
 These timestamps do not establish transaction commit order. When registration
 and message arrival overlap, either sending or suppressing the notification is
-acceptable; there is no exact enrollment-order guarantee. Activation never scans
+acceptable; there is no exact enrollment-order guarantee. A concurrent lease
+update, including renewal of an active lease, can also suppress a notification
+under this best-effort contract. Activation never scans
 historical messages or deliberately backfills older notifications.
 
 This isolation requires the overlap migration and updated writers. Old images
