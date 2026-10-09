@@ -1,7 +1,10 @@
 //! Community-admitted event-write transactions.
 
+use std::collections::BTreeSet;
+
 use buzz_core::CommunityId;
 use sqlx::{PgConnection, Postgres, Transaction};
+use uuid::Uuid;
 
 use crate::deletion::{DeletionStore, ServingWriteLease};
 use crate::Result;
@@ -68,6 +71,8 @@ use crate::Result;
 pub struct AdmittedTx {
     tx: Transaction<'static, Postgres>,
     community: CommunityId,
+    /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
+    ttl_refresh_channels: BTreeSet<Uuid>,
 }
 
 impl AdmittedTx {
@@ -78,7 +83,11 @@ impl AdmittedTx {
         community: CommunityId,
     ) -> Result<Self> {
         store.guard_transaction(&mut tx, community).await?;
-        Ok(Self { tx, community })
+        Ok(Self {
+            tx,
+            community,
+            ttl_refresh_channels: BTreeSet::new(),
+        })
     }
 
     /// Validate `lease` on `tx` under the community admission lock and wrap
@@ -94,6 +103,7 @@ impl AdmittedTx {
         Ok(Self {
             tx,
             community: lease.community_id,
+            ttl_refresh_channels: BTreeSet::new(),
         })
     }
 
@@ -111,9 +121,29 @@ impl AdmittedTx {
         &mut self.tx
     }
 
+    /// Record that an event committed with this transaction belongs to
+    /// `channel_id`, so [`AdmittedTx::commit`] refreshes the channel's TTL.
+    pub(crate) fn record_channel_event(&mut self, channel_id: Option<Uuid>, kind: i32) {
+        if let Some(channel) = crate::store::event_follow_up::ttl_refresh_channel(channel_id, kind)
+        {
+            self.ttl_refresh_channels.insert(channel);
+        }
+    }
+
     /// Commit the transaction. This is the only commit path for admitted
     /// event writes.
-    pub async fn commit(self) -> Result<()> {
+    ///
+    /// Refreshes the TTL of every channel that received an event first, as
+    /// the last statement before COMMIT.
+    pub async fn commit(mut self) -> Result<()> {
+        if !self.ttl_refresh_channels.is_empty() {
+            crate::store::event_follow_up::refresh_channel_ttls(
+                &mut self.tx,
+                self.community,
+                &self.ttl_refresh_channels,
+            )
+            .await?;
+        }
         self.tx.commit().await?;
         Ok(())
     }

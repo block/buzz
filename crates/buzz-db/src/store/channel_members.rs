@@ -398,6 +398,13 @@ impl LockedMemberSnapshot {
                 "member snapshot event id already exists".into(),
             ));
         }
+        crate::store::event_follow_up::after_admitted_insert(
+            &mut self.tx,
+            event.id.as_bytes().as_slice(),
+            kind,
+            Some(channel_id),
+        )
+        .await?;
         crate::insert_mentions_in_transaction(&mut self.tx, event, Some(channel_id)).await?;
         Ok((
             buzz_core::StoredEvent::with_received_at(

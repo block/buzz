@@ -333,6 +333,15 @@ async fn replace_parameterized_event_in_transaction_impl(
         if insert_result.rows_affected() == 0 {
             return Ok(false);
         }
+        // Inside the savepoint, so a later failure here also drops the job.
+        // The TTL refresh is recorded only once the savepoint is released.
+        crate::store::event_follow_up::enqueue_push_match(
+            tx.conn(),
+            community_id,
+            incoming_id,
+            kind_i32,
+        )
+        .await?;
 
         if is_nip_rs {
             sqlx::query(
@@ -380,6 +389,9 @@ async fn replace_parameterized_event_in_transaction_impl(
     sqlx::query("RELEASE SAVEPOINT parameterized_replace")
         .execute(tx.conn())
         .await?;
+    if status == ParameterizedReplaceStatus::Inserted {
+        tx.record_channel_event(channel_id, kind_i32);
+    }
 
     Ok(ParameterizedReplaceResult::new(
         event,
@@ -534,6 +546,14 @@ impl Db {
                         false,
                     ));
                 }
+
+                crate::store::event_follow_up::after_admitted_insert(
+                    &mut tx,
+                    event.id.as_bytes().as_slice(),
+                    kind_i32,
+                    channel_id,
+                )
+                .await?;
 
                 // The replaceable event and its denormalized mention index are one
                 // authoritative discovery write. An indexing error must roll back the

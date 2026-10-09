@@ -9,13 +9,16 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show
+        MatrixUtils,
         RenderParagraph,
         RenderRepaintBoundary,
         ScrollDirection,
-        SemanticsAction;
+        SemanticsAction,
+        SemanticsNode;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -43,6 +46,7 @@ import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_actions.dart';
+import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
@@ -262,6 +266,7 @@ Widget _buildTestable({
   List<NostrEvent> huddleLifecycle = const [],
   String? huddleCurrentPubkey,
   http.Client? mediaClient,
+  VideoPreviewFrameLoader? videoPreviewLoader,
   Widget? home,
 }) {
   final resolvedChannel = channel ?? _testChannel;
@@ -273,6 +278,8 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
+      if (videoPreviewLoader != null)
+        videoPreviewFrameLoaderProvider.overrideWithValue(videoPreviewLoader),
       channelMessagesProvider(
         _channelId,
       ).overrideWith(() => fakeMessagesNotifier),
@@ -13246,7 +13253,9 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          find
+              .byKey(const ValueKey('thread-message-group-thread-root'))
+              .hitTestable(),
           findsNothing,
         );
         expect(
@@ -13331,7 +13340,9 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          find
+              .byKey(const ValueKey('thread-message-group-thread-root'))
+              .hitTestable(),
           findsNothing,
         );
         expect(
