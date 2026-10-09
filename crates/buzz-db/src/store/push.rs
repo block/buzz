@@ -29,14 +29,11 @@ async fn begin_operation_transaction(
     Ok(sqlx::Transaction::begin(connection, None).await?)
 }
 
-/// Namespace for the per-community push-gate advisory lock. Event inserts
-/// take it SHARED in `event_follow_up::enqueue_push_match` (and in the
-/// `enqueue_push_match_job` trigger from migration 0023 until it is retired);
-/// every lease transition that can make match eligibility true takes it
-/// EXCLUSIVE here, forcing a total order so a concurrent event insert either
-/// sees the committed lease or strictly precedes the activation (in which case
-/// no wake was owed). Distinct key domain from the audit lock and the lease
-/// address/author locks.
+/// Namespace for the per-community push-gate advisory lock. The post-commit
+/// enqueue worker takes it SHARED, while lease transitions take it EXCLUSIVE.
+/// The worker checks receipt-time eligibility after obtaining the lock. Legacy
+/// trigger writers still hold the shared lock in their event transaction.
+/// Distinct key domain from the audit and lease address/author locks.
 const PUSH_GATE_LOCK_NAMESPACE: &str = "buzz_push_gate:";
 
 /// The push-gate advisory lock key for `community`. Both sides of the lock

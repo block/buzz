@@ -333,15 +333,6 @@ async fn replace_parameterized_event_in_transaction_impl(
         if insert_result.rows_affected() == 0 {
             return Ok(false);
         }
-        // Inside the savepoint, so a later failure here also drops the job.
-        // The TTL refresh is recorded only once the savepoint is released.
-        crate::store::event_follow_up::enqueue_push_match(
-            tx.conn(),
-            community_id,
-            incoming_id,
-            kind_i32,
-        )
-        .await?;
 
         if is_nip_rs {
             sqlx::query(
@@ -390,7 +381,8 @@ async fn replace_parameterized_event_in_transaction_impl(
         .execute(tx.conn())
         .await?;
     if status == ParameterizedReplaceStatus::Inserted {
-        tx.record_channel_event(channel_id, kind_i32);
+        crate::store::event_follow_up::after_admitted_insert(tx, incoming_id, kind_i32, channel_id)
+            .await?;
     }
 
     Ok(ParameterizedReplaceResult::new(
@@ -436,6 +428,7 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         let transaction_timer = observability::TransactionTimer::start(
             observability::TransactionOperation::ReplaceAddressableEvent,
         );
@@ -610,6 +603,7 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         let transaction_timer =
             observability::TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent);
         transaction_timer

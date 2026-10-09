@@ -705,9 +705,11 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 59);
-        assert_eq!(migrations[58].version, 60);
-        assert!(migrations[58]
+        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations[58].version, 59);
+        assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
+        assert_eq!(migrations[59].version, 60);
+        assert!(migrations[59]
             .sql
             .as_str()
             .contains("ALTER TABLE push_leases DROP COLUMN app_profile"));
@@ -3266,7 +3268,7 @@ mod postgres_tests {
     async fn migration_0060_refuses_active_legacy_leases_without_mutation() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        run_migrations_through(&pool, 58)
+        run_migrations_through(&pool, 59)
             .await
             .expect("legacy schema");
         let community = uuid::Uuid::new_v4();

@@ -2,9 +2,9 @@
 //!
 //! Two pieces of work follow every durable event insert:
 //!
-//! - **Push match enqueue.** Push-eligible kinds get a `push_match_queue` row
-//!   when the community has an eligible lease. This runs right after the
-//!   INSERT, in the same transaction, and any failure rejects the event.
+//! - **Push match enqueue.** Eligible event IDs are staged in memory. Commit
+//!   submits them to a bounded best-effort worker using a dedicated connection.
+//!   Push errors, delays, overload, and shutdown can drop wakes, never messages.
 //! - **Channel TTL refresh.** A channel-scoped event pushes its ephemeral
 //!   channel's `ttl_deadline` forward. [`AdmittedTx`] records the channel and
 //!   runs the refresh as the last statement before COMMIT (see
@@ -13,10 +13,9 @@
 //!
 //! This is the application-side replacement for the `events_enqueue_push_match`
 //! and `events_refresh_channel_ttl` triggers (migrations 0023, 0024, 0040).
-//! Both run during the migration window; the push enqueue is idempotent
-//! (`ON CONFLICT DO NOTHING`) and a second TTL refresh is harmless. Every
-//! production `INSERT INTO events` must call this module, which
-//! `tests/observability_source.rs` enforces.
+//! Updated writer connections suppress the surviving push trigger. Legacy
+//! writers retain transactional enqueue until replaced. Every production
+//! `INSERT INTO events` must call this module, enforced by source-policy tests.
 
 use std::collections::BTreeSet;
 
@@ -38,66 +37,16 @@ const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
 
 /// Follow-up for an event row inserted in an admitted transaction.
 ///
-/// Call only when the INSERT affected a row. Enqueues the push match job now
-/// and records the channel for the pre-commit TTL refresh.
-///
-/// If the insert ran inside a savepoint that may still roll back, call
-/// [`enqueue_push_match`] inside the savepoint and
-/// [`AdmittedTx::record_channel_event`] after it is released instead.
+/// Call only when the INSERT affected a row, after releasing any savepoint
+/// that may roll it back. Stages push work for after commit and records TTL work.
 pub(crate) async fn after_admitted_insert(
     tx: &mut AdmittedTx,
     event_id: &[u8],
     kind: i32,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
-    let community = tx.community();
-    enqueue_push_match(tx.conn(), community, event_id, kind).await?;
+    tx.record_push_event(event_id, kind);
     tx.record_channel_event(channel_id, kind);
-    Ok(())
-}
-
-/// Enqueue a push match job for a just-inserted event, if its kind is
-/// push-eligible and the community has an eligible lease.
-///
-/// Takes the push gate SHARED and holds it to transaction end. Lease
-/// activations take it EXCLUSIVE (`acquire_push_gate_lock` in `push.rs`), so
-/// an event either sees the committed lease or strictly precedes the
-/// activation, in which case no wake was owed. The lock must be its own
-/// statement: under READ COMMITTED the eligibility check needs a snapshot
-/// taken after the lock is granted.
-///
-/// Errors propagate and reject the event, as the trigger did.
-pub(crate) async fn enqueue_push_match(
-    conn: &mut PgConnection,
-    community: CommunityId,
-    event_id: &[u8],
-    kind: i32,
-) -> Result<()> {
-    if !PUSH_MATCH_KINDS.contains(&kind) {
-        return Ok(());
-    }
-    crate::observability::observe_advisory_lock(
-        crate::observability::LockType::PushGate,
-        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
-            .bind(crate::push::push_gate_lock_key(community))
-            .execute(&mut *conn),
-    )
-    .await?;
-    sqlx::query(
-        "INSERT INTO push_match_queue (community_id, event_id) \
-         SELECT $1, $2 \
-         WHERE EXISTS ( \
-             SELECT 1 FROM push_leases \
-             WHERE community_id = $1 \
-               AND active \
-               AND endpoint_enabled \
-               AND expires_at > EXTRACT(EPOCH FROM now())::bigint) \
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(community.as_uuid())
-    .bind(event_id)
-    .execute(&mut *conn)
-    .await?;
     Ok(())
 }
 

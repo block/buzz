@@ -73,6 +73,8 @@ pub struct AdmittedTx {
     community: CommunityId,
     /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
     ttl_refresh_channels: BTreeSet<Uuid>,
+    push_enqueue: Option<super::push_enqueue::PushEnqueue>,
+    push_events: Vec<Vec<u8>>,
 }
 
 impl AdmittedTx {
@@ -87,6 +89,8 @@ impl AdmittedTx {
             tx,
             community,
             ttl_refresh_channels: BTreeSet::new(),
+            push_enqueue: None,
+            push_events: Vec::new(),
         })
     }
 
@@ -104,7 +108,26 @@ impl AdmittedTx {
             tx,
             community: lease.community_id,
             ttl_refresh_channels: BTreeSet::new(),
+            push_enqueue: None,
+            push_events: Vec::new(),
         })
+    }
+
+    pub(crate) fn set_push_enqueue(&mut self, producer: Option<super::push_enqueue::PushEnqueue>) {
+        self.push_enqueue = producer;
+    }
+
+    pub(crate) fn record_push_event(&mut self, event_id: &[u8], kind: i32) {
+        if self.push_enqueue.is_some()
+            && crate::store::event_follow_up::PUSH_MATCH_KINDS.contains(&kind)
+        {
+            // Bound transaction-local staging as well as the shared worker queue.
+            if self.push_events.len() < super::push_enqueue::CAPACITY {
+                self.push_events.push(event_id.to_vec());
+            } else {
+                super::push_enqueue::record_drop("transaction_full");
+            }
+        }
     }
 
     /// The community this transaction was admitted for.
@@ -145,6 +168,11 @@ impl AdmittedTx {
             .await?;
         }
         self.tx.commit().await?;
+        if let Some(producer) = self.push_enqueue {
+            for event_id in self.push_events {
+                producer.submit(self.community, event_id);
+            }
+        }
         Ok(())
     }
 
