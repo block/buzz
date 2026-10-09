@@ -149,7 +149,10 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
             match arr.first().and_then(|v| v.as_str()) {
                 Some("hidden") => is_hidden = true,
                 Some("private") => is_private = true,
-                Some("t") => declared_type = arr.get(1).and_then(|v| v.as_str()),
+                // The first `t` is the channel type; later `t` tags are labels.
+                Some("t") if declared_type.is_none() => {
+                    declared_type = arr.get(1).and_then(|v| v.as_str())
+                }
                 _ => {}
             }
         }
@@ -4188,6 +4191,16 @@ mod recovery_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_type_comes_from_the_first_t_tag_not_a_label() {
+        let tags = vec![
+            serde_json::json!(["d", "c"]),
+            serde_json::json!(["t", "dm"]),
+            serde_json::json!(["t", "workspace"]),
+        ];
+        assert_eq!(channel_type_from_tags(&tags), "dm");
+    }
 
     async fn nip11_test_client(
         responses: HashMap<String, (u16, String)>,

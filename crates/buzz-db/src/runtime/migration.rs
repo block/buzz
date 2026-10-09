@@ -705,7 +705,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations.len(), 61);
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[59].version, 60);
@@ -713,6 +713,8 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("ALTER TABLE push_leases DROP COLUMN app_profile"));
+        assert_eq!(migrations[60].version, 61);
+        assert!(migrations[60].sql.as_str().contains("ADD COLUMN labels"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql

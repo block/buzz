@@ -1272,6 +1272,7 @@ mod postgres_tests {
                 None,
                 author.public_key().to_bytes().as_slice(),
                 None,
+                &[],
             )
             .await
             .expect("channel");
@@ -1346,6 +1347,7 @@ mod postgres_tests {
             None,
             author.public_key().to_bytes().as_slice(),
             None,
+            &[],
         )
         .await
         .expect("create community A channel");
@@ -1359,6 +1361,7 @@ mod postgres_tests {
             None,
             author.public_key().to_bytes().as_slice(),
             None,
+            &[],
         )
         .await
         .expect("create community B channel");
