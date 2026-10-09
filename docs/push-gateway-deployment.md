@@ -235,7 +235,7 @@ the environment's GitOps values; the chart then renders
 `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
-distributed Apple application identifier and the actual PostgreSQL network. Set
+distributed Apple application identifier, its matching APNs topic, and the actual PostgreSQL network. Set
 `gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
 the routing hostname and is not passed to the gateway binary. In an
 environment with an existing ingress or service mesh route, keep

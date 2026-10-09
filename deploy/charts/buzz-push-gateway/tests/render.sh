@@ -15,9 +15,14 @@ helm template push deploy/charts/buzz-push-gateway >"$out"
 production_args=(
   -f deploy/charts/buzz-push-gateway/values-production.yaml
   --set 'image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-  --set 'application.appAttestAppId=REALTEAM.com.example.buzz'
+  --set 'application.appAttestAppId=REALTEAM.com.example.production'
   --set 'networkPolicy.postgresEgressCidrs[0]=10.42.0.0/16'
 )
+if helm template push deploy/charts/buzz-push-gateway "${production_args[@]}" >/dev/null 2>&1; then
+  echo 'expected production values without an APNs topic to fail' >&2
+  exit 1
+fi
+production_args+=(--set 'application.apnsTopic=com.example.production')
 helm lint deploy/charts/buzz-push-gateway "${production_args[@]}" >/dev/null
 helm template push deploy/charts/buzz-push-gateway "${production_args[@]}" >"$production_out"
 
@@ -116,6 +121,8 @@ assert!(!production.any? { |x| x["kind"] == "HTTPRoute" })
 production_deployment = production.find { |x| x["kind"] == "Deployment" }
 production_image = production_deployment.dig("spec", "template", "spec", "containers", 0, "image")
 assert!(production_image == "ghcr.io/block/buzz-push-gateway@sha256:#{"a" * 64}", production_image.inspect)
+production_env = production_deployment.dig("spec", "template", "spec", "containers", 0, "env")
+assert!(production_env.find { |env| env["name"] == "BUZZ_PUSH_APNS_TOPIC" }["value"] == "com.example.production")
 route = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "HTTPRoute" }
 assert!(!route.dig("spec", "parentRefs").empty?)
 assert!(route.dig("spec", "hostnames") == ["push.example"])

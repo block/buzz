@@ -7,6 +7,7 @@ image:
 gatewayOrigin: ""
 application:
   appAttestAppId: ""
+  apnsTopic: ""
 httpRoute:
   # Keep disabled when the platform already routes the configured gateway
   # origin to this Service. Gateway API users enable it and inject a parentRef.
