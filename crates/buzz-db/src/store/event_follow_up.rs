@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::{AdmittedTx, DbError, Result};
 
 /// Event kinds that wake push subscribers. Keep identical to the relay's
-/// validated NIP-PL descriptor and to `backfill_push_match_jobs` in `push.rs`.
+/// validated NIP-PL descriptor.
 pub(crate) const PUSH_MATCH_KINDS: [i32; 4] = [9, 40002, 45001, 45003];
 
 /// Kind 9007 creates the channel and initializes its deadline itself.
@@ -62,7 +62,7 @@ pub(crate) async fn after_admitted_insert(
 /// Takes the push gate SHARED and holds it to transaction end. Lease
 /// activations take it EXCLUSIVE (`acquire_push_gate_lock` in `push.rs`), so
 /// an event either sees the committed lease or strictly precedes the
-/// activation, whose backfill then covers it. The lock must be its own
+/// activation, in which case no wake was owed. The lock must be its own
 /// statement: under READ COMMITTED the eligibility check needs a snapshot
 /// taken after the lock is granted.
 ///
