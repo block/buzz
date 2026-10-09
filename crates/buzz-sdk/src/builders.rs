@@ -781,7 +781,12 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    // The target may be the signer (an owner changing its own role); nostr
+    // drops a self `p` tag unless told not to, and the relay then rejects the
+    // event for "missing p tag".
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
@@ -794,7 +799,10 @@ pub fn build_remove_member(
         tag(&["h", &channel_id.to_string()])?,
         tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    // Same as add-member: the target may be the signer.
+    Ok(EventBuilder::new(Kind::Custom(9001), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 leave-request event (kind 9022).
@@ -3457,6 +3465,24 @@ mod tests {
         let ev = sign(build_add_member(cid, pubkey, None::<MemberRole>).unwrap());
         assert_eq!(ev.kind.as_u16(), 9000);
         assert!(tag_values(&ev, "role").is_empty());
+    }
+
+    #[test]
+    fn member_events_keep_a_self_targeted_p_tag() {
+        let cid = uuid();
+        let k = keys();
+        let me = k.public_key().to_hex();
+        let add = build_add_member(cid, &me, Some(MemberRole::Bot))
+            .unwrap()
+            .sign_with_keys(&k)
+            .unwrap();
+        assert!(has_tag(&add, "p", &me));
+        assert!(has_tag(&add, "role", "bot"));
+        let remove = build_remove_member(cid, &me)
+            .unwrap()
+            .sign_with_keys(&k)
+            .unwrap();
+        assert!(has_tag(&remove, "p", &me));
     }
 
     #[test]
