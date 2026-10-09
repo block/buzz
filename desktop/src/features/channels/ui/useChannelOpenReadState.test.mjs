@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getTopLevelInboxUnreadOverrideIds } from "./useChannelOpenReadState.ts";
+import {
+  getTopLevelInboxUnreadOverrideIds,
+  observeOpenChannelReadState,
+} from "./useChannelOpenReadState.ts";
 
 test("opening a channel clears only its top-level Inbox overrides", () => {
   assert.deepEqual(
@@ -22,4 +25,37 @@ test("opening a channel clears only its top-level Inbox overrides", () => {
     ),
     ["top-level"],
   );
+});
+
+test("a background channel does not advance source read state", () => {
+  const calls = [];
+  observeOpenChannelReadState({
+    activeChannelId: "general",
+    activeReadAt: "2026-10-09T19:00:00.000Z",
+    appFocused: false,
+    isChannelMember: true,
+    locallyUnreadFeedItems: [{ id: "mention", channelId: "general", tags: [] }],
+    markChannelRead: (...args) => calls.push(["mark", ...args]),
+    undoUnread: (...args) => calls.push(["undo", ...args]),
+  });
+
+  assert.deepEqual(calls, []);
+});
+
+test("focusing the source channel consumes its top-level unread state", () => {
+  const calls = [];
+  observeOpenChannelReadState({
+    activeChannelId: "general",
+    activeReadAt: "2026-10-09T19:00:00.000Z",
+    appFocused: true,
+    isChannelMember: true,
+    locallyUnreadFeedItems: [{ id: "mention", channelId: "general", tags: [] }],
+    markChannelRead: (...args) => calls.push(["mark", ...args]),
+    undoUnread: (...args) => calls.push(["undo", ...args]),
+  });
+
+  assert.deepEqual(calls, [
+    ["undo", "mention"],
+    ["mark", "general", "2026-10-09T19:00:00.000Z", { topLevelOnly: true }],
+  ]);
 });
