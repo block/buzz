@@ -235,6 +235,7 @@ const scenarios = [
   ["Justfile", ["Justfile"], ["desktop", "rust"]],
   ["Hermit environment", ["bin/hermit.hcl"], ["desktop", "rust"]],
   ["CI apt retry", ["scripts/ci-apt-retry.sh"], ["desktop", "rust"]],
+  ["Rust cache workspace-root checker", ["scripts/check-rust-cache-workspace-root.mjs"], ["rust"]],
   ["integration services", ["docker-compose.yml"], ["rust"]],
   ["CI integration images", ["docker-compose.ci.yml"], ["rust"]],
   [

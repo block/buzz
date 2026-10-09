@@ -598,12 +598,12 @@ test-unit:
         # (nextest exits 4 on zero tests, cargo on a missing --test target).
         # In the union an empty clause would be absorbed silently, so check
         # every clause still selects a test. Same -p list: no rebuild.
+        # A list failure (compile or filterset error) aborts under set -e
+        # with its own error rather than being reported as an empty clause.
         for clause in "${unit_filters[@]}"; do
-            if ! cargo nextest list "${unit_packages[@]}" -E "$clause" \
-                --message-format oneline --cargo-quiet | grep -q .; then
-                echo "test-unit: clause selects no tests: $clause" >&2
-                exit 1
-            fi
+            listed=$(cargo nextest list "${unit_packages[@]}" -E "$clause" \
+                --message-format oneline --cargo-quiet)
+            [[ -n $listed ]] || { echo "test-unit: clause selects no tests: $clause" >&2; exit 1; }
         done
         unit_expr=$(printf ' | (%s)' "${unit_filters[@]}")
         cargo nextest run "${unit_packages[@]}" -E "${unit_expr# | }"

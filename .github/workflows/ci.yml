@@ -66,6 +66,7 @@ jobs:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'scripts/ci-apt-retry.sh'
+              - 'scripts/check-rust-cache-workspace-root.mjs'
               - 'Justfile'
             desktop:
               - '.github/workflows/ci.yml'

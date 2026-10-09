@@ -55,9 +55,9 @@ test("Hermit's default in-checkout registry fails", () => {
   assert.match(result.stderr, /1 non-member package\(s\) have a manifest under \/work\/buzz/);
 });
 
-test("a sibling directory sharing the root prefix is outside the root", () => {
-  assert.deepEqual(
-    dependenciesUnderWorkspaceRoot(metadata("/work/buzz-cargo")),
-    [],
-  );
+test("a sibling directory sharing the root prefix fails, as rust-cache sees it", () => {
+  // rust-cache's startsWith has no separator, so /work/buzz-cargo is "inside".
+  assert.deepEqual(dependenciesUnderWorkspaceRoot(metadata("/work/buzz-cargo")), [
+    "serde 1.0.0 (/work/buzz-cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.0/Cargo.toml)",
+  ]);
 });

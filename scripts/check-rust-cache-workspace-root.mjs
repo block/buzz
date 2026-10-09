@@ -9,14 +9,14 @@
 //
 // Usage: cargo metadata --all-features --format-version 1 | node scripts/check-rust-cache-workspace-root.mjs
 import { readFileSync } from "node:fs";
-import { sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export function dependenciesUnderWorkspaceRoot(metadata) {
   const members = new Set(metadata.workspace_members);
-  const root = metadata.workspace_root.endsWith(sep)
-    ? metadata.workspace_root
-    : metadata.workspace_root + sep;
+  // Mirror rust-cache's raw prefix test (src/workspace.ts at e18b4977:
+  // `!pkg.manifest_path.startsWith(this.root)`, no separator), so a sibling
+  // such as `<checkout>-cargo` counts as inside, exactly as rust-cache sees it.
+  const root = metadata.workspace_root;
   return metadata.packages
     .filter((pkg) => !members.has(pkg.id) && pkg.manifest_path.startsWith(root))
     .map((pkg) => `${pkg.name} ${pkg.version} (${pkg.manifest_path})`);
