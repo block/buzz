@@ -31,7 +31,7 @@ nip_fi_disconnect	relay	POST	/api/nip-fi/disconnect	internal_nip_fi	not_applicab
 moderation_reports	relay	GET	/moderation/reports	community_nip98	community	enforce	matrix:moderation_reports+moderation_owner_ban	admin
 moderation_audit	relay	GET	/moderation/audit	community_nip98	community	enforce	matrix:moderation_audit+moderation_owner_ban	admin
 moderation_restricted	relay	GET	/moderation/restricted	community_nip98	community	enforce	matrix:moderation_restricted+moderation_owner_ban	admin
-workflow_webhook	relay	POST	/hooks/{id}	workflow_webhook_secret	not_applicable	not_applicable:webhook_secret_auth	classified	-
+workflow_webhook	relay	POST	/hooks/{id}	workflow_webhook_secret	not_applicable	enforce	pending:BUZZ-272	BUZZ-272
 mesh_demo_echo	relay	POST	/_mesh/demo/echo	testbed_internal	not_applicable	not_applicable:testbed_only	classified	-
 huddle_audio	relay	GET	/huddle/{channel_id}/audio	community_nip42	community	enforce	pg:audio_join_rejects_community_banned_member+audio_join_rejects_banned_admin+audio_join_rejects_banned_owner_agent	-
 media_upload	relay	PUT	/upload	community_blossom	community	enforce	matrix:media_upload	member
@@ -67,3 +67,9 @@ health_liveness	health	GET	/_liveness	health_probe	not_applicable	not_applicable
 health_readiness	health	GET	/_readiness	health_probe	not_applicable	not_applicable:health_probe	classified	-
 health_status	health	GET	/_status	health_probe	not_applicable	not_applicable:health_probe	classified	-
 health_mesh	health	GET	/_mesh	health_probe	not_applicable	not_applicable:health_probe	classified	-
+admin_communities	relay	GET	/api/admin/v1/communities	operator_control	not_applicable	not_applicable:relay_admin_control	classified	-
+admin_event	relay	GET	/api/admin/v1/events/{id}	operator_control	not_applicable	not_applicable:relay_admin_control	classified	-
+admin_member_search	relay	GET	/api/admin/v1/members/search	operator_control	not_applicable	not_applicable:relay_admin_control	classified	-
+admin_member	relay	GET	/api/admin/v1/members/{pubkey}	operator_control	not_applicable	not_applicable:relay_admin_control	classified	-
+buzz_sidebar	relay	GET	/buzz/v1/me/sidebar	community_nip98	community	enforce	matrix:buzz_sidebar	member
+buzz_read_state	relay	POST	/buzz/v1/me/read-state	community_nip98	community	enforce	matrix:buzz_read_state	member
