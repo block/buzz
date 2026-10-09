@@ -90,8 +90,18 @@ pub(crate) fn desired_state_schema_dir() -> std::path::PathBuf {
 /// children itself, in an order the remaining constraints accept.
 ///
 /// Each PostgreSQL test process owns its database (`crates/buzz-db/TESTING.md`),
-/// so the rewrite does not reach other tests.
+/// so the rewrite does not reach other tests. It refuses any database the
+/// per-test wrapper did not create, so it cannot rewrite a shared one.
 pub(crate) async fn retire_foreign_key_delete_actions(pool: &sqlx::PgPool) {
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .expect("read current database");
+    assert!(
+        database.starts_with("buzz_nt_"),
+        "refusing to rewrite foreign keys in shared database {database}; \
+         run this test through scripts/postgres-test-run.sh"
+    );
     sqlx::raw_sql(
         r#"DO $$
         DECLARE c record;
