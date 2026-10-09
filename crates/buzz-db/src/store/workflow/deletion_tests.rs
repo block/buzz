@@ -364,16 +364,33 @@ async fn quiescing_community_rejects_workflow_deletion_at_admission_before_repla
     assert_eq!(stored, 0, "a rejected deletion request must not be stored");
 }
 
+async fn count_where(db: &Db, table: &str, column: &str, community: CommunityId, id: Uuid) -> i64 {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {table} WHERE community_id = $1 AND {column} = $2"
+    )))
+    .bind(community.as_uuid())
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count children")
+}
+
+/// With every foreign-key delete action retired, the coordinate delete must
+/// remove approvals (of the workflow or of its runs), fires and runs itself,
+/// in an order the remaining constraints accept.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_removes_children_without_cascades() {
     let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
     let keys = Keys::generate();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
     let d_tag = id.to_string();
     let now = Timestamp::now().as_secs();
     let query = seed(&db, community, &keys, id, &d_tag, now).await;
+    let other = Uuid::new_v4();
+    seed(&db, community, &keys, other, &other.to_string(), now).await;
     let run_id = create_workflow_run(&db.pool, community, id, None, None)
         .await
         .expect("run");
@@ -387,43 +404,92 @@ async fn workflow_deletion_removes_children_without_cascades() {
     .execute(&db.pool)
     .await
     .expect("scheduled claim linked to run");
-    crate::workflow::create_approval(
-        &db.pool,
-        crate::workflow::CreateApprovalParams {
-            community_id: community,
-            token: "cascade-free-approval",
-            workflow_id: id,
-            run_id,
-            step_id: "gate",
-            step_index: 0,
-            approver_spec: "@anyone",
-            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-        },
-    )
-    .await
-    .expect("approval");
+    // One approval hangs off the workflow; the other names a different
+    // workflow but this workflow's run, so only the run_id branch reaches it.
+    for (token, workflow_id) in [("workflow-approval", id), ("run-approval", other)] {
+        crate::workflow::create_approval(
+            &db.pool,
+            crate::workflow::CreateApprovalParams {
+                community_id: community,
+                token,
+                workflow_id,
+                run_id,
+                step_id: "gate",
+                step_index: 0,
+                approver_spec: "@anyone",
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        )
+        .await
+        .expect("approval");
+    }
 
-    // No foreign-key action fires here, so every child must go explicitly.
-    let without_cascades = Db::from_pool(crate::test_support::pool_without_triggers().await);
-    let outcome = without_cascades
+    let outcome = db
         .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
         .await
         .expect("delete without cascades");
     assert!(outcome.changed);
     assert_absent(&db, &query, id).await;
-    for table in [
-        "workflow_approvals",
-        "scheduled_workflow_fires",
-        "workflow_runs",
+    for (table, column, key) in [
+        ("workflow_approvals", "workflow_id", id),
+        ("workflow_approvals", "run_id", run_id),
+        ("scheduled_workflow_fires", "workflow_id", id),
+        ("workflow_runs", "workflow_id", id),
     ] {
-        let left: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT count(*) FROM {table} WHERE community_id = $1 AND workflow_id = $2"
-        )))
-        .bind(community.as_uuid())
-        .bind(id)
-        .fetch_one(&db.pool)
-        .await
-        .expect("count children");
-        assert_eq!(left, 0, "{table} rows must be deleted explicitly");
+        assert_eq!(
+            count_where(&db, table, column, community, key).await,
+            0,
+            "{table} rows by {column} must be deleted explicitly"
+        );
     }
+    assert!(get_workflow(&db.pool, community, other).await.is_ok());
+}
+
+/// A run inserted concurrently with the delete holds the workflow's key-share
+/// lock. The delete must wait for it at its row lock and then remove the run;
+/// with no cascade, a delete that took its child snapshot first would fail the
+/// foreign-key check on the workflow.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
+    let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    seed(&db, community, &keys, id, &d_tag, now).await;
+
+    let mut inserter = db.pool.begin().await.expect("begin run insert");
+    sqlx::query(
+        "INSERT INTO workflow_runs (community_id, id, workflow_id, status, current_step, execution_trace) \
+         VALUES ($1, $2, $3, 'pending', 0, '[]')",
+    )
+    .bind(community.as_uuid())
+    .bind(Uuid::new_v4())
+    .bind(id)
+    .execute(&mut *inserter)
+    .await
+    .expect("insert concurrent run");
+
+    let name = format!("workflow-delete-{}", Uuid::new_v4().simple());
+    let deleter = Db::from_pool(crate::test_support::named_pool(&name).await);
+    let deletion = tokio::spawn(async move {
+        deleter
+            .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+            .await
+    });
+    crate::test_support::wait_for_lock_wait(&db.pool, &name).await;
+    inserter.commit().await.expect("commit concurrent run");
+
+    let outcome = deletion
+        .await
+        .expect("join deletion")
+        .expect("delete after concurrent run");
+    assert!(outcome.changed);
+    assert_eq!(
+        count_where(&db, "workflow_runs", "workflow_id", community, id).await,
+        0
+    );
 }

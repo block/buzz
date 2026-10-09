@@ -114,7 +114,8 @@ async fn delete_workflow_in_transaction(
     }
 
     // UUID coordinates are canonical; retain the legacy name-based path.
-    // The owner predicate remains in the mutation, not just a prior check.
+    // The owner predicate is in the locking SELECT; FOR UPDATE keeps it
+    // binding for the deletes below.
     let workflow_id = Uuid::parse_str(d_tag).ok();
     // Lock the workflow first: a concurrent run or fire insert must lock it for
     // its foreign key, so the child deletes below see every committed child.
@@ -130,7 +131,7 @@ async fn delete_workflow_in_transaction(
     .bind(d_tag)
     .fetch_optional(tx.conn())
     .await?;
-    let row = match target {
+    let deleted_channel = match target {
         Some(id) => Some(delete_workflow_with_children(tx, id).await?),
         None => None,
     };
@@ -145,8 +146,8 @@ async fn delete_workflow_in_transaction(
     .bind(cutoff)
     .execute(tx.conn())
     .await?;
-    let changed = row.is_some() || definitions.rows_affected() > 0;
-    let channel_id = row.flatten();
+    let changed = deleted_channel.is_some() || definitions.rows_affected() > 0;
+    let channel_id = deleted_channel.flatten();
     Ok(WorkflowDeletionOutcome {
         changed,
         channel_id,

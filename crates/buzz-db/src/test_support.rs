@@ -83,22 +83,75 @@ pub(crate) fn desired_state_schema_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema")
 }
 
-/// A pool whose sessions run with `session_replication_role = replica`, which
-/// disables ordinary and foreign-key triggers. A delete path exercised through
-/// it gets no `ON DELETE` cascade, so a test proves the path removes its own
-/// child rows rather than relying on the constraint action.
-pub(crate) async fn pool_without_triggers() -> sqlx::PgPool {
+/// Rewrite every `ON DELETE CASCADE`, `SET NULL` and `SET DEFAULT` foreign key
+/// in this test's database as `NO ACTION`: the schema the cascade retirement
+/// targets. Every trigger stays live, including the foreign-key checks and the
+/// community fence, so a delete path exercised afterwards must remove its
+/// children itself, in an order the remaining constraints accept.
+///
+/// Each PostgreSQL test process owns its database (`crates/buzz-db/TESTING.md`),
+/// so the rewrite does not reach other tests.
+pub(crate) async fn retire_foreign_key_delete_actions(pool: &sqlx::PgPool) {
+    sqlx::raw_sql(
+        r#"DO $$
+        DECLARE c record;
+        BEGIN
+          FOR c IN SELECT conrelid::regclass AS tbl, conname, pg_get_constraintdef(oid) AS def
+                   FROM pg_constraint
+                   WHERE contype = 'f' AND confdeltype IN ('c', 'n', 'd') AND conparentid = 0
+          LOOP
+            EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I, ADD CONSTRAINT %I %s',
+              c.tbl, c.conname, c.conname,
+              regexp_replace(c.def, ' ON DELETE (CASCADE|SET NULL|SET DEFAULT)( \([^)]*\))?', ''));
+          END LOOP;
+        END $$"#,
+    )
+    .execute(pool)
+    .await
+    .expect("retire foreign-key delete actions");
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND confdeltype IN ('c', 'n', 'd')",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count foreign-key delete actions");
+    assert_eq!(remaining, 0, "every foreign-key delete action is retired");
+}
+
+/// A single-connection pool whose session carries `application_name`, so
+/// [`wait_for_lock_wait`] can tell when its statement is blocked.
+pub(crate) async fn named_pool(application_name: &str) -> sqlx::PgPool {
+    use std::str::FromStr as _;
+    let options = sqlx::postgres::PgConnectOptions::from_str(&database_url())
+        .expect("parse test database URL")
+        .application_name(application_name);
     sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .after_connect(|connection, _| {
-            Box::pin(async move {
-                sqlx::query("SET session_replication_role = replica")
-                    .execute(connection)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(&database_url())
+        .max_connections(1)
+        .connect_with(options)
         .await
-        .expect("connect trigger-free test pool")
+        .expect("connect named test pool")
+}
+
+/// Wait until the session named `application_name` in this test's database is
+/// blocked on a lock.
+pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND application_name = $1 \
+                   AND wait_event_type = 'Lock')",
+            )
+            .bind(application_name)
+            .fetch_one(pool)
+            .await
+            .expect("inspect lock wait");
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session reached a lock wait");
 }

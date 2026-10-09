@@ -1180,39 +1180,7 @@ mod postgres_tests {
     }
 
     async fn named_contender_db(application_name: &str) -> Db {
-        use std::str::FromStr as _;
-        let options =
-            sqlx::postgres::PgConnectOptions::from_str(&crate::test_support::database_url())
-                .expect("parse test database URL")
-                .application_name(application_name);
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("connect contender DB");
-        Db::from_pool(pool)
-    }
-
-    async fn wait_for_lock_wait(db: &Db, application_name: &str) {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
-                     WHERE datname = current_database() AND application_name = $1 \
-                       AND wait_event_type = 'Lock')",
-                )
-                .bind(application_name)
-                .fetch_one(&db.pool)
-                .await
-                .expect("inspect contender lock wait");
-                if waiting {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("contender reached a lock wait");
+        Db::from_pool(crate::test_support::named_pool(application_name).await)
     }
 
     /// An archive that queues behind an ownership transfer must re-check
@@ -1256,7 +1224,7 @@ mod postgres_tests {
                     .await
             }
         });
-        wait_for_lock_wait(&db, &transfer_name).await;
+        crate::test_support::wait_for_lock_wait(&db.pool, &transfer_name).await;
 
         let archive_name = format!("archive-transfer-archive-{}", Uuid::new_v4().simple());
         let archive_db = named_contender_db(&archive_name).await;
@@ -1269,7 +1237,7 @@ mod postgres_tests {
                     .await
             }
         });
-        wait_for_lock_wait(&db, &archive_name).await;
+        crate::test_support::wait_for_lock_wait(&db.pool, &archive_name).await;
 
         owner_rows_gate
             .rollback()

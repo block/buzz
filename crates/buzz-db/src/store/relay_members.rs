@@ -1419,14 +1419,14 @@ mod postgres_tests {
         .expect("count acceptances")
     }
 
-    /// Both removal paths delete acceptance evidence themselves: the pool used
-    /// here runs no foreign-key action, so nothing cascades. Owners and a role
+    /// Both removal paths delete acceptance evidence themselves: with every
+    /// foreign-key delete action retired, nothing cascades. Owners and a role
     /// mismatch keep theirs.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn member_removal_deletes_acceptances_without_cascades() {
         let pool = setup_pool().await;
-        let without_cascades = crate::test_support::pool_without_triggers().await;
+        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
         let (community, owner) = owned_community(&pool).await;
         let version = "a".repeat(64);
         sqlx::query(
@@ -1449,14 +1449,14 @@ mod postgres_tests {
         }
 
         assert_eq!(
-            remove_relay_member(&without_cascades, community, &owner)
+            remove_relay_member(&pool, community, &owner)
                 .await
                 .expect("owner removal"),
             RemoveResult::IsOwner
         );
         assert_eq!(acceptances(&pool, community, &owner).await, 1);
         assert_eq!(
-            remove_relay_member_if_role(&without_cascades, community, &admin, "member")
+            remove_relay_member_if_role(&pool, community, &admin, "member")
                 .await
                 .expect("mismatched removal"),
             RemoveResult::RoleMismatch
@@ -1464,19 +1464,68 @@ mod postgres_tests {
         assert_eq!(acceptances(&pool, community, &admin).await, 1);
 
         assert_eq!(
-            remove_relay_member(&without_cascades, community, &member)
+            remove_relay_member(&pool, community, &member)
                 .await
                 .expect("member removal"),
             RemoveResult::Removed
         );
         assert_eq!(acceptances(&pool, community, &member).await, 0);
         assert_eq!(
-            remove_relay_member_if_role(&without_cascades, community, &admin, "admin")
+            remove_relay_member_if_role(&pool, community, &admin, "admin")
                 .await
                 .expect("role removal"),
             RemoveResult::Removed
         );
         assert_eq!(acceptances(&pool, community, &admin).await, 0);
+    }
+
+    /// An acceptance inserted concurrently with the removal holds the member
+    /// row's key-share lock. Removal must wait for it at its row lock and then
+    /// delete it; with no cascade, a removal that took its child snapshot first
+    /// would fail the foreign-key check on the member.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_removal_waits_for_and_removes_concurrent_acceptance() {
+        let pool = setup_pool().await;
+        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
+        let (community, _owner) = owned_community(&pool).await;
+        let member = test_pubkey();
+        claim_relay_membership(&pool, community, &member, "member", Some(&"a".repeat(64)))
+            .await
+            .expect("claim membership");
+
+        let mut inserter = pool.begin().await.expect("begin acceptance insert");
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .bind("b".repeat(64))
+        .execute(&mut *inserter)
+        .await
+        .expect("insert concurrent acceptance");
+
+        let name = format!("member-remove-{}", Uuid::new_v4().simple());
+        let remover = crate::test_support::named_pool(&name).await;
+        let removal = tokio::spawn({
+            let member = member.clone();
+            async move { remove_relay_member(&remover, community, &member).await }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, &name).await;
+        inserter
+            .commit()
+            .await
+            .expect("commit concurrent acceptance");
+
+        assert_eq!(
+            removal
+                .await
+                .expect("join removal")
+                .expect("removal after concurrent acceptance"),
+            RemoveResult::Removed
+        );
+        assert_eq!(acceptances(&pool, community, &member).await, 0);
     }
 
     async fn owned_community(pool: &PgPool) -> (CommunityId, String) {
