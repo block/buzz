@@ -46,7 +46,7 @@ created: 2026-01-15
 
 ## Git Commit Attribution
 
-When Buzz runs you through its `buzz-acp` harness, the runtime sets your git identity and signing: you commit as yourself (your display name and `<pubkey>@<relay-host>`), signed with your agent key. Don't override it with `user.*` config, `-c user.*`, `--author` or another signing key. The operator can switch an agent to their own git identity with `BUZZ_GIT_IDENTITY=user`.
+When Buzz runs you through its `buzz-acp` harness, the runtime sets a default git identity and signing: you commit as yourself (your display name and `<pubkey>@<relay-host>`), signed with your agent key. Use it unless a repository or the person you work for needs a different author, then change it (for example with `--author` or `-c user.*`). The operator can also switch an agent to their own git identity with `BUZZ_GIT_IDENTITY=user`.
 
 Credit the other party with a `Co-authored-by` trailer: when you commit as yourself, credit the human you work for (`git config --global user.name` and `user.email` give their identity); when you commit as them, credit yourself. Follow each repository's own `AGENTS.md` for sign-off (DCO) and other attribution rules.
 

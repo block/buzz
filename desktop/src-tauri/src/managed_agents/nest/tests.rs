@@ -44,7 +44,7 @@ fn nest_skill_contains_safe_mention_workflow() {
 #[test]
 fn nest_agents_template_defers_commit_policy_to_repositories() {
     assert_eq!(AGENTS_MD.matches("## Git Commit Attribution").count(), 1);
-    assert!(AGENTS_MD.contains("the runtime sets your git identity and signing"));
+    assert!(AGENTS_MD.contains("the runtime sets a default git identity and signing"));
     assert!(AGENTS_MD.contains("`BUZZ_GIT_IDENTITY=user`"));
     assert!(AGENTS_MD.contains("Credit the other party with a `Co-authored-by` trailer"));
     assert!(AGENTS_MD.contains("Follow each repository's own `AGENTS.md` for sign-off (DCO)"));
