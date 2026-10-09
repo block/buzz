@@ -299,7 +299,7 @@ pub async fn remove_relay_member(
         return Ok(RemoveResult::Removed);
     }
 
-    // rows_affected == 0: either not found or is owner.  One cheap read to
+    // Nothing was locked: either not found or is owner. One cheap read to
     // distinguish the two cases so callers can return the right error message.
     let exists = sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
@@ -340,7 +340,7 @@ pub async fn remove_relay_member_if_role(
         return Ok(RemoveResult::Removed);
     }
 
-    // rows_affected == 0: either not found or role changed. One cheap read to
+    // Nothing was locked: either not found or role changed. One cheap read to
     // distinguish the cases so callers can return the right error message.
     let row = sqlx::query("SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())

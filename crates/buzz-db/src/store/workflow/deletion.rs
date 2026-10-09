@@ -159,6 +159,18 @@ async fn delete_workflow_in_transaction(
 /// runs), scheduled fires, then runs. Returns the workflow's `channel_id`.
 async fn delete_workflow_with_children(tx: &mut AdmittedTx, id: Uuid) -> Result<Option<Uuid>> {
     let community = *tx.community().as_uuid();
+    // The workflow lock stops new runs, but an approval naming another workflow
+    // can still reference one of these runs; it key-share locks only that run.
+    // Lock the runs (in a fixed order) so such an insert either commits before
+    // the approval delete below or waits until this transaction ends.
+    sqlx::query(
+        "SELECT id FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2 \
+             ORDER BY id FOR UPDATE",
+    )
+    .bind(community)
+    .bind(id)
+    .execute(tx.conn())
+    .await?;
     sqlx::query(
         "DELETE FROM workflow_approvals WHERE community_id = $1 AND (workflow_id = $2 \
              OR run_id IN (SELECT id FROM workflow_runs \

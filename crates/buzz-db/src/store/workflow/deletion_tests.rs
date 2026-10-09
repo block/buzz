@@ -493,3 +493,67 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
         0
     );
 }
+
+/// An approval naming another workflow but one of this workflow's runs only
+/// key-share locks that run, so the workflow lock does not exclude it. The
+/// delete must lock the runs, wait for the insert, and then remove it; with no
+/// cascade, committing it between the approval and run deletes would fail the
+/// run delete's foreign-key check.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_approval() {
+    let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    seed(&db, community, &keys, id, &d_tag, now).await;
+    let other = Uuid::new_v4();
+    seed(&db, community, &keys, other, &other.to_string(), now).await;
+    let run_id = create_workflow_run(&db.pool, community, id, None, None)
+        .await
+        .expect("run");
+
+    let mut inserter = db.pool.begin().await.expect("begin approval insert");
+    sqlx::query(
+        "INSERT INTO workflow_approvals (community_id, token, workflow_id, run_id, step_id, \
+         step_index, approver_spec, status, expires_at) \
+         VALUES ($1, $2, $3, $4, 'gate', 0, '@anyone', 'pending', NOW() + INTERVAL '1 hour')",
+    )
+    .bind(community.as_uuid())
+    .bind(Uuid::new_v4().as_bytes().to_vec())
+    .bind(other)
+    .bind(run_id)
+    .execute(&mut *inserter)
+    .await
+    .expect("insert concurrent cross-workflow approval");
+
+    let name = format!("workflow-delete-{}", Uuid::new_v4().simple());
+    let deleter = Db::from_pool(crate::test_support::named_pool(&name).await);
+    let deletion = tokio::spawn(async move {
+        deleter
+            .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+            .await
+    });
+    crate::test_support::wait_for_lock_wait(&db.pool, &name).await;
+    inserter.commit().await.expect("commit concurrent approval");
+
+    let outcome = deletion
+        .await
+        .expect("join deletion")
+        .expect("delete after concurrent approval");
+    assert!(outcome.changed);
+    for (table, column, key) in [
+        ("workflow_approvals", "run_id", run_id),
+        ("workflow_runs", "workflow_id", id),
+    ] {
+        assert_eq!(
+            count_where(&db, table, column, community, key).await,
+            0,
+            "{table}"
+        );
+    }
+    assert!(get_workflow(&db.pool, community, other).await.is_ok());
+}
