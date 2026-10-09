@@ -140,6 +140,10 @@ pub enum ChannelType {
     Stream,
     #[value(name = "forum")]
     Forum,
+    /// A channel used only for access control. Queries leave it out unless
+    /// they name it or ask for system channels.
+    #[value(name = "system")]
+    System,
 }
 
 impl std::fmt::Display for ChannelType {
@@ -147,6 +151,7 @@ impl std::fmt::Display for ChannelType {
         match self {
             Self::Stream => write!(f, "stream"),
             Self::Forum => write!(f, "forum"),
+            Self::System => write!(f, "system"),
         }
     }
 }
@@ -590,6 +595,10 @@ pub enum ChannelsCmd {
         /// writes the creator; clients cannot set it.
         #[arg(long, value_name = "NPUB_OR_HEX")]
         creator: Option<String>,
+        /// Only show system channels. Other lists leave them out. Conflicts
+        /// with --label, because a relay matches either tag value.
+        #[arg(long, default_value_t = false, conflicts_with = "label")]
+        system: bool,
         /// Maximum number of channels to return [default: 500]
         #[arg(long)]
         limit: Option<u32>,

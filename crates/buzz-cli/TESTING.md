@@ -505,7 +505,7 @@ buzz messages delete --event "not-hex" 2>&1; echo "exit: $?"
 
 # Exit 1: Invalid --type value (clap validates the enum — multi-line error)
 buzz channels create --name x --type invalid --visibility open 2>&1; echo "exit: $?"
-# stderr: {"error":"user_error","message":"error: invalid value 'invalid' for '--type <CHANNEL_TYPE>'\n  [possible values: stream, forum]\n..."}
+# stderr: {"error":"user_error","message":"error: invalid value 'invalid' for '--type <CHANNEL_TYPE>'\n  [possible values: stream, forum, system]\n..."}
 # exit: 1
 
 # Exit 1: Invalid --direction value

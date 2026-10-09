@@ -48,6 +48,8 @@ buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
 buzz channels create --name "notes" --type stream --visibility private --label agent-attention
 buzz channels list --label agent-attention --creator <npub>
+buzz channels create --name "attention" --type system --label agent-attention   # private, left out of ordinary lists
+buzz channels list --system --member      # the system channels you belong to
 buzz channels update --channel <uuid> --label workspace   # replace labels; --no-labels clears them
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
