@@ -207,8 +207,8 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
-    /// Event reads drop signature material (`sig`, NIP-OA `auth`) and lift the
-    /// channel and reply target into fields; other reads match `json`.
+    /// Event reads drop signature material (`sig`, NIP-OA `auth`) and fold
+    /// NIP-10 thread markers into `reply_to`; other reads match `json`.
     /// Default for harness-managed agents.
     #[value(name = "agent")]
     Agent,

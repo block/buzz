@@ -42,37 +42,37 @@ fn compact_event(event: &Value) -> Value {
     })
 }
 
-/// Drops signature material (`sig`, NIP-OA `auth`) and lifts the channel `h` tag
-/// and NIP-10 thread markers into `channel` / `reply_to`; every other tag
-/// (mentions, edit targets, diff provenance, ...) is kept verbatim.
+/// Drops signature material (`sig`, NIP-OA `auth`) and folds the NIP-10 thread
+/// markers into `reply_to`; every other tag (channel, mentions, edit targets,
+/// diff provenance, ...) is kept verbatim.
 fn agent_event(event: &Value) -> Value {
     let raw_tags = event.get("tags").unwrap_or(&Value::Null);
     let reply_to = thread_markers(raw_tags).resolve().map(|(_, parent)| parent);
+    let kept: Vec<Value> = raw_tags
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|tag| {
+            let name = tag.get(0).and_then(Value::as_str);
+            let marker = tag.get(3).and_then(Value::as_str);
+            match (name, marker) {
+                (Some("auth"), _) => false,
+                (Some("e"), Some("root" | "reply")) => reply_to.is_none(),
+                _ => true,
+            }
+        })
+        .cloned()
+        .collect();
     let mut projected = serde_json::json!({
         "id": field(event, "id"),
         "pubkey": field(event, "pubkey"),
         "kind": field(event, "kind"),
         "created_at": field(event, "created_at"),
         "content": field(event, "content"),
+        "tags": kept,
     });
-    let mut kept = Vec::new();
-    for tag in raw_tags.as_array().into_iter().flatten() {
-        let name = tag.get(0).and_then(Value::as_str);
-        let marker = tag.get(3).and_then(Value::as_str);
-        match (name, marker) {
-            (Some("h"), _) if projected.get("channel").is_none() => {
-                projected["channel"] = tag.get(1).cloned().unwrap_or_default();
-            }
-            (Some("auth"), _) => {}
-            (Some("e"), Some("root" | "reply")) if reply_to.is_some() => {}
-            _ => kept.push(tag.clone()),
-        }
-    }
     if let Some(parent) = reply_to {
         projected["reply_to"] = Value::String(parent);
-    }
-    if !kept.is_empty() {
-        projected["tags"] = Value::Array(kept);
     }
     projected
 }
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_format_drops_signature_material_and_lifts_channel_and_reply_target() {
+    fn agent_format_drops_signature_material_and_folds_thread_markers_into_reply_to() {
         assert_eq!(
             render(json!([signed_reply()]), &OutputFormat::Agent)[0],
             json!({
@@ -132,9 +132,8 @@ mod tests {
                 "kind": 9,
                 "created_at": 1_787_754_972_u64,
                 "content": "reply content",
-                "channel": CHANNEL,
                 "reply_to": "d".repeat(64),
-                "tags": [["p", "e".repeat(64)]],
+                "tags": [["h", CHANNEL], ["p", "e".repeat(64)]],
             })
         );
     }
@@ -162,13 +161,19 @@ mod tests {
 
         let output = render(json!([edit, diff]), &OutputFormat::Agent);
 
-        assert_eq!(output[0]["tags"], json!([["e", "c".repeat(64)]]));
+        assert_eq!(
+            output[0]["tags"],
+            json!([["h", CHANNEL], ["e", "c".repeat(64)]])
+        );
         assert!(output[0].get("reply_to").is_none());
         assert_eq!(
             output[1]["tags"],
-            json!([["repo", "https://example.com/r.git"], ["commit", "abc123"]])
+            json!([
+                ["h", CHANNEL],
+                ["repo", "https://example.com/r.git"],
+                ["commit", "abc123"]
+            ])
         );
-        assert_eq!(output[1]["channel"], CHANNEL);
     }
 
     #[test]
