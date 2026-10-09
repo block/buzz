@@ -490,6 +490,51 @@ async fn test_instructions_version_limit_one_selects_subject_current() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// The `#t` subject match is positional, not JSONB containment: a newer version
+/// for another team must not take the `limit: 1` slot when it merely contains
+/// the wanted value elsewhere — through an unrelated `["meta","t",<team>]` tag,
+/// or (for the valid team id `t`) as the tag name itself. WS REQ and HTTP.
+#[tokio::test]
+#[ignore]
+async fn test_instructions_version_team_subject_match_is_exact() {
+    let owner = Keys::generate();
+    let author = owner.public_key().to_hex();
+    let base = now() - 100;
+    let mut ws = BuzzTestClient::connect(&relay_url(), &owner)
+        .await
+        .expect("connect");
+
+    let wanted = format!("team-{}", uuid::Uuid::new_v4());
+    for team in [wanted.as_str(), "t"] {
+        let current = team_version(&owner, team, base);
+        let current_id = current.id.to_hex();
+        let decoy = version_event(
+            &owner,
+            vec![
+                vec!["t", &format!("other-{}", uuid::Uuid::new_v4())],
+                vec!["meta", "t", team],
+            ],
+            CIPHERTEXT,
+            base + 1,
+        );
+        publish(&mut ws, current).await;
+        publish(&mut ws, decoy).await;
+
+        let filter = json!({"kinds": [44300], "authors": [author], "#t": [team], "limit": 1});
+        let got = req(&mut ws, "team-exact", filter.clone()).await;
+        assert_eq!(ids(&got), vec![current_id.clone()], "WS team {team}");
+        let (status, body) = http_post(&owner, "/query", json!([filter])).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body.as_array().map(Vec::len),
+            Some(1),
+            "HTTP team {team}: {body}"
+        );
+        assert_eq!(body[0]["id"], json!(current_id), "HTTP team {team}");
+    }
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// History pages by `(until, before_id)` across versions sharing one
 /// `created_at`, on both WS REQ and HTTP `/query`: every version exactly once,
 /// ordered by `created_at` desc then `id` asc, ending on an empty page.

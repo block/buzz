@@ -1117,10 +1117,9 @@ fn filter_to_query_params(
         }
     });
 
-    // Push single-value #t tag into SQL via JSONB containment, for the same
-    // reason as #p: a per-subject read (NIP-AP kind:44300 `#t:[team]`,
+    // Push single-value #t tag into SQL as an exact positional tag match, for
+    // the same reason as #p: a per-subject read (NIP-AP kind:44300 `#t:[team]`,
     // `limit:1`) must not lose its rows to newer events with other `t` values.
-    // Containment can only over-match, and the post-filter keeps NIP-01 exact.
     let t_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::T);
     let t_tag = filter.generic_tags.get(&t_tag_key).and_then(|values| {
         if values.len() == 1 {

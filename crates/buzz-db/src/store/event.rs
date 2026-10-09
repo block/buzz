@@ -730,14 +730,11 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     }
 
     if let Some((ref name, ref value)) = q.custom_tag {
-        let containment = serde_json::json!([[name, value]]);
-        qb.push(format!(" AND {col_prefix}tags @> "))
-            .push_bind(containment);
+        push_exact_tag_filter(&mut qb, col_prefix, name, value);
     }
 
     if let Some(ref t) = q.t_tag {
-        qb.push(format!(" AND {col_prefix}tags @> "))
-            .push_bind(serde_json::json!([["t", t]]));
+        push_exact_tag_filter(&mut qb, col_prefix, "t", t);
     }
 
     if let Some(s) = q.since {
@@ -854,6 +851,30 @@ async fn fetch_with_e_tag_deadline(
 /// e-tag pushdown as one array-bound containment test instead of an N-way
 /// `OR` chain, so planner cost does not scale with the number of referenced
 /// ids (the thread aux hop sends one id per reply).
+/// Match a tag whose first element is `name` and second is `value` (NIP-01).
+///
+/// JSONB containment alone ignores element position and multiplicity:
+/// `[["t","t"]]` is contained in `["t","other"]`, and `[["t","v"]]` in
+/// `["meta","t","v"]`. Over-matching before `LIMIT` lets a non-matching newer
+/// row take the slot, so containment stays only as the GIN-indexed prefilter
+/// and the positional check makes the predicate exact.
+fn push_exact_tag_filter(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    name: &str,
+    value: &str,
+) {
+    qb.push(format!(" AND {col_prefix}tags @> "))
+        .push_bind(serde_json::json!([[name, value]]));
+    qb.push(format!(
+        " AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag WHERE tag->>0 = "
+    ))
+    .push_bind(name.to_owned())
+    .push(" AND tag->>1 = ")
+    .push_bind(value.to_owned())
+    .push(")");
+}
+
 fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_tags: &[String]) {
     let containments: Vec<serde_json::Value> = e_tags
         .iter()
