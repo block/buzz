@@ -640,3 +640,68 @@ async fn non_author_deletion_does_not_reveal_target_kind() {
         }
     }
 }
+
+/// An author removed from a private channel can no longer delete their
+/// messages there, so kind 5 and kind 9005 (sent from a channel they still
+/// write to) must reject exactly as for a missing target, while the channel
+/// owner and the author's own still-writable messages keep working.
+#[tokio::test]
+#[ignore]
+async fn removed_author_deletion_does_not_reveal_target() {
+    let client = http_client();
+    let owner = Keys::generate();
+    let author = Keys::generate();
+    let private = create_channel(&client, &owner, "private").await;
+    let own = create_channel(&client, &author, "open").await;
+    let membership = |kind: u16| {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags(vec![
+                tag(&["h", &private]),
+                tag(&["p", &author.public_key().to_hex()]),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap()
+    };
+    submit_ok(&client, &owner, &membership(9000)).await;
+    let retained = post_message(&client, &author, &private).await;
+    let moderated = post_message(&client, &author, &private).await;
+    submit_ok(&client, &owner, &membership(9001)).await;
+    let missing = "a".repeat(64);
+
+    let delete = |target: &str| build_deletion(&author, vec![tag(&["e", target])]);
+    let redact = |keys: &Keys, target: &str, channel: &str| {
+        EventBuilder::new(Kind::Custom(9005), "")
+            .tags(vec![tag(&["e", target]), tag(&["h", channel])])
+            .sign_with_keys(keys)
+            .unwrap()
+    };
+    let cases = [
+        ("kind 5, missing", delete(&missing)),
+        ("kind 5, retained", delete(&retained.id.to_hex())),
+        ("9005, missing", redact(&author, &missing, &own)),
+        (
+            "9005, retained",
+            redact(&author, &retained.id.to_hex(), &own),
+        ),
+    ];
+    let mut expected = None;
+    for (case, deletion) in cases {
+        let (status, http_msg, ws_msg) = rejection(&client, &author, deletion).await;
+        assert_eq!(http_msg, DENIED, "{case}: HTTP");
+        assert_eq!(ws_msg, DENIED, "{case}: WS");
+        assert_eq!(
+            *expected.get_or_insert(status),
+            status,
+            "{case}: HTTP status"
+        );
+    }
+
+    submit_ok(
+        &client,
+        &owner,
+        &redact(&owner, &moderated.id.to_hex(), &private),
+    )
+    .await;
+    let still_writable = post_message(&client, &author, &own).await;
+    submit_ok(&client, &author, &delete(&still_writable.id.to_hex())).await;
+}

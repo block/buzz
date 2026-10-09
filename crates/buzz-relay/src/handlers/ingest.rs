@@ -2593,6 +2593,17 @@ async fn ingest_event_inner(
         });
     }
 
+    // A kind 5 targeting an event derives its channel from that target, so
+    // every channel gate below would reveal the target's existence or
+    // location. Their rejections all collapse to the shared denial.
+    let deletion_targets_event = kind_u32 == KIND_DELETION
+        && !crate::handlers::side_effects::extract_target_event_ids(&event).is_empty();
+    let deletion_denied = || {
+        IngestError::Rejected(format!(
+            "invalid: {}",
+            crate::handlers::side_effects::DELETION_TARGET_DENIED
+        ))
+    };
     let mut channel_id = if kind_u32 == KIND_REACTION {
         match derive_reaction_channel(tenant.community(), &state.db, &event).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
@@ -2632,12 +2643,7 @@ async fn ingest_event_inner(
                 .map_err(|e| {
                     IngestError::Internal(format!("error: looking up deletion target: {e}"))
                 })?
-                .ok_or_else(|| {
-                    IngestError::Rejected(format!(
-                        "invalid: {}",
-                        crate::handlers::side_effects::DELETION_TARGET_DENIED
-                    ))
-                })?;
+                .ok_or_else(deletion_denied)?;
                 match state
                     .db
                     .get_event_by_id_for_event_write(tenant.community(), target_id)
@@ -2668,7 +2674,15 @@ async fn ingest_event_inner(
     }
 
     if let Some(ch_id) = channel_id {
-        check_token_channel_access(&auth, ch_id).map_err(IngestError::AuthFailed)?;
+        check_token_channel_access(&auth, ch_id).map_err(|e| {
+            if deletion_targets_event {
+                deletion_denied()
+            } else {
+                IngestError::AuthFailed(e)
+            }
+        })?;
+    } else if deletion_targets_event && auth.channel_ids().is_some() {
+        return Err(deletion_denied());
     } else if auth.channel_ids().is_some() {
         // Channel-scoped tokens cannot publish global events — that would bypass
         // the token's channel restriction. This covers kind:1 (global text notes),
@@ -2751,7 +2765,13 @@ async fn ingest_event_inner(
                 },
                 state_for_request(tenant, auth.pubkey()),
             );
-            auth_result.map_err(IngestError::Rejected)?;
+            auth_result.map_err(|e| {
+                if deletion_targets_event {
+                    deletion_denied()
+                } else {
+                    IngestError::Rejected(e)
+                }
+            })?;
         }
     }
 
@@ -2905,7 +2925,11 @@ async fn ingest_event_inner(
         if !is_unarchive {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
-                    return Err(IngestError::Rejected("invalid: channel is archived".into()));
+                    return Err(if deletion_targets_event {
+                        deletion_denied()
+                    } else {
+                        IngestError::Rejected("invalid: channel is archived".into())
+                    });
                 }
             }
         }
@@ -6783,8 +6807,15 @@ mod postgres_tests {
         };
         let h = Tag::parse(["h", &channels[0].to_string()]).unwrap();
         let live = publish(9, vec![h.clone()], &author);
-        let deleted = publish(9, vec![h], &author);
-        for event in [live.clone(), deleted.clone()] {
+        let deleted = publish(9, vec![h.clone()], &author);
+        let global = publish(1, vec![], &author);
+        let in_scope = publish(9, vec![h], &author);
+        for event in [
+            live.clone(),
+            deleted.clone(),
+            global.clone(),
+            in_scope.clone(),
+        ] {
             ingest_event_inner(&state, &tracer, &tenant, event, author_auth())
                 .await
                 .expect("store message");
@@ -6806,23 +6837,44 @@ mod postgres_tests {
         .await
         .expect("soft-delete message");
 
-        for target in ["a".repeat(64), live.id.to_hex(), deleted.id.to_hex()] {
-            let auth = IngestAuth::Nip42 {
-                pubkey: sender.public_key(),
-                scopes: vec![Scope::MessagesWrite],
-                channel_ids: Some(vec![channels[1]]),
-                conn_id: Uuid::new_v4(),
-            };
-            match ingest_event_inner(&state, &tracer, &tenant, delete(&target, &sender), auth).await
-            {
-                Err(IngestError::Rejected(msg)) => assert_eq!(
-                    msg, "invalid: deletion target not found or not deletable by you",
-                    "target {target}"
-                ),
-                Err(other) => panic!("target {target}: {other:?}"),
-                Ok(_) => panic!("target {target}: deletion accepted"),
+        let scoped_auth = |keys: &Keys, channel: Uuid| IngestAuth::Nip42 {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            channel_ids: Some(vec![channel]),
+            conn_id: Uuid::new_v4(),
+        };
+        // Neither a non-owner nor the author holding a token scoped to the
+        // sender's channel may delete; both get the missing-target rejection.
+        for keys in [&sender, &author] {
+            for target in [
+                "a".repeat(64),
+                live.id.to_hex(),
+                deleted.id.to_hex(),
+                global.id.to_hex(),
+            ] {
+                let auth = scoped_auth(keys, channels[1]);
+                match ingest_event_inner(&state, &tracer, &tenant, delete(&target, keys), auth)
+                    .await
+                {
+                    Err(IngestError::Rejected(msg)) => assert_eq!(
+                        msg, "invalid: deletion target not found or not deletable by you",
+                        "target {target}"
+                    ),
+                    Err(other) => panic!("target {target}: {other:?}"),
+                    Ok(_) => panic!("target {target}: deletion accepted"),
+                }
             }
         }
+        // A token scoped to the target's channel still deletes.
+        ingest_event_inner(
+            &state,
+            &tracer,
+            &tenant,
+            delete(&in_scope.id.to_hex(), &author),
+            scoped_auth(&author, channels[0]),
+        )
+        .await
+        .expect("in-scope token deletes the author's message");
     }
 
     // ── Owner-aware ban/timeout coverage ─────────────────────────────────────
