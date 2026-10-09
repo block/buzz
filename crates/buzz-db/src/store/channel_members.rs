@@ -926,6 +926,14 @@ impl MembershipRemovalFence {
 /// lock (the transaction is implicitly rolled back if not committed). To
 /// durably write the workflow-disable and release the lock in one step, call
 /// [`Self::commit_disabling_workflows`].
+///
+/// Write admission is taken up front, before the membership lock, so the
+/// lock order matches [`add_member`]. Taking it lazily in
+/// [`Self::commit_disabling_workflows`] would invert that order. As a result,
+/// a community that leaves `active` between the kick commit and this call
+/// refuses the fence, and the caller skips its live side effects. That is
+/// intended: the membership cache is already invalidated and fan-out
+/// re-checks membership before delivery.
 pub async fn membership_removal_fence(
     pool: &PgPool,
     community_id: CommunityId,

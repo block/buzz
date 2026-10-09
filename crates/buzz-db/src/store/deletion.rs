@@ -806,7 +806,7 @@ impl Db {
 
 impl DeletionStore {
     /// Construct from the writer pool used by [`crate::Db`].
-    pub fn new(pool: PgPool) -> Self {
+    pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
@@ -2955,27 +2955,14 @@ impl DeletionStore {
     }
 
     /// Take the shared community deletion lock inside an existing transaction.
+    ///
+    /// See [`guard_community_write`].
     pub async fn guard_transaction(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         community: CommunityId,
     ) -> Result<()> {
-        lock_community_deletion_shared(tx, community).await?;
-        let state: Option<String> = sqlx::query_scalar(
-            "SELECT deletion_state FROM communities WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(community.as_uuid())
-        .fetch_optional(&mut **tx)
-        .await?;
-        match state.as_deref() {
-            Some("active") => Ok(()),
-            Some(other) => Err(DbError::AccessDenied(format!(
-                "community {community} is write-fenced ({other})"
-            ))),
-            None => Err(DbError::AccessDenied(format!(
-                "community {community} is missing or tombstoned"
-            ))),
-        }
+        guard_community_write(tx, community).await
     }
 
     /// Take the shared community deletion lock inside an existing transaction
@@ -3340,6 +3327,36 @@ async fn lock_community_deletion(
     )
     .await?;
     Ok(())
+}
+
+/// Admit a community write inside an existing transaction.
+///
+/// Takes the shared community deletion lock, then requires the community to
+/// be `active` and not tombstoned. Refusal is [`DbError::AccessDenied`];
+/// a lock timeout surfaces as the underlying `55P03` database error. The
+/// lock is transaction-scoped, so commit, rollback, or a dropped transaction
+/// releases it. Crates outside `buzz-db` that own their own transactions
+/// (the audit chain) admit through this function.
+pub async fn guard_community_write(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+) -> Result<()> {
+    lock_community_deletion_shared(tx, community).await?;
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT deletion_state FROM communities WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .fetch_optional(&mut **tx)
+    .await?;
+    match state.as_deref() {
+        Some("active") => Ok(()),
+        Some(other) => Err(DbError::AccessDenied(format!(
+            "community {community} is write-fenced ({other})"
+        ))),
+        None => Err(DbError::AccessDenied(format!(
+            "community {community} is missing or tombstoned"
+        ))),
+    }
 }
 
 pub(crate) async fn lock_community_deletion_shared(

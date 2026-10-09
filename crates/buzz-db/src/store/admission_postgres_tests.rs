@@ -677,3 +677,103 @@ async fn personal_read_writer_requires_application_admission() {
         super::personal_read::IntentOutcome::Applied
     );
 }
+
+async fn count_relay_members(db: &Db, community: CommunityId) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM relay_members WHERE community_id = $1")
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count relay members")
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn allowlist_backfill_requires_application_admission() {
+    let (db, communities) = fixture().await;
+    for community in &communities {
+        sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(vec![0x5a_u8; 32])
+            .execute(&db.pool)
+            .await
+            .expect("seed legacy allowlist row");
+    }
+    for community in &communities[1..] {
+        assert_fenced(
+            super::relay_members::backfill_from_allowlist(&db.pool, *community)
+                .await
+                .expect_err("backfill into a write-fenced community must reject"),
+        );
+        assert_eq!(count_relay_members(&db, *community).await, 0);
+    }
+    assert_eq!(
+        super::relay_members::backfill_from_allowlist(&db.pool, communities[0])
+            .await
+            .expect("active backfill succeeds"),
+        1
+    );
+    assert_eq!(count_relay_members(&db, communities[0]).await, 1);
+
+    // A community that already has members needs no write, so startup does
+    // not fail on admission even while the community is quiescing.
+    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')")
+        .bind(communities[1].as_uuid())
+        .bind("e".repeat(64))
+        .execute(&db.pool)
+        .await
+        .expect("seed existing member");
+    assert_eq!(
+        super::relay_members::backfill_from_allowlist(&db.pool, communities[1])
+            .await
+            .expect("no-op backfill does not need admission"),
+        0
+    );
+    assert_eq!(count_relay_members(&db, communities[1]).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn owner_mutations_report_pending_deletion_when_admission_refuses() {
+    let (db, communities) = fixture().await;
+    let quiescing = communities[1];
+    sqlx::query(
+        "INSERT INTO community_deletion_requests (community_id, community_host, requested_by) \
+         SELECT id, host, 'admission-test' FROM communities WHERE id = $1",
+    )
+    .bind(quiescing.as_uuid())
+    .execute(&db.pool)
+    .await
+    .expect("seed deletion request");
+    let owner = "f".repeat(64);
+    let next_owner = "1".repeat(64);
+
+    assert_eq!(
+        super::relay_members::transfer_ownership(&db.pool, quiescing, &next_owner, &owner)
+            .await
+            .expect("transfer returns a result"),
+        super::relay_members::TransferResult::DeletionPending
+    );
+    assert_eq!(
+        db.provision_owner(quiescing, &owner)
+            .await
+            .expect("provision returns a result"),
+        super::relay_members::ProvisionOwnerResult::DeletionPending
+    );
+
+    // Without a deletion request the refusal stays a lifecycle conflict.
+    let fenced = communities[2];
+    assert_eq!(
+        super::relay_members::transfer_ownership(&db.pool, fenced, &next_owner, &owner)
+            .await
+            .expect("transfer returns a result"),
+        super::relay_members::TransferResult::LifecycleConflict
+    );
+    assert_eq!(
+        db.provision_owner(fenced, &owner)
+            .await
+            .expect("provision returns a result"),
+        super::relay_members::ProvisionOwnerResult::LifecycleConflict
+    );
+    assert_eq!(count_relay_members(&db, quiescing).await, 0);
+    assert_eq!(count_relay_members(&db, fenced).await, 0);
+}

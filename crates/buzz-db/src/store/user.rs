@@ -57,6 +57,22 @@ async fn ensure_user_with_operation(
     pubkey: &[u8],
     operation: crate::observability::WriterOperation,
 ) -> Result<bool> {
+    // Almost every call finds the user already registered. Answer that with
+    // one read, so the hot path skips the admission round trips; no write
+    // happens, so the fence contract is unaffected.
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_one(&mut *connection)
+    .await?;
+    if exists {
+        return Ok(false);
+    }
+    drop(connection);
+
     let mut tx = crate::begin_community_write_transaction(pool, community_id, operation).await?;
     let result = sqlx::query(
         r#"
