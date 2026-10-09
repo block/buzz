@@ -721,8 +721,9 @@ pub(crate) async fn handle_active_audio_connection(
     #[cfg(test)]
     crate::nip_fi_test_hooks::after_deny_set_check_passed(tenant.community()).await;
 
-    // NIP-OA owner of a delegated agent: from relay membership on a closed
-    // relay, or straight from the self-proving auth tag on an open one.
+    // NIP-OA owner of a delegated agent: from relay membership when it admitted
+    // the agent through its owner, otherwise straight from the self-proving
+    // auth tag (open relay, or a direct member of a closed one).
     let mut nip_oa_owner = None;
     let relay_refusal = match crate::api::relay_members::check_relay_membership(
         &state,
