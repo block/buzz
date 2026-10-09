@@ -3,6 +3,7 @@ pub mod channel_templates;
 pub mod channels;
 pub mod dms;
 pub mod emoji;
+pub(crate) mod event_output;
 pub mod feed;
 pub mod gifs;
 pub mod issues;
