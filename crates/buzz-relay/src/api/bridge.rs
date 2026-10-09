@@ -1129,16 +1129,17 @@ async fn submit_event_authed(
     )
     .await
     {
+        // Membership only names the owner when it admitted the agent through
+        // one. An agent admitted on its own (open relay, or a direct member of
+        // a closed relay) still needs its owner link for observer frames, so
+        // read it from the self-proving tag; it grants nothing the owner's
+        // signature did not already attest.
         Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(
-                    &pubkey_bytes,
-                    auth_tag,
-                    signed_auth_created_at,
-                )
-            } else {
-                None
-            }
+            super::relay_members::extract_nip_oa_owner(
+                &pubkey_bytes,
+                auth_tag,
+                signed_auth_created_at,
+            )
         }),
         Err(e) => {
             return SubmitOutcome::Err {
@@ -8495,6 +8496,94 @@ pub(crate) mod postgres_tests {
             let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
                 .execute(&admin)
                 .await;
+        }
+    }
+
+    /// Closed relay: `POST /events` from an agent that is a direct relay
+    /// member records the NIP-OA owner named by a valid `x-auth-tag`, the
+    /// link `is_agent_owner` reads to authorize observer frames. Without the
+    /// header no link is written, and a tag signed for a different agent is
+    /// ignored.
+    /// Mutation: restore the `require_relay_membership` gate on the
+    /// `extract_nip_oa_owner` fallback in `submit_event_authed` → the tagged
+    /// member's link is never written → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn closed_relay_direct_member_post_events_records_nip_oa_owner() {
+        let mut state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let mut config = (*state.config).clone();
+        config.require_relay_membership = true;
+        Arc::get_mut(&mut state).expect("unique state").config = Arc::new(config);
+
+        let community = uuid::Uuid::new_v4();
+        let host = format!("closed-member-{}.local", community.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(&host)
+            .execute(state.db.pool())
+            .await
+            .expect("seed community");
+        let tenant = TenantContext::resolved(buzz_core::CommunityId::from_uuid(community), &host);
+        let owner = Keys::generate();
+
+        for (case, tagged) in [
+            ("tagged", Some(true)),
+            ("untagged", None),
+            ("foreign-tag", Some(false)),
+        ] {
+            let agent = Keys::generate();
+            buzz_db::relay_members::add_relay_member(
+                state.db.pool(),
+                tenant.community(),
+                &agent.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("seed direct member");
+            let mut headers = HeaderMap::new();
+            if let Some(for_this_agent) = tagged {
+                let subject = if for_this_agent {
+                    agent.public_key()
+                } else {
+                    Keys::generate().public_key()
+                };
+                let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &subject, "")
+                    .expect("sign NIP-OA credential");
+                headers.insert("x-auth-tag", auth_tag.parse().expect("header value"));
+            }
+            let event = EventBuilder::new(Kind::TextNote, case)
+                .sign_with_keys(&agent)
+                .expect("sign event");
+            let outcome = submit_event_authed(
+                &state,
+                &tenant,
+                &headers,
+                serde_json::to_vec(&event).expect("event json").as_slice(),
+                agent.public_key(),
+                fresh_nip98_event_id_bytes(),
+                Some(nostr::Timestamp::now().as_secs()),
+            )
+            .await;
+            assert!(
+                !matches!(outcome, SubmitOutcome::Err { .. }),
+                "{case}: a direct member is admitted on a closed relay"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .is_agent_owner(
+                        tenant.community(),
+                        agent.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("owner lookup"),
+                tagged == Some(true),
+                "{case}: the owner link is recorded only from a tag signed for this agent"
+            );
         }
     }
 }

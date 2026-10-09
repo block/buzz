@@ -2,9 +2,11 @@
 //!
 //! Relay membership enforcement uses the shared
 //! [`crate::api::relay_members::enforce_relay_membership`] helper, which supports
-//! NIP-OA owner-delegation fallback on closed relays. On open relays, the auth
-//! handler calls [`crate::api::relay_members::extract_nip_oa_owner`] directly to
-//! extract the owner pubkey for agent→owner backfill (observer frame auth).
+//! NIP-OA owner-delegation fallback on closed relays. When membership admits
+//! the agent on its own (open relay, or a direct member of a closed relay), the
+//! auth handler calls [`crate::api::relay_members::extract_nip_oa_owner`]
+//! directly to extract the owner pubkey for agent→owner backfill (observer
+//! frame auth).
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -551,20 +553,19 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
-            // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
-            // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
-            // No feature flag needed: NIP-OA is cryptographically self-proving.
+            // NIP-OA backfill: extract the owner for the agent→owner DB mapping
+            // (needed for observer frame auth). Membership only names the owner
+            // when it admitted the agent through one; an agent admitted on its
+            // own (open relay, or a direct member of a closed relay) still needs
+            // the link, so read it from the tag. No feature flag needed: NIP-OA
+            // is cryptographically self-proving, and the link grants nothing the
+            // owner's signature did not already attest.
             let nip_oa_owner = nip_oa_owner.or_else(|| {
-                if !state.config.require_relay_membership && auth_tag_json.is_some() {
-                    crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                        Some(signed_auth_created_at),
-                    )
-                } else {
-                    None
-                }
+                crate::api::relay_members::extract_nip_oa_owner(
+                    pubkey.as_bytes(),
+                    auth_tag_json.as_deref(),
+                    Some(signed_auth_created_at),
+                )
             });
 
             // B2: acquire a session effect permit after the last policy read
@@ -1613,9 +1614,25 @@ mod tests {
             std::sync::Arc<crate::connection::ConnectionState>,
             tokio::sync::mpsc::Receiver<WsMessage>,
         ) {
+            let (conn, ctrl_rx, _send_rx) =
+                registered_pending_conn_with_data_rx(state, community, challenge);
+            (conn, ctrl_rx)
+        }
+
+        /// [`registered_pending_conn`] that also keeps the data channel's
+        /// receiver, for tests that read `OK` frames sent after admission.
+        fn registered_pending_conn_with_data_rx(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            challenge: &str,
+        ) -> (
+            std::sync::Arc<crate::connection::ConnectionState>,
+            tokio::sync::mpsc::Receiver<WsMessage>,
+            tokio::sync::mpsc::Receiver<WsMessage>,
+        ) {
             use std::collections::HashMap;
             use std::sync::Arc;
-            let (send_tx, _send_rx) = tokio::sync::mpsc::channel::<WsMessage>(8);
+            let (send_tx, send_rx) = tokio::sync::mpsc::channel::<WsMessage>(8);
             let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<WsMessage>(8);
             let (terminal_ctrl_tx, _terminal_rx) = tokio::sync::mpsc::channel::<WsMessage>(1);
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -1657,7 +1674,7 @@ mod tests {
                 3,
                 conn.community_control.clone(),
             );
-            (conn, ctrl_rx)
+            (conn, ctrl_rx, send_rx)
         }
 
         fn signed_auth(
@@ -1672,6 +1689,126 @@ mod tests {
                 builder = builder.tag(Tag::parse(tag).unwrap());
             }
             builder.sign_with_keys(keys).unwrap()
+        }
+
+        /// A kind 24200 telemetry frame from `agent` to `owner`, the shape
+        /// `buzz agents draft-create` / `draft-update` publish.
+        fn observer_telemetry_frame(agent: &Keys, owner: &Keys) -> nostr::Event {
+            use buzz_core::observer::{
+                encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG,
+                OBSERVER_FRAME_TELEMETRY,
+            };
+            let encrypted = encrypt_observer_payload(
+                agent,
+                &owner.public_key(),
+                &serde_json::json!({"type": "agent_management"}),
+            )
+            .expect("encrypt observer payload");
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+                encrypted,
+            )
+            .tags([
+                Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+            ])
+            .sign_with_keys(agent)
+            .expect("sign observer frame")
+        }
+
+        /// Closed relay: an agent that is a direct relay member and presents a
+        /// valid NIP-OA tag at AUTH gets its owner link recorded, so the
+        /// observer frames it then publishes are accepted. The same member
+        /// without a tag has no link and its frame is refused.
+        ///
+        /// Mutation: restore the `require_relay_membership` gate on the
+        /// `extract_nip_oa_owner` fallback in `handle_auth` → the tagged
+        /// member's link is never written and its frame is refused → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn closed_relay_direct_member_with_auth_tag_gets_owner_link() {
+            use std::sync::Arc;
+            let base = auth_test_state_real_db_expect().await;
+            let mut config = (*base.config).clone();
+            config.require_relay_membership = true;
+            let mut state = (*base).clone();
+            state.config = Arc::new(config);
+            let state = Arc::new(state);
+            let community = seeded_community(&state).await;
+            let owner = Keys::generate();
+
+            for (tagged, challenge) in [(true, "member-tagged"), (false, "member-untagged")] {
+                let agent = Keys::generate();
+                buzz_db::relay_members::add_relay_member(
+                    state.db.pool(),
+                    community,
+                    &agent.public_key().to_hex(),
+                    "member",
+                    None,
+                )
+                .await
+                .expect("seed direct member");
+                let tag = tagged.then(|| {
+                    let auth_tag =
+                        buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                            .expect("sign NIP-OA credential");
+                    serde_json::from_str::<Vec<String>>(&auth_tag).expect("tag JSON")
+                });
+
+                let (conn, _ctrl, mut data) =
+                    registered_pending_conn_with_data_rx(&state, community, challenge);
+                handle_auth(
+                    signed_auth(&agent, challenge, tag),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+                .await;
+                let admitted_owner = match conn.auth_state_snapshot() {
+                    AuthState::Authenticated(ctx) => ctx.agent_owner_pubkey,
+                    other => panic!("{challenge}: a direct member is admitted, got {other:?}"),
+                };
+                assert_eq!(
+                    admitted_owner,
+                    tagged.then(|| owner.public_key()),
+                    "{challenge}: the session carries the owner only when the tag proved it"
+                );
+                assert_eq!(
+                    state
+                        .db
+                        .is_agent_owner(
+                            community,
+                            agent.public_key().as_bytes(),
+                            owner.public_key().as_bytes(),
+                        )
+                        .await
+                        .expect("owner lookup"),
+                    tagged,
+                    "{challenge}: the owner link is recorded only from a valid tag"
+                );
+
+                // Drain the AUTH ack so the next frame read is the observer OK.
+                while data.try_recv().is_ok() {}
+                crate::handlers::event::handle_event(
+                    observer_telemetry_frame(&agent, &owner),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+                .await;
+                let WsMessage::Text(text) = data.try_recv().expect("observer OK frame") else {
+                    panic!("{challenge}: expected a text frame");
+                };
+                let frame: serde_json::Value = serde_json::from_str(&text).expect("relay frame");
+                assert_eq!(frame[0], "OK", "{challenge}: {text}");
+                assert_eq!(frame[2], tagged, "{challenge}: {text}");
+                if !tagged {
+                    assert_eq!(
+                        frame[3],
+                        "restricted: observer frame is not authorized for this agent owner",
+                        "{challenge}: {text}"
+                    );
+                }
+            }
         }
 
         /// A ban whose disconnect lands after AUTH's policy reads but before it

@@ -235,11 +235,13 @@ pub mod relay_members {
     /// its NIP-OA owner *is* — access is granted via delegation.
     ///
     /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
-    /// immediately — no membership check is performed. Callers that need NIP-OA
-    /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
+    /// immediately — no membership check is performed.
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
-    /// no NIP-OA tag is present/applicable (open relay without auth tag).
+    /// no NIP-OA tag is present/applicable (open relay without auth tag). Callers
+    /// that record the agent→owner link must not stop at `None`: an agent
+    /// admitted on its own may still carry a valid tag, so fall back to
+    /// [`extract_nip_oa_owner`] regardless of membership mode.
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
@@ -328,8 +330,9 @@ pub mod relay_members {
 
     /// Extract NIP-OA owner from an auth tag without membership enforcement.
     ///
-    /// Used on open relays (`require_relay_membership = false`) to opportunistically
-    /// extract the owner pubkey for agent→owner backfill. The NIP-OA signature is
+    /// Used to opportunistically extract the owner pubkey for agent→owner
+    /// backfill whenever the caller was admitted on its own (open relay, or a
+    /// direct member of a closed relay). The NIP-OA signature is
     /// cryptographically self-proving, so no feature flag is needed. Temporal
     /// conditions are evaluated against `signed_auth_created_at`. Returns
     /// `None` if the tag, timestamp, or conditions are absent or invalid.
