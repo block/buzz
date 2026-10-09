@@ -112,6 +112,10 @@ Values in one tag filter combine with OR, as in NIP-01. So
 `"#t": ["workspace", "notes"]` finds channels with either label. To require a
 label and a creator, use `#t` and `#P` together.
 
+The relay MUST match `#t` and `#P` before it applies `limit`, as NIP-01
+requires. A relay that reads the newest channel events first and matches tags
+after can return a short or empty page while matching channels exist.
+
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the

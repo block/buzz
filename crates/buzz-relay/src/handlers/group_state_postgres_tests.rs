@@ -453,3 +453,144 @@ async fn members_cannot_change_labels() {
         vec!["stream", "keep"]
     );
 }
+
+/// Run one historical REQ as `reader` and return the IDs of the events sent
+/// before EOSE.
+async fn req_event_ids(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+    filter: serde_json::Value,
+) -> Vec<String> {
+    let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(256);
+    let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let conn = Arc::new(crate::connection::ConnectionState {
+        conn_id: Uuid::new_v4(),
+        tenant: tenant.clone(),
+        remote_addr: "127.0.0.1:1234".parse().expect("addr"),
+        auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+            buzz_auth::AuthContext {
+                pubkey: reader.public_key(),
+                scopes: Vec::new(),
+                channel_ids: None,
+                auth_method: buzz_auth::AuthMethod::Nip42,
+                agent_owner_pubkey: None,
+            },
+        )),
+        subscriptions: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        send_tx,
+        ctrl_tx,
+        terminal_ctrl_tx: tokio::sync::mpsc::channel(1).0,
+        cancel: cancel.clone(),
+        backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        grace_limit: 3,
+        nip_fi_assertion: None,
+        session_deadline: None,
+        nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(cancel.clone()),
+        community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+    });
+    let filter: nostr::Filter = serde_json::from_value(filter).expect("filter");
+    crate::handlers::req::handle_req("g".into(), vec![filter], vec![None], conn, state.clone())
+        .await;
+    let mut ids = Vec::new();
+    while let Ok(frame) = send_rx.try_recv() {
+        let axum::extract::ws::Message::Text(text) = frame else {
+            continue;
+        };
+        let message: serde_json::Value = serde_json::from_str(&text).expect("relay frame");
+        match message[0].as_str() {
+            Some("EVENT") => ids.push(message[2]["id"].as_str().expect("id").to_owned()),
+            Some("EOSE") => return ids,
+            other => panic!("unexpected frame {other:?}: {text}"),
+        }
+    }
+    panic!("no EOSE; events so far: {ids:?}");
+}
+
+/// The current kind:39000 event ID for `channel_id`.
+async fn metadata_event_id(state: &AppState, tenant: &TenantContext, channel_id: Uuid) -> String {
+    state
+        .db
+        .query_events(&EventQuery {
+            kinds: Some(vec![39000]),
+            d_tag: Some(channel_id.to_string()),
+            limit: Some(1),
+            ..EventQuery::for_community(tenant.community())
+        })
+        .await
+        .expect("query 39000")
+        .first()
+        .expect("kind:39000")
+        .event
+        .id
+        .to_hex()
+}
+
+/// A selective `#t` or `#P` REQ on group-state kinds returns its match even
+/// when the match is older than a full page of other channels. The tag
+/// match must run in SQL before `LIMIT`, not after it.
+/// Mutation: drop `group_state_tag_values` from `filter_to_query_params` →
+/// RED (the page holds only the newest unrelated channels).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn selective_label_and_creator_reqs_are_not_starved_by_limit() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-pushdown").await;
+    let needle_creator = Keys::generate();
+    let other_creator = Keys::generate();
+    let reader = Keys::generate();
+
+    let needle = create_channel(&state, &tenant, &needle_creator, &[&["t", "needle"]]).await;
+    // Group-state created_at has one-second resolution, and rows with the
+    // same second sort by ID, so wait for the next second: then every other
+    // channel's 39000 is strictly newer than the needle's.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    for _ in 0..6 {
+        create_channel(&state, &tenant, &other_creator, &[&["t", "hay"]]).await;
+    }
+    let expected = vec![metadata_event_id(&state, &tenant, needle).await];
+
+    assert_eq!(
+        req_event_ids(
+            &state,
+            &tenant,
+            &reader,
+            serde_json::json!({"kinds": [39000], "#t": ["needle"], "limit": 2}),
+        )
+        .await,
+        expected,
+        "#t label match"
+    );
+    assert_eq!(
+        req_event_ids(
+            &state,
+            &tenant,
+            &reader,
+            serde_json::json!({
+                "kinds": [39000],
+                "#P": [needle_creator.public_key().to_hex()],
+                "limit": 2
+            }),
+        )
+        .await,
+        expected,
+        "#P creator match"
+    );
+    assert!(
+        req_event_ids(
+            &state,
+            &tenant,
+            &reader,
+            serde_json::json!({
+                "kinds": [39000],
+                "#P": [needle_creator.public_key().to_hex()],
+                "#t": ["hay"],
+                "limit": 2
+            }),
+        )
+        .await
+        .is_empty(),
+        "#t and #P must both match"
+    );
+}
