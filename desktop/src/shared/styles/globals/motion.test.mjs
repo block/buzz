@@ -22,3 +22,27 @@ test("conversation arrival has a reduced-motion treatment", () => {
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.motion-enter-conversation/,
   );
 });
+
+test("send entrance uses shared tokens and avoids transforms and filters", () => {
+  const rule = motionCss.match(/\.motion-enter-send\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(rule, /var\(--motion-duration-standard\)/);
+  assert.match(rule, /var\(--motion-ease-standard\)/);
+
+  // Transforms or filters inside virtualized timeline rows leave stale paint
+  // in WKWebView, so the send entrance animates only track size and opacity.
+  for (const name of ["motion-enter-send-open", "motion-enter-send-fade"]) {
+    const keyframes =
+      motionCss.match(
+        new RegExp(`@keyframes ${name}\\s*\\{[\\s\\S]*?\\n\\}`),
+      )?.[0] ?? "";
+    assert.ok(keyframes, `missing @keyframes ${name}`);
+    assert.doesNotMatch(keyframes, /transform|filter/);
+  }
+});
+
+test("send entrance has a reduced-motion treatment", () => {
+  assert.match(
+    motionCss,
+    /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.motion-enter-send\s*\{\s*animation:\s*none/,
+  );
+});

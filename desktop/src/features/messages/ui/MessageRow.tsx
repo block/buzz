@@ -11,6 +11,7 @@ import {
   canSendMessageToChannel,
 } from "@/features/messages/lib/canSendToChannel";
 import type { TimelineMessage } from "@/features/messages/types";
+import { SendEntrance } from "@/features/messages/ui/SendEntrance";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
@@ -191,6 +192,12 @@ export const MessageRow = React.memo(
         : undefined;
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
+    );
+    // A row that first mounts while its send is pending is the user's own
+    // message appearing. It keeps its render key through the acknowledgement,
+    // so the entrance plays once and never replays when the send lands.
+    const [mountedWhilePending] = React.useState(
+      () => message.pending === true,
     );
     const handleEntranceAnimationEnd = React.useCallback(
       (event: React.AnimationEvent<HTMLElement>) => {
@@ -692,7 +699,7 @@ export const MessageRow = React.memo(
     );
     const bodyContainerClass = cn(
       isContinuation ? "mt-0" : bodyOffsetClass,
-      "transition-opacity",
+      "transition-opacity motion-reduce:transition-none",
       message.pending && "opacity-60",
     );
 
@@ -741,7 +748,7 @@ export const MessageRow = React.memo(
       </>
     );
 
-    return (
+    const rowNode = (
       <div
         className="relative"
         style={
@@ -948,6 +955,12 @@ export const MessageRow = React.memo(
           {actionBarNode}
         </article>
       </div>
+    );
+
+    return mountedWhilePending ? (
+      <SendEntrance>{rowNode}</SendEntrance>
+    ) : (
+      rowNode
     );
     // Callbacks (onReply, onToggleReaction) intentionally excluded: inline arrows
     // from parent create new refs every render — including them defeats memo.
