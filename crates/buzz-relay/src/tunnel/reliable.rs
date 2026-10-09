@@ -329,6 +329,9 @@ impl ReliableMeshStream {
     /// pinned fenced tuple and the Redis directory. This is the reliable-stream
     /// equivalent of Dawn's hot-path media floor, but authoritative: stale or
     /// mismatched frames fail the session rather than being dropped silently.
+    /// This receive is not cancellation-safe: it can consume frame bytes before
+    /// awaiting directory validation. Preserve an in-flight receive across
+    /// housekeeping ticks; cancellation is only safe when terminating the stream.
     pub async fn recv_validated(
         &mut self,
         directory: &SessionDirectory,
