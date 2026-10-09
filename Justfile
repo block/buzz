@@ -592,7 +592,7 @@ test-unit:
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
                 + test(/^api::nip_fi::/)'
         # Invitation drain/cutoff boundary contracts are infra-free.
-        cargo nextest run -p buzz-relay --lib -E 'test(/^invite_token::tests::/) + test(/^config::invite_cutoff_tests::/)'
+        cargo nextest run -p buzz-relay --lib -E 'test(/^invite_token::/) + test(/^config::invite_cutoff_tests::/)'
         # boot_lifecycle spawns the real relay binary and asserts its startup
         # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
         # non-ignored tests need no Postgres or Redis; the Postgres cases are
