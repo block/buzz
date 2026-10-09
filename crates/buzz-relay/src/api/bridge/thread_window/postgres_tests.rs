@@ -532,3 +532,64 @@ async fn thread_window_router_aux_row_cap_and_corrupt_page() {
 mod failure_postgres_tests;
 
 mod review_postgres_tests;
+
+/// A deletion of an author-only event is private by its `k` tag alone. Neither
+/// window's aux closure returns one to anyone but its signer, and a read by id
+/// stays author-only after its target is physically gone. Ordinary ingest can
+/// build neither case, so both use stored fixtures.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn private_deletions_reach_only_their_signer_through_windows_and_id_reads() {
+    let f = Fixture::new().await;
+    let reply = f.reply(0).await;
+    let reply_reaction = f.aux(7, &reply, Some(f.channel)).await;
+    let root_reaction = f.aux(7, &f.root, Some(f.channel)).await;
+    let signer = Keys::generate();
+    let deletion = |target: &str, k: &str| {
+        EventBuilder::new(Kind::EventDeletion, "")
+            .tags([
+                Tag::parse(["e", target]).unwrap(),
+                Tag::parse(["k", k]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(f.root.created_at.as_secs() + 120))
+            .sign_with_keys(&signer)
+            .unwrap()
+    };
+    let reminder = buzz_core::kind::KIND_EVENT_REMINDER.to_string();
+    let thread_private = deletion(&reply_reaction.id.to_hex(), &reminder);
+    let thread_public = deletion(&reply_reaction.id.to_hex(), "7");
+    let channel_private = deletion(&root_reaction.id.to_hex(), &reminder);
+    let channel_public = deletion(&root_reaction.id.to_hex(), "7");
+    let orphan_private = deletion(&"ab".repeat(32), &reminder);
+    for event in [
+        &thread_private,
+        &thread_public,
+        &channel_private,
+        &channel_public,
+        &orphan_private,
+    ] {
+        f.state
+            .db
+            .insert_event(f.community, event, None)
+            .await
+            .unwrap();
+    }
+
+    let thread = f.query(&f.filter()).await;
+    let thread = ids(&thread, Some(5));
+    assert!(thread.contains(&thread_public.id.to_hex().as_str()));
+    assert!(!thread.contains(&thread_private.id.to_hex().as_str()));
+
+    let window = json!({"top_level":true,"#h":[f.channel],"kinds":[9],"include_aux":true});
+    let window = f.query(&window).await;
+    let window = ids(&window, Some(5));
+    assert!(window.contains(&channel_public.id.to_hex().as_str()));
+    assert!(!window.contains(&channel_private.id.to_hex().as_str()));
+
+    let by_id = json!([{"ids":[orphan_private.id.to_hex()]}]);
+    for (reader, visible) in [(&f.keys, false), (&signer, true)] {
+        let (status, body) = f.post(reader, "/query", by_id.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body, Some(5)).len(), usize::from(visible), "{body}");
+    }
+}
