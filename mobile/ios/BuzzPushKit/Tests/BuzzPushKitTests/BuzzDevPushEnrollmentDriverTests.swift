@@ -127,7 +127,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     try assertMatchesVector(
       "enroll",
       actual: appAttest.clientData[0],
-      expectedSHA256: "58274bd9e9a86489fe5bae36aecbe89618824433189405ff4de8b18b58384270",
+      expectedSHA256: "792966649266bfcebdb79de54e8ed3880746f58efd77427a0f43e88c650d79d0",
       fixture: makeFixtureTranscript(
         name: "enroll",
         replacements: []
