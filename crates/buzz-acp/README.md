@@ -51,6 +51,39 @@ BUZZ_RELAY_PRIVATE_KEY=<relay signing key> \
 
 ## Channels
 
+### IFC DM history slice
+
+`BUZZ_ACP_IFC_READ` enables IFC checks for one DM's recent-history read:
+
+```sh
+export BUZZ_ACP_IFC_READ='{
+  "community_id": "<community UUID>",
+  "channel_id": "<DM UUID>",
+  "relay_pubkey": "<trusted relay signing public key hex>"
+}'
+```
+
+Start `buzz-acp` with its usual relay and agent configuration. The hook runs
+when a non-threaded DM turn fetches recent history and the context-message
+limit is greater than zero. Other reads keep their existing behavior.
+
+The harness uses its existing `RestClient` to fetch relay-signed metadata and
+membership before and after the history query. It derives the current domain,
+compares it with the retained `IfcSession`, and calls `call("channel.read")`
+and `read(resource_label)` before returning verified messages to the existing
+prompt formatter. Cosmetic edits and reordered or reissued equivalent member
+lists preserve the domain. Membership or visibility changes deny the read.
+
+On failure, the turn stops and both the ACP session and its IFC state are
+discarded. Queue mode uses the existing bounded retry path; its next attempt
+creates a fresh ACP session. Drop mode requires a new message. The agent
+process remains healthy. There is no membership cache or request journal.
+
+This slice covers only recent DM history. Thread history, other prompt inputs,
+tools, and publication remain unmediated, so IFC input is marked unknown.
+The agent still has its existing credentials. The checks bracket the read;
+they do not make relay membership changes atomic with delivery.
+
 The harness discovers channels by querying the relay with the agent's authenticated identity.
 
 By default, the harness discovers only channels the agent is a **member** of (`GET /api/channels?member=true`). When the agent is added to a new channel, the membership notification subscription auto-subscribes to it.

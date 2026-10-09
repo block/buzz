@@ -113,6 +113,10 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
+    /// A local IFC read failed; the ACP process itself remains healthy.
+    #[error("IFC DM history read failed: {0}")]
+    IfcRead(String),
+
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
 }

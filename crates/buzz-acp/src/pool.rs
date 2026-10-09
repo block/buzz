@@ -152,6 +152,8 @@ pub struct SessionState {
     /// Per-scope successful-delivery state. Created with the ACP session and
     /// cleared atomically with every invalidation path.
     pub deliveries: HashMap<SessionScope, ChannelDeliveryState>,
+    /// IFC state lives and is discarded with the corresponding ACP session.
+    pub(crate) ifc_sessions: HashMap<SessionScope, buzz_ifc::IfcSession>,
     /// Pool-assigned ownership generation for each scope. A worker returning
     /// after another worker forked the scope carries an older generation; the
     /// pool uses this fence to discard that stale provider session before the
@@ -185,6 +187,7 @@ impl SessionState {
         self.core_sections.remove(scope);
         self.canvas_sections.remove(scope);
         self.deliveries.remove(scope);
+        self.ifc_sessions.remove(scope);
         self.scope_owner_generations.remove(scope);
         self.sessions.remove(scope).is_some()
     }
@@ -200,6 +203,7 @@ impl SessionState {
             .chain(self.core_sections.keys())
             .chain(self.canvas_sections.keys())
             .chain(self.deliveries.keys())
+            .chain(self.ifc_sessions.keys())
             .chain(self.scope_owner_generations.keys())
             .filter(|s| s.channel_id() == *channel_id)
             .cloned()
@@ -225,6 +229,7 @@ impl SessionState {
         self.core_sections.clear();
         self.canvas_sections.clear();
         self.deliveries.clear();
+        self.ifc_sessions.clear();
         self.scope_owner_generations.clear();
     }
 
@@ -910,6 +915,8 @@ pub struct PromptContext {
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
+    /// Optional IFC hook for one DM's recent-history read.
+    pub(crate) ifc_read: Option<crate::ifc::ReadConfig>,
     /// Shared channel metadata for startup-known and dynamically joined channels.
     pub channel_info: ChannelInfoResolver,
     /// Max messages to include in thread/DM context. 0 = disabled.
@@ -3073,14 +3080,32 @@ pub async fn run_prompt_task(
             .cloned()
             .unwrap_or_default();
         let conversation_context = if ctx.context_message_limit > 0 {
-            fetch_conversation_context_for_target(
-                b.channel_id,
+            match fetch_conversation_context_for_target(
+                b,
                 &context_target,
                 &ctx,
                 thread_context_is_hydrated,
                 &delivered_ids,
+                &mut agent.state.ifc_sessions,
             )
             .await
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    // Discard both histories together. The existing bounded retry
+                    // path creates a fresh ACP session on the next attempt.
+                    agent.state.invalidate_scope(&b.scope);
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(error),
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
+                    return;
+                }
+            }
         } else {
             None
         };
@@ -4125,17 +4150,18 @@ fn conversation_context_delta(
 /// events this scope's live session already received, so subsequent turns
 /// deliver only intervening same-thread messages plus the trigger.
 async fn fetch_conversation_context_for_target(
-    channel_id: Uuid,
+    batch: &FlushBatch,
     target: &ContextTarget,
     ctx: &PromptContext,
     overfetch_session_delta: bool,
     delivered_ids: &HashSet<String>,
-) -> Option<ConversationContext> {
+    ifc_sessions: &mut HashMap<SessionScope, buzz_ifc::IfcSession>,
+) -> Result<Option<ConversationContext>, AcpError> {
     let limit = ctx.context_message_limit;
-    match target {
+    let context = match target {
         ContextTarget::Thread(root_id) => {
             fetch_thread_context(
-                channel_id,
+                batch.channel_id,
                 root_id,
                 limit,
                 ctx.agent_keys.public_key(),
@@ -4145,9 +4171,31 @@ async fn fetch_conversation_context_for_target(
             )
             .await
         }
-        ContextTarget::Dm => fetch_dm_context(channel_id, limit, &ctx.rest_client).await,
+        ContextTarget::Dm => {
+            if let Some(config) = ctx
+                .ifc_read
+                .as_ref()
+                .filter(|config| config.channel_id == batch.channel_id)
+            {
+                let read = config.read_history(
+                    &ctx.rest_client,
+                    batch,
+                    ctx.agent_owner_pubkey,
+                    ifc_sessions,
+                    limit,
+                );
+                let history = timeout(CONTEXT_FETCH_TIMEOUT, read)
+                    .await
+                    .map_err(|_| AcpError::IfcRead("read timed out".into()))?
+                    .map_err(|error| AcpError::IfcRead(error.to_string()))?;
+                parse_nostr_dm_response(history, limit)
+            } else {
+                fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await
+            }
+        }
         ContextTarget::None => None,
-    }
+    };
+    Ok(context)
 }
 
 /// Which history to fetch for a batch's context section.
@@ -8672,7 +8720,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
     /// An idle agent (slot 0) holding a provider session for `scope`, so
     /// `has_session_for(scope)` is true.
-    async fn idle_agent_with_session(index: usize, scope: SessionScope) -> OwnedAgent {
+    pub(crate) async fn idle_agent_with_session(index: usize, scope: SessionScope) -> OwnedAgent {
         let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
             .await
             .expect("spawn dummy ACP");
@@ -10466,6 +10514,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 keys: agent_keys.clone(),
                 auth_tag_json: None,
             },
+            ifc_read: None,
             channel_info: ChannelInfoResolver::new(
                 std::collections::HashMap::new(),
                 RestClient {
