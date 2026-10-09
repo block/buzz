@@ -711,7 +711,7 @@ test("interested thread reply shows the channel preview dot without incrementing
   await waitForBadgeState(page, baselineBadge);
 });
 
-test("mention in the open thread keeps an attention dot on the app icon", async ({
+test("mention already visible in the open thread does not retain an app dot", async ({
   page,
 }) => {
   await page.goto("/");
@@ -743,7 +743,7 @@ test("mention in the open thread keeps an attention dot on the app icon", async 
   await page.getByTestId("message-thread-summary").first().click();
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
-  await page.evaluate(
+  const mentionEventId = await page.evaluate(
     ({ channelId, mentionPubkey, parentEventId, pubkey }) => {
       const mention = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
@@ -765,6 +765,7 @@ test("mention in the open thread keeps an attention dot on the app icon", async 
         pubkey: mention.pubkey,
         tags: mention.tags,
       });
+      return mention.id;
     },
     {
       channelId: GENERAL_CHANNEL_ID,
@@ -774,14 +775,27 @@ test("mention in the open thread keeps an attention dot on the app icon", async 
     },
   );
 
-  await waitForBadgeState(page, { state: "dot", count: 0 });
+  await expect(page.getByTestId("message-thread-panel")).toContainText(
+    "Direct ping for @tyler in the open thread",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ eventId, pubkey }) => {
+          const raw = localStorage.getItem(
+            `buzz-home-mention-attention-seen.v1:${pubkey}`,
+          );
+          return raw ? JSON.parse(raw).includes(eventId) : false;
+        },
+        { eventId: mentionEventId, pubkey: DEFAULT_MOCK_PUBKEY },
+      ),
+    )
+    .toBe(true);
+  await waitForBadgeState(page, baselineBadge);
   await expect
     .poll(() => getSidebarHomeBadgeText(page))
     .toBe(baselineHomeBadge);
 
-  await page.getByRole("button", { name: "Inbox" }).click();
-  await waitForBadgeState(page, baselineBadge);
-  await page.getByTestId("channel-general").click();
   await page.reload();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForBadgeState(page, baselineBadge);

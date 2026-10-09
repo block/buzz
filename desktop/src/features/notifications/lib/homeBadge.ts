@@ -50,19 +50,48 @@ export function buildHomeBadgeFeedItems(
   return dedupeFeedItemsById(items);
 }
 
-export function hasUnseenHomeMention(
-  feed: HomeFeedResponse | undefined,
-  seenMentionIds: ReadonlySet<string>,
-): boolean {
-  return homeMentionAttentionIds(feed).some((id) => !seenMentionIds.has(id));
-}
-
 export function homeMentionAttentionIds(
   feed: HomeFeedResponse | undefined,
 ): string[] {
   // The feed's mention bucket intentionally includes ordinary DMs because DM
   // messages address every other participant even without textual @mentions.
   return feed?.feed.mentions.map((item) => item.id) ?? [];
+}
+
+type HomeMentionReadState = {
+  getChannelReadAt: (channelId: string) => number | null;
+  getMessageReadAt?: (messageId: string) => number | null;
+};
+
+export function homeMentionSourceReadIds(
+  feed: HomeFeedResponse | undefined,
+  readState: HomeMentionReadState,
+): string[] {
+  return (
+    feed?.feed.mentions
+      .filter((item) => {
+        const readAt = feedItemThreadRootId(item)
+          ? (readState.getMessageReadAt?.(item.id) ?? null)
+          : item.channelId
+            ? readState.getChannelReadAt(item.channelId)
+            : null;
+        return readAt !== null && item.createdAt <= readAt;
+      })
+      .map((item) => item.id) ?? []
+  );
+}
+
+export function hasUnseenHomeMention(
+  feed: HomeFeedResponse | undefined,
+  seenMentionIds: ReadonlySet<string>,
+  readState?: HomeMentionReadState,
+): boolean {
+  const sourceReadIds = readState
+    ? new Set(homeMentionSourceReadIds(feed, readState))
+    : null;
+  return homeMentionAttentionIds(feed).some(
+    (id) => !seenMentionIds.has(id) && !sourceReadIds?.has(id),
+  );
 }
 
 export function isInboxObserved(input: {

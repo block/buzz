@@ -46,7 +46,13 @@ const feedWithMention = (id) => ({
 
 function renderAttentionHook(pubkey, initialFeed, initialObserved) {
   return renderHook(
-    ({ feed, observed }) =>
+    ({
+      channelReadAt = null,
+      feed,
+      messageReadAt = null,
+      observed,
+      readStateVersion = 0,
+    }) =>
       useHomeFeedNotificationState(
         feed,
         pubkey,
@@ -55,15 +61,15 @@ function renderAttentionHook(pubkey, initialFeed, initialObserved) {
         false,
         true,
         observed,
-        () => null,
-        0,
+        () => channelReadAt,
+        readStateVersion,
         new Set(),
         undefined,
         new Set(),
         new Set(),
         [],
         () => null,
-        () => null,
+        () => messageReadAt,
         [],
         new Set(),
       ),
@@ -74,6 +80,45 @@ function renderAttentionHook(pubkey, initialFeed, initialObserved) {
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+});
+
+test("viewing the source message clears and persists mention attention", async () => {
+  const pubkey = "source-view-user";
+  const storageKey = `buzz-home-mention-attention-seen.v1:${pubkey}`;
+  const hook = renderAttentionHook(pubkey, emptyFeed(), true);
+  await waitFor(() => assert.equal(localStorage.getItem(storageKey), "[]"));
+
+  await act(async () => {
+    hook.rerender({
+      feed: feedWithMention("source-view-mention"),
+      observed: false,
+    });
+  });
+  assert.equal(hook.result.current.hasHomeMentionAttention, true);
+
+  await act(async () => {
+    hook.rerender({
+      channelReadAt: 1,
+      feed: feedWithMention("source-view-mention"),
+      observed: false,
+      readStateVersion: 1,
+    });
+  });
+  assert.equal(hook.result.current.hasHomeMentionAttention, false);
+  await waitFor(() =>
+    assert.equal(
+      localStorage.getItem(storageKey),
+      JSON.stringify(["source-view-mention"]),
+    ),
+  );
+
+  hook.unmount();
+  const remount = renderAttentionHook(
+    pubkey,
+    feedWithMention("source-view-mention"),
+    false,
+  );
+  assert.equal(remount.result.current.hasHomeMentionAttention, false);
 });
 
 test("a background Inbox does not acknowledge a newly arrived mention", async () => {

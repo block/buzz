@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildHomeBadgeFeedItems,
   homeMentionAttentionIds,
+  homeMentionSourceReadIds,
   hasUnseenHomeMention,
   isInboxObserved,
   isHomeBadgeFeedItemUnread,
@@ -81,6 +82,51 @@ test("mention attention remains until the Inbox has seen the mention", () => {
 
   assert.equal(hasUnseenHomeMention(feed, new Set()), true);
   assert.equal(hasUnseenHomeMention(feed, new Set(["mention"])), false);
+});
+
+test("mention attention clears when its top-level source message is read", () => {
+  const mention = {
+    ...feedItem("mention", "mention"),
+    channelId: "stream-channel",
+    createdAt: 500,
+  };
+  const feed = homeFeed({ mentions: [mention] });
+  const unreadState = {
+    getChannelReadAt: () => 499,
+    getMessageReadAt: () => null,
+  };
+  const readState = {
+    ...unreadState,
+    getChannelReadAt: () => 500,
+  };
+
+  assert.deepEqual(homeMentionSourceReadIds(feed, unreadState), []);
+  assert.equal(hasUnseenHomeMention(feed, new Set(), unreadState), true);
+  assert.deepEqual(homeMentionSourceReadIds(feed, readState), ["mention"]);
+  assert.equal(hasUnseenHomeMention(feed, new Set(), readState), false);
+});
+
+test("thread mention attention clears only when that reply is revealed", () => {
+  const mention = {
+    ...feedItem("thread-mention", "mention"),
+    channelId: "stream-channel",
+    createdAt: 500,
+    tags: ROOT_TAGS,
+  };
+  const feed = homeFeed({ mentions: [mention] });
+  const unreadState = {
+    // Channel-level observation must not clear a reply that was not revealed.
+    getChannelReadAt: () => 600,
+    getMessageReadAt: () => null,
+  };
+  const readState = {
+    ...unreadState,
+    getMessageReadAt: (messageId) =>
+      messageId === "thread-mention" ? 500 : null,
+  };
+
+  assert.equal(hasUnseenHomeMention(feed, new Set(), unreadState), true);
+  assert.equal(hasUnseenHomeMention(feed, new Set(), readState), false);
 });
 
 test("Inbox observation requires the focused main Inbox window", () => {

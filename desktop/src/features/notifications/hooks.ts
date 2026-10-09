@@ -28,6 +28,7 @@ import {
 import {
   buildHomeBadgeFeedItems,
   homeMentionAttentionIds,
+  homeMentionSourceReadIds,
   hasUnseenHomeMention,
   isHomeBadgeFeedItemUnread,
   shouldCountTowardHomeBadgeSubtotal,
@@ -503,6 +504,15 @@ export function useHomeFeedNotificationState(
     () => homeMentionAttentionIds(feed),
     [feed],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion intentionally invalidates the stable marker resolvers
+  const sourceReadMentionIds = React.useMemo(
+    () =>
+      homeMentionSourceReadIds(feed, {
+        getChannelReadAt,
+        getMessageReadAt,
+      }),
+    [feed, getChannelReadAt, getMessageReadAt, readStateVersion],
+  );
 
   React.useEffect(() => {
     if (!feed || seenMentionIds !== null) {
@@ -540,6 +550,25 @@ export function useHomeFeedNotificationState(
     }
     markCurrentMentionsSeen();
   }, [currentMentionIds, isInboxObserved, normalizedPubkey]);
+
+  const markSourceReadMentionsSeen = React.useEffectEvent(() => {
+    setSeenMentionIds((current) => {
+      if (current === null) {
+        return current;
+      }
+      return mergeSeenFeedIds(current, sourceReadMentionIds);
+    });
+  });
+
+  // Persist source-message observation too, so a cleared dot cannot flash back
+  // during startup before the read-state snapshot finishes loading.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates the stable marker resolvers
+  React.useEffect(() => {
+    if (sourceReadMentionIds.length === 0) {
+      return;
+    }
+    markSourceReadMentionsSeen();
+  }, [normalizedPubkey, readStateVersion, sourceReadMentionIds]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getChannelReadAt
   return React.useMemo(() => {
@@ -594,7 +623,10 @@ export function useHomeFeedNotificationState(
       hasHomeMentionAttention:
         !isInboxObserved &&
         seenMentionIds !== null &&
-        hasUnseenHomeMention(feed, new Set(seenMentionIds)),
+        hasUnseenHomeMention(feed, new Set(seenMentionIds), {
+          getChannelReadAt,
+          getMessageReadAt,
+        }),
       homeBadgeCount: total,
       homeBadgeCountExcludingHighPriority: excludingHighPriority,
     };
