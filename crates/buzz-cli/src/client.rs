@@ -1174,7 +1174,8 @@ impl BuzzClient {
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
     ///
-    /// The relay rejects ephemeral kinds (20000–29999) over HTTP. Delegates to
+    /// The relay accepts only typing (kind:20002) of the ephemeral kinds
+    /// (20000–29999) over HTTP. Delegates to
     /// `buzz_ws_client::publish_event` which handles connect, NIP-42 auth,
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {

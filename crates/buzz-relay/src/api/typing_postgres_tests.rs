@@ -207,17 +207,99 @@ async fn typing_without_channel_is_rejected() {
 #[ignore = "requires Postgres and Redis"]
 async fn oversized_typing_is_rejected() {
     let f = Fixture::new().await;
-    let event = EventBuilder::new(Kind::Custom(20002), "x".repeat(2048))
-        .tags([Tag::parse(["h".to_string(), f.channel.to_string()]).unwrap()])
-        .sign_with_keys(&f.member)
+    let h = || Tag::parse(["h".to_string(), f.channel.to_string()]).unwrap();
+    let empty = || Tag::parse([String::new()]).unwrap();
+    let cases = [
+        ("content", "x".repeat(2048), vec![h()]),
+        (
+            "tag value",
+            String::new(),
+            vec![
+                h(),
+                Tag::parse(["e".to_string(), "x".repeat(2048)]).unwrap(),
+            ],
+        ),
+        (
+            "empty tags",
+            String::new(),
+            std::iter::once(h())
+                .chain(std::iter::repeat_with(empty).take(10_000))
+                .collect(),
+        ),
+    ];
+    for (case, content, tags) in cases {
+        let event = EventBuilder::new(Kind::Custom(20002), content)
+            .tags(tags)
+            .sign_with_keys(&f.member)
+            .unwrap();
+        let (status, body) = f.post(&f.member, &event).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{case}: {body}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("too large"),
+            "{case}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn fenced_community_typing_is_rejected() {
+    use futures::StreamExt;
+    let f = Fixture::new().await;
+    // Over HTTP a quiescing community's host no longer binds (404), so the
+    // fence only matters when quiescing starts after the request has bound its
+    // tenant. Reproduce that order: bind first, then quiesce, then publish.
+    let tenant = crate::tenant::bind_community(&f.state.db, &f.host)
+        .await
         .unwrap();
-    let (status, body) = f.post(&f.member, &event).await;
-    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    // Enter the deletion executor's transaction scope in this disposable
+    // fixture; the DB rejects unfenced ad-hoc state changes.
+    let mut tx = f.pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true), set_config('buzz.deletion_fence_generation', '0', true)")
+        .bind(f.community.to_string())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
+        .bind(f.community.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let topic = buzz_pubsub::EventTopicKey {
+        community_id: f.community,
+        topic: buzz_pubsub::EventTopic::Channel(f.channel),
+    }
+    .redis_channel();
+    let client = redis::Client::open(f.state.config.redis_url.as_str()).unwrap();
+    let mut pubsub = client.get_async_pubsub().await.unwrap();
+    pubsub.subscribe(&topic).await.unwrap();
+
+    let err = crate::handlers::event::publish_http_typing(
+        &f.state,
+        &tenant,
+        f.typing(&f.member, Some(f.channel)),
+        f.member.public_key(),
+    )
+    .await
+    .unwrap_err();
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("too large"),
-        "{body}"
+        matches!(&err, IngestError::Rejected(msg) if msg == "restricted: community writes are fenced"),
+        "{err:?}"
+    );
+    let mut messages = pubsub.into_on_message();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), messages.next())
+            .await
+            .is_err(),
+        "fenced typing indicator must not be published"
     );
 }

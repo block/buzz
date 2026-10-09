@@ -96,8 +96,8 @@ fn current_working_directory() -> Result<String> {
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
-/// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
-/// updates must be routed through the WS path.
+/// The HTTP bridge rejects presence (kind:20001); typing (kind:20002) is the
+/// only ephemeral kind it accepts. Presence updates must use the WS path.
 ///
 /// Content is a bare status string (`"online"`, `"away"`, `"offline"`) matching
 /// the desktop client's format. The relay stores this in Redis and synthesizes
