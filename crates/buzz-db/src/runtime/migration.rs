@@ -705,7 +705,21 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 57);
+        assert_eq!(migrations.len(), 58);
+        assert_eq!(migrations[57].version, 58);
+        let retire_follow_ups = strip_sql_comments(migrations[57].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP TRIGGER events_enqueue_push_match ON events;",
+            "DROP TRIGGER events_refresh_channel_ttl ON events;",
+            "DROP FUNCTION enqueue_push_match_job();",
+            "DROP FUNCTION refresh_channel_ttl_after_event_insert();",
+        ] {
+            assert!(
+                retire_follow_ups.contains(statement),
+                "0058 must run {statement}"
+            );
+        }
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -1654,9 +1668,10 @@ mod postgres_tests {
         assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
         assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
 
+        // Migration 0058 retired the trigger; the app owns the allowlist.
         let desired_schema = crate::test_support::desired_state_schema_sql();
-        assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
-        assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
+        assert!(!desired_schema.contains("enqueue_push_match_job"));
+        assert!(!desired_schema.contains("refresh_channel_ttl_after_event_insert"));
     }
 
     #[test]

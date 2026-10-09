@@ -1,6 +1,6 @@
 //! PostgreSQL contract for the event follow-up producers (push match
-//! enqueue and channel TTL refresh), on the desired and migration schemas,
-//! with the follow-up triggers present (dual) and dropped (app-only).
+//! enqueue and channel TTL refresh), on the desired and migration schemas.
+//! Both schemas have no follow-up trigger, so the app is the only producer.
 use crate::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
 use crate::{event, migration, push, AdmittedTx, Db, DbConfig, DbError};
 use buzz_core::CommunityId;
@@ -210,54 +210,34 @@ async fn activate_lease(
     );
 }
 
-/// Which producers are live. `Dual` is production during the migration
-/// window: the app follow-ups plus the 0023/0024 triggers. `AppOnly` drops
-/// both triggers in this disposable database, as the retirement migration
-/// will.
-#[derive(Clone, Copy, Debug)]
-enum Arm {
-    Dual,
-    AppOnly,
-}
-
-async fn apply_arm(pool: &PgPool, arm: Arm) {
+/// The app is the only producer: neither schema has a follow-up trigger on
+/// `events` or on any partition.
+async fn assert_no_follow_up_triggers(pool: &PgPool) {
     let triggers: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_trigger \
-         WHERE tgrelid = 'events'::regclass \
-           AND tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
+         WHERE tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
     )
     .fetch_one(pool)
     .await
-    .expect("count follow-up triggers");
-    assert_eq!(triggers, 2, "both follow-up triggers exist before the arm");
-    if let Arm::AppOnly = arm {
-        for statement in [
-            "DROP TRIGGER events_enqueue_push_match ON events",
-            "DROP TRIGGER events_refresh_channel_ttl ON events",
-        ] {
-            sqlx::query(statement)
-                .execute(pool)
-                .await
-                .expect("drop follow-up trigger in disposable database");
-        }
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_trigger \
-             WHERE tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("count remaining follow-up triggers, including partition clones");
-        assert_eq!(
-            remaining, 0,
-            "app-only arm must leave no trigger on any partition"
-        );
-    }
+    .expect("count follow-up triggers, including partition clones");
+    assert_eq!(
+        triggers, 0,
+        "no follow-up trigger may remain on any partition"
+    );
+    let functions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_proc \
+         WHERE proname IN ('enqueue_push_match_job', 'refresh_channel_ttl_after_event_insert')",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count follow-up trigger functions");
+    assert_eq!(functions, 0, "no follow-up trigger function may remain");
 }
 
-async fn assert_contract(migration_schema: bool, arm: Arm) {
+async fn assert_contract(migration_schema: bool) {
     let db = connect(migration_schema).await;
     let pool = db.pool();
-    apply_arm(pool, arm).await;
+    assert_no_follow_up_triggers(pool).await;
     let keys = Keys::generate();
     let community = create_community(pool).await;
     let channel = create_channel(pool, community, &keys.public_key().to_bytes()).await;
@@ -476,7 +456,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     assert!(
         deadline(pool, community, channel).await
             >= database_time_before_commit + chrono::Duration::seconds(60),
-        "the deferred trigger must refresh TTL at commit"
+        "the pre-commit refresh must set the deadline at commit time"
     );
     assert_eq!(match_count(pool, community, &committed).await, 1);
 
@@ -585,11 +565,8 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     );
 
     // A cancelled statement is not swallowed: plpgsql `WHEN OTHERS` never
-    // caught 57014, so the event is rejected. Both arms discriminate: if
-    // the app swallowed the cancel, the app-only arm would commit the
-    // event, and in the dual arm the trigger's own wait at COMMIT is not
-    // cut short by the 200ms statement timeout, so the commit outlives the
-    // 5s guard.
+    // caught 57014, so the event is rejected. If the app swallowed the
+    // cancel, the event would commit.
     let cancelled_event = signed_event(&keys, 9, "ttl-statement-cancel");
     let mut cancelled_tx = begin_caller_owned_event_transaction(&db, community).await;
     sqlx::query("SET LOCAL statement_timeout = '200ms'")
@@ -624,8 +601,8 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
 }
 
 /// Every production writer that can carry a channel runs both follow-ups,
-/// not just `insert_event`. In the app-only arm this is what catches a
-/// writer that skips the hook.
+/// not just `insert_event`. With no trigger, this catches a writer that skips
+/// the hook.
 async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, keys: &Keys) {
     let pool = db.pool();
 
@@ -750,24 +727,12 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn desired_event_follow_up_contract_dual() {
-    assert_contract(false, Arm::Dual).await;
+async fn desired_event_follow_up_contract() {
+    assert_contract(false).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn desired_event_follow_up_contract_app_only() {
-    assert_contract(false, Arm::AppOnly).await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn migration_schema_event_follow_up_contract_dual() {
-    assert_contract(true, Arm::Dual).await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn migration_schema_event_follow_up_contract_app_only() {
-    assert_contract(true, Arm::AppOnly).await;
+async fn migration_schema_event_follow_up_contract() {
+    assert_contract(true).await;
 }

@@ -11,10 +11,9 @@
 //!   [`refresh_channel_ttls`]). A refresh failure is logged and counted, and
 //!   the event still commits.
 //!
-//! This is the application-side replacement for the `events_enqueue_push_match`
-//! and `events_refresh_channel_ttl` triggers (migrations 0023, 0024, 0040).
-//! Both run during the migration window; the push enqueue is idempotent
-//! (`ON CONFLICT DO NOTHING`) and a second TTL refresh is harmless. Every
+//! This replaced the `events_enqueue_push_match` and
+//! `events_refresh_channel_ttl` triggers (migrations 0023, 0024, 0040; dropped
+//! in 0058), so nothing in the database does this work any more. Every
 //! production `INSERT INTO events` must call this module, which
 //! `tests/observability_source.rs` enforces.
 
@@ -66,7 +65,7 @@ pub(crate) async fn after_admitted_insert(
 /// statement: under READ COMMITTED the eligibility check needs a snapshot
 /// taken after the lock is granted.
 ///
-/// Errors propagate and reject the event, as the trigger did.
+/// Errors propagate and reject the event.
 pub(crate) async fn enqueue_push_match(
     conn: &mut PgConnection,
     community: CommunityId,
@@ -108,18 +107,15 @@ pub(crate) fn ttl_refresh_channel(channel_id: Option<Uuid>, kind: i32) -> Option
 
 /// Refresh the TTL deadline of every channel that received an event in this
 /// transaction. [`AdmittedTx::commit`] calls this as its last work before
-/// COMMIT, which keeps the deferred-trigger timing from migration 0024: the
-/// deadline is computed at commit. An ephemeral channel's row lock, taken by
-/// the UPDATE, is held through the remaining refreshes and the COMMIT round
-/// trip; the trigger held it only inside COMMIT. A permanent channel's row is
-/// never locked.
+/// COMMIT, so the deadline is computed at commit. An ephemeral channel's row
+/// lock, taken by the UPDATE, is held through the remaining refreshes and the
+/// COMMIT round trip. A permanent channel's row is never locked.
 ///
 /// Channels are refreshed in sorted order, so two transactions that touch the
 /// same channels cannot deadlock on the shared locks against an exclusive
 /// waiter. Each refresh runs in its own savepoint. A failure is rolled back,
-/// logged, and counted, and the event still commits, as with the trigger's
-/// `EXCEPTION WHEN OTHERS`. A cancelled statement (`57014`) still rejects the
-/// transaction, because plpgsql never caught it either.
+/// logged, and counted, and the event still commits. A cancelled statement
+/// (`57014`) still rejects the transaction.
 pub(crate) async fn refresh_channel_ttls(
     conn: &mut PgConnection,
     community: CommunityId,

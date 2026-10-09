@@ -348,7 +348,7 @@ async fn personal_read_intent_does_not_lock_shared_conversation_rows() {
     .await
     .unwrap();
     assert!(matches!(result, IntentOutcome::Applied));
-    // Exercise the actual event-insert TTL trigger while private progress is
+    // Exercise the actual event-insert TTL refresh while private progress is
     // uncommitted, then verify event deletion can update the observed row.
     let incoming = EventBuilder::new(Kind::Custom(9), "concurrent ephemeral ingest")
         .sign_with_keys(&Keys::generate())
