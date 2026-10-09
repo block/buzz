@@ -152,6 +152,30 @@ channel. It is private unless the kind:9007 also has `["visibility", "open"]`.
 **Hidden.** While a system channel is private, its kind:39000 carries the
 NIP-29 `hidden` tag.
 
+### Reads that leave system channels out
+
+The relay leaves system channels out of every read that does not name them.
+Clients that do not know about system channels then stay correct with no
+change. This applies to:
+
+- a filter without `#h`, for example the channels or messages a reader can see;
+- kind:39002 `#p:["<reader>"]`, the channels a reader belongs to;
+- COUNT and NIP-50 search; and
+- any relay-specific query API that does the same reads.
+
+A filter **names** a system channel when it has the channel ID in `#h`, or in
+`#d` on a filter whose kinds are all 39000–39003. Then the ordinary read rules
+apply: the reader can read the channel if they are a member or if it is open.
+A client that has the ID, for example from a link, can open the channel. Thus
+a system channel stays an ordinary NIP-29 group.
+
+The relay decides this for each filter. A filter that names a system channel
+does not add it to another filter in the same request.
+
+The relay MUST NOT send push notifications or kind:44100/44101 membership
+notifications for system channels. A client that received one would show the
+channel.
+
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the
