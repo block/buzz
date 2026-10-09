@@ -93,7 +93,7 @@ async fn single_application_cutover_refuses_populated_v5_authority() {
     .execute(&pool)
     .await
     .unwrap();
-    GATEWAY_MIGRATOR.run_to(5, &pool).await.unwrap();
+    migrate_gateway_through(&pool, 5).await.unwrap();
     sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,app_profile,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at) VALUES($1,$2,$3,0,'buzz-ios-dogfood',$4,$5,1,now()+interval '1 day')")
         .bind(Uuid::new_v4()).bind(vec![1_u8]).bind(vec![2_u8;33]).bind(vec![3_u8]).bind(vec![4_u8;32])
         .execute(&pool).await.unwrap();

@@ -12,6 +12,14 @@ mod bootstrap_postgres_tests;
 
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+#[cfg(test)]
+async fn migrate_gateway_through(
+    pool: &PgPool,
+    version: i64,
+) -> Result<(), sqlx::migrate::MigrateError> {
+    GATEWAY_MIGRATOR.run_to(version, pool).await
+}
+
 #[derive(Clone)]
 pub struct PostgresAuthorityStore {
     pool: PgPool,

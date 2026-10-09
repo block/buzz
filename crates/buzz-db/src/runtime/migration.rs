@@ -705,7 +705,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 57);
+        assert_eq!(migrations.len(), 58);
+        assert_eq!(migrations[57].version, 58);
+        assert!(migrations[57]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE push_leases DROP COLUMN app_profile"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -3239,7 +3244,9 @@ mod postgres_tests {
     async fn migration_0058_refuses_active_legacy_leases_without_mutation() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        MIGRATOR.run_to(57, &pool).await.expect("legacy schema");
+        run_migrations_through(&pool, 57)
+            .await
+            .expect("legacy schema");
         let community = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities(id,host) VALUES($1,'push-cutover.example')")
             .bind(community)
