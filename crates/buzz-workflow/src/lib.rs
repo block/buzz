@@ -376,7 +376,10 @@ impl WorkflowEngine {
                 }
             };
 
-            if !def.enabled || !trigger_matches_event(&def.trigger, kind_u32) {
+            if !def.enabled
+                || !trigger_matches_event(&def.trigger, kind_u32)
+                || !member_joined_content_gate(&def.trigger, &trigger_ctx.system_type)
+            {
                 continue;
             }
 
@@ -904,7 +907,8 @@ async fn should_fire_workflow(
     let filter = match &def.trigger {
         TriggerDef::MessagePosted { filter }
         | TriggerDef::ReactionAdded { filter, .. }
-        | TriggerDef::DiffPosted { filter } => filter.as_ref(),
+        | TriggerDef::DiffPosted { filter }
+        | TriggerDef::MemberJoined { filter } => filter.as_ref(),
         TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
     };
     if let Some(expr) = filter {
@@ -939,6 +943,10 @@ async fn should_fire_workflow(
 /// - `emoji` — for `KIND_REACTION` events, the content is the emoji; otherwise empty
 /// - `message_id` — for reactions, the target message's event ID (from `e` tag);
 ///   for all other events, the event's own ID
+/// - `system_type` — for kind:40099 system messages, the content's `type`
+///   discriminator (e.g. `member_joined`); otherwise empty
+/// - `target` — for kind:40099 system messages, the content's `target` pubkey
+///   hex (e.g. the joining member); otherwise empty
 pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::TriggerContext {
     let kind_u32 = event_kind_u32(&event.event);
     let content = event.event.content.clone();
@@ -987,6 +995,13 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         event.event.id.to_hex()
     };
 
+    // Kind:40099 system messages are a shared envelope — parse the `type` /
+    // `target` content fields so filters and templates can address the joiner.
+    // The signature invariant stands: `author` stays the event signer (the
+    // relay keypair for genuine system messages); content metadata cannot
+    // speak for another pubkey.
+    let (system_type, target) = parse_system_message_fields(kind_u32, &content);
+
     executor::TriggerContext {
         text: content,
         author,
@@ -998,6 +1013,8 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         emoji,
         message_id,
         is_reply: event_is_reply(&event.event),
+        system_type,
+        target,
         webhook_fields: HashMap::new(),
     }
 }
@@ -1036,14 +1053,55 @@ fn owner_authority_allows(role: Option<&str>, needs_elevated: bool) -> bool {
 
 /// Returns `true` if the trigger type matches the given event kind.
 fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
-    use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
+    use buzz_core::kind::{
+        KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF, KIND_SYSTEM_MESSAGE,
+    };
     match trigger {
         TriggerDef::MessagePosted { .. } => kind_u32 == KIND_STREAM_MESSAGE,
         TriggerDef::ReactionAdded { .. } => kind_u32 == KIND_REACTION,
         TriggerDef::DiffPosted { .. } => kind_u32 == KIND_STREAM_MESSAGE_DIFF,
+        // Kind 40099 is a shared system-message envelope (member_joined,
+        // member_left, topic_changed, …): the kind match alone is not
+        // sufficient — `member_joined_content_gate` applies the content `type`
+        // discriminator in `on_event`.
+        TriggerDef::MemberJoined { .. } => kind_u32 == KIND_SYSTEM_MESSAGE,
         // Schedule and Webhook triggers are not fired by channel events.
         TriggerDef::Schedule { .. } | TriggerDef::Webhook => false,
     }
+}
+
+/// Gate for the shared kind:40099 system-message envelope.
+///
+/// `trigger_matches_event` sees only the kind number, so a `member_joined`
+/// trigger must additionally check the content's `type` discriminator (already
+/// parsed into `TriggerContext::system_type`). Other system messages sharing
+/// the envelope (member_left, topic_changed, …) must not fire it. Non-
+/// `member_joined` triggers are not gated here.
+fn member_joined_content_gate(trigger: &TriggerDef, system_type: &str) -> bool {
+    !matches!(trigger, TriggerDef::MemberJoined { .. }) || system_type == "member_joined"
+}
+
+/// Parse the discriminator fields of a kind:40099 system-message content JSON.
+///
+/// Returns `(system_type, target)` — e.g. `("member_joined", <joining pubkey
+/// hex>)` — or `("", "")` for any other kind or an unparseable/missing field.
+/// System types without a `target` (e.g. `member_left` carries only `actor`)
+/// yield an empty target.
+fn parse_system_message_fields(kind_u32: u32, content: &str) -> (String, String) {
+    if kind_u32 != buzz_core::kind::KIND_SYSTEM_MESSAGE {
+        return (String::new(), String::new());
+    }
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) else {
+        return (String::new(), String::new());
+    };
+    let field = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    (field("type"), field("target"))
 }
 
 #[cfg(test)]
@@ -1542,6 +1600,133 @@ steps:
         let trigger = TriggerDef::MessagePosted { filter: None };
         assert!(!trigger_matches_event(&trigger, 40008));
         assert!(trigger_matches_event(&trigger, 9));
+    }
+
+    #[test]
+    fn member_joined_matches_kind_40099_only() {
+        let trigger = TriggerDef::MemberJoined { filter: None };
+        assert!(trigger_matches_event(&trigger, 40099));
+        assert!(!trigger_matches_event(&trigger, 9));
+        assert!(!trigger_matches_event(&trigger, 7));
+        assert!(!trigger_matches_event(&trigger, 40008));
+        assert!(!trigger_matches_event(&trigger, 0));
+    }
+
+    #[test]
+    fn other_triggers_do_not_match_kind_40099() {
+        // System messages must never fire message/reaction/diff triggers.
+        assert!(!trigger_matches_event(
+            &TriggerDef::MessagePosted { filter: None },
+            40099
+        ));
+        assert!(!trigger_matches_event(
+            &TriggerDef::ReactionAdded {
+                emoji: None,
+                filter: None
+            },
+            40099
+        ));
+        assert!(!trigger_matches_event(
+            &TriggerDef::DiffPosted { filter: None },
+            40099
+        ));
+    }
+
+    #[test]
+    fn member_joined_content_gate_requires_member_joined_type() {
+        let trigger = TriggerDef::MemberJoined { filter: None };
+        assert!(member_joined_content_gate(&trigger, "member_joined"));
+        // Other types sharing the kind:40099 envelope must not fire.
+        assert!(!member_joined_content_gate(&trigger, "member_left"));
+        assert!(!member_joined_content_gate(&trigger, "topic_changed"));
+        assert!(!member_joined_content_gate(&trigger, ""));
+    }
+
+    #[test]
+    fn member_joined_content_gate_does_not_gate_other_triggers() {
+        // The gate is transparent for non-member_joined triggers (their kind
+        // match already decided).
+        assert!(member_joined_content_gate(
+            &TriggerDef::MessagePosted { filter: None },
+            ""
+        ));
+        assert!(member_joined_content_gate(
+            &TriggerDef::Webhook,
+            "member_left"
+        ));
+    }
+
+    #[test]
+    fn parse_system_message_fields_extracts_type_and_target() {
+        let content = r#"{"type":"member_joined","actor":"aa11","target":"bb22"}"#;
+        let (system_type, target) = parse_system_message_fields(40099, content);
+        assert_eq!(system_type, "member_joined");
+        assert_eq!(target, "bb22");
+    }
+
+    #[test]
+    fn parse_system_message_fields_handles_missing_target() {
+        // member_left carries only `actor` — no `target`.
+        let content = r#"{"type":"member_left","actor":"aa11"}"#;
+        let (system_type, target) = parse_system_message_fields(40099, content);
+        assert_eq!(system_type, "member_left");
+        assert_eq!(target, "");
+    }
+
+    #[test]
+    fn parse_system_message_fields_ignores_other_kinds_and_bad_json() {
+        // Non-40099 kinds never parse content as a system envelope.
+        let content = r#"{"type":"member_joined","target":"bb22"}"#;
+        assert_eq!(
+            parse_system_message_fields(9, content),
+            (String::new(), String::new())
+        );
+        // Malformed content on a 40099 yields empty fields, not a panic.
+        assert_eq!(
+            parse_system_message_fields(40099, "not json"),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            parse_system_message_fields(40099, r#"{"no_type":true}"#),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn build_trigger_context_system_message_keeps_signer_as_author() {
+        use nostr::{EventBuilder, Keys, Kind};
+        use uuid::Uuid;
+
+        let relay_keys = Keys::generate();
+        let joiner = Keys::generate();
+        let content = serde_json::json!({
+            "type": "member_joined",
+            "actor": relay_keys.public_key().to_hex(),
+            "target": joiner.public_key().to_hex(),
+        })
+        .to_string();
+        let event = EventBuilder::new(Kind::Custom(40099), content.clone())
+            .sign_with_keys(&relay_keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+
+        let ctx = build_trigger_context(&stored);
+
+        // Signature invariant: author is the signer (relay), never a content
+        // field — content metadata cannot speak for another pubkey.
+        assert_eq!(ctx.author, relay_keys.public_key().to_hex());
+        assert_eq!(ctx.system_type, "member_joined");
+        assert_eq!(ctx.target, joiner.public_key().to_hex());
+        // The raw content stays available as trigger_text.
+        assert_eq!(ctx.text, content);
+    }
+
+    #[test]
+    fn build_trigger_context_plain_message_has_empty_system_fields() {
+        let stored = make_message_event();
+        let ctx = build_trigger_context(&stored);
+        assert_eq!(ctx.system_type, "");
+        assert_eq!(ctx.target, "");
     }
 
     #[test]
