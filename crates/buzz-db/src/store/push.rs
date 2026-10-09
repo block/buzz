@@ -30,12 +30,11 @@ async fn begin_operation_transaction(
 }
 
 /// Namespace for the per-community push-gate advisory lock. Event inserts
-/// take it SHARED in `event_follow_up::enqueue_push_match` (and in the
-/// `enqueue_push_match_job` trigger from migration 0023 until it is retired);
-/// every lease transition that can make match eligibility true takes it
-/// EXCLUSIVE here, forcing a total order so a concurrent event insert either
-/// sees the committed lease or strictly precedes the activation (in which case
-/// no wake was owed). Distinct key domain from the audit lock and the lease
+/// take it SHARED in `event_follow_up::enqueue_push_match`; every lease
+/// transition that can make match eligibility true takes it EXCLUSIVE here,
+/// forcing a total order so a concurrent event insert either sees the
+/// committed lease or strictly precedes the activation (in which case no wake
+/// was owed). Distinct key domain from the audit lock and the lease
 /// address/author locks.
 const PUSH_GATE_LOCK_NAMESPACE: &str = "buzz_push_gate:";
 
@@ -2014,6 +2013,12 @@ mod postgres_tests {
         .execute(pool)
         .await
         .expect("insert wake source event");
+        // Production event writers queue the match job in the same step.
+        let mut conn = pool.acquire().await.expect("acquire follow-up connection");
+        crate::store::event_follow_up::enqueue_push_match(&mut conn, community, event_id, 9)
+            .await
+            .expect("queue wake source match job");
+        drop(conn);
         match enqueue_wake(
             pool,
             community,
@@ -2185,7 +2190,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn matcher_trigger_is_allowlisted_and_deleted_events_are_discarded() {
+    async fn matcher_enqueue_is_allowlisted_and_deleted_events_are_discarded() {
         let pool = setup_pool().await;
         // Global claim assertions below require a queue free of other tests'
         // leftovers.
@@ -2248,7 +2253,7 @@ mod postgres_tests {
     async fn matcher_load_error_preserves_claimed_job_for_recovery() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
-        // Eligible lease required for the T1b-gated trigger to enqueue.
+        // Eligible lease required for the T1b-gated enqueue.
         activate(&pool, community, &[79; 32], "install", &[80; 32], 1).await;
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "retry me")
             .sign_with_keys(&nostr::Keys::generate())
@@ -2342,7 +2347,7 @@ mod postgres_tests {
             .await
             .expect("drain matcher queue");
         let community = make_community(&pool).await;
-        // Eligible lease required for the T1b-gated trigger to enqueue.
+        // Eligible lease required for the T1b-gated enqueue.
         activate(&pool, community, &[81; 32], "install", &[82; 32], 1).await;
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "one job")
             .sign_with_keys(&nostr::Keys::generate())
@@ -2758,7 +2763,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
 
-        // Hold the insert transaction open after its trigger takes the shared gate lock.
+        // Hold the insert transaction open after its follow-up takes the shared gate lock.
         let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced wake")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign raced event");
@@ -2774,6 +2779,14 @@ mod postgres_tests {
         .execute(&mut *insert_tx)
         .await
         .expect("insert raced event inside held txn");
+        crate::store::event_follow_up::enqueue_push_match(
+            &mut insert_tx,
+            community,
+            raced.id.as_bytes().as_slice(),
+            9,
+        )
+        .await
+        .expect("take the shared gate lock inside held txn");
 
         let insert_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *insert_tx)

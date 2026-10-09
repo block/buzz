@@ -1924,8 +1924,8 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
 
     assert!(
         violations.is_empty(),
-        "production `INSERT INTO events` writers must call `event_follow_up` so the push \
-         enqueue and channel TTL refresh survive the trigger retirement: {violations:?}"
+        "production `INSERT INTO events` writers must call `event_follow_up` because no \
+         trigger does the push enqueue or channel TTL refresh: {violations:?}"
     );
     // The seven writers at the time of BUZZ-176. A lower count means the scan
     // stopped seeing a writer, not that one was removed safely.

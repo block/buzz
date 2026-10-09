@@ -576,12 +576,13 @@ pub async fn update_channel(
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
-    // T1a repair: a TTL change can flip this channel's event-trigger fast
-    // path (migration 0024 reads ttl_seconds under a SHARED per-channel
-    // advisory lock). Take the same key EXCLUSIVE before the UPDATE so a
-    // concurrent event either sees the committed TTL or strictly precedes
-    // this transition — whose own deadline reset is then the latest word.
-    // Non-TTL updates don't touch the fast path and skip the lock.
+    // T1a repair: a TTL change can flip this channel's event-commit fast
+    // path (`event_follow_up::refresh_channel_ttls` reads ttl_seconds under
+    // a SHARED per-channel advisory lock). Take the same key EXCLUSIVE
+    // before the UPDATE so a concurrent event either sees the committed TTL
+    // or strictly precedes this transition — whose own deadline reset is
+    // then the latest word. Non-TTL updates don't touch the fast path and
+    // skip the lock.
     if updates.ttl_seconds.is_some() {
         let mut tx = begin_event_write_transaction(pool).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -1009,9 +1010,9 @@ impl Db {
 }
 
 /// The per-channel TTL advisory lock key. Event commits take it SHARED
-/// (`event_follow_up::refresh_channel_ttls`, and the 0024 trigger until it is
-/// retired); TTL transitions in [`update_channel`] take it EXCLUSIVE. Both
-/// sides build it here, so the keys cannot drift.
+/// (`event_follow_up::refresh_channel_ttls`); TTL transitions in
+/// [`update_channel`] take it EXCLUSIVE. Both sides build it here, so the keys
+/// cannot drift.
 pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> String {
     format!("buzz_channel_ttl:{}:{channel}", community.as_uuid())
 }
