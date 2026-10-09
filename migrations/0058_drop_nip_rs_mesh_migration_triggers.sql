@@ -13,6 +13,10 @@
 -- without them. Dropping a trigger on the partitioned parent also drops its
 -- partition clones. Published migrations 0009, 0010, 0011 and 0019 stay
 -- checksum-frozen.
+--
+-- DROP TRIGGER takes ACCESS EXCLUSIVE on events and every partition; fail the
+-- deployment rather than queue relay reads and writes behind a long holder.
+SET LOCAL lock_timeout = '5s';
 
 DROP TRIGGER trg_events_nip_rs_watermark ON events;
 DROP TRIGGER trg_events_guard_nip_rs_hard_delete ON events;

@@ -1125,8 +1125,8 @@ macro_rules! mesh_status_event_predicate {
 /// historical value: NIP-RS read state and Buzz mesh heartbeats. Their
 /// deletion is physical, including the mention index, so soft-deleted payloads
 /// never accumulate. These predicates are the only definition of the class:
-/// the replace path asks PostgreSQL through [`classify_retention_free`] rather
-/// than re-implementing them in Rust.
+/// every removal path decides row by row through
+/// [`remove_coordinate_versions_in_tx`] rather than re-implementing them in Rust.
 macro_rules! retention_free_event_predicate {
     () => {
         concat!(
@@ -1145,38 +1145,21 @@ fn may_be_retention_free(kind: i32) -> bool {
     kind == 30078 || kind == 30003
 }
 
-/// Which retention-free class an event belongs to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RetentionFreeClass {
-    /// A conforming NIP-RS read-state coordinate.
-    pub(crate) nip_rs: bool,
-    /// A Buzz mesh heartbeat.
-    pub(crate) mesh_status: bool,
-}
-
-impl RetentionFreeClass {
-    /// Superseded and deleted rows of this event are removed physically.
-    pub(crate) fn is_retention_free(self) -> bool {
-        self.nip_rs || self.mesh_status
-    }
-}
-
-/// Classify an event that has not been written yet, using the same SQL
-/// predicates as the purge and delete paths so the two cannot drift.
-pub(crate) async fn classify_retention_free(
+/// Whether an event that has not been written yet is a conforming NIP-RS
+/// read-state coordinate, which advances the stale-write watermark. Uses the
+/// same SQL predicate as the purge and delete paths so the two cannot drift.
+pub(crate) async fn is_nip_rs_event(
     conn: &mut sqlx::PgConnection,
     kind: i32,
     d_tag: &str,
     tags: &serde_json::Value,
-) -> Result<RetentionFreeClass> {
-    if !may_be_retention_free(kind) {
-        return Ok(RetentionFreeClass::default());
+) -> Result<bool> {
+    if kind != 30078 {
+        return Ok(false);
     }
-    let (nip_rs, mesh_status): (bool, bool) = sqlx::query_as(concat!(
+    let nip_rs: bool = sqlx::query_scalar(concat!(
         "SELECT COALESCE(",
         nip_rs_event_predicate!(),
-        ", false), COALESCE(",
-        mesh_status_event_predicate!(),
         ", false) \
          FROM (SELECT $1::integer AS kind, $2::text AS d_tag, $3::jsonb AS tags) event_row"
     ))
@@ -1185,10 +1168,7 @@ pub(crate) async fn classify_retention_free(
     .bind(tags)
     .fetch_one(conn)
     .await?;
-    Ok(RetentionFreeClass {
-        nip_rs,
-        mesh_status,
-    })
+    Ok(nip_rs)
 }
 
 /// Soft-delete the live row for an addressable coordinate
@@ -1236,14 +1216,35 @@ pub async fn soft_delete_by_coordinate(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let deleted =
+        remove_coordinate_versions_in_tx(&mut tx, kind, pubkey, d_tag, deletion_created_at).await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Remove every live version of `(kind, pubkey, d_tag)` created at or before
+/// `created_at_or_before`, in the caller's transaction. Each row is classified
+/// by its own stored shape: retention-free rows are purged physically with
+/// their mentions, every other row is soft-deleted. NIP-09 coordinate deletion
+/// and parameterized replacement both remove versions through this function.
+///
+/// Returns `true` if any row was removed.
+pub(crate) async fn remove_coordinate_versions_in_tx(
+    tx: &mut AdmittedTx,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+    created_at_or_before: DateTime<Utc>,
+) -> Result<bool> {
+    let community_id = tx.community();
     let purged = if may_be_retention_free(kind) {
         purge_retention_free_events(
-            &mut tx,
+            tx,
             RetentionFreeTarget::Coordinate {
                 kind,
                 pubkey,
                 d_tag,
-                created_at_or_before: deletion_created_at,
+                created_at_or_before,
             },
         )
         .await?
@@ -1254,8 +1255,9 @@ pub async fn soft_delete_by_coordinate(
     // statement order: under READ COMMITTED this UPDATE takes a fresh snapshot,
     // so a retention-free head committed by a racing replacement after the
     // purge ran is spared instead of soft-deleted (the "deletion arrived
-    // first" outcome documented above). COALESCE keeps a NULL predicate
-    // (e.g. NULL `d_tag`) on the ordinary soft-delete path, as the triggers do.
+    // first" outcome documented on [`soft_delete_by_coordinate`]). COALESCE
+    // keeps a NULL predicate (e.g. NULL `d_tag`) on the ordinary soft-delete
+    // path.
     let result = sqlx::query(concat!(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -1267,11 +1269,9 @@ pub async fn soft_delete_by_coordinate(
     .bind(kind)
     .bind(pubkey)
     .bind(d_tag)
-    .bind(deletion_created_at)
+    .bind(created_at_or_before)
     .execute(tx.conn())
     .await?;
-
-    tx.commit().await?;
 
     Ok(purged > 0 || result.rows_affected() > 0)
 }
