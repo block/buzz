@@ -38,6 +38,8 @@ pub struct FleetStockSnapshot {
     pub channels_dm: i64,
     /// Non-deleted workflow channels.
     pub channels_workflow: i64,
+    /// Non-deleted system channels.
+    pub channels_system: i64,
     /// Relay owners.
     pub members_owner: i64,
     /// Relay administrators.
@@ -96,7 +98,8 @@ where
                 COUNT(*) FILTER (WHERE channel_type = 'stream') AS stream,
                 COUNT(*) FILTER (WHERE channel_type = 'forum') AS forum,
                 COUNT(*) FILTER (WHERE channel_type = 'dm') AS dm,
-                COUNT(*) FILTER (WHERE channel_type = 'workflow') AS workflow
+                COUNT(*) FILTER (WHERE channel_type = 'workflow') AS workflow,
+                COUNT(*) FILTER (WHERE channel_type = 'system') AS system
             FROM channels
             WHERE deleted_at IS NULL
         ),
@@ -122,6 +125,7 @@ where
             channels.forum AS channels_forum,
             channels.dm AS channels_dm,
             channels.workflow AS channels_workflow,
+            channels.system AS channels_system,
             members.owner AS members_owner,
             members.admin AS members_admin,
             members.member AS members_member,
@@ -1455,7 +1459,7 @@ mod postgres_tests {
         .await
         .expect("deactivate user");
 
-        for channel_type in ["stream", "forum", "dm", "workflow"] {
+        for channel_type in ["stream", "forum", "dm", "workflow", "system"] {
             sqlx::query(
                 "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
                  VALUES ($1, $2, $3, $4::channel_type, 'open', $5)",
@@ -1589,8 +1593,9 @@ mod postgres_tests {
                 stock.channels_forum,
                 stock.channels_dm,
                 stock.channels_workflow,
+                stock.channels_system,
             ),
-            (1, 1, 1, 1)
+            (1, 1, 1, 1, 1)
         );
         assert_eq!(
             (

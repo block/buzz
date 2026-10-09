@@ -469,7 +469,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `user.rs` | User profile storage |
 | `error.rs` | Database error types |
 
-**Channel types:** `Stream`, `Forum`, `Dm`, `Workflow`  
+**Channel types:** `Stream`, `Forum`, `Dm`, `Workflow`, `System`  
 **Member roles:** `Owner`, `Admin`, `Member`, `Guest`, `Bot`  
 **Workflow statuses:** `Active`, `Disabled`, `Archived`  
 **Run statuses:** `Pending`, `Running`, `WaitingApproval`, `Completed`, `Failed`, `Cancelled`
