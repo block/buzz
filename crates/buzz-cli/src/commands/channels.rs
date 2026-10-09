@@ -192,7 +192,8 @@ impl ChannelSummary {
             match key {
                 "d" => channel_id = val.map(str::to_string),
                 "name" => name = val.map(str::to_string),
-                "t" => channel_type = val.map(str::to_string),
+                // The first `t` is the channel type; later `t` tags are labels.
+                "t" if channel_type.is_none() => channel_type = val.map(str::to_string),
                 // NIP-29 emits both `private` and `public` (Buzz adds the latter).
                 // The presence of either tag is the source of truth; tag value is unused.
                 "private" => visibility = Some("private".to_string()),
@@ -2006,6 +2007,19 @@ mod tests {
             presence: presence.map(str::to_string),
             profile_updated_at,
         }
+    }
+
+    #[test]
+    fn from_event_reads_the_type_from_the_first_t_tag() {
+        let ev = event(json!([
+            ["d", "11111111-1111-1111-1111-111111111111"],
+            ["name", "labeled"],
+            ["t", "forum"],
+            ["t", "workspace"],
+            ["P", "ab".repeat(32)],
+        ]));
+        let s = ChannelSummary::from_event(&ev).expect("parse");
+        assert_eq!(s.channel_type.as_deref(), Some("forum"));
     }
 
     #[test]

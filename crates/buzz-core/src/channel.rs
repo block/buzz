@@ -17,26 +17,108 @@ pub fn canonical_channel_name(name: &str) -> &str {
         .trim_end()
 }
 
+/// Maximum number of labels on one channel.
+pub const MAX_CHANNEL_LABELS: usize = 8;
+
+/// Maximum length of one channel label, in bytes.
+pub const MAX_CHANNEL_LABEL_LEN: usize = 64;
+
+/// Names a label may not take, because the channel type uses the same `t`
+/// tag. A label equal to one of these could make a channel look like
+/// another type. The list includes types that a later relay may add.
+pub const RESERVED_CHANNEL_LABELS: &[&str] = &["stream", "forum", "dm", "workflow", "system"];
+
+/// Why a set of channel labels was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChannelLabelError {
+    /// More than [`MAX_CHANNEL_LABELS`] distinct labels.
+    #[error("too many labels: at most {MAX_CHANNEL_LABELS} are allowed")]
+    TooMany,
+    /// A label is not 1–64 characters from `a-z`, `0-9`, `.`, `:` and `-`.
+    #[error("invalid label {0:?}: use 1-{MAX_CHANNEL_LABEL_LEN} characters from a-z, 0-9, '.', ':' and '-'")]
+    Invalid(String),
+    /// A label equals a channel type name.
+    #[error("invalid label {0:?}: a label cannot be a channel type name")]
+    Reserved(String),
+    /// The clear marker `""` was combined with other labels.
+    #[error("an empty label clears all labels and cannot be combined with other labels")]
+    ClearWithOthers,
+}
+
+/// Validate the values of a channel's `["t", <label>]` tags and return the
+/// label set to store, in first-seen order without duplicates.
+///
+/// A single `""` means "no labels" and returns an empty set; kind:9002 uses
+/// it to clear the labels, the same convention as `["ttl", ""]`.
+pub fn parse_channel_labels<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<String>, ChannelLabelError> {
+    let values: Vec<&str> = values.into_iter().collect();
+    if values.contains(&"") {
+        return if values.iter().all(|value| value.is_empty()) {
+            Ok(Vec::new())
+        } else {
+            Err(ChannelLabelError::ClearWithOthers)
+        };
+    }
+    let mut labels: Vec<String> = Vec::with_capacity(values.len());
+    for value in values {
+        let valid = value.len() <= MAX_CHANNEL_LABEL_LEN
+            && value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".:-".contains(&byte)
+            });
+        if !valid {
+            return Err(ChannelLabelError::Invalid(value.to_owned()));
+        }
+        if RESERVED_CHANNEL_LABELS.contains(&value) {
+            return Err(ChannelLabelError::Reserved(value.to_owned()));
+        }
+        if !labels.iter().any(|label| label == value) {
+            labels.push(value.to_owned());
+        }
+    }
+    if labels.len() > MAX_CHANNEL_LABELS {
+        return Err(ChannelLabelError::TooMany);
+    }
+    Ok(labels)
+}
+
 /// Tags that identify a channel on every NIP-29 group-state event the relay
 /// signs (kinds 39000–39003), in this order:
 ///
 /// 1. `["t", <channel_type>]`. It comes first, so a client that reads the
 ///    first `t` tag gets the channel type.
-/// 2. `["P", <creator hex>]`: the key that signed the channel's kind:9007.
+/// 2. `["t", <label>]` for each label, in stored order.
+/// 3. `["P", <creator hex>]`: the key that signed the channel's kind:9007.
 ///    It comes from the database and does not change when ownership moves.
 ///    Uppercase `P` names the author of the root object, as in NIP-22,
 ///    NIP-34 and NIP-72; lowercase `p` already means members and DM
 ///    participants on these kinds.
 ///
-/// Filters such as `{kinds:[39000], #P:[<key>]}` select by these tags.
+/// Filters such as `{kinds:[39000], #P:[<key>], #t:[<label>]}` select by
+/// these tags.
 pub fn group_state_identity_tags(
     channel_type: &str,
+    labels: &[String],
     created_by: &[u8],
 ) -> Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
-    Ok(vec![
-        nostr::Tag::parse(["t", channel_type])?,
-        nostr::Tag::parse(["P", &hex::encode(created_by)])?,
-    ])
+    let mut tags = Vec::with_capacity(labels.len() + 2);
+    tags.push(nostr::Tag::parse(["t", channel_type])?);
+    for label in labels {
+        tags.push(nostr::Tag::parse(["t", label.as_str()])?);
+    }
+    tags.push(nostr::Tag::parse(["P", &hex::encode(created_by)])?);
+    Ok(tags)
+}
+
+/// Return the channel type from group-state tags: the value of the first
+/// `t` tag. Later `t` tags are labels.
+pub fn channel_type_from_group_state_tags<'a>(
+    tags: impl IntoIterator<Item = &'a nostr::Tag>,
+) -> Option<&'a str> {
+    tags.into_iter()
+        .find(|tag| tag.kind() == nostr::TagKind::t())
+        .and_then(|tag| tag.content())
 }
 
 /// Tag on kind:39000 that holds the channel's creation time in Unix seconds.
@@ -213,22 +295,82 @@ impl FromStr for MemberRole {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_channel_name, group_state_identity_tags};
+    use super::{
+        canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
+        parse_channel_labels, ChannelLabelError, MAX_CHANNEL_LABELS,
+    };
 
     #[test]
-    fn group_state_identity_tags_put_the_type_first_then_the_creator() {
+    fn group_state_identity_tags_put_the_type_first_then_labels_then_the_creator() {
         let creator = [0xab; 32];
-        let tags: Vec<Vec<String>> = group_state_identity_tags("forum", &creator)
-            .expect("valid tags")
-            .into_iter()
-            .map(|tag| tag.to_vec())
-            .collect();
+        let labels = vec!["workspace".to_string(), "team:core".to_string()];
+        let built = group_state_identity_tags("forum", &labels, &creator).expect("valid tags");
+        assert_eq!(channel_type_from_group_state_tags(&built), Some("forum"));
+        let tags: Vec<Vec<String>> = built.into_iter().map(|tag| tag.to_vec()).collect();
         assert_eq!(
             tags,
             vec![
                 vec!["t".to_string(), "forum".to_string()],
+                vec!["t".to_string(), "workspace".to_string()],
+                vec!["t".to_string(), "team:core".to_string()],
                 vec!["P".to_string(), "ab".repeat(32)],
             ]
+        );
+    }
+
+    #[test]
+    fn channel_labels_accept_the_allowed_alphabet_and_drop_duplicates() {
+        assert_eq!(
+            parse_channel_labels(["agent-attention", "v1.2:x", "agent-attention"]),
+            Ok(vec!["agent-attention".to_string(), "v1.2:x".to_string()])
+        );
+        assert_eq!(
+            parse_channel_labels(["a".repeat(64).as_str()]),
+            Ok(vec!["a".repeat(64)])
+        );
+    }
+
+    #[test]
+    fn channel_labels_refuse_bad_characters_lengths_and_type_names() {
+        for bad in ["Upper", "has space", "under_score", "emoji🙂"] {
+            assert_eq!(
+                parse_channel_labels([bad]),
+                Err(ChannelLabelError::Invalid(bad.to_string()))
+            );
+        }
+        let long = "a".repeat(65);
+        assert_eq!(
+            parse_channel_labels([long.as_str()]),
+            Err(ChannelLabelError::Invalid(long.clone()))
+        );
+        for reserved in ["stream", "forum", "dm", "workflow", "system"] {
+            assert_eq!(
+                parse_channel_labels([reserved]),
+                Err(ChannelLabelError::Reserved(reserved.to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn channel_labels_cap_the_distinct_count() {
+        let names: Vec<String> = (0..=MAX_CHANNEL_LABELS).map(|i| format!("l{i}")).collect();
+        assert_eq!(
+            parse_channel_labels(names.iter().map(String::as_str)),
+            Err(ChannelLabelError::TooMany)
+        );
+        assert_eq!(
+            parse_channel_labels(names[..MAX_CHANNEL_LABELS].iter().map(String::as_str))
+                .map(|labels| labels.len()),
+            Ok(MAX_CHANNEL_LABELS)
+        );
+    }
+
+    #[test]
+    fn a_lone_empty_label_clears_and_cannot_mix_with_labels() {
+        assert_eq!(parse_channel_labels([""]), Ok(Vec::new()));
+        assert_eq!(
+            parse_channel_labels(["", "workspace"]),
+            Err(ChannelLabelError::ClearWithOthers)
         );
     }
 

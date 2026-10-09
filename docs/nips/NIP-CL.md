@@ -21,13 +21,18 @@ plain NIP-29, a client cannot:
 - tell which of two channels is older. The `created_at` of a kind:39000 event
   is the time of the last edit, not the time of creation.
 
+A client also cannot mark its own channels so that it can find them again.
+Channel labels (below) do this.
+
 ## Channel identity tags
 
 On every channel-state event that the relay signs, the relay MUST put these
 tags in this order, before any other `t` or `P` tag:
 
 1. `["t", <channel type>]`, for example `stream`, `forum`, `dm`, `workflow`.
-2. `["P", <creator public key, hex>]`.
+2. `["t", <label>]` for each channel label, in stored order (see
+   [Channel labels](#channel-labels)).
+3. `["P", <creator public key, hex>]`.
 
 kind:39000 also carries `["created_at", <unix seconds>]`.
 
@@ -42,6 +47,7 @@ Example kind:39000 (signing fields and unrelated tags omitted):
     ["d", "9b353519-f4fe-4757-aef4-bec6cc0ae54c"],
     ["name", "agent-config"],
     ["t", "stream"],
+    ["t", "agent-config"],
     ["P", "<creator public key>"],
     ["created_at", "1759939200"]
   ]
@@ -51,11 +57,12 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 | Tag | Kinds | Meaning |
 | --- | --- | --- |
 | first `t` | 39000–39003 | Channel type. |
+| later `t` | 39000–39003 | Channel labels. |
 | `P` | 39000–39003 | Public key that signed the kind:9007 that created the channel. |
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
-A relay can add other `t` tags after it.
+Later `t` tags are labels.
 
 **Creator.** The relay writes `P` from its own record of the kind:9007 that
 created the channel. No client can set it. It does not change when ownership
@@ -69,6 +76,27 @@ would mix creators with members.
 **Creation time.** The `created_at` tag does not change when the channel is
 edited. Use it, not the event's `created_at`, to compare the age of channels.
 
+## Channel labels
+
+A label groups channels across channel types, for example `workspace` or
+`agent-config`. Labels have no meaning to the relay.
+
+**Set labels.** A kind:9007 (create group) MAY carry up to 8 `["t", <label>]`
+tags. On kind:9002 (edit metadata):
+
+- `t` tags replace the whole label set;
+- one `["t", ""]` tag and no other `t` tag clears the set;
+- no `t` tag leaves the labels as they are.
+
+Only an owner or admin of the channel MAY change its labels.
+
+**Rules.** A label is 1–64 characters from `a-z`, `0-9`, `.`, `:` and `-`. A
+label MUST NOT be `stream`, `forum`, `dm`, `workflow` or `system`. These are
+channel type names, so this rule stops a label from making a channel look like
+another type. The relay MUST reject the whole event if it has more than 8
+labels, an invalid label, a reserved name, or `["t", ""]` together with other
+labels. The relay stores repeated labels once.
+
 ## Finding channels
 
 Use ordinary NIP-01 filters on the channel-state kinds.
@@ -76,12 +104,21 @@ Use ordinary NIP-01 filters on the channel-state kinds.
 | To find | Filter |
 | --- | --- |
 | Channels that a key created | `{"kinds": [39000], "#P": ["<creator>"]}` |
+| Channels with a label | `{"kinds": [39000], "#t": ["<label>"]}` |
+| One creator's channels with a label | `{"kinds": [39000], "#P": ["<creator>"], "#t": ["<label>"]}` |
 | Channels of one type | `{"kinds": [39000], "#t": ["<type>"]}` |
+
+Values in one tag filter combine with OR, as in NIP-01. So
+`"#t": ["workspace", "notes"]` finds channels with either label. To require a
+label and a creator, use `#t` and `#P` together.
 
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the
 event, as for all NIP-29 group-state events.
+
+Labels give no trust. Any owner or admin can set them. Only `P` says who
+created a channel.
 
 ## Relation to other NIPs
 

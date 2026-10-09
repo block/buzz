@@ -307,6 +307,8 @@ pub async fn insert_auto_membership_in_transaction(
 pub struct ChannelIdentity {
     /// Channel type string (e.g. `"stream"`, `"forum"`, `"dm"`).
     pub channel_type: String,
+    /// Labels, published as `t` tags after the channel type.
+    pub labels: Vec<String>,
     /// Public key bytes of the channel creator (the kind:9007 signer).
     pub created_by: Vec<u8>,
 }
@@ -316,7 +318,7 @@ pub struct ChannelIdentity {
 pub struct LockedMemberSnapshot {
     /// Canonical active members captured behind the lock.
     pub members: Vec<MemberRecord>,
-    /// The channel's type and creator, read on the same connection, so the
+    /// The channel's type, labels and creator, read on the same connection, so the
     /// roster carries the same identity tags as the channel's other
     /// group-state events. `None` when no channel row exists.
     pub identity: Option<ChannelIdentity>,
@@ -491,15 +493,16 @@ pub async fn lock_member_snapshot(
         .into_iter()
         .map(row_to_member_record)
         .collect::<Result<Vec<_>>>()?;
-    let identity = sqlx::query_as::<_, (String, Vec<u8>)>(
-        "SELECT channel_type::text, created_by FROM channels WHERE community_id = $1 AND id = $2",
+    let identity = sqlx::query_as::<_, (String, Vec<String>, Vec<u8>)>(
+        "SELECT channel_type::text, labels, created_by FROM channels WHERE community_id = $1 AND id = $2",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_optional(tx.conn())
     .await?
-    .map(|(channel_type, created_by)| ChannelIdentity {
+    .map(|(channel_type, labels, created_by)| ChannelIdentity {
         channel_type,
+        labels,
         created_by,
     });
     Ok(LockedMemberSnapshot {
@@ -1260,7 +1263,7 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, labels
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -1356,7 +1359,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline,
+               c.ttl_seconds, c.ttl_deadline, c.labels,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm
@@ -3481,6 +3484,7 @@ mod postgres_tests {
             None,
             author.public_key().to_bytes().as_slice(),
             None,
+            &[],
         )
         .await
         .expect("create channel");
