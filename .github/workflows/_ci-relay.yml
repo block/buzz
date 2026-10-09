@@ -347,6 +347,8 @@ jobs:
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
       - name: Start relay
+        env:
+          BUZZ_V1_ENABLED: "true"
         run: |
           chmod +x ./target/ci/buzz-relay
           nohup env \
@@ -545,6 +547,8 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/workflow_sink/)'
       - name: Start relay
+        env:
+          BUZZ_V1_ENABLED: "true"
         run: |
           chmod +x ./target/ci/buzz-relay
           nohup env \
@@ -614,6 +618,8 @@ jobs:
           merge-multiple: true
           path: target/ci
       - name: Start relay
+        env:
+          BUZZ_V1_ENABLED: "true"
         run: |
           chmod +x ./target/ci/buzz-relay ./target/ci/git-credential-nostr
           ./scripts/start-relay-for-tests.sh --no-build
