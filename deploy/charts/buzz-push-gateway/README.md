@@ -1,5 +1,16 @@
 # Buzz push gateway chart
 
+## 0.4.0 release
+
+This release configures one Apple application per gateway through `application`,
+replacing the profile map. Use it with the gateway implementing `buzz-push-v1`;
+clients must enroll again using the new capability. Configure the App Attest
+application ID and APNs topic explicitly before enabling the gateway.
+
+Stop old gateway instances and verify the migration prerequisites before
+activation. The gateway migration refuses existing installations, and the relay
+migration refuses active legacy leases; neither deletes registration state.
+
 ### Platform-managed runtime integration
 
 `podLabels`, `serviceAccountName`, and `terminationGracePeriodSeconds` configure
