@@ -33,11 +33,11 @@ export type FriendlyAgentLastError =
   | { severity: "generic"; copy: string };
 
 /**
- * The exact copy for the relay-mesh denial. Centralized as a constant so the
+ * The fallback copy for a model-provider authentication failure. Centralized so the
  * test asserts the user-facing string verbatim rather than a fuzzy pattern.
  */
-export const RELAY_MESH_DENIED_COPY =
-  "Community access denied this agent — check its community membership.";
+export const MODEL_AUTH_DENIED_COPY =
+  "The model provider rejected authentication — check its credentials or sign in again.";
 
 export const MODEL_NOT_FOUND_COPY =
   "The configured model is not available — open agent settings and select a different one from the dropdown.";
@@ -61,6 +61,16 @@ function recoverEmbeddedCode(trimmed: string): {
   };
 }
 
+function modelAuthFailureCopy(message: string): string {
+  const detail = message
+    .replace(/^Agent reported error: /, "")
+    .replace(/^llm auth:\s*/, "")
+    .trim();
+  return detail
+    ? `${MODEL_AUTH_DENIED_COPY} ${detail}`
+    : MODEL_AUTH_DENIED_COPY;
+}
+
 export function friendlyAgentLastError(
   raw: string | null,
   code?: number | null,
@@ -78,7 +88,10 @@ export function friendlyAgentLastError(
   if (effectiveCode != null) {
     switch (effectiveCode) {
       case -32001:
-        return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+        return {
+          severity: "denied",
+          copy: modelAuthFailureCopy(embedded?.remainder ?? trimmed),
+        };
       case -32002:
         return { severity: "denied", copy: MODEL_NOT_FOUND_COPY };
       case -32603: {
@@ -110,7 +123,7 @@ export function friendlyAgentLastError(
     trimmed.startsWith("Agent reported error: llm auth:") ||
     trimmed.startsWith("llm auth:")
   ) {
-    return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
+    return { severity: "denied", copy: modelAuthFailureCopy(trimmed) };
   }
 
   return { severity: "generic", copy: trimmed };
