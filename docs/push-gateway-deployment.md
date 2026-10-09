@@ -294,8 +294,11 @@ reject or roll back a committed message, and there is no replay/backfill of
 in-memory work. Monitor `buzz_push_enqueue_total` by result (`completed`, `full`,
 `transaction_full`, `closed`, `error`, `timeout`, `shutdown`). `completed` includes
 jobs with no eligible lease. Database enqueue is conditional on a live event and
-an eligible lease last updated no later than event receipt. A concurrent lease
-update can suppress a notification under this best-effort contract.
+an eligible lease whose recorded update timestamp is no later than event receipt.
+These timestamps do not establish transaction commit order. When registration
+and message arrival overlap, either sending or suppressing the notification is
+acceptable; there is no exact enrollment-order guarantee. Activation never scans
+historical messages or deliberately backfills older notifications.
 
 This isolation requires the overlap migration and updated writers. Old images
 and raw SQL writers can still run the legacy transactional trigger until replaced.

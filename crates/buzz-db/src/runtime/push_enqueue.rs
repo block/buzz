@@ -158,9 +158,9 @@ async fn enqueue(pool: &PgPool, job: &Job) -> crate::Result<()> {
         .bind(crate::push::push_gate_lock_key(job.community))
         .execute(&mut *tx)
         .await?;
-    // Do not enqueue solely because a lease first appeared after the
-    // message arrived. Updates racing this check may drop a wake, which is
-    // permitted by the best-effort contract; message storage is authoritative.
+    // Compare recorded receipt/update times without imposing commit ordering.
+    // Registration overlapping message arrival may send or suppress a wake.
+    // This bounded job never scans historical messages on lease activation.
     sqlx::query(
         "INSERT INTO push_match_queue (community_id, event_id) \
          SELECT $1, $2 FROM events e \

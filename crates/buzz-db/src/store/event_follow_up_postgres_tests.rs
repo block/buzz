@@ -998,8 +998,9 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
         .unwrap();
     assert_eq!(match_count(&isolated, community, &healthy).await, 1);
 
-    // If activation finishes while a post-commit job waits, it must not create
-    // a wake solely for a lease that appeared after the message was received.
+    // Exercise the timestamp filter with a lease timestamp explicitly newer
+    // than this message. This is not a production activation-order regression:
+    // registration overlapping message arrival may send or suppress a wake.
     let later = create_community(db.pool()).await;
     let mut activation = db.pool().begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
