@@ -5,6 +5,8 @@
 //! deleted. For a kind in `AUTHOR_ONLY_KINDS` (here the NIP-ER reminder,
 //! kind:30300) the relay must hide that deletion from everyone but its author
 //! on every read surface, and must reject one that omits the matching `k` tag.
+//! A deletion from anyone but the author is rejected before any of that, so
+//! the rejection cannot reveal the target's kind.
 //!
 //! # Running
 //!
@@ -489,4 +491,40 @@ async fn public_deletion_cannot_claim_author_only_kind() {
         !accepted,
         "a public deletion must not hide behind k=30300 (got: {msg})"
     );
+}
+
+/// Submit `deletion` as `sender` over HTTP and WS; both must reject it as
+/// not the author's, without revealing the target's kind.
+async fn assert_rejected_as_non_author(client: &Client, sender: &Keys, deletion: nostr::Event) {
+    let (accepted, http_msg) = submit(client, sender, &deletion).await;
+    assert!(!accepted, "HTTP must reject {deletion:?}");
+    let mut ws = BuzzTestClient::connect(&relay_url(), sender)
+        .await
+        .expect("connect");
+    let ok = ws.send_event(deletion).await.expect("OK");
+    ws.disconnect().await.expect("disconnect");
+    assert!(!ok.accepted, "WS must reject the deletion");
+    for msg in [http_msg, ok.message] {
+        assert!(msg.contains("must be event author"), "got: {msg}");
+        assert!(!msg.contains("30300"), "leaks the target kind: {msg}");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn non_author_deletion_does_not_reveal_target_kind() {
+    let client = http_client();
+    let author = Keys::generate();
+    let other = Keys::generate();
+    let live = build_reminder(&author);
+    submit_ok(&client, &author, &live).await;
+    let (deleted, _) = store_deleted_reminder(&client, &author).await;
+
+    for target in [&live, &deleted] {
+        for k in [None, Some("30350"), Some("30300")] {
+            let mut tags = vec![tag(&["e", &target.id.to_hex()])];
+            tags.extend(k.map(|k| tag(&["k", k])));
+            assert_rejected_as_non_author(&client, &other, build_deletion(&other, tags)).await;
+        }
+    }
 }
