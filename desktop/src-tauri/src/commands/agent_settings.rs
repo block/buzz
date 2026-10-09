@@ -4,8 +4,9 @@ use tauri::{AppHandle, Manager, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        current_instance_id, find_managed_agent_mut, load_managed_agents, save_managed_agents,
-        sync_managed_agent_processes, ManagedAgentSummary,
+        current_instance_id, find_managed_agent_mut, load_managed_agents,
+        normalize_self_update_fields, save_managed_agents, sync_managed_agent_processes,
+        ManagedAgentSummary, SelfUpdateField,
     },
     util::now_iso,
 };
@@ -91,6 +92,53 @@ pub async fn set_managed_agent_auto_restart(
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
             record.auto_restart_on_config_change = auto_restart_on_config_change;
+            record.updated_at = now_iso();
+        }
+
+        save_managed_agents(&app, &records)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        super::agents::summarize_from_disk(&app, record, &runtimes)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Set which definition fields this agent may change on its own
+/// `draft-update` without owner review (#6287). An empty list restores the
+/// default owner-review path. Mirrors `set_managed_agent_auto_restart`.
+#[tauri::command]
+pub async fn set_managed_agent_self_update_fields(
+    pubkey: String,
+    self_update_fields: Vec<SelfUpdateField>,
+    app: AppHandle,
+) -> Result<ManagedAgentSummary, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
+
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
+            save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_agent_session_caches(pubkey);
+        }
+
+        {
+            let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            record.self_update_fields = normalize_self_update_fields(self_update_fields);
             record.updated_at = now_iso();
         }
 

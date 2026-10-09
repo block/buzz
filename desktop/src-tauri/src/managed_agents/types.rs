@@ -146,6 +146,7 @@ impl AgentDefinition {
             env_vars: self.env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
+            self_update_fields: Vec::new(),
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
@@ -350,6 +351,18 @@ pub struct ManagedAgentRecord {
     /// frontend only fires when the agent is idle, connected, and local.
     #[serde(default = "default_auto_restart_on_config_change")]
     pub auto_restart_on_config_change: bool,
+    /// Definition fields this agent may change on its own `draft-update`
+    /// without owner review (#6287). Empty, the default, keeps every draft on
+    /// the owner-review path. Local bookkeeping like
+    /// `auto_restart_on_config_change`: never published on kind:30177, never
+    /// exported in agent or team snapshots. Unknown names from a newer build
+    /// are dropped on load rather than failing the store.
+    #[serde(
+        default,
+        deserialize_with = "super::deserialize_self_update_fields",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub self_update_fields: Vec<super::SelfUpdateField>,
     #[serde(default)]
     pub runtime_pid: Option<u32>,
     #[serde(default)]
@@ -606,6 +619,9 @@ pub struct ManagedAgentSummary {
     pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
     pub auto_restart_on_config_change: bool,
+    /// Self-update allowlist (#6287). Local UI state only; see the record field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub self_update_fields: Vec<super::SelfUpdateField>,
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
