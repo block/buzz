@@ -1158,7 +1158,21 @@ async fn submit_event_authed(
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
 
-    match crate::handlers::ingest::ingest_event(state, tenant, event, auth).await {
+    // Typing indicators are ephemeral: broadcast to the channel, never stored.
+    let result = if kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR {
+        let event_id = event.id.to_hex();
+        crate::handlers::event::publish_http_typing(state, tenant, event, pubkey)
+            .await
+            .map(|()| crate::handlers::ingest::IngestResult {
+                event_id,
+                accepted: true,
+                message: String::new(),
+            })
+    } else {
+        crate::handlers::ingest::ingest_event(state, tenant, event, auth).await
+    };
+
+    match result {
         Ok(result) => {
             let response = Json(serde_json::json!({
                 "event_id": result.event_id,
@@ -2916,6 +2930,10 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 #[cfg(test)]
 #[path = "artifact_postgres_tests.rs"]
 mod artifact_postgres_tests;
+
+#[cfg(test)]
+#[path = "typing_postgres_tests.rs"]
+mod typing_postgres_tests;
 
 #[cfg(test)]
 pub(crate) mod postgres_tests {

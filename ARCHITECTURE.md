@@ -314,6 +314,8 @@ Presence events skip membership checks and use local-only fan-out. Multi-node pr
 5. LOCAL FAN-OUT     — sub_registry.fan_out → conn_manager.send_to
 ```
 
+Typing indicators (kind 20002) are also accepted through HTTP `POST /events`, for clients that sign events but hold no WebSocket, such as app-hosted agents. The HTTP route requires an `h` tag, checks bans/timeouts and the community write fence, then runs steps 1–5 above.
+
 Ephemeral events are never stored in Postgres and never appear in REQ historical queries.
 
 ### Handler Semaphore

@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -889,7 +889,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 }
 
-/// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.
+/// Handle ephemeral events (kind 20000–29999) submitted over WebSocket —
+/// never stored. Typing indicators may also arrive over HTTP; see
+/// [`publish_http_typing`].
 ///
 /// Rejections are typed with the ingest taxonomy: [`IngestError::Rejected`]
 /// is a client-input refusal (stays `invalid` in the rejection counter),
@@ -979,36 +981,8 @@ async fn handle_ephemeral_event(
         // publish/fan-out path below so other relay nodes receive the live delta.
     }
 
-    // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        // Membership refusals are client-input rejections, and the shared
-        // gate's message text is surfaced verbatim exactly as before this
-        // typed classification; no behavior change on this path.
-        super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
-            .await
-            .map_err(IngestError::Rejected)?;
-
-        // Mark as local before Redis publish to prevent double-delivery when
-        // the event comes back through the Redis subscriber loop.
-        state.mark_local_event(conn.tenant.community(), &event.id);
-
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Channel(ch_id), &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral publish failed: {e}");
-        }
-
-        // Direct fan-out to local WS subscribers, through the guarded send path
-        // so a stale subscription on a removed/non-member connection cannot
-        // receive this private-channel ephemeral event.
-        // Pass the channel_id so fan_out() uses the channel-kind index.
-        let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        publish_channel_ephemeral(&state, &conn.tenant, event, ch_id, &pubkey_bytes).await?;
     } else {
         // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
         //
@@ -1040,6 +1014,81 @@ async fn handle_ephemeral_event(
     }
 
     Ok(())
+}
+
+/// Publishes a verified channel-scoped ephemeral event to the channel's live
+/// subscribers, on this node and through Redis to the others. The sender must
+/// be a channel member.
+async fn publish_channel_ephemeral(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    ch_id: uuid::Uuid,
+    pubkey_bytes: &[u8],
+) -> Result<(), IngestError> {
+    // Membership refusals are client-input rejections, and the shared
+    // gate's message text is surfaced verbatim.
+    super::ingest::check_channel_membership(tenant, state, ch_id, pubkey_bytes, None)
+        .await
+        .map_err(IngestError::Rejected)?;
+
+    // Mark as local before Redis publish to prevent double-delivery when
+    // the event comes back through the Redis subscriber loop.
+    state.mark_local_event(tenant.community(), &event.id);
+
+    if let Err(e) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Channel(ch_id), &event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event.id.to_hex(), "Ephemeral publish failed: {e}");
+    }
+
+    // Direct fan-out to local WS subscribers, through the guarded send path
+    // so a stale subscription on a removed/non-member connection cannot
+    // receive this private-channel ephemeral event.
+    // Pass the channel_id so fan_out() uses the channel-kind index.
+    let stored_event = StoredEvent::new(event, Some(ch_id));
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored_event).await;
+    Ok(())
+}
+
+/// Publishes a typing indicator (kind:20002) submitted through HTTP
+/// `POST /events`, for clients that sign but hold no WebSocket, such as
+/// app-hosted agents. Applies the gates the WebSocket path applies to
+/// ephemeral events, then the same channel publish. The caller has already
+/// authenticated `auth_pubkey` and enforced relay membership.
+pub(crate) async fn publish_http_typing(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth_pubkey: PublicKey,
+) -> Result<(), IngestError> {
+    if event.pubkey != auth_pubkey {
+        return Err(IngestError::AuthFailed(
+            "invalid: event pubkey does not match authenticated identity".into(),
+        ));
+    }
+    let ch_id = super::ingest::extract_channel_id(&event).ok_or_else(|| {
+        IngestError::Rejected("invalid: typing indicator needs a channel UUID h tag".into())
+    })?;
+    let event_clone = event.clone();
+    match tokio::task::spawn_blocking(move || verify_event(&event_clone)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+        Err(_) => return Err(IngestError::Internal("error: internal error".into())),
+    }
+    super::ingest::enforce_write_restriction(state, tenant, KIND_TYPING_INDICATOR, &auth_pubkey)
+        .await?;
+    super::ingest::map_serving_fence_state(
+        buzz_deletion::store(&state.db)
+            .is_serving_active(tenant.community())
+            .await,
+    )?;
+    publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

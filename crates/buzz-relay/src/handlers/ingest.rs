@@ -459,7 +459,9 @@ pub enum IngestError {
 /// `restricted:` wire text the ephemeral path uses. A lookup outage is a
 /// server fault and fails closed as `error:`/500 — a Postgres blip can
 /// neither admit a write past the fence nor read as a client mistake.
-fn map_serving_fence_state(active: Result<bool, buzz_db::DbError>) -> Result<(), IngestError> {
+pub(crate) fn map_serving_fence_state(
+    active: Result<bool, buzz_db::DbError>,
+) -> Result<(), IngestError> {
     match active {
         Ok(true) => Ok(()),
         Ok(false) => Err(IngestError::Rejected(
@@ -3559,7 +3561,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn check_channel_write_denies_when_channel_lookup_fails() {
         let state = crate::state::tests::test_state_with_database_url(
-            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1 -- local test fixture
         )
         .await;
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
