@@ -585,6 +585,8 @@ jobs:
             --run-ignored ignored-only
         env:
           RELAY_URL: ws://localhost:3000
+          # schema/schema.sql (applied above) indexes kind:5 content.
+          BUZZ_TEST_SEARCH_INDEXES_DELETIONS: "1"
       - name: Upload relay log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

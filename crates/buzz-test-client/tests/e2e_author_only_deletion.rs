@@ -14,6 +14,7 @@
 //! RELAY_URL=ws://localhost:3001 cargo test -p buzz-test-client --test e2e_author_only_deletion -- --ignored
 //! ```
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use buzz_test_client::{BuzzTestClient, RelayMessage};
@@ -214,7 +215,7 @@ async fn ws_count(ws: &mut BuzzTestClient, filter: &Filter) -> u64 {
 
 /// Every historical read surface returns the deletion to `reader` iff
 /// `visible`: WS REQ, WS COUNT, HTTP `/query` and HTTP `/count`, by author
-/// and by id; search never returns it to anyone else.
+/// and by id.
 async fn assert_deletion_visibility(
     reader: &Keys,
     author: &Keys,
@@ -243,33 +244,81 @@ async fn assert_deletion_visibility(
             }
         }
     }
-    // Search, through reads: databases created before migration 0008 index
-    // kind:5 content and fresh ones do not, so the author may or may not get
-    // a hit. Nobody else ever does.
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    ws.disconnect().await.expect("disconnect");
+}
+
+/// Whether the relay's `search_tsv` indexes kind:5 content. The desired
+/// schema (`schema/schema.sql`, which CI applies) does; an empty database
+/// initialized through migration 0008 gets a positive allowlist that doesn't.
+fn search_indexes_deletions() -> bool {
+    std::env::var("BUZZ_TEST_SEARCH_INDEXES_DELETIONS").is_ok_and(|v| v == "1")
+}
+
+/// Search results for `filter` over WS REQ and HTTP `/query`, as hex ids.
+async fn search_ids(reader: &Keys, filter: &Filter) -> [(&'static str, BTreeSet<String>); 2] {
+    let mut ws = BuzzTestClient::connect(&relay_url(), reader)
+        .await
+        .expect("connect reader");
+    let ws_ids = ws_query_ids(&mut ws, filter)
+        .await
+        .iter()
+        .map(EventId::to_hex)
+        .collect();
+    ws.disconnect().await.expect("disconnect");
+    let http_ids = http_query_ids(&http_client(), reader, filter)
+        .await
+        .into_iter()
+        .collect();
+    [("WS REQ search", ws_ids), ("HTTP /query search", http_ids)]
+}
+
+#[tokio::test]
+#[ignore]
+async fn author_only_deletion_search_reaches_only_author() {
+    let client = http_client();
+    let author = Keys::generate();
+    let (_, private) = store_deleted_reminder(&client, &author).await;
+    // Public control: an ordinary deletion carrying the same reason word.
+    let note = EventBuilder::text_note("public note")
+        .sign_with_keys(&author)
+        .unwrap();
+    submit_ok(&client, &author, &note).await;
+    let public = build_deletion_with_reason(
+        &author,
+        vec![tag(&["e", &note.id.to_hex()]), tag(&["k", "1"])],
+        &search_term(&author),
+    );
+    submit_ok(&client, &author, &public).await;
+
     let search = Filter::new()
         .kind(Kind::EventDeletion)
-        .search(search_term(author));
-    let searched = [
+        .search(search_term(&author));
+    let (private, public) = (private.id.to_hex(), public.id.to_hex());
+    let strict = search_indexes_deletions();
+    let mut mismatches = Vec::new();
+    for (reader, name, allowed) in [
         (
-            "WS REQ search",
-            ws_query_ids(&mut ws, &search)
-                .await
-                .iter()
-                .map(EventId::to_hex)
-                .collect::<Vec<_>>(),
+            &author,
+            "author",
+            BTreeSet::from([private.clone(), public.clone()]),
         ),
-        (
-            "HTTP /query search",
-            http_query_ids(&client, reader, &search).await,
-        ),
-    ];
-    for (surface, ids) in searched {
-        if ids.iter().any(|id| *id != deletion.to_hex()) || (!visible && !ids.is_empty()) {
-            mismatches.push(format!("{surface}: {ids:?}, visible={visible}"));
+        (&Keys::generate(), "other", BTreeSet::from([public.clone()])),
+    ] {
+        for (surface, ids) in search_ids(reader, &search).await {
+            let ok = if strict {
+                ids == allowed
+            } else {
+                ids.is_subset(&allowed)
+            };
+            if !ok {
+                mismatches.push(format!(
+                    "{surface} as {name}: {ids:?}, expected {allowed:?} (strict={strict})"
+                ));
+            }
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
-    ws.disconnect().await.expect("disconnect");
 }
 
 #[tokio::test]

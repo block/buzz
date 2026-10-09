@@ -233,8 +233,8 @@ pub async fn list_reports(
               AND e.id = r.target_event_id
               AND e.kind <> ALL($10)
               AND NOT (e.kind = 5 AND EXISTS (
-                  SELECT 1 FROM unnest($11::text[]) k
-                  WHERE e.tags @> jsonb_build_array(jsonb_build_array('k', k))))
+                  SELECT 1 FROM jsonb_array_elements(e.tags) t
+                  WHERE t->>0 = 'k' AND t->>1 = ANY($11::text[])))
             ORDER BY e.created_at DESC
             LIMIT 1
         ) target ON TRUE
@@ -308,8 +308,8 @@ async fn get_report(
               AND e.id = r.target_event_id
               AND e.kind <> ALL($2)
               AND NOT (e.kind = 5 AND EXISTS (
-                  SELECT 1 FROM unnest($3::text[]) k
-                  WHERE e.tags @> jsonb_build_array(jsonb_build_array('k', k))))
+                  SELECT 1 FROM jsonb_array_elements(e.tags) t
+                  WHERE t->>0 = 'k' AND t->>1 = ANY($3::text[])))
             ORDER BY e.created_at DESC
             LIMIT 1
         ) target ON TRUE
@@ -553,8 +553,8 @@ pub async fn get_event_preview(
         FROM events
         WHERE community_id = $1 AND id = $2 AND kind <> ALL($3)
           AND NOT (kind = 5 AND EXISTS (
-              SELECT 1 FROM unnest($4::text[]) k
-              WHERE tags @> jsonb_build_array(jsonb_build_array('k', k))))
+              SELECT 1 FROM jsonb_array_elements(tags) t
+              WHERE t->>0 = 'k' AND t->>1 = ANY($4::text[])))
         ORDER BY created_at DESC
         LIMIT 1
         "#,
@@ -947,25 +947,33 @@ mod postgres_tests {
         // Deletions of author-only events are private by their `k` tag alone,
         // live or soft-deleted; a deletion with a public or non-canonical `k`
         // stays readable, matching `buzz_core::kind::k_tag_kinds`.
+        // An unrelated tag that merely contains `"k"` and an author-only kind
+        // is not a marker: matching is positional, as in Rust.
         let mut public_deletions = Vec::new();
-        for (i, k) in AUTHOR_ONLY_KINDS
+        let cases = AUTHOR_ONLY_KINDS
             .iter()
-            .map(u32::to_string)
-            .chain(["1".into(), "030300".into(), "+30300".into()])
-            .enumerate()
-        {
+            .map(|k| (format!(r#"[["k","{k}"]]"#), true))
+            .chain(
+                [
+                    r#"[["k","1"]]"#,
+                    r#"[["k","030300"]]"#,
+                    r#"[["k","+30300"]]"#,
+                    r#"[["k","1"],["meta","k","30300"]]"#,
+                ]
+                .map(|tags| (tags.to_string(), false)),
+            );
+        for (i, (tags, private)) in cases.enumerate() {
             let event_id = vec![0x60 + i as u8; 32];
             sqlx::query(
                 r#"
                 INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, deleted_at)
-                VALUES ($1, $2, $3, now(), 5, jsonb_build_array(jsonb_build_array('k', $4::text)), '', $5,
-                        CASE WHEN $6 THEN now() END)
+                VALUES ($1, $2, $3, now(), 5, $4::jsonb, '', $5, CASE WHEN $6 THEN now() END)
                 "#,
             )
             .bind(community_id)
             .bind(&event_id)
             .bind(author)
-            .bind(&k)
+            .bind(&tags)
             .bind(vec![3_u8; 64])
             .bind(i % 2 == 1)
             .execute(&pool)
@@ -975,12 +983,11 @@ mod postgres_tests {
             let preview = get_event_preview(&pool, community_id, &event_id)
                 .await
                 .expect("preview");
-            if !private_deletion_k_values().contains(&k) {
-                assert!(preview.is_some(), "preview, deletion k={k}");
-                public_deletions.push(report);
-            } else {
-                assert!(preview.is_none(), "preview, deletion k={k}");
+            assert_eq!(preview.is_none(), private, "preview, deletion tags {tags}");
+            if private {
                 hidden.push((5, report));
+            } else {
+                public_deletions.push((tags, report));
             }
         }
         let visible_id = vec![0x3f_u8; 32];
@@ -1022,8 +1029,22 @@ mod postgres_tests {
             assert!(detail.message.is_none(), "detail, kind {kind}");
         }
         assert_eq!(author_of(visible), Some(hex::encode(author)));
-        for report_id in public_deletions {
-            assert_eq!(author_of(report_id), Some(hex::encode(author)));
+        for (tags, report_id) in public_deletions {
+            assert_eq!(
+                author_of(report_id),
+                Some(hex::encode(author)),
+                "list, deletion tags {tags}"
+            );
+            let detail = get_report(
+                &pool,
+                report_id,
+                &admin_hidden_kinds(),
+                &private_deletion_k_values(),
+            )
+            .await
+            .expect("query report")
+            .expect("report exists");
+            assert!(detail.message.is_some(), "detail, deletion tags {tags}");
         }
         let detail = get_report(
             &pool,
