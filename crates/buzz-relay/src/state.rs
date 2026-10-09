@@ -1589,6 +1589,7 @@ impl AppState {
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         self.push_cancel.cancel();
+        self.db.cancel_push_enqueue();
     }
 
     #[cfg(test)]

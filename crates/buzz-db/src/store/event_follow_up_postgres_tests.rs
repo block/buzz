@@ -86,7 +86,11 @@ fn signed_event(keys: &Keys, kind: u16, content: &str) -> Event {
         .expect("sign test event")
 }
 
-async fn match_count(pool: &PgPool, community: CommunityId, event: &Event) -> i64 {
+async fn match_count(db: &Db, community: CommunityId, event: &Event) -> i64 {
+    if let Some(producer) = &db.push_enqueue {
+        producer.flush().await;
+    }
+    let pool = db.pool();
     sqlx::query_scalar(
         "SELECT count(*) FROM push_match_queue WHERE community_id=$1 AND event_id=$2",
     )
@@ -285,6 +289,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     activate_lease(pool, community, &keys, 11, now + 3600).await;
 
     assert_rollback(&db, community, channel, &keys).await;
+    assert_async_isolation(&db, community, &keys).await;
 
     for kind in [9, 40002, 45001, 45003] {
         let deadline_before_first_insert = reset_deadline(pool, community, channel).await;
@@ -296,7 +301,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
                 .1
         );
         assert_eq!(event_count(pool, community, &message).await, 1);
-        assert_eq!(match_count(pool, community, &message).await, 1);
+        assert_eq!(match_count(&db, community, &message).await, 1);
         let deadline_after_first_insert = deadline(pool, community, channel).await;
         assert!(
             deadline_after_first_insert > deadline_before_first_insert,
@@ -308,7 +313,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
                 .expect("deduplicate event")
                 .1
         );
-        assert_eq!(match_count(pool, community, &message).await, 1);
+        assert_eq!(match_count(&db, community, &message).await, 1);
         assert_eq!(
             deadline(pool, community, channel).await,
             deadline_after_first_insert,
@@ -323,7 +328,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             .expect("insert reaction")
             .1
     );
-    assert_eq!(match_count(pool, community, &reaction).await, 0);
+    assert_eq!(match_count(&db, community, &reaction).await, 0);
 
     let no_lease_community = create_community(pool).await;
     let no_lease_message = signed_event(&keys, 9, "no-lease");
@@ -334,7 +339,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             .1
     );
     assert_eq!(
-        match_count(pool, no_lease_community, &no_lease_message).await,
+        match_count(&db, no_lease_community, &no_lease_message).await,
         0
     );
 
@@ -386,7 +391,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
                 .1
         );
         assert_eq!(event_count(pool, predicate_community, &message).await, 1);
-        assert_eq!(match_count(pool, predicate_community, &message).await, 0);
+        assert_eq!(match_count(&db, predicate_community, &message).await, 0);
     }
 
     let mut push_gate_holder = pool.begin().await.expect("begin push-gate lock holder");
@@ -401,16 +406,16 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         .execute(gated_tx.conn())
         .await
         .expect("bound push-gate lock wait");
-    let gated_error = event::insert_event_in_transaction(&mut gated_tx, &gated, None)
-        .await
-        .expect_err("push-eligible insert must fail closed when its gate cannot be acquired");
-    assert_sqlstate(&gated_error, "55P03");
-    gated_tx
-        .rollback()
-        .await
-        .expect("rollback failed push-gate transaction");
-    assert_eq!(event_count(pool, community, &gated).await, 0);
-    assert_eq!(match_count(pool, community, &gated).await, 0);
+    timeout(Duration::from_secs(5), async {
+        event::insert_event_in_transaction(&mut gated_tx, &gated, None)
+            .await
+            .unwrap();
+        gated_tx.commit().await.unwrap();
+    })
+    .await
+    .expect("push contention must not delay message commit");
+    assert_eq!(event_count(pool, community, &gated).await, 1);
+    assert_eq!(match_count(&db, community, &gated).await, 0);
 
     let ungated = signed_event(&keys, 7, "push-gate-non-eligible-control");
     let mut ungated_tx = begin_caller_owned_event_transaction(&db, community).await;
@@ -429,7 +434,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         .await
         .expect("commit non-push control while gate held");
     assert_eq!(event_count(pool, community, &ungated).await, 1);
-    assert_eq!(match_count(pool, community, &ungated).await, 0);
+    assert_eq!(match_count(&db, community, &ungated).await, 0);
     push_gate_holder
         .rollback()
         .await
@@ -442,7 +447,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             .1
     );
     assert_eq!(event_count(pool, community, &gated_control).await, 1);
-    assert_eq!(match_count(pool, community, &gated_control).await, 1);
+    assert_eq!(match_count(&db, community, &gated_control).await, 1);
 
     let rollback_deadline = reset_deadline(pool, community, channel).await;
     let rolled_back = signed_event(&keys, 9, "rolled-back");
@@ -461,13 +466,13 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     .fetch_one(rollback_tx.conn())
     .await
     .expect("read uncommitted follow-up");
-    assert_eq!(in_transaction, 1);
+    assert_eq!(in_transaction, 0, "push work starts only after commit");
     rollback_tx
         .rollback()
         .await
         .expect("rollback event and follow-up");
     assert_eq!(event_count(pool, community, &rolled_back).await, 0);
-    assert_eq!(match_count(pool, community, &rolled_back).await, 0);
+    assert_eq!(match_count(&db, community, &rolled_back).await, 0);
     assert_eq!(deadline(pool, community, channel).await, rollback_deadline);
 
     let before_commit = reset_deadline(pool, community, channel).await;
@@ -500,7 +505,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             >= database_time_before_commit + chrono::Duration::seconds(60),
         "the deferred trigger must refresh TTL at commit"
     );
-    assert_eq!(match_count(pool, community, &committed).await, 1);
+    assert_eq!(match_count(&db, community, &committed).await, 1);
 
     let before_skips = reset_deadline(pool, community, channel).await;
     let channel_create = signed_event(&keys, 9007, "channel-create");
@@ -511,7 +516,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             .1
     );
     assert_eq!(deadline(pool, community, channel).await, before_skips);
-    assert_eq!(match_count(pool, community, &channel_create).await, 0);
+    assert_eq!(match_count(&db, community, &channel_create).await, 0);
     let channelless = signed_event(&keys, 9, "channel-null");
     assert!(
         db.insert_event(community, &channelless, None)
@@ -519,7 +524,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
             .expect("insert channel-less event")
             .1
     );
-    assert_eq!(match_count(pool, community, &channelless).await, 1);
+    assert_eq!(match_count(&db, community, &channelless).await, 1);
 
     let no_ttl_channel =
         channel_with_ttl(pool, community, &keys.public_key().to_bytes(), None).await;
@@ -630,7 +635,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         .expect_err("a cancelled TTL refresh must reject the event");
     assert_sqlstate(&cancel_error, "57014");
     assert_eq!(event_count(pool, community, &cancelled_event).await, 0);
-    assert_eq!(match_count(pool, community, &cancelled_event).await, 0);
+    assert_eq!(match_count(&db, community, &cancelled_event).await, 0);
     assert_eq!(
         deadline(pool, community, channel).await,
         before_lock_timeout
@@ -640,7 +645,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
         .await
         .expect("release exclusive TTL lock");
     assert_eq!(event_count(pool, community, &locked_event).await, 1);
-    assert_eq!(match_count(pool, community, &locked_event).await, 1);
+    assert_eq!(match_count(&db, community, &locked_event).await, 1);
 
     assert_entry_points(&db, community, channel, &keys).await;
 }
@@ -660,8 +665,24 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
             .expect("insert through the thread-metadata writer")
             .1
     );
-    assert_eq!(match_count(pool, community, &threaded).await, 1);
+    assert_eq!(match_count(db, community, &threaded).await, 1);
     assert!(deadline(pool, community, channel).await > before);
+
+    // Internal/external-effect completion uses the same post-commit producer.
+    let lease = db
+        .deletion_store()
+        .acquire_serving_write_lease(community, "push-contract", "test", Duration::from_secs(60))
+        .await
+        .unwrap();
+    let guarded = signed_event(keys, 40002, "serving-lease-writer");
+    db.insert_event_with_serving_write_guard(&lease, &guarded, Some(channel))
+        .await
+        .unwrap();
+    assert_eq!(match_count(db, community, &guarded).await, 1);
+    db.deletion_store()
+        .release_serving_write_lease(&lease)
+        .await
+        .unwrap();
 
     // Replaceable writer (NIP-16 and NIP-29 discovery state).
     let before = reset_deadline(pool, community, channel).await;
@@ -672,7 +693,7 @@ async fn assert_entry_points(db: &Db, community: CommunityId, channel: Uuid, key
             .expect("insert through the replaceable writer")
             .1
     );
-    assert_eq!(match_count(pool, community, &replaceable).await, 0);
+    assert_eq!(match_count(db, community, &replaceable).await, 0);
     assert!(deadline(pool, community, channel).await > before);
 
     // Parameterized writer: the insert runs inside a savepoint, and the
@@ -801,7 +822,7 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
     db.insert_event(community, &retained, Some(channel))
         .await
         .unwrap();
-    assert_eq!(match_count(pool, community, &retained).await, 1);
+    assert_eq!(match_count(db, community, &retained).await, 1);
     let lease_before: serde_json::Value =
         sqlx::query_scalar("SELECT to_jsonb(p) FROM push_leases p WHERE community_id=$1")
             .bind(community.as_uuid())
@@ -840,6 +861,7 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
         push_enabled: false,
         max_connections: 1,
         min_connections: 0,
+        lock_timeout_ms: 100,
         ..DbConfig::default()
     })
     .await
@@ -864,18 +886,18 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
             .unwrap();
         let message = signed_event(keys, kind, &format!("disabled-{kind}"));
         timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             disabled.insert_event(community, &message, Some(channel)),
         )
         .await
         .expect("disabled write must not wait for the push gate")
         .unwrap();
         assert_eq!(event_count(pool, community, &message).await, 1);
-        assert_eq!(match_count(pool, community, &message).await, 0);
+        assert_eq!(match_count(db, community, &message).await, 0);
         disabled_events.push(message);
     }
     holder.rollback().await.unwrap();
-    assert_eq!(match_count(pool, community, &retained).await, 1);
+    assert_eq!(match_count(db, community, &retained).await, 1);
     let lease_after: serde_json::Value =
         sqlx::query_scalar("SELECT to_jsonb(p) FROM push_leases p WHERE community_id=$1")
             .bind(community.as_uuid())
@@ -912,7 +934,16 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
         .insert_event(community, &message, Some(channel))
         .await
         .unwrap();
-    assert_eq!(match_count(pool, community, &message).await, 1);
+    let trigger_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='events_enqueue_push_match')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        match_count(db, community, &message).await,
+        i64::from(trigger_exists)
+    );
     legacy.pool().close().await;
 
     // Reactivation is an operator decision about retained queues. Reopening
@@ -921,9 +952,137 @@ async fn assert_rollback(db: &Db, community: CommunityId, channel: Uuid, keys: &
     db.insert_event(community, &message, Some(channel))
         .await
         .unwrap();
-    assert_eq!(match_count(pool, community, &message).await, 1);
+    assert_eq!(match_count(db, community, &message).await, 1);
     for message in disabled_events {
-        assert_eq!(match_count(pool, community, &message).await, 0);
+        assert_eq!(match_count(db, community, &message).await, 0);
     }
     disabled.pool().close().await;
+}
+
+async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
+    // A one-connection serving pool proves a stalled push job cannot monopolize
+    // its only connection. The lock holder uses the independent fixture pool.
+    let isolated = Db::new(&DbConfig {
+        database_url: std::env::var("BUZZ_TEST_DATABASE_URL").unwrap(),
+        max_connections: 1,
+        min_connections: 0,
+        lock_timeout_ms: 100,
+        push_enabled: true,
+        ..DbConfig::default()
+    })
+    .await
+    .unwrap();
+    let mut holder = db.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE push_match_queue IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let message = signed_event(keys, 9, "async-queue-lock");
+    timeout(
+        Duration::from_secs(5),
+        isolated.insert_event(community, &message, None),
+    )
+    .await
+    .expect("push table lock must not delay storage")
+    .unwrap();
+    assert_eq!(event_count(isolated.pool(), community, &message).await, 1);
+    isolated.push_enqueue.as_ref().unwrap().flush().await;
+    // The background statement failed its lock timeout; the message survived.
+    holder.rollback().await.unwrap();
+    assert_eq!(match_count(&isolated, community, &message).await, 0);
+    assert_eq!(event_count(isolated.pool(), community, &message).await, 1);
+    let healthy = signed_event(keys, 9, "async-after-error");
+    isolated
+        .insert_event(community, &healthy, None)
+        .await
+        .unwrap();
+    assert_eq!(match_count(&isolated, community, &healthy).await, 1);
+
+    // If activation finishes while a post-commit job waits, it must not create
+    // a wake solely for a lease that appeared after the message was received.
+    let later = create_community(db.pool()).await;
+    let mut activation = db.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(push::push_gate_lock_key(later))
+        .execute(&mut *activation)
+        .await
+        .unwrap();
+    let before_enrollment = signed_event(keys, 9, "before-async-enrollment");
+    isolated
+        .insert_event(later, &before_enrollment, None)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO push_leases (community_id, author, installation_id, source_event_id, \
+         source_created_at, generation, active, endpoint_enabled, app_profile, endpoint_hash, \
+         endpoint_grant, max_class, subscriptions, expires_at, updated_at) \
+         SELECT $1, author, installation_id, source_event_id, source_created_at, generation, \
+         active, endpoint_enabled, app_profile, endpoint_hash, endpoint_grant, max_class, \
+         subscriptions, expires_at, clock_timestamp() FROM push_leases WHERE community_id=$2",
+    )
+    .bind(later.as_uuid())
+    .bind(community.as_uuid())
+    .execute(&mut *activation)
+    .await
+    .unwrap();
+    activation.commit().await.unwrap();
+    assert_eq!(match_count(&isolated, later, &before_enrollment).await, 0);
+    assert_eq!(
+        event_count(isolated.pool(), later, &before_enrollment).await,
+        1
+    );
+
+    let mut holder = db.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE push_match_queue IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let cancelled = signed_event(keys, 9, "async-cancel-inflight");
+    isolated
+        .insert_event(community, &cancelled, None)
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname=current_database() AND application_name='buzz-push-enqueue' \
+                 AND wait_event_type='Lock' AND query LIKE 'INSERT INTO push_match_queue%')",
+            )
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("observe actual enqueue blocked on the table");
+    isolated.cancel_push_enqueue();
+    timeout(Duration::from_secs(5), isolated.join_push_enqueue())
+        .await
+        .expect("shutdown cancels in-flight enqueue without waiting for lock timeout");
+    holder.rollback().await.unwrap();
+    assert_eq!(event_count(isolated.pool(), community, &cancelled).await, 1);
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM push_match_queue WHERE community_id=$1 AND event_id=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(cancelled.id.as_bytes().as_slice())
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(queued, 0);
+    let after_stop = signed_event(keys, 9, "async-message-after-stop");
+    isolated
+        .insert_event(community, &after_stop, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        event_count(isolated.pool(), community, &after_stop).await,
+        1
+    );
+    isolated.pool().close().await;
 }

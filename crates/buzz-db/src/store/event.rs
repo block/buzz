@@ -413,6 +413,9 @@ pub async fn huddle_started_link_exists_in_transaction(
 
 /// Insert a Nostr event. Rejects AUTH and ephemeral kinds.
 ///
+/// This raw-pool helper does not start application push production. Serving
+/// callers should use [`Db::insert_event`] with a configured [`Db`].
+///
 /// Returns `(StoredEvent, was_inserted)` — `was_inserted` is `false` on duplicate.
 pub async fn insert_event(
     pool: &PgPool,
@@ -2116,6 +2119,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         let result = crate::event::insert_event_in_transaction(&mut tx, event, channel_id).await?;
         if result.1 {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
@@ -2641,6 +2645,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result = crate::event::insert_event_with_thread_metadata_tx(
             &mut tx,

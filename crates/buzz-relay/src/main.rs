@@ -1672,6 +1672,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     )
     .await?;
     state.push_cancel.cancel();
+    state.db.cancel_push_enqueue();
+    state.db.join_push_enqueue().await;
     if let Some((matcher, delivery)) = push_workers {
         for result in [matcher.await, delivery.await] {
             if let Err(error) = result {

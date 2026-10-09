@@ -182,6 +182,7 @@ installation, event, or request identifier as a label.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `buzz_push_enabled` | gauge | — | `1` only when the deployment opt-in is active. |
+| `buzz_push_enqueue_total` | counter | `result` = `completed` \| `full` \| `transaction_full` \| `closed` \| `error` \| `timeout` \| `shutdown` | Best-effort post-commit enqueue outcomes. |
 | `buzz_push_match_jobs_total` | counter | `result` = `matched` \| `unmatched` \| `error` \| `context_error` | Accepted message events evaluated by the matcher. |
 | `buzz_push_match_queue_seconds` | histogram | — | Relay receipt to matcher evaluation latency. |
 | `buzz_push_wakes_total` | counter | `result` = `enqueued` \| `duplicate` \| `inactive_lease` | Durable wake-enqueue outcomes. |
@@ -260,15 +261,17 @@ gateway grants unchanged. Do not stop a shared gateway as part of relay rollback
 The relay copies the flag into `DbConfig::push_enabled`. Every physical writer
 connection, including the audit pool and replacement connections, sets the
 `buzz.push_enabled` PostgreSQL session setting. Other `DbConfig` callers default
-to disabled. Both the application producer and the surviving overlap trigger
-return before push locks, lease scans or queue writes when this setting is off.
+to disabled. Updated writers also set `buzz.push_async_enqueue=on`, which makes
+the surviving trigger skip enqueueing regardless of the enabled flag. The
+application producer is created only when enabled. Disabled writes perform no
+push locks, lease scans or queue writes.
 The overlap migration updates only an existing trigger function; it does not
 recreate a retired trigger or function. Deploy that migration before relying on
 the flag with a surviving trigger. Older images and raw SQL writers with a
 missing setting retain legacy enqueue behavior; inventory and replace or
 explicitly disable all such connections before declaring rollback complete.
 
-On SIGTERM/Ctrl-C, the relay cancels matcher and delivery futures immediately,
+On SIGTERM/Ctrl-C, the relay cancels enqueue, matcher and delivery futures immediately,
 before its listener drain. Uncommitted transactions roll back; committed claims
 remain leased until their normal expiry. No cancellation cleanup deletes or
 acknowledges queue entries. An HTTP request already accepted by the gateway may
@@ -279,9 +282,23 @@ Verify all old writer sessions and workers have exited, eligible messages still
 store and arrive in chat, no new matcher jobs appear, and gateway attempts stop
 once in-flight work settles. Inspect enqueue activity as well as queue counts:
 a stable count alone can conceal additions and removals. Ordinary reads, writes,
-authentication and reconnects must remain healthy. Enabled enqueue still runs
-inside the message transaction and propagates errors; this change does not
-isolate enabled message storage from push failures.
+authentication and reconnects must remain healthy.
+
+When enabled, updated application writers stage at most 256 event IDs per
+transaction and submit them only after successful commit using a non-waiting
+send. One background worker has a 256-item queue and a dedicated one-connection
+pool; it never borrows a message-write connection. Each attempt has a two-second
+deadline, a 500 ms lock timeout and a 1.5 second statement timeout. Saturation,
+errors, deadlines, process loss and shutdown can drop notifications. They cannot
+reject or roll back a committed message, and there is no replay/backfill of
+in-memory work. Monitor `buzz_push_enqueue_total` by result (`completed`, `full`,
+`transaction_full`, `closed`, `error`, `timeout`, `shutdown`). `completed` includes
+jobs with no eligible lease. Database enqueue is conditional on a live event and
+an eligible lease last updated no later than event receipt. A concurrent lease
+update can suppress a notification under this best-effort contract.
+
+This isolation requires the overlap migration and updated writers. Old images
+and raw SQL writers can still run the legacy transactional trigger until replaced.
 
 Pending matcher jobs and pending/claimed delivery jobs remain dormant. Do not
 process or delete them during urgent rollback. **Before re-enabling**, inspect

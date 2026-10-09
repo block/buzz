@@ -8,12 +8,14 @@ BEGIN
     -- Legacy connections without the setting preserve their existing behavior.
     -- Updated writer pools always set it, including on reconnect. Check before
     -- taking push locks or touching leases/queues so disabled chat stays healthy.
+    IF COALESCE(current_setting('buzz.push_async_enqueue', true), '') = 'on' THEN
+        RETURN NEW;
+    END IF;
     IF NOT COALESCE(NULLIF(current_setting('buzz.push_enabled', true), '')::boolean, true) THEN
         RETURN NEW;
     END IF;
     -- Keep this allowlist identical to the relay's validated NIP-PL descriptor.
-    -- Centralizing it on the events table covers every durable producer,
-    -- including internal paths that bypass live dispatch.
+    -- This compatibility path covers legacy writers until they are replaced.
     IF NEW.kind IN (9, 40002, 45001, 45003) THEN
         PERFORM pg_advisory_xact_lock_shared(
             hashtextextended('buzz_push_gate:' || NEW.community_id::text, 0));
