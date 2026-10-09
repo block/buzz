@@ -388,6 +388,40 @@ pub(crate) async fn authorized_standard_deletion_target(
     Ok(authorized.then_some(target))
 }
 
+/// Whether `actor` may delete `author`'s event in `channel_id` with kind 9005:
+/// the author while still a member or the channel is open (a removed member
+/// of a private channel loses this), a channel owner/admin, or the owning
+/// human of the author agent, even when that human is not a channel member.
+async fn may_delete_channel_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    channel_id: Uuid,
+    author: &[u8],
+    actor: &[u8],
+) -> anyhow::Result<bool> {
+    if author_delete_can_use_self_delete_path(author, actor, event)
+        && (state
+            .is_member_cached(tenant.community(), channel_id, actor)
+            .await?
+            || state
+                .db
+                .get_channel_for_event_write(tenant.community(), channel_id)
+                .await
+                .map(|ch| ch.visibility == "open")
+                .unwrap_or(false))
+    {
+        return Ok(true);
+    }
+    Ok(actor_is_channel_owner_or_admin(
+        &state.db.get_members(tenant.community(), channel_id).await?,
+        actor,
+    ) || state
+        .db
+        .is_agent_owner(tenant.community(), author, actor)
+        .await?)
+}
+
 /// Validate a standard NIP-09 deletion event before it is stored.
 ///
 /// Buzz accepts standard deletions for self-authored events, plus the owning
@@ -783,49 +817,40 @@ pub async fn validate_admin_event(
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
 
-            if target_event.channel_id != Some(channel_id) {
-                // Channel authority covers only this channel's events, so only
-                // the target's author or their agent's owner may learn where
-                // the target lives.
-                if author != actor_bytes
-                    && !state
-                        .db
-                        .is_agent_owner(tenant.community(), &author, &actor_bytes)
-                        .await?
-                {
-                    return Err(denied());
-                }
-                return Err(match target_event.channel_id {
-                    Some(_) => anyhow::anyhow!("target event belongs to a different channel"),
-                    None => anyhow::anyhow!("target event has no channel"),
-                });
-            }
-
-            // Author deleting their own message: re-gate on membership/open
-            // visibility so that a removed private-channel member cannot mutate
-            // old messages after access is revoked. Otherwise the actor must be
-            // a channel owner/admin or the owning human of the message's
-            // agent-author, even when that human is not a channel member.
-            let authorized = (author_delete_can_use_self_delete_path(&author, &actor_bytes, event)
-                && (state
-                    .is_member_cached(tenant.community(), channel_id, &actor_bytes)
+            // Only someone who could delete the target where it actually lives
+            // may learn that it lives outside the `h` channel; channel
+            // authority covers only that channel's events.
+            let authorized = match target_event.channel_id {
+                Some(target_channel) => {
+                    may_delete_channel_event(
+                        tenant,
+                        state,
+                        event,
+                        target_channel,
+                        &author,
+                        &actor_bytes,
+                    )
                     .await?
-                    || state
-                        .db
-                        .get_channel_for_event_write(tenant.community(), channel_id)
-                        .await
-                        .map(|ch| ch.visibility == "open")
-                        .unwrap_or(false)))
-                || actor_is_channel_owner_or_admin(
-                    &state.db.get_members(tenant.community(), channel_id).await?,
-                    &actor_bytes,
-                )
-                || state
-                    .db
-                    .is_agent_owner(tenant.community(), &author, &actor_bytes)
-                    .await?;
+                }
+                None => {
+                    author == actor_bytes
+                        || state
+                            .db
+                            .is_agent_owner(tenant.community(), &author, &actor_bytes)
+                            .await?
+                }
+            };
             if !authorized {
                 return Err(denied());
+            }
+            match target_event.channel_id {
+                Some(target_channel) if target_channel != channel_id => {
+                    return Err(anyhow::anyhow!(
+                        "target event belongs to a different channel"
+                    ));
+                }
+                None => return Err(anyhow::anyhow!("target event has no channel")),
+                Some(_) => {}
             }
             if target_event.event.kind.as_u16() == 45011 {
                 return Err(anyhow::anyhow!(
