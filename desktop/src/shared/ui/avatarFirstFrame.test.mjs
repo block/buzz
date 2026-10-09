@@ -64,11 +64,15 @@ after(() => dom.window.close());
 let React;
 let render;
 let UserAvatar;
+let ProfileAvatar;
 
 before(async () => {
   React = (await import("react")).default;
   ({ render } = await import("@testing-library/react"));
   ({ UserAvatar } = await import("./UserAvatar.tsx"));
+  ({ ProfileAvatar } = await import(
+    "../../features/profile/ui/ProfileAvatar.tsx"
+  ));
 });
 
 const AVATAR_URL = "https://media.example/avatar.png";
@@ -87,7 +91,23 @@ test("a cached avatar renders its image on the first render without lazy loading
   assert.notEqual(image.getAttribute("loading"), "lazy");
 });
 
-test("the Radix load probe requests the avatar as soon as it mounts", () => {
+test("a cached profile avatar renders its image on the first render without lazy loading", () => {
+  const { getByTestId } = render(
+    React.createElement(ProfileAvatar, {
+      avatarUrl: AVATAR_URL,
+      label: "Bruce",
+      testId: "profile-avatar",
+    }),
+  );
+
+  const image = getByTestId("profile-avatar-image");
+  assert.equal(image.getAttribute("src"), AVATAR_URL);
+  assert.notEqual(image.getAttribute("loading"), "lazy");
+});
+
+// Pins the Radix behavior this fix relies on, not the fix itself: if a Radix
+// upgrade stops probing on mount, revisit whether avatars should lazy-load.
+test("Radix behavior: the load probe requests the avatar as soon as it mounts", () => {
   render(
     React.createElement(UserAvatar, {
       avatarUrl: AVATAR_URL,
