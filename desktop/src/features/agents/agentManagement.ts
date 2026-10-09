@@ -2,10 +2,18 @@ import type {
   AgentPersona,
   CreatePersonaInput,
   RespondToMode,
+  SelfUpdateField,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 
 export const AGENT_MANAGEMENT_REQUEST = "agent_management_request" as const;
+
+/** Every self-updatable field, in the order the policy UI and store use. */
+export const SELF_UPDATE_FIELDS: readonly SelfUpdateField[] = [
+  "system_prompt",
+  "model",
+  "display_name",
+];
 
 export type AgentManagementCreateRequest = {
   type: typeof AGENT_MANAGEMENT_REQUEST;
@@ -139,6 +147,44 @@ export function requestTargetsEditablePersona(
   persona: AgentPersona | undefined,
 ): persona is AgentPersona {
   return Boolean(persona && !persona.sourceTeam);
+}
+
+/** Human label for a self-updatable field, for policy checkboxes and toasts. */
+export function selfUpdateFieldLabel(field: SelfUpdateField): string {
+  switch (field) {
+    case "system_prompt":
+      return "system prompt";
+    case "model":
+      return "model";
+    case "display_name":
+      return "display name";
+  }
+}
+
+/** Toggle one field in a policy, keeping the canonical field order. */
+export function toggleSelfUpdateField(
+  value: readonly SelfUpdateField[],
+  field: SelfUpdateField,
+  checked: boolean,
+): SelfUpdateField[] {
+  return SELF_UPDATE_FIELDS.filter((candidate) =>
+    candidate === field ? checked : value.includes(candidate),
+  );
+}
+
+/** One line for the audit toast after an agent applied its own update. */
+export function describeSelfUpdate(
+  displayName: string,
+  fields: readonly SelfUpdateField[],
+): string {
+  const labels = fields.map(selfUpdateFieldLabel);
+  const what =
+    labels.length === 0
+      ? "definition"
+      : labels.length === 1
+        ? labels[0]
+        : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+  return `${displayName} updated its own ${what}`;
 }
 
 export function createInputFromRequest(

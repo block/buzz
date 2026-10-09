@@ -6,6 +6,7 @@ import {
 import type {
   ManagedAgent,
   ManagedAgentRuntimeStatus,
+  SelfUpdateField,
 } from "@/shared/api/types";
 
 export async function startManagedAgent(
@@ -68,6 +69,60 @@ export async function setManagedAgentAutoRestart(
     },
   );
   return fromRawManagedAgent(response);
+}
+
+export async function setManagedAgentSelfUpdateFields(
+  pubkey: string,
+  selfUpdateFields: readonly SelfUpdateField[],
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "set_managed_agent_self_update_fields",
+    {
+      pubkey,
+      selfUpdateFields,
+    },
+  );
+  return fromRawManagedAgent(response);
+}
+
+/** The update half of an `agent_management_request`, as the backend reads it. */
+export type AgentSelfUpdateDraft = {
+  channelId: string;
+  agentName: string;
+  displayName?: string;
+  systemPrompt?: string;
+  runtime?: string;
+  provider?: string;
+  model?: string;
+  respondTo?: string;
+};
+
+export type AgentSelfUpdateOutcome =
+  | {
+      outcome: "applied";
+      agent_pubkey: string;
+      persona_id: string;
+      display_name: string;
+      fields: SelfUpdateField[];
+    }
+  | { outcome: "review"; reason: string };
+
+/**
+ * Ask the backend to apply an agent's own draft-update under its
+ * `selfUpdateFields` policy. `review` is the normal answer and means the
+ * caller should open the owner-review form exactly as before; `applied`
+ * means the definition was saved and the auto-restart policy owns the rest.
+ */
+export async function applyAgentSelfUpdate(
+  agentPubkey: string,
+  draft: AgentSelfUpdateDraft,
+  issuedAt: string | null,
+): Promise<AgentSelfUpdateOutcome> {
+  return invokeTauri<AgentSelfUpdateOutcome>("apply_agent_self_update", {
+    agentPubkey,
+    draft,
+    issuedAt,
+  });
 }
 
 export async function listManagedAgentRuntimes(): Promise<

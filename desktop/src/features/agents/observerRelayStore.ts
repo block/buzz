@@ -136,7 +136,11 @@ const controlResultListeners = new Map<
 >();
 
 const agentManagementListeners = new Set<
-  (agentPubkey: string, request: AgentManagementRequest) => void
+  (
+    agentPubkey: string,
+    request: AgentManagementRequest,
+    issuedAt: string | null,
+  ) => void
 >();
 const projectChannelRequestListeners = new Set<
   (agentPubkey: string, request: ProjectChannelRequest) => void
@@ -509,8 +513,12 @@ function processLiveObserverEvents(
     }
     const managementRequest = parseAgentManagementRequest(parsed.payload);
     if (managementRequest) {
+      // The envelope timestamp lets the self-update path refuse a draft the
+      // relay replayed long after the agent sent it.
+      const issuedAt =
+        typeof parsed.timestamp === "string" ? parsed.timestamp : null;
       for (const listener of agentManagementListeners) {
-        listener(agentPubkey, managementRequest);
+        listener(agentPubkey, managementRequest, issuedAt);
       }
     }
     const projectChannelRequest = parseProjectChannelRequest(parsed.payload);
@@ -694,7 +702,11 @@ function dispatchControlResult(
  * a `switch_model` frame.
  */
 export function subscribeAgentManagementRequests(
-  listener: (agentPubkey: string, request: AgentManagementRequest) => void,
+  listener: (
+    agentPubkey: string,
+    request: AgentManagementRequest,
+    issuedAt: string | null,
+  ) => void,
 ) {
   agentManagementListeners.add(listener);
   return () => {

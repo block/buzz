@@ -1,13 +1,21 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
+import { toast } from "sonner";
+
 import {
   createInputFromRequest,
+  describeSelfUpdate,
   requestTargetsEditablePersona,
   type AgentManagementRequest,
   updateInputFromRequest,
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
+import {
+  applyAgentSelfUpdate,
+  type AgentSelfUpdateOutcome,
+} from "@/shared/api/tauriManagedAgents";
+import { sendChannelMessage } from "@/shared/api/tauriMessages";
 import {
   managedAgentsQueryKey,
   personasQueryKey,
@@ -54,11 +62,83 @@ export function useAgentManagement() {
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
   const bufferedRequestsRef = React.useRef<
-    Array<{ agentPubkey: string; request: AgentManagementRequest }>
+    Array<{
+      agentPubkey: string;
+      request: AgentManagementRequest;
+      issuedAt: string | null;
+    }>
   >([]);
 
+  // Today's path: open the prefilled owner-review form. One request at a
+  // time; a request that arrives while another is open is marked seen and
+  // dropped, as before.
+  function presentForReview(
+    agentPubkey: string,
+    next: AgentManagementRequest,
+    message: string | null,
+  ) {
+    if (pendingRequestId.current !== null) return;
+    pendingRequestId.current = next.requestId;
+    sourceAgentPubkey.current = agentPubkey;
+    setError(message);
+    setRequest(next);
+  }
+
+  // Self-update (#6287): an update drafted by an agent for its own definition
+  // may apply without review when its record's `selfUpdateFields` covers
+  // every field it sets. The backend decides under the store lock; any
+  // refusal, and any failure, lands on the review form so the request is
+  // never lost.
+  async function trySelfUpdate(
+    agentPubkey: string,
+    next: Extract<AgentManagementRequest, { action: "update" }>,
+    issuedAt: string | null,
+  ) {
+    let outcome: AgentSelfUpdateOutcome;
+    try {
+      outcome = await applyAgentSelfUpdate(agentPubkey, next.request, issuedAt);
+    } catch (cause) {
+      presentForReview(
+        agentPubkey,
+        next,
+        cause instanceof Error
+          ? cause.message
+          : "Could not apply this agent's update.",
+      );
+      return;
+    }
+    if (outcome.outcome === "review") {
+      presentForReview(agentPubkey, next, null);
+      return;
+    }
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: personasQueryKey }),
+      queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+    ]);
+    const summary = describeSelfUpdate(outcome.display_name, outcome.fields);
+    // Audit copy in the originating channel, posted as the owner. Plain text
+    // on purpose: a mention would wake the agent to answer its own note.
+    let description =
+      "Applied without review under this agent's self-update policy.";
+    try {
+      await sendChannelMessage(
+        next.request.channelId,
+        `${summary} (applied without review under its self-update policy).`,
+      );
+    } catch (cause) {
+      console.warn("Self-update channel note not posted:", cause);
+      description =
+        "Applied without review. The audit note could not be posted to the channel.";
+    }
+    toast.success(summary, { description });
+  }
+
   const acceptOwnedRequest = React.useEffectEvent(
-    (agentPubkey: string, next: AgentManagementRequest) => {
+    (
+      agentPubkey: string,
+      next: AgentManagementRequest,
+      issuedAt: string | null,
+    ) => {
       if (
         classifyAgentManagementOrigin(
           managedAgentsRef.current,
@@ -72,11 +152,11 @@ export function useAgentManagement() {
       }
       seenRequestIds.current.add(next.requestId);
       setError(null);
-      if (pendingRequestId.current === null) {
-        pendingRequestId.current = next.requestId;
-        sourceAgentPubkey.current = agentPubkey;
-        setRequest(next);
+      if (next.action === "update") {
+        void trySelfUpdate(agentPubkey, next, issuedAt);
+        return;
       }
+      presentForReview(agentPubkey, next, null);
     },
   );
 
@@ -86,14 +166,18 @@ export function useAgentManagement() {
     if (managedAgentsQuery.data && channelsQuery.data) {
       const buffered = bufferedRequestsRef.current.splice(0);
       for (const candidate of buffered) {
-        acceptOwnedRequest(candidate.agentPubkey, candidate.request);
+        acceptOwnedRequest(
+          candidate.agentPubkey,
+          candidate.request,
+          candidate.issuedAt,
+        );
       }
     }
   }, [channelsQuery.data, managedAgentsQuery.data]);
 
   React.useEffect(
     () =>
-      subscribeAgentManagementRequests((agentPubkey, next) => {
+      subscribeAgentManagementRequests((agentPubkey, next, issuedAt) => {
         // Observer frames are owner-scoped and authenticated. Any managed agent
         // this Desktop owns may draft a change; defer the ownership decision
         // until the managed-agent query has initialized so ephemeral requests
@@ -106,13 +190,17 @@ export function useAgentManagement() {
             next.request.channelId,
           ) === "buffer"
         ) {
-          bufferedRequestsRef.current.push({ agentPubkey, request: next });
+          bufferedRequestsRef.current.push({
+            agentPubkey,
+            request: next,
+            issuedAt,
+          });
           if (bufferedRequestsRef.current.length > 100) {
             bufferedRequestsRef.current.shift();
           }
           return;
         }
-        acceptOwnedRequest(agentPubkey, next);
+        acceptOwnedRequest(agentPubkey, next, issuedAt);
       }),
     [],
   );

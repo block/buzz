@@ -997,6 +997,7 @@ type RawManagedAgent = {
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
+  self_update_fields?: Array<"system_prompt" | "model" | "display_name">;
   backend:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -9965,6 +9966,16 @@ async function handleSetManagedAgentAutoRestart(args: {
   return cloneManagedAgent(agent);
 }
 
+async function handleSetManagedAgentSelfUpdateFields(args: {
+  pubkey: string;
+  selfUpdateFields: NonNullable<RawManagedAgent["self_update_fields"]>;
+}): Promise<RawManagedAgent> {
+  const agent = getMockManagedAgent(args.pubkey);
+  agent.self_update_fields = [...args.selfUpdateFields];
+  agent.updated_at = new Date().toISOString();
+  return cloneManagedAgent(agent);
+}
+
 async function handleGetManagedAgentLog(args: {
   pubkey: string;
   lineCount?: number;
@@ -14163,6 +14174,16 @@ export function maybeInstallE2eTauriMocks() {
         return handleSetManagedAgentAutoRestart(
           payload as Parameters<typeof handleSetManagedAgentAutoRestart>[0],
         );
+      case "set_managed_agent_self_update_fields":
+        return handleSetManagedAgentSelfUpdateFields(
+          payload as Parameters<
+            typeof handleSetManagedAgentSelfUpdateFields
+          >[0],
+        );
+      case "apply_agent_self_update":
+        // The mock world has no self-update policy: every draft stays on the
+        // owner-review path, which is also the real default.
+        return { outcome: "review", reason: "agent has no self-update policy" };
       case "set_managed_agent_start_on_app_launch":
         return handleSetManagedAgentStartOnAppLaunch(
           payload as Parameters<
