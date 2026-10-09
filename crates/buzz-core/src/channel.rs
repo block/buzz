@@ -251,6 +251,10 @@ pub enum ChannelType {
     Dm,
     /// Internal workflow execution channel.
     Workflow,
+    /// Access-control channel. The relay leaves it out of queries unless a
+    /// filter names it, or asks for system channels with `#t:["system"]` on
+    /// kinds 39000-39003.
+    System,
 }
 
 impl ChannelType {
@@ -261,6 +265,7 @@ impl ChannelType {
             Self::Forum => "forum",
             Self::Dm => "dm",
             Self::Workflow => "workflow",
+            Self::System => "system",
         }
     }
 }
@@ -280,6 +285,7 @@ impl FromStr for ChannelType {
             "forum" => Ok(Self::Forum),
             "dm" => Ok(Self::Dm),
             "workflow" => Ok(Self::Workflow),
+            "system" => Ok(Self::System),
             other => Err(format!("unknown channel type: {other:?}")),
         }
     }

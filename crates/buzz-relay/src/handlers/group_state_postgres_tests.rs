@@ -691,3 +691,65 @@ async fn selective_label_and_creator_reqs_are_not_starved_by_limit() {
         "#t and #P must both match"
     );
 }
+
+/// Whether a group-state tag list has a bare `[name]` marker tag.
+fn has_marker(tags: &[Vec<String>], name: &str) -> bool {
+    tags.iter().any(|tag| tag.len() == 1 && tag[0] == name)
+}
+
+/// A system channel is private unless its creator asks for open, and its
+/// kind:39000 carries NIP-29 `hidden` exactly while it is private.
+/// Mutation: default system channels to open, or drop the `hidden` rule →
+/// RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn system_channel_defaults_private_and_hidden() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-system").await;
+    let creator = Keys::generate();
+
+    let private = create_channel(&state, &tenant, &creator, &[&["channel_type", "system"]]).await;
+    let tags = group_state_tags(&state, &tenant, private, 39000).await;
+    assert!(has_marker(&tags, "private"), "default private: {tags:?}");
+    assert!(
+        has_marker(&tags, "hidden"),
+        "private system is hidden: {tags:?}"
+    );
+    assert_eq!(
+        t_values(&state, &tenant, private, 39000).await.first(),
+        Some(&"system".to_string())
+    );
+
+    edit_channel(
+        &state,
+        &tenant,
+        &creator,
+        private,
+        &[&["visibility", "open"]],
+    )
+    .await
+    .expect("open the channel");
+    let tags = group_state_tags(&state, &tenant, private, 39000).await;
+    assert!(has_marker(&tags, "public"), "opened: {tags:?}");
+    assert!(
+        !has_marker(&tags, "hidden"),
+        "open system is not hidden: {tags:?}"
+    );
+
+    let open = create_channel(
+        &state,
+        &tenant,
+        &creator,
+        &[&["channel_type", "system"], &["visibility", "open"]],
+    )
+    .await;
+    let tags = group_state_tags(&state, &tenant, open, 39000).await;
+    assert!(has_marker(&tags, "public"), "explicit open: {tags:?}");
+    assert!(!has_marker(&tags, "hidden"), "{tags:?}");
+
+    // Other types keep the open default and are not hidden.
+    let stream = create_channel(&state, &tenant, &creator, &[]).await;
+    let tags = group_state_tags(&state, &tenant, stream, 39000).await;
+    assert!(has_marker(&tags, "public"), "{tags:?}");
+    assert!(!has_marker(&tags, "hidden"), "{tags:?}");
+}

@@ -2619,6 +2619,7 @@ fn emit_fleet_stock_metrics(snapshot: buzz_db::usage::FleetStockSnapshot) {
         ("forum", snapshot.channels_forum),
         ("dm", snapshot.channels_dm),
         ("workflow", snapshot.channels_workflow),
+        ("system", snapshot.channels_system),
     ] {
         metrics::gauge!("buzz_total_channels", "type" => kind).set(value as f64);
     }
@@ -2762,7 +2763,7 @@ async fn emit_db_usage_metrics(
     // Zero-fill across all (community, channel_type) pairs so a type that
     // drops to zero emits 0 rather than retaining its last nonzero value.
     {
-        const CHANNEL_TYPES: &[&str] = &["stream", "forum", "dm", "workflow"];
+        const CHANNEL_TYPES: &[&str] = &["stream", "forum", "dm", "workflow", "system"];
         let rows: HashMap<(Uuid, &str), i64> = channel_rows
             .into_iter()
             .filter_map(|r| {

@@ -3048,17 +3048,6 @@ async fn ingest_event_inner(
 
         // Validate visibility/channel_type for ALL kind:9007 events (with or without h-tag).
         // This runs pre-storage so invalid enums are rejected before the event is persisted.
-        let visibility_str = event
-            .tags
-            .iter()
-            .find_map(|t| {
-                if t.kind().to_string() == "visibility" {
-                    t.content().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "open".to_string());
         let channel_type_str = event
             .tags
             .iter()
@@ -3070,6 +3059,24 @@ async fn ingest_event_inner(
                 }
             })
             .unwrap_or_else(|| "stream".to_string());
+        // A system channel holds access-controlled data, so it is private
+        // unless its creator asks for open.
+        let default_visibility = if channel_type_str == "system" {
+            "private"
+        } else {
+            "open"
+        };
+        let visibility_str = event
+            .tags
+            .iter()
+            .find_map(|t| {
+                if t.kind().to_string() == "visibility" {
+                    t.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| default_visibility.to_string());
 
         let visibility: buzz_db::channel::ChannelVisibility = visibility_str
             .parse()
