@@ -1,23 +1,54 @@
 use ifc_core::{EgressError, FlowState};
+use uuid::Uuid;
 
-use crate::domain::{DomainContext, ExecutionDomain, OperationEffect};
-use crate::label::{CommunityId, ConfidentialityLabel, Principal};
+use crate::domain::{ConversationKind, DomainContext, ExecutionDomain, OperationEffect};
+use crate::label::{CommunityId, ConfidentialityLabel, LabelError, Principal};
 
 /// The security metadata the broker checks before exposing a resource to an
 /// agent session.
 ///
-/// Constructing this from the domain where the resource originated keeps its
-/// audience and retained-state context together. These describe which readers
-/// and contexts may receive the resource; the broker checks current access
-/// separately.
+/// Conversation data uses the conversation's full reader set. Derived state,
+/// such as a summary, uses the producing domain's output audience. The broker
+/// authenticates the source facts and checks current access separately.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceLabel {
-    audience: ConfidentialityLabel,
-    context: DomainContext,
+    pub(crate) audience: ConfidentialityLabel,
+    pub(crate) context: DomainContext,
 }
 
 impl ResourceLabel {
-    /// Label a resource with the security metadata of its source domain.
+    /// Label conversation data from verified community and conversation facts.
+    ///
+    /// Supply every member as a reader, including agents. No requester, owner,
+    /// or capability policy participates in this label. Public conversations
+    /// are readable by everyone in the community and ignore the member list.
+    /// Restricted conversations and DMs require a nonempty member list and
+    /// retain their conversation identity.
+    pub fn from_conversation(
+        community: CommunityId,
+        channel_id: Uuid,
+        kind: ConversationKind,
+        members: impl IntoIterator<Item = Principal>,
+    ) -> Result<Self, LabelError> {
+        let (audience, context) = match kind {
+            ConversationKind::Public => (
+                ConfidentialityLabel::public(community),
+                DomainContext::CommunityPublic(community),
+            ),
+            ConversationKind::Restricted | ConversationKind::DirectMessage => (
+                ConfidentialityLabel::restricted(community, members.into_iter().collect())?,
+                DomainContext::Conversation {
+                    community,
+                    channel_id,
+                },
+            ),
+        };
+        Ok(Self { audience, context })
+    }
+
+    /// Label derived state with the producing domain's output audience and context.
+    ///
+    /// Use [`Self::from_conversation`] for the conversation's original data.
     pub fn from_domain(domain: &ExecutionDomain) -> Self {
         Self {
             audience: domain.audience.clone(),
@@ -85,23 +116,27 @@ impl AuthorizedPublication {
 /// [Appendix G of the design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-g-security-labels-as-a-lattice).
 ///
 /// The broker keeps this value for as long as it keeps the agent's history,
-/// files, or other state. The same domain selects both. This example uses a
-/// broker-owned pool so a later turn cannot reset the session's restrictions:
+/// files, or other state. Domain equality permits reuse under the same policy;
+/// the broker separately selects the conversation and lifecycle generation.
+/// This example preserves separate conversation histories in a broker-owned
+/// pool so a later turn cannot reset the session's restrictions:
 ///
 /// ```
 /// # use std::collections::HashMap;
 /// # use buzz_ifc::{AuthorizedPublication, ConfidentialityLabel, ExecutionDomain,
 /// #     IfcError, IfcSession, ResourceLabel};
+/// # use uuid::Uuid;
 /// # fn broker_sink(_: AuthorizedPublication) {}
 /// # fn run_turn(
-/// #     sessions: &mut HashMap<ExecutionDomain, IfcSession>,
+/// #     sessions: &mut HashMap<(ExecutionDomain, Uuid), IfcSession>,
 /// #     domain: ExecutionDomain,
+/// #     conversation: Uuid,
 /// #     resource: &ResourceLabel,
 /// #     destination: &ConfidentialityLabel,
 /// #     request_bytes: Vec<u8>,
 /// # ) -> Result<(), IfcError> {
 /// let session = sessions
-///     .entry(domain.clone())
+///     .entry((domain.clone(), conversation))
 ///     .or_insert_with(|| IfcSession::enter(domain));
 /// session.call("buzz.read.current")?;
 /// session.read(resource)?;

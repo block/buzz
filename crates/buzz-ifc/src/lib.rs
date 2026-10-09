@@ -7,9 +7,13 @@
 //! the same policy in a different event does not change the domain.
 //!
 //! The broker must verify events and membership before supplying [`DomainFacts`].
-//! It uses the complete domain to select both the agent's saved state and its
-//! [`IfcSession`]. Keep that session across turns: recreating it would forget
-//! whether unlabeled input had reached the agent.
+//! Domain equality permits policy-compatible reuse. The broker also keeps
+//! conversation histories separate and manages lifecycle generations; equality
+//! alone provides no epoch revocation. Keep the matching [`IfcSession`] for as
+//! long as retained state survives: recreating it would forget whether unlabeled
+//! input had reached the agent. Label raw conversation data with
+//! [`ResourceLabel::from_conversation`] and derived state with
+//! [`ResourceLabel::from_domain`].
 //!
 //! Check reads before delivering data, calls before executing them, and
 //! publications with [`IfcSession::publish`] before sending them to a sink.

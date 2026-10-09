@@ -11,6 +11,5 @@ description = "Buzz execution domains and broker-side information-flow checks"
 buzz-core = { workspace = true }
 ifc-core = { workspace = true }
 nostr = { workspace = true }
-serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

@@ -1276,7 +1276,6 @@ dependencies = [
  "buzz-core",
  "ifc-core",
  "nostr 0.44.7",
- "serde",
  "thiserror 2.0.18",
  "uuid",
 ]

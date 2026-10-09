@@ -1,14 +1,12 @@
 pub use buzz_core::CommunityId;
 pub use ifc_core::LabelError;
 use nostr::{secp256k1::XOnlyPublicKey, PublicKey};
-use serde::Serialize;
 
 /// A person, agent, or relay identified by a valid Nostr public key.
 ///
 /// The key is validated and stored in binary form. Hexadecimal case does not
 /// affect equality of principals or execution domains.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Principal(XOnlyPublicKey);
 
 impl Principal {

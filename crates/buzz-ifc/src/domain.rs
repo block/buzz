@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::label::{CommunityId, ConfidentialityLabel, Principal, ReaderSet};
+use crate::session::ResourceLabel;
 
 /// Which conversations may share an agent's history, files, and caches.
 ///
 /// Two private channels keep separate state even if they have the same members.
-/// Public channels share a community-wide context. A DM between an agent and
-/// its owner has a separate owner-private context.
+/// Public channels have a community-wide policy context. The broker keeps
+/// conversation histories separate even when their domains match. A DM between
+/// an agent and its owner has a separate owner-private policy context.
 ///
 /// A matching context is not enough to reuse state. The broker must compare the
 /// full [`ExecutionDomain`], so a change in agent, owner, audience, or
@@ -71,8 +72,7 @@ impl DomainContext {
 /// For a publication, permission to call the operation is not enough: the broker
 /// must use [`crate::IfcSession::publish`] to check whether the information may
 /// flow to the destination's readers.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OperationEffect {
     /// Does not expose information outside the agent's environment.
     NonEgressing,
@@ -251,11 +251,8 @@ pub fn derive_execution_domain(
         return Err(DerivationError::EmptyRequesters);
     }
 
-    let (audience, context) = match facts.kind {
-        ConversationKind::Public => (
-            ConfidentialityLabel::public(facts.community),
-            DomainContext::CommunityPublic(facts.community),
-        ),
+    match facts.kind {
+        ConversationKind::Public => {}
         ConversationKind::Restricted | ConversationKind::DirectMessage => {
             if !facts.members.contains(&facts.executing_agent) {
                 return Err(DerivationError::AgentNotMember);
@@ -266,30 +263,35 @@ pub fn derive_execution_domain(
             }) {
                 return Err(DerivationError::RequesterNotMember);
             }
-
-            let mut readers = facts.members.clone();
-            readers.remove(&facts.executing_agent);
-            let context = match &facts.owner {
-                Some(owner)
-                    if facts.kind == ConversationKind::DirectMessage
-                        && readers.len() == 1
-                        && readers.contains(owner) =>
-                {
-                    DomainContext::OwnerPrivate {
-                        community: facts.community,
-                        owner: *owner,
-                    }
-                }
-                _ => DomainContext::Conversation {
-                    community: facts.community,
-                    channel_id: facts.channel_id,
-                },
-            };
-            let audience = ConfidentialityLabel::restricted(facts.community, readers)
-                .map_err(|_| DerivationError::EmptyRestrictedAudience)?;
-            (audience, context)
         }
-    };
+    }
+    // Use the same conversation classification as raw resource labels, with
+    // output recipients excluding the executing agent.
+    let ResourceLabel {
+        audience,
+        mut context,
+    } = ResourceLabel::from_conversation(
+        facts.community,
+        facts.channel_id,
+        facts.kind,
+        facts
+            .members
+            .iter()
+            .copied()
+            .filter(|member| *member != facts.executing_agent),
+    )
+    .map_err(|_| DerivationError::EmptyRestrictedAudience)?;
+    if let (Some(owner), ReaderSet::Only(readers)) = (&facts.owner, audience.reader_set()) {
+        if facts.kind == ConversationKind::DirectMessage
+            && readers.len() == 1
+            && readers.contains(owner)
+        {
+            context = DomainContext::OwnerPrivate {
+                community: facts.community,
+                owner: *owner,
+            };
+        }
+    }
     let capabilities = effective_capabilities(&context, &facts, policy);
     ExecutionDomain::new(
         facts.executing_agent,
@@ -342,6 +344,9 @@ fn effective_capabilities(
 /// it does not distinguish two occurrences of the same policy separated by a
 /// membership change. The broker must verify current access separately and
 /// preserve session restrictions when reusing retained state.
+/// Conversation identity and lifecycle generation are additional broker
+/// boundaries: equal public domains do not merge model histories, and equality
+/// does not revoke a session when membership leaves and returns to the same set.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ExecutionDomain {
     agent: Principal,

@@ -440,11 +440,10 @@ fn publication_cannot_cross_communities() {
     );
 }
 
-/// This models the broker's retained-session pool. Public channels share one
-/// community domain, while restricted channel identity and audience
-/// each select different state.
+/// Equal public policy domains do not require shared conversation histories.
+/// The broker keys retained sessions by policy and conversation identity.
 #[test]
-fn broker_routes_retained_sessions_by_complete_domain_structure() {
+fn broker_routes_retained_sessions_by_domain_and_conversation() {
     let public_a = public_domain(community(1), 10);
     let public_b = public_domain(community(1), 20);
     let restricted_a = restricted_domain(community(1), 10, &[1, 2]);
@@ -452,22 +451,23 @@ fn broker_routes_retained_sessions_by_complete_domain_structure() {
     let restricted_new_audience = restricted_domain(community(1), 10, &[1, 2, 3]);
     let public_domain = public_a.clone();
     let domains = [
-        public_a,
-        public_b,
-        restricted_a,
-        restricted_b,
-        restricted_new_audience,
+        (public_a, Uuid::from_u128(10)),
+        (public_b, Uuid::from_u128(20)),
+        (restricted_a, Uuid::from_u128(10)),
+        (restricted_b, Uuid::from_u128(20)),
+        (restricted_new_audience, Uuid::from_u128(10)),
     ];
     let mut pool = HashMap::new();
 
-    for domain in domains {
-        pool.entry(domain.clone())
+    for (domain, conversation) in domains {
+        pool.entry((domain.clone(), conversation))
             .or_insert_with(|| IfcSession::enter(domain));
     }
 
-    assert_eq!(pool.len(), 4);
+    assert_eq!(pool.len(), 5);
     assert_eq!(
-        pool.get(&public_domain).map(IfcSession::domain),
+        pool.get(&(public_domain.clone(), Uuid::from_u128(10)))
+            .map(IfcSession::domain),
         Some(&public_domain)
     );
 }
