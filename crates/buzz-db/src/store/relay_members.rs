@@ -150,8 +150,12 @@ pub async fn add_relay_member(
     role: &str,
     added_by: Option<&str>,
 ) -> Result<bool> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, pubkey) DO NOTHING",
@@ -160,8 +164,9 @@ pub async fn add_relay_member(
     .bind(pubkey)
     .bind(role)
     .bind(added_by)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -177,9 +182,12 @@ pub async fn claim_relay_membership(
     role: &str,
     policy_version: Option<&str>,
 ) -> Result<bool> {
-    let connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, 'invite') \
@@ -188,7 +196,7 @@ pub async fn claim_relay_membership(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(role)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .rows_affected()
         > 0;
@@ -201,7 +209,7 @@ pub async fn claim_relay_membership(
         .bind(community.as_uuid())
         .bind(pubkey)
         .bind(version)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -253,18 +261,23 @@ pub async fn remove_relay_member(
     community: CommunityId,
     pubkey: &str,
 ) -> Result<RemoveResult> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         "DELETE FROM relay_members \
          WHERE community_id = $1 AND pubkey = $2 AND role <> 'owner'",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() > 0 {
+        tx.commit().await?;
         return Ok(RemoveResult::Removed);
     }
 
@@ -273,9 +286,10 @@ pub async fn remove_relay_member(
     let exists = sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
         .bind(pubkey)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
+    tx.commit().await?;
     if exists.is_some() {
         Ok(RemoveResult::IsOwner)
     } else {
@@ -302,18 +316,23 @@ pub async fn remove_relay_member_if_role(
     pubkey: &str,
     expected_role: &str,
 ) -> Result<RemoveResult> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         "DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2 AND role = $3",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(expected_role)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
 
     if result.rows_affected() > 0 {
+        tx.commit().await?;
         return Ok(RemoveResult::Removed);
     }
 
@@ -322,9 +341,10 @@ pub async fn remove_relay_member_if_role(
     let row = sqlx::query("SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
         .bind(pubkey)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
+    tx.commit().await?;
     match row {
         None => Ok(RemoveResult::NotFound),
         Some(r) => {
@@ -349,8 +369,12 @@ pub async fn update_relay_member_role(
     pubkey: &str,
     new_role: &str,
 ) -> Result<bool> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE relay_members SET role = $1, updated_at = now() \
          WHERE community_id = $2 AND pubkey = $3 AND role <> 'owner'",
@@ -358,8 +382,9 @@ pub async fn update_relay_member_role(
     .bind(new_role)
     .bind(community.as_uuid())
     .bind(pubkey)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -483,6 +508,16 @@ async fn bootstrap_owner_with_operation(
     let pubkey = owner_pubkey.to_ascii_lowercase();
     let connection = observability::acquire_writer(pool, operation).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    if let Err(error) = crate::deletion::DeletionStore::new(pool.clone())
+        .guard_transaction(&mut tx, community)
+        .await
+    {
+        return match error {
+            DbError::AccessDenied(_) => Ok(ProvisionOwnerResult::LifecycleConflict),
+            other => Err(other),
+        };
+    }
 
     match lock_owner_mutation_admission(&mut tx, community, &pubkey, OwnerMutationMode::Converge)
         .await?
@@ -706,6 +741,27 @@ pub async fn transfer_ownership(
     let connection =
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    if let Err(error) = crate::deletion::DeletionStore::new(pool.clone())
+        .guard_transaction(&mut tx, community)
+        .await
+    {
+        return match error {
+            DbError::AccessDenied(_) => {
+                let exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1)")
+                        .bind(community.as_uuid())
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if exists {
+                    Ok(TransferResult::LifecycleConflict)
+                } else {
+                    Ok(TransferResult::NoOwner)
+                }
+            }
+            other => Err(other),
+        };
+    }
 
     // 1. Serialize on the transferee so concurrent transfers to the same
     //    recipient cannot both pass the ownership count check.

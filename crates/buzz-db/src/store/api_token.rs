@@ -38,6 +38,12 @@ pub async fn create_api_token(
         })
         .transpose()?;
 
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        CommunityId::from_uuid(community_id),
+        crate::observability::WriterOperation::Authentication,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO api_tokens
@@ -53,9 +59,9 @@ pub async fn create_api_token(
     .bind(&scopes_json)
     .bind(&channel_ids_json)
     .bind(expires_at)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
-
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -94,6 +100,12 @@ pub async fn create_api_token_if_under_limit(
     // Conditional INSERT: only inserts if active (non-revoked, non-expired) token count < 10
     // **for this (community, owner) pair**. The subquery and insert execute atomically --
     // no separate count + insert race.
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        CommunityId::from_uuid(community_id),
+        crate::observability::WriterOperation::Authentication,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         INSERT INTO api_tokens
@@ -118,8 +130,9 @@ pub async fn create_api_token_if_under_limit(
     .bind(&channel_ids_json)
     .bind(expires_at)
     .bind(owner_pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     if result.rows_affected() == 0 {
         // Limit exceeded -- the WHERE clause prevented the INSERT.
@@ -279,6 +292,12 @@ pub async fn revoke_token(
     owner_pubkey: &[u8],
     revoked_by: &[u8],
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        CommunityId::from_uuid(community_id),
+        crate::observability::WriterOperation::Authentication,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE api_tokens
@@ -293,9 +312,9 @@ pub async fn revoke_token(
     .bind(community_id)
     .bind(id)
     .bind(owner_pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
-
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -309,6 +328,12 @@ pub async fn revoke_all_tokens(
     owner_pubkey: &[u8],
     revoked_by: &[u8],
 ) -> Result<u64> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        CommunityId::from_uuid(community_id),
+        crate::observability::WriterOperation::Authentication,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE api_tokens
@@ -321,9 +346,9 @@ pub async fn revoke_all_tokens(
     .bind(revoked_by)
     .bind(community_id)
     .bind(owner_pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
-
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -504,13 +529,20 @@ impl Db {
     /// Record a token usage (update `last_used_at`), scoped to community.
     #[datastore_span(name = "touch_api_token", system = "postgresql")]
     pub async fn touch_api_token(&self, community_id: CommunityId, hash: &[u8]) -> Result<()> {
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::Authentication,
+        )
+        .await?;
         sqlx::query(
             "UPDATE api_tokens SET last_used_at = NOW() WHERE community_id = $1 AND token_hash = $2",
         )
         .bind(community_id.as_uuid())
         .bind(hash)
-        .execute(&self.pool)
+        .execute(tx.conn())
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 

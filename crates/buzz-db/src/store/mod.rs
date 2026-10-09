@@ -78,3 +78,6 @@ mod artifact_query;
 
 #[cfg(test)]
 mod artifact_postgres_tests;
+
+#[cfg(test)]
+mod admission_postgres_tests;

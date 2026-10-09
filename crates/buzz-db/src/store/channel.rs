@@ -29,27 +29,6 @@ pub use crate::channel_members::{
     LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
 };
 
-async fn begin_event_write_transaction(
-    pool: &PgPool,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-    let connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    Ok(sqlx::Transaction::begin(connection, None).await?)
-}
-
-async fn acquire_event_write_connection(
-    pool: &PgPool,
-) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-    Ok(crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?)
-}
-
 /// A channel row as returned from the database.
 #[derive(Debug, Clone)]
 pub struct ChannelRecord {
@@ -125,7 +104,12 @@ pub async fn create_channel(
 
     let id = Uuid::new_v4();
 
-    let mut tx = begin_event_write_transaction(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     sqlx::query(
         r#"
@@ -142,7 +126,7 @@ pub async fn create_channel(
     .bind(description)
     .bind(created_by)
     .bind(ttl_seconds)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     sqlx::query(
@@ -159,7 +143,7 @@ pub async fn create_channel(
     .bind(id)
     .bind(created_by)
     .bind(created_by)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     let row = sqlx::query(
@@ -176,7 +160,7 @@ pub async fn create_channel(
     )
     .bind(community_id.as_uuid())
     .bind(id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     let record = row_to_channel_record(row)?;
@@ -218,7 +202,12 @@ pub async fn create_channel_with_id(
         return Err(DbError::InvalidData("channel name is required".into()));
     }
 
-    let mut tx = begin_event_write_transaction(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     let rows_affected = sqlx::query(
         r#"
@@ -236,7 +225,7 @@ pub async fn create_channel_with_id(
     .bind(description)
     .bind(created_by)
     .bind(ttl_seconds)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .rows_affected();
 
@@ -258,7 +247,7 @@ pub async fn create_channel_with_id(
         .bind(channel_id)
         .bind(created_by)
         .bind(created_by)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -276,7 +265,7 @@ pub async fn create_channel_with_id(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     let record = row_to_channel_record(row)?;
@@ -351,17 +340,24 @@ pub async fn set_canvas(
     channel_id: Uuid,
     canvas: Option<&str>,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let rows = sqlx::query(
         "UPDATE channels SET canvas = $1 WHERE community_id = $2 AND id = $3 AND deleted_at IS NULL",
     )
         .bind(canvas)
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .execute(pool)
+        .execute(tx.conn())
         .await?;
     if rows.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -583,22 +579,33 @@ pub async fn update_channel(
     // this transition — whose own deadline reset is then the latest word.
     // Non-TTL updates don't touch the fast path and skip the lock.
     if updates.ttl_seconds.is_some() {
-        let mut tx = begin_event_write_transaction(pool).await?;
+        let mut tx = crate::begin_community_write_transaction(
+            pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(channel_ttl_lock_key(community_id, channel_id))
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
-        let result = q.execute(&mut *tx).await?;
+        let result = q.execute(tx.conn()).await?;
         if result.rows_affected() == 0 {
             return Err(DbError::ChannelNotFound(channel_id));
         }
         tx.commit().await?;
     } else {
-        let mut connection = acquire_event_write_connection(pool).await?;
-        let result = q.execute(&mut *connection).await?;
+        let mut tx = crate::begin_community_write_transaction(
+            pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let result = q.execute(tx.conn()).await?;
         if result.rows_affected() == 0 {
             return Err(DbError::ChannelNotFound(channel_id));
         }
+        tx.commit().await?;
     }
 
     get_channel_with_operation(
@@ -618,7 +625,12 @@ pub async fn set_topic(
     topic: &str,
     set_by: &[u8],
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE channels SET topic = $1, topic_set_by = $2, topic_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
@@ -627,11 +639,12 @@ pub async fn set_topic(
     .bind(set_by)
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -643,7 +656,12 @@ pub async fn set_purpose(
     purpose: &str,
     set_by: &[u8],
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE channels SET purpose = $1, purpose_set_by = $2, purpose_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
@@ -652,11 +670,12 @@ pub async fn set_purpose(
     .bind(set_by)
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -669,14 +688,19 @@ pub async fn archive_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     // First check: does the channel exist and what is its state?
     let row = sqlx::query(
         "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
     match row {
@@ -697,9 +721,10 @@ pub async fn archive_channel(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
 
+    tx.commit().await?;
     Ok(())
 }
 
@@ -712,14 +737,19 @@ pub async fn unarchive_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     // First check: does the channel exist and what is its state?
     let row = sqlx::query(
         "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
     match row {
@@ -742,9 +772,10 @@ pub async fn unarchive_channel(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
 
+    tx.commit().await?;
     Ok(())
 }
 
@@ -757,15 +788,21 @@ pub async fn soft_delete_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<bool> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
             .bind(community_id.as_uuid())
             .bind(channel_id)
-            .execute(&mut *connection)
+            .execute(tx.conn())
             .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 

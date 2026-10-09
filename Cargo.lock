@@ -1046,8 +1046,8 @@ version = "0.1.0"
 dependencies = [
  "buzz-core",
  "buzz-datastore-tracing",
+ "buzz-db",
  "chrono",
- "futures-util",
  "hex",
  "metrics",
  "serde",
