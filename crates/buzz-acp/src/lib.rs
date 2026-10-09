@@ -9,6 +9,7 @@ mod config;
 mod edit_routing;
 mod engram_fetch;
 mod filter;
+mod ifc;
 mod isolated_execution;
 mod observer;
 mod pool;

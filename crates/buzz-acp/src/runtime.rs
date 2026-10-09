@@ -110,6 +110,7 @@ fn make_prompt_context(
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd,
         rest_client: rest_client.clone(),
+        ifc_read: crate::ifc::ReadConfig::from_env()?,
         channel_info: pool::ChannelInfoResolver::new(channels, rest_client),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
