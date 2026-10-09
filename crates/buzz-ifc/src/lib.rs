@@ -2,11 +2,12 @@
 //!
 //! An [`ExecutionDomain`] records which agent is running, who may receive its
 //! output, which conversations may share its saved state, and which operations
-//! it may use. Its [`DomainKey`] includes all of those decisions, plus the owner
-//! and membership version, so a change produces a different key.
+//! it may use. Structural equality compares all of those decisions, plus the
+//! owner and community. Membership determines restricted audiences; reissuing
+//! the same policy in a different event does not change the domain.
 //!
 //! The broker must verify events and membership before supplying [`DomainFacts`].
-//! It uses the resulting key to select both the agent's saved state and its
+//! It uses the complete domain to select both the agent's saved state and its
 //! [`IfcSession`]. Keep that session across turns: recreating it would forget
 //! whether unlabeled input had reached the agent.
 //!
@@ -23,7 +24,7 @@ mod session;
 
 pub use domain::{
     derive_execution_domain, CapabilityPolicy, CapabilitySet, ConversationKind, DerivationError,
-    DomainFacts, DomainKey, ExecutionDomain, MembershipEpoch, OperationEffect,
+    DomainFacts, ExecutionDomain, OperationEffect,
 };
 pub use label::{CommunityId, ConfidentialityLabel, LabelError, Principal, PrincipalError};
 pub use session::{AuthorizedPublication, IfcError, IfcSession, ResourceLabel};

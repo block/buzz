@@ -1,32 +1,27 @@
 use ifc_core::{EgressError, FlowState};
 
-use crate::domain::{DomainContext, DomainKey, ExecutionDomain, MembershipEpoch, OperationEffect};
+use crate::domain::{DomainContext, ExecutionDomain, OperationEffect};
 use crate::label::{CommunityId, ConfidentialityLabel, Principal};
 
 /// The security metadata the broker checks before exposing a resource to an
 /// agent session.
 ///
 /// Constructing this from the domain where the resource originated keeps its
-/// audience, retained-state context, and membership epoch together. Public
-/// community data does not carry an epoch because any context in that
-/// community may read it. Restricted data retains the epoch under which its
-/// source domain was authorized.
+/// audience and retained-state context together. These describe which readers
+/// and contexts may receive the resource; the broker checks current access
+/// separately.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceLabel {
     audience: ConfidentialityLabel,
     context: DomainContext,
-    epoch: Option<MembershipEpoch>,
 }
 
 impl ResourceLabel {
     /// Label a resource with the security metadata of its source domain.
     pub fn from_domain(domain: &ExecutionDomain) -> Self {
-        let epoch = (!matches!(domain.context, DomainContext::CommunityPublic(_)))
-            .then(|| domain.epoch.clone());
         Self {
             audience: domain.audience.clone(),
             context: domain.context.clone(),
-            epoch,
         }
     }
 }
@@ -90,23 +85,23 @@ impl AuthorizedPublication {
 /// [Appendix G of the design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-g-security-labels-as-a-lattice).
 ///
 /// The broker keeps this value for as long as it keeps the agent's history,
-/// files, or other state. The same domain key selects both. This example uses a
+/// files, or other state. The same domain selects both. This example uses a
 /// broker-owned pool so a later turn cannot reset the session's restrictions:
 ///
 /// ```
 /// # use std::collections::HashMap;
 /// # use buzz_ifc::{AuthorizedPublication, ConfidentialityLabel, ExecutionDomain,
-/// #     DomainKey, IfcError, IfcSession, ResourceLabel};
+/// #     IfcError, IfcSession, ResourceLabel};
 /// # fn broker_sink(_: AuthorizedPublication) {}
 /// # fn run_turn(
-/// #     sessions: &mut HashMap<DomainKey, IfcSession>,
+/// #     sessions: &mut HashMap<ExecutionDomain, IfcSession>,
 /// #     domain: ExecutionDomain,
 /// #     resource: &ResourceLabel,
 /// #     destination: &ConfidentialityLabel,
 /// #     request_bytes: Vec<u8>,
 /// # ) -> Result<(), IfcError> {
 /// let session = sessions
-///     .entry(domain.key())
+///     .entry(domain.clone())
 ///     .or_insert_with(|| IfcSession::enter(domain));
 /// session.call("buzz.read.current")?;
 /// session.read(resource)?;
@@ -137,9 +132,9 @@ impl IfcSession {
         Self { domain, flow }
     }
 
-    /// Return the key the broker uses to route later turns to this session.
-    pub fn domain_key(&self) -> DomainKey {
-        self.domain.key()
+    /// Return the complete domain the broker compares before reusing this session.
+    pub fn domain(&self) -> &ExecutionDomain {
+        &self.domain
     }
 
     /// Check a labeled resource before exposing it to the agent.
@@ -148,7 +143,7 @@ impl IfcSession {
     /// is readable by the domain's entire audience, so reading it does not
     /// further restrict output: `enter` already applied that audience.
     /// The broker must check current resource permissions separately; matching
-    /// stored membership epochs does not prove that membership is still current.
+    /// audience and context does not prove that membership is still current.
     pub fn read(&self, resource: &ResourceLabel) -> Result<(), IfcError> {
         if !resource.audience.can_flow_to(&self.domain.audience) {
             return Err(IfcError::ReadAudienceDenied);
@@ -156,15 +151,6 @@ impl IfcSession {
         if !self.domain.context.permits(&resource.context) {
             return Err(IfcError::ReadContextDenied);
         }
-        if resource.context == self.domain.context
-            && resource
-                .epoch
-                .as_ref()
-                .is_some_and(|epoch| epoch != &self.domain.epoch)
-        {
-            return Err(IfcError::StaleResourceEpoch);
-        }
-
         Ok(())
     }
 
@@ -236,9 +222,6 @@ pub enum IfcError {
     /// The resource belongs to retained state this domain may not reuse.
     #[error("resource belongs to a different retained-state context")]
     ReadContextDenied,
-    /// Restricted state was created under a different membership epoch.
-    #[error("resource membership epoch does not match the execution domain")]
-    StaleResourceEpoch,
     /// The execution domain does not admit the requested operation.
     #[error("operation is not admitted by this execution domain")]
     CapabilityDenied,

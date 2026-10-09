@@ -39,7 +39,7 @@ fn conversation_capabilities() -> CapabilitySet {
     ])
 }
 
-fn conversation(values: &[u8], channel_id: Uuid, epoch: &str) -> ExecutionDomain {
+fn conversation(values: &[u8], channel_id: Uuid) -> ExecutionDomain {
     ExecutionDomain::new(
         principal(9),
         Some(principal(1)),
@@ -48,7 +48,6 @@ fn conversation(values: &[u8], channel_id: Uuid, epoch: &str) -> ExecutionDomain
             community: community(),
             channel_id,
         },
-        MembershipEpoch::new(epoch),
         conversation_capabilities(),
     )
     .expect("coherent conversation domain")
@@ -128,7 +127,6 @@ fn derivation_grants_personal_capabilities_only_to_owner_private_work() {
             community: community(),
             channel_id: Uuid::from_u128(1),
             kind: ConversationKind::DirectMessage,
-            epoch: MembershipEpoch::new("membership:v1"),
             members: BTreeSet::from([agent, owner]),
             executing_agent: agent,
             requesters: BTreeSet::from([owner]),
@@ -156,7 +154,6 @@ fn derivation_grants_personal_capabilities_only_to_owner_private_work() {
             community: community(),
             channel_id: Uuid::from_u128(2),
             kind: ConversationKind::Public,
-            epoch: MembershipEpoch::new("community:v1"),
             members: BTreeSet::new(),
             executing_agent: agent,
             requesters: BTreeSet::from([owner]),
@@ -189,7 +186,6 @@ fn restricted_derivation_requires_verified_membership() {
         community: community(),
         channel_id: Uuid::from_u128(1),
         kind: ConversationKind::Restricted,
-        epoch: MembershipEpoch::new("membership:v1"),
         members,
         executing_agent: agent,
         requesters,
@@ -217,96 +213,96 @@ fn restricted_derivation_requires_verified_membership() {
     );
 }
 
-/// Change each of the six domain fields separately and require a different key.
-/// Omitting one from the hash could reuse history from a different agent, owner,
-/// audience, conversation, membership version, or capability set.
+/// Change each domain component separately and require a different domain.
+/// Omitting one from equality could reuse history from a different agent, owner,
+/// audience, conversation, community, or capability set.
 #[test]
-fn every_domain_component_changes_the_routing_key() {
-    let base = conversation(&[1, 2], Uuid::from_u128(1), "v1");
-    let build = |agent, owner, audience, channel_id, epoch, capabilities| {
+fn structural_domain_equality_compares_every_component() {
+    let base = conversation(&[1, 2], Uuid::from_u128(1));
+    let build = |agent, owner, audience: ConfidentialityLabel, channel_id, capabilities| {
+        let community = *audience.universe();
         ExecutionDomain::new(
             agent,
             owner,
             audience,
             DomainContext::Conversation {
-                community: community(),
+                community,
                 channel_id,
             },
-            MembershipEpoch::new(epoch),
             capabilities,
         )
         .expect("coherent domain")
     };
-    let ids = [
-        base.key(),
+    let domains = [
+        base,
         build(
             principal(8),
             Some(principal(1)),
             label(&[1, 2]),
             Uuid::from_u128(1),
-            "v1",
             conversation_capabilities(),
-        )
-        .key(),
+        ),
         build(
             principal(9),
             None,
             label(&[1, 2]),
             Uuid::from_u128(1),
-            "v1",
             conversation_capabilities(),
-        )
-        .key(),
+        ),
         build(
             principal(9),
             Some(principal(1)),
             label(&[1, 3]),
             Uuid::from_u128(1),
-            "v1",
             conversation_capabilities(),
-        )
-        .key(),
+        ),
         build(
             principal(9),
             Some(principal(1)),
             label(&[1, 2]),
             Uuid::from_u128(2),
-            "v1",
             conversation_capabilities(),
-        )
-        .key(),
+        ),
+        build(
+            principal(9),
+            Some(principal(1)),
+            ConfidentialityLabel::restricted(other_community(), readers(&[1, 2]))
+                .expect("non-empty readers"),
+            Uuid::from_u128(1),
+            conversation_capabilities(),
+        ),
         build(
             principal(9),
             Some(principal(1)),
             label(&[1, 2]),
             Uuid::from_u128(1),
-            "v2",
-            conversation_capabilities(),
-        )
-        .key(),
-        build(
-            principal(9),
-            Some(principal(1)),
-            label(&[1, 2]),
-            Uuid::from_u128(1),
-            "v1",
             non_egressing(["buzz.read.current"]),
-        )
-        .key(),
+        ),
     ];
 
-    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+    for (index, domain) in domains.iter().enumerate() {
+        for previous in &domains[..index] {
+            assert_ne!(domain, previous);
+        }
+    }
 }
 
-/// Keep the same key for the same domain across code changes. An accidental
-/// encoding change would break lookups of state saved under the old key.
+/// Reader and operation ordering, and duplicate entries, do not change a domain.
+/// Equivalent structures must also select the same entry in a retained-state pool.
 #[test]
-fn domain_key_has_a_canonical_golden_value() {
-    let domain = conversation(&[1, 2], Uuid::from_u128(1), "membership:event-1");
-    assert_eq!(
-        domain.key().as_str(),
-        "c83fb1c188109526fca87b73297eb00f9bf0b6545e36c6f0b8d3fb2771ce7962"
-    );
+fn equivalent_domains_ignore_reader_and_capability_ordering() {
+    let domain = conversation(&[1, 2], Uuid::from_u128(1));
+    let mut reordered = conversation(&[2, 1, 2], Uuid::from_u128(1));
+    reordered.capabilities = CapabilitySet::from_operations([
+        ("buzz.reply", OperationEffect::Publication),
+        ("buzz.post", OperationEffect::Publication),
+        ("buzz.read.current", OperationEffect::NonEgressing),
+        ("buzz.reply", OperationEffect::Publication),
+    ]);
+
+    assert_eq!(domain, reordered);
+    let pool = std::collections::HashMap::from([(domain, "retained state")]);
+    assert_eq!(pool.get(&reordered), Some(&"retained state"));
 }
 
 /// A public audience cannot be paired with another community's context or with
@@ -319,7 +315,6 @@ fn domains_reject_incoherent_audience_context_pairs() {
             Some(principal(1)),
             ConfidentialityLabel::public(community()),
             DomainContext::CommunityPublic(other_community()),
-            MembershipEpoch::new("v1"),
             CapabilitySet::default(),
         ),
         Err(DomainError::ContextCommunityMismatch)
@@ -333,7 +328,6 @@ fn domains_reject_incoherent_audience_context_pairs() {
                 community: community(),
                 channel_id: Uuid::from_u128(2),
             },
-            MembershipEpoch::new("v1"),
             CapabilitySet::default(),
         ),
         Err(DomainError::AudienceContextMismatch)

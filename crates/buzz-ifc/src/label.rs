@@ -6,8 +6,8 @@ use serde::Serialize;
 /// A person, agent, or relay identified by a valid Nostr public key.
 ///
 /// The key is validated and stored in binary form. Hexadecimal case does not
-/// affect equality or domain keys.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+/// affect equality of principals or execution domains.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct Principal(XOnlyPublicKey);
 
@@ -34,10 +34,6 @@ impl Principal {
     /// Return the public key as lowercase hexadecimal.
     pub fn to_hex(&self) -> String {
         self.0.to_string()
-    }
-
-    pub(crate) fn to_bytes(self) -> [u8; 32] {
-        self.0.serialize()
     }
 }
 

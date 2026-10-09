@@ -9,10 +9,8 @@ description = "Buzz execution domains and broker-side information-flow checks"
 
 [dependencies]
 buzz-core = { workspace = true }
-hex = { workspace = true }
 ifc-core = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

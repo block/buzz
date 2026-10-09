@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::label::{CommunityId, ConfidentialityLabel, Principal, ReaderSet};
@@ -13,9 +12,9 @@ use crate::label::{CommunityId, ConfidentialityLabel, Principal, ReaderSet};
 /// its owner has a separate owner-private context.
 ///
 /// A matching context is not enough to reuse state. The broker must compare the
-/// full [`DomainKey`], so a change in agent, owner, audience, membership version,
-/// or capabilities also prevents reuse.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// full [`ExecutionDomain`], so a change in agent, owner, audience, or
+/// capabilities also prevents reuse.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum DomainContext {
     /// Shared state for public conversations in one community.
     CommunityPublic(CommunityId),
@@ -64,28 +63,6 @@ impl DomainContext {
             Self::OwnerPrivate { .. } => self == source,
         }
     }
-
-    pub(crate) fn stable_hash(&self, hasher: &mut Sha256) {
-        match self {
-            Self::CommunityPublic(community) => {
-                hash_field(hasher, b"community-public");
-                hash_field(hasher, community.as_uuid().as_bytes());
-            }
-            Self::Conversation {
-                community,
-                channel_id,
-            } => {
-                hash_field(hasher, b"conversation");
-                hash_field(hasher, community.as_uuid().as_bytes());
-                hash_field(hasher, channel_id.as_bytes());
-            }
-            Self::OwnerPrivate { community, owner } => {
-                hash_field(hasher, b"owner-private");
-                hash_field(hasher, community.as_uuid().as_bytes());
-                hash_field(hasher, &owner.to_bytes());
-            }
-        }
-    }
 }
 
 /// Whether an operation can send information out of the agent's environment.
@@ -94,7 +71,7 @@ impl DomainContext {
 /// For a publication, permission to call the operation is not enough: the broker
 /// must use [`crate::IfcSession::publish`] to check whether the information may
 /// flow to the destination's readers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationEffect {
     /// Does not expose information outside the agent's environment.
@@ -110,13 +87,6 @@ impl OperationEffect {
             (Self::Publication, _) | (_, Self::Publication) => Self::Publication,
         }
     }
-
-    fn stable_hash(self, hasher: &mut Sha256) {
-        match self {
-            Self::NonEgressing => hash_field(hasher, b"non-egressing"),
-            Self::Publication => hash_field(hasher, b"publication"),
-        }
-    }
 }
 
 /// Operations a policy allows, with each operation's publication behavior.
@@ -129,7 +99,7 @@ impl OperationEffect {
 /// let capabilities = buzz_ifc::CapabilitySet::default();
 /// let _ = capabilities.contains("buzz.post");
 /// ```
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct CapabilitySet(BTreeMap<String, OperationEffect>);
 
 impl CapabilitySet {
@@ -177,14 +147,6 @@ impl CapabilitySet {
     pub(crate) fn effect(&self, operation: &str) -> Option<OperationEffect> {
         self.0.get(operation).copied()
     }
-
-    fn stable_hash(&self, hasher: &mut Sha256) {
-        hash_field(hasher, &(self.0.len() as u64).to_be_bytes());
-        for (name, effect) in &self.0 {
-            hash_field(hasher, name.as_bytes());
-            effect.stable_hash(hasher);
-        }
-    }
 }
 
 /// Limits on the operations available to an agent.
@@ -204,22 +166,6 @@ impl CapabilityPolicy {
     /// from `bot`.
     pub fn new(bot: CapabilitySet, conversation: CapabilitySet) -> Self {
         Self { bot, conversation }
-    }
-}
-
-/// Version of the membership or access policy used to derive a domain.
-///
-/// The broker must change this value when the relevant membership or policy
-/// changes. It becomes part of the domain key, preventing the broker from
-/// selecting old state with the new key. This crate does not check freshness.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
-pub struct MembershipEpoch(String);
-
-impl MembershipEpoch {
-    /// Use a broker-verified version, such as a membership event ID.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
     }
 }
 
@@ -248,8 +194,6 @@ pub struct DomainFacts {
     pub channel_id: Uuid,
     /// Conversation type from verified metadata.
     pub kind: ConversationKind,
-    /// Current membership or community policy version supplied by the relay.
-    pub epoch: MembershipEpoch,
     /// Complete verified member list, including the agent. Ignored for public
     /// channels, whose audience is the whole community.
     pub members: BTreeSet<Principal>,
@@ -297,8 +241,8 @@ pub enum DerivationError {
 /// and conversation policies, even if the owner made the request.
 ///
 /// The broker must supply verified [`DomainFacts`] and use the resulting
-/// [`DomainKey`] to select saved state. This function does not load or clear
-/// sessions itself.
+/// [`ExecutionDomain`] to select saved state. This function does not load or
+/// clear sessions itself.
 pub fn derive_execution_domain(
     facts: DomainFacts,
     policy: &CapabilityPolicy,
@@ -352,7 +296,6 @@ pub fn derive_execution_domain(
         facts.owner,
         audience,
         context,
-        facts.epoch,
         capabilities,
     )
     .map_err(|_| DerivationError::InvalidDomain)
@@ -380,38 +323,31 @@ fn effective_capabilities(
     CapabilitySet::effective(&policy.bot, requester, domain)
 }
 
-/// Key the broker uses to select an agent's saved state.
-///
-/// Compare the full key when deciding whether to reuse a session. Matching only
-/// a channel or member list would miss changes in owner, policy, or capabilities.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
-pub struct DomainKey(String);
-
-impl DomainKey {
-    /// Return the key as a hexadecimal string for storage or lookup.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 /// The identity, readers, context, and policy for an agent invocation.
 ///
-/// The audience says who may receive information. The context says which
-/// conversations may share saved state. The epoch records the membership or
-/// policy version, and the capabilities list the allowed operations. Agent and
-/// owner identities keep different agents and ownership relationships separate.
+/// Conceptually, `D = (community, agent, owner, audience, context, capabilities)`.
+/// The community is encoded in both the audience and context; the constructor
+/// requires them to agree. The audience says who may receive information, the
+/// context says which conversations may share saved state, and capabilities
+/// list the allowed operations. Agent and owner identities keep different
+/// agents and ownership relationships separate.
 ///
-/// This extends the domain model in
+/// Restricted audiences contain the verified member set minus the executing
+/// agent. Public audiences represent everyone in the community without listing
+/// members. Event IDs, timestamps, names, and topics do not participate in
+/// equality. Compare the complete structure before reusing retained state.
+///
+/// This represents current policy state. Unlike the temporal epochs in
 /// [Appendix B of the design paper](../../../docs/practical-information-flow-for-buzz-agents.md#appendix-b-formal-execution-domains)
-/// by including the owner and capabilities in the key as well.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// it does not distinguish two occurrences of the same policy separated by a
+/// membership change. The broker must verify current access separately and
+/// preserve session restrictions when reusing retained state.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ExecutionDomain {
     agent: Principal,
     owner: Option<Principal>,
     pub(crate) audience: ConfidentialityLabel,
     pub(crate) context: DomainContext,
-    pub(crate) epoch: MembershipEpoch,
     pub(crate) capabilities: CapabilitySet,
 }
 
@@ -422,13 +358,12 @@ impl ExecutionDomain {
         owner: Option<Principal>,
         audience: ConfidentialityLabel,
         context: DomainContext,
-        epoch: MembershipEpoch,
         capabilities: CapabilitySet,
     ) -> Result<Self, DomainError> {
         if *audience.universe() != context.community() {
             return Err(DomainError::ContextCommunityMismatch);
         }
-        if !audience_context_shape_matches(&audience, &context) {
+        if !audience_matches_context(&audience, &context) {
             return Err(DomainError::AudienceContextMismatch);
         }
         Ok(Self {
@@ -436,7 +371,6 @@ impl ExecutionDomain {
             owner,
             audience,
             context,
-            epoch,
             capabilities,
         })
     }
@@ -445,54 +379,9 @@ impl ExecutionDomain {
     pub fn audience(&self) -> &ConfidentialityLabel {
         &self.audience
     }
-
-    /// Hash every domain field into a stable key for session lookup.
-    ///
-    /// Changing any field changes the key. The broker must use this complete key
-    /// so it cannot reuse a session that has seen data under a different policy.
-    pub fn key(&self) -> DomainKey {
-        let mut hasher = Sha256::new();
-        hasher.update(b"buzz-ifc-domain-v6");
-        hash_field(&mut hasher, &self.agent.to_bytes());
-        match &self.owner {
-            Some(owner) => {
-                hash_field(&mut hasher, b"owner");
-                hash_field(&mut hasher, &owner.to_bytes());
-            }
-            None => hash_field(&mut hasher, b"no-owner"),
-        }
-        hash_field(&mut hasher, self.audience.universe().as_uuid().as_bytes());
-        hash_reader_set(self.audience.reader_set(), &mut hasher);
-        self.context.stable_hash(&mut hasher);
-        hash_field(&mut hasher, self.epoch.0.as_bytes());
-        self.capabilities.stable_hash(&mut hasher);
-        DomainKey(hex::encode(hasher.finalize()))
-    }
 }
 
-fn hash_reader_set(readers: &ReaderSet, hasher: &mut Sha256) {
-    match readers {
-        ReaderSet::Everyone => hash_field(hasher, b"everyone"),
-        ReaderSet::Only(readers) => {
-            hash_field(hasher, b"only");
-            hash_field(hasher, &(readers.len() as u64).to_be_bytes());
-            for reader in readers {
-                hash_field(hasher, &reader.to_bytes());
-            }
-        }
-    }
-}
-
-fn hash_field(hasher: &mut Sha256, value: &[u8]) {
-    let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
-    hasher.update(length.to_be_bytes());
-    hasher.update(value);
-}
-
-fn audience_context_shape_matches(
-    audience: &ConfidentialityLabel,
-    context: &DomainContext,
-) -> bool {
+fn audience_matches_context(audience: &ConfidentialityLabel, context: &DomainContext) -> bool {
     match (audience.reader_set(), context) {
         (ReaderSet::Everyone, DomainContext::CommunityPublic(_)) => true,
         (ReaderSet::Only(readers), DomainContext::Conversation { .. }) => !readers.is_empty(),

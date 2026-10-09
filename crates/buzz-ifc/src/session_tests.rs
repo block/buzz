@@ -29,13 +29,12 @@ fn policy() -> CapabilityPolicy {
     CapabilityPolicy::new(operations(), operations())
 }
 
-fn public_domain(community: CommunityId, channel: u128, epoch: &str) -> ExecutionDomain {
+fn public_domain(community: CommunityId, channel: u128) -> ExecutionDomain {
     derive_execution_domain(
         DomainFacts {
             community,
             channel_id: Uuid::from_u128(channel),
             kind: ConversationKind::Public,
-            epoch: MembershipEpoch::new(epoch),
             members: BTreeSet::new(),
             executing_agent: principal(9),
             requesters: BTreeSet::from([principal(1)]),
@@ -47,12 +46,7 @@ fn public_domain(community: CommunityId, channel: u128, epoch: &str) -> Executio
     .expect("valid public domain")
 }
 
-fn restricted_domain(
-    community: CommunityId,
-    channel: u128,
-    epoch: &str,
-    readers: &[u8],
-) -> ExecutionDomain {
+fn restricted_domain(community: CommunityId, channel: u128, readers: &[u8]) -> ExecutionDomain {
     let agent = principal(9);
     let members = readers
         .iter()
@@ -65,7 +59,6 @@ fn restricted_domain(
             community,
             channel_id: Uuid::from_u128(channel),
             kind: ConversationKind::Restricted,
-            epoch: MembershipEpoch::new(epoch),
             members,
             executing_agent: agent,
             requesters: BTreeSet::from([principal(readers[0])]),
@@ -77,7 +70,7 @@ fn restricted_domain(
     .expect("valid restricted domain")
 }
 
-fn owner_private_domain(community: CommunityId, channel: u128, epoch: &str) -> ExecutionDomain {
+fn owner_private_domain(community: CommunityId, channel: u128) -> ExecutionDomain {
     let owner = principal(1);
     let agent = principal(9);
     derive_execution_domain(
@@ -85,7 +78,6 @@ fn owner_private_domain(community: CommunityId, channel: u128, epoch: &str) -> E
             community,
             channel_id: Uuid::from_u128(channel),
             kind: ConversationKind::DirectMessage,
-            epoch: MembershipEpoch::new(epoch),
             members: BTreeSet::from([agent, owner]),
             executing_agent: agent,
             requesters: BTreeSet::from([owner]),
@@ -119,7 +111,7 @@ fn execute_publication(
 /// operation, audience, and bytes together, including the concrete destination.
 #[test]
 fn broker_turn_uses_one_small_checked_surface() {
-    let domain = restricted_domain(community(1), 10, "membership:v1", &[1, 2]);
+    let domain = restricted_domain(community(1), 10, &[1, 2]);
     let resource = ResourceLabel::from_domain(&domain);
     let destination = domain.audience().clone();
     let session = IfcSession::enter(domain);
@@ -146,7 +138,7 @@ fn broker_turn_uses_one_small_checked_surface() {
 /// has since received unknown input and can no longer authorize new requests.
 #[test]
 fn publication_keeps_the_checked_bytes_operation_and_destination() {
-    let domain = public_domain(community(1), 10, "community:v1");
+    let domain = public_domain(community(1), 10);
     let mut destination = domain.audience().clone();
     let checked_destination = destination.clone();
     let mut session = IfcSession::enter(domain);
@@ -188,8 +180,8 @@ fn publication_keeps_the_checked_bytes_operation_and_destination() {
 /// appended to the simulated agent inbox.
 #[test]
 fn broker_does_not_deliver_a_resource_with_a_narrower_audience() {
-    let group = restricted_domain(community(1), 10, "membership:v1", &[1, 2]);
-    let alice_only = restricted_domain(community(1), 20, "membership:v1", &[1]);
+    let group = restricted_domain(community(1), 10, &[1, 2]);
+    let alice_only = restricted_domain(community(1), 20, &[1]);
     let resource = ResourceLabel::from_domain(&alice_only);
     let destination = group.audience().clone();
     let session = IfcSession::enter(group);
@@ -209,7 +201,7 @@ fn broker_does_not_deliver_a_resource_with_a_narrower_audience() {
 /// destination-flow check. Misclassifying this path would bypass IFC entirely.
 #[test]
 fn egressing_operation_cannot_use_the_call_path() {
-    let session = IfcSession::enter(public_domain(community(1), 10, "community:v1"));
+    let session = IfcSession::enter(public_domain(community(1), 10));
 
     assert_eq!(
         session.call(REPLY),
@@ -221,7 +213,7 @@ fn egressing_operation_cannot_use_the_call_path() {
 /// broker API and policy cannot silently change how a call is executed.
 #[test]
 fn non_egressing_operation_cannot_use_the_publish_path() {
-    let domain = public_domain(community(1), 10, "community:v1");
+    let domain = public_domain(community(1), 10);
     let destination = domain.audience().clone();
     let session = IfcSession::enter(domain);
 
@@ -236,7 +228,7 @@ fn non_egressing_operation_cannot_use_the_publish_path() {
 /// how to execute it.
 #[test]
 fn operation_absent_from_the_domain_is_denied() {
-    let domain = public_domain(community(1), 10, "community:v1");
+    let domain = public_domain(community(1), 10);
     let destination = domain.audience().clone();
     let session = IfcSession::enter(domain);
 
@@ -251,8 +243,8 @@ fn operation_absent_from_the_domain_is_denied() {
 /// the central no-write-down confidentiality invariant at the checked sink.
 #[test]
 fn private_session_cannot_publish_to_a_public_audience() {
-    let private = restricted_domain(community(1), 10, "membership:v1", &[1, 2]);
-    let public = public_domain(community(1), 20, "community:v1");
+    let private = restricted_domain(community(1), 10, &[1, 2]);
+    let public = public_domain(community(1), 20);
     let destination = public.audience();
     let session = IfcSession::enter(private);
 
@@ -271,7 +263,7 @@ fn private_session_cannot_publish_to_a_public_audience() {
 /// narrowing while potentially allowing the unsafe direction above.
 #[test]
 fn public_session_may_publish_to_a_private_audience() {
-    let public = public_domain(community(1), 10, "community:v1");
+    let public = public_domain(community(1), 10);
     // A destination needs an audience, not an agent execution domain.
     let destination = ConfidentialityLabel::restricted_to(community(1), principal(1));
     let session = IfcSession::enter(public);
@@ -285,7 +277,7 @@ fn public_session_may_publish_to_a_private_audience() {
 /// must not reset the flag and accidentally launder unknown data.
 #[test]
 fn unknown_input_permanently_blocks_publication() {
-    let domain = public_domain(community(1), 10, "community:v1");
+    let domain = public_domain(community(1), 10);
     let resource = ResourceLabel::from_domain(&domain);
     let destination = domain.audience().clone();
     let mut session = IfcSession::enter(domain);
@@ -309,18 +301,18 @@ fn unknown_input_permanently_blocks_publication() {
 /// the unknown-input flag. This exercises the pool lookup used in the example.
 #[test]
 fn unknown_input_survives_reusing_a_session_in_another_public_channel() {
-    let first_turn = public_domain(community(1), 10, "community:v1");
-    let next_turn = public_domain(community(1), 20, "community:v1");
+    let first_turn = public_domain(community(1), 10);
+    let next_turn = public_domain(community(1), 20);
     let resource = ResourceLabel::from_domain(&next_turn);
     let destination = next_turn.audience().clone();
     let mut pool = HashMap::new();
 
-    pool.entry(first_turn.key())
+    pool.entry(first_turn.clone())
         .or_insert_with(|| IfcSession::enter(first_turn))
         .mark_unknown_input();
 
     let session = pool
-        .entry(next_turn.key())
+        .entry(next_turn.clone())
         .or_insert_with(|| IfcSession::enter(next_turn));
     session
         .call(READ)
@@ -337,27 +329,25 @@ fn unknown_input_survives_reusing_a_session_in_another_public_channel() {
     assert_eq!(pool.len(), 1);
 }
 
-/// Retained restricted state from an older membership snapshot cannot enter a
-/// newly routed session for the same conversation.
+/// Adding a member does not make older restricted state readable by them.
+/// Its original audience must cover everyone in the new session's audience.
 #[test]
-fn same_conversation_rejects_a_stale_membership_epoch() {
-    let old = restricted_domain(community(1), 10, "membership:v1", &[1, 2]);
-    let current = restricted_domain(community(1), 10, "membership:v2", &[1, 2]);
+fn same_conversation_rejects_a_resource_with_a_narrower_audience() {
+    let old = restricted_domain(community(1), 10, &[1, 2]);
+    let current = restricted_domain(community(1), 10, &[1, 2, 3]);
     let resource = ResourceLabel::from_domain(&old);
     let session = IfcSession::enter(current);
 
-    assert_eq!(session.read(&resource), Err(IfcError::StaleResourceEpoch));
+    assert_eq!(session.read(&resource), Err(IfcError::ReadAudienceDenied));
 }
 
-/// Public community data intentionally has no conversation membership epoch,
-/// so a restricted session may read it without comparing unrelated epochs.
-/// This catches the earlier design bug where public data inherited an epoch
-/// and was rejected by every private domain with a different epoch.
+/// Public community data is readable by the restricted session's audience.
+/// Its public context may enter any retained-state context in that community.
 /// Reading that data must not make the session's private state public.
 #[test]
 fn private_session_may_read_public_data_from_its_community() {
-    let public = public_domain(community(1), 20, "community:v7");
-    let private = restricted_domain(community(1), 10, "membership:v2", &[1, 2]);
+    let public = public_domain(community(1), 20);
+    let private = restricted_domain(community(1), 10, &[1, 2]);
     let resource = ResourceLabel::from_domain(&public);
     let private_audience = private.audience().clone();
     let session = IfcSession::enter(private);
@@ -381,8 +371,8 @@ fn private_session_may_read_public_data_from_its_community() {
 /// owner's private state remains protected by the exact-context rule.
 #[test]
 fn owner_private_session_may_read_conversation_data_safe_for_its_owner() {
-    let conversation = restricted_domain(community(1), 20, "membership:v7", &[1, 2]);
-    let owner_private = owner_private_domain(community(1), 10, "membership:v2");
+    let conversation = restricted_domain(community(1), 20, &[1, 2]);
+    let owner_private = owner_private_domain(community(1), 10);
     let resource = ResourceLabel::from_domain(&conversation);
     let session = IfcSession::enter(owner_private);
 
@@ -393,8 +383,8 @@ fn owner_private_session_may_read_conversation_data_safe_for_its_owner() {
 /// context. Otherwise one private channel could inject history into another.
 #[test]
 fn equal_audiences_do_not_merge_restricted_conversation_contexts() {
-    let source = restricted_domain(community(1), 10, "membership:v1", &[1, 2]);
-    let destination = restricted_domain(community(1), 20, "membership:v1", &[1, 2]);
+    let source = restricted_domain(community(1), 10, &[1, 2]);
+    let destination = restricted_domain(community(1), 20, &[1, 2]);
     let resource = ResourceLabel::from_domain(&source);
     let session = IfcSession::enter(destination);
 
@@ -406,8 +396,8 @@ fn equal_audiences_do_not_merge_restricted_conversation_contexts() {
 /// owner's private history or memory.
 #[test]
 fn owner_private_state_cannot_enter_a_conversation_with_the_same_audience() {
-    let owner_private = owner_private_domain(community(1), 10, "membership:v1");
-    let conversation = restricted_domain(community(1), 20, "membership:v1", &[1]);
+    let owner_private = owner_private_domain(community(1), 10);
+    let conversation = restricted_domain(community(1), 20, &[1]);
     assert_eq!(owner_private.audience(), conversation.audience());
     let resource = ResourceLabel::from_domain(&owner_private);
     let session = IfcSession::enter(conversation);
@@ -419,8 +409,8 @@ fn owner_private_state_cannot_enter_a_conversation_with_the_same_audience() {
 /// A cross-community resource must be rejected before any data is delivered.
 #[test]
 fn public_resource_cannot_cross_communities() {
-    let source = public_domain(community(1), 10, "community:v1");
-    let destination = public_domain(community(2), 10, "community:v1");
+    let source = public_domain(community(1), 10);
+    let destination = public_domain(community(2), 10);
     let resource = ResourceLabel::from_domain(&source);
     let session = IfcSession::enter(destination);
     let mut inbox = Vec::new();
@@ -436,8 +426,8 @@ fn public_resource_cannot_cross_communities() {
 /// same principals. A target in another community is never a valid IFC sink.
 #[test]
 fn publication_cannot_cross_communities() {
-    let source = public_domain(community(1), 10, "community:v1");
-    let destination = public_domain(community(2), 10, "community:v1");
+    let source = public_domain(community(1), 10);
+    let destination = public_domain(community(2), 10);
     let session = IfcSession::enter(source);
 
     assert_eq!(
@@ -451,33 +441,33 @@ fn publication_cannot_cross_communities() {
 }
 
 /// This models the broker's retained-session pool. Public channels share one
-/// community domain, while restricted channel identity and membership epoch
+/// community domain, while restricted channel identity and audience
 /// each select different state.
 #[test]
-fn broker_routes_retained_sessions_by_complete_domain_key() {
-    let public_a = public_domain(community(1), 10, "community:v1");
-    let public_b = public_domain(community(1), 20, "community:v1");
-    let restricted_a = restricted_domain(community(1), 10, "membership:v1", &[1, 2]);
-    let restricted_b = restricted_domain(community(1), 20, "membership:v1", &[1, 2]);
-    let restricted_new_epoch = restricted_domain(community(1), 10, "membership:v2", &[1, 2]);
-    let public_key = public_a.key();
+fn broker_routes_retained_sessions_by_complete_domain_structure() {
+    let public_a = public_domain(community(1), 10);
+    let public_b = public_domain(community(1), 20);
+    let restricted_a = restricted_domain(community(1), 10, &[1, 2]);
+    let restricted_b = restricted_domain(community(1), 20, &[1, 2]);
+    let restricted_new_audience = restricted_domain(community(1), 10, &[1, 2, 3]);
+    let public_domain = public_a.clone();
     let domains = [
         public_a,
         public_b,
         restricted_a,
         restricted_b,
-        restricted_new_epoch,
+        restricted_new_audience,
     ];
     let mut pool = HashMap::new();
 
     for domain in domains {
-        pool.entry(domain.key())
+        pool.entry(domain.clone())
             .or_insert_with(|| IfcSession::enter(domain));
     }
 
     assert_eq!(pool.len(), 4);
     assert_eq!(
-        pool.get(&public_key).map(IfcSession::domain_key),
-        Some(public_key)
+        pool.get(&public_domain).map(IfcSession::domain),
+        Some(&public_domain)
     );
 }
