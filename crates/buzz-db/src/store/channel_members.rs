@@ -1107,6 +1107,10 @@ pub async fn get_members_bulk(
 ///
 /// Includes channels where the pubkey is an active member AND all open channels.
 /// Open channels must be included in REQ filter resolution.
+///
+/// System channels are left out of both halves: this is the implicit scope of
+/// queries that do not name a channel. A query that names a system channel,
+/// or opts in to them, adds them from [`get_readable_system_channel_ids`].
 pub async fn get_accessible_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1123,10 +1127,12 @@ pub async fn get_accessible_channel_ids(
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
+          AND c.channel_type <> 'system'
         UNION
         SELECT id AS channel_id
         FROM channels
         WHERE community_id = $1 AND visibility = 'open' AND deleted_at IS NULL
+          AND channel_type <> 'system'
         "#,
     )
     .bind(community_id.as_uuid())
@@ -1140,6 +1146,72 @@ pub async fn get_accessible_channel_ids(
             Ok(id)
         })
         .collect()
+}
+
+/// Get the system channels a pubkey can read: those where it is an active
+/// member, and every open system channel. Uncached, so a caller can trust it
+/// for a channel the request names.
+pub async fn get_readable_system_channel_ids(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Vec<Uuid>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT c.id AS channel_id
+        FROM channels c
+        WHERE c.community_id = $1 AND c.deleted_at IS NULL AND c.channel_type = 'system'
+          AND (
+            c.visibility = 'open'
+            OR EXISTS (
+              SELECT 1 FROM channel_members cm
+              WHERE cm.community_id = c.community_id AND cm.channel_id = c.id
+                AND cm.pubkey = $2 AND cm.removed_at IS NULL
+            )
+          )
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| {
+            let id: Uuid = r.try_get("channel_id")?;
+            Ok(id)
+        })
+        .collect()
+}
+
+/// The IDs in `channel_ids` that name system channels, deleted or not.
+/// Push matching and membership notifications use it to skip them.
+pub async fn system_channel_ids_among(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[Uuid],
+) -> Result<Vec<Uuid>> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM channels \
+         WHERE community_id = $1 AND id = ANY($2) AND channel_type = 'system'",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_ids)
+    .fetch_all(&mut *connection)
+    .await?)
 }
 
 /// A large channel whose canonical active-member count may need its legacy
@@ -1367,6 +1439,7 @@ pub async fn get_accessible_channels(
         WHERE c.community_id = $1 AND c.deleted_at IS NULL
           {membership_clause}
           AND (c.channel_type != 'dm' OR cm.hidden_at IS NULL)
+          AND c.channel_type <> 'system'
     "#
     );
 
@@ -1770,6 +1843,26 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
         get_accessible_channel_ids(&self.pool, community_id, pubkey).await
+    }
+
+    /// Get the system channels a pubkey can read (member, or open).
+    #[datastore_span(name = "get_readable_system_channel_ids", system = "postgresql")]
+    pub async fn get_readable_system_channel_ids(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        get_readable_system_channel_ids(&self.pool, community_id, pubkey).await
+    }
+
+    /// The IDs in `channel_ids` that name system channels, deleted or not.
+    #[datastore_span(name = "system_channel_ids_among", system = "postgresql")]
+    pub async fn system_channel_ids_among(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        system_channel_ids_among(&self.pool, community_id, channel_ids).await
     }
 
     /// Returns large active-channel rosters whose relay-authored snapshots differ.
