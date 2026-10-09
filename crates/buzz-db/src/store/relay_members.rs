@@ -866,17 +866,19 @@ pub async fn transfer_ownership(
 ///
 /// Converts BYTEA pubkeys to lowercase hex text and inserts them as members of
 /// `community`. Returns the number of rows inserted, or 0 if:
-/// - the `pubkey_allowlist` table doesn't exist, or
+/// - the `pubkey_allowlist` table doesn't exist,
+/// - `pubkey_allowlist` has no rows for this community, or
 /// - `relay_members` already has rows for this community (migration ran in a
 ///   prior startup).
 ///
 /// The empty-table guard prevents re-adding members that were intentionally
 /// removed by an admin after the initial backfill.
 pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> Result<u64> {
-    // The common startup case writes nothing: either the legacy table is gone
-    // or this community already has members. Answer those with plain reads so
-    // an unchanged startup never needs write admission, and a quiescing
-    // deployment community keeps starting as it did before.
+    // The common startup case writes nothing: the legacy table is gone, it
+    // has no rows for this community, or the community already has members.
+    // Answer those with plain reads so a startup with nothing to backfill
+    // never needs write admission, and a quiescing deployment community keeps
+    // starting as it did before.
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Bootstrap).await?;
     let exists: bool = sqlx::query_scalar(
@@ -886,6 +888,15 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
     .fetch_one(&mut *connection)
     .await?;
     if !exists || community_has_members(&mut connection, community).await? {
+        return Ok(0);
+    }
+    let has_allowlist_rows: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pubkey_allowlist WHERE community_id = $1)",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    if !has_allowlist_rows {
         return Ok(0);
     }
     drop(connection);
