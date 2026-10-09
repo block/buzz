@@ -243,11 +243,51 @@ pub enum RemoveResult {
     RoleMismatch,
 }
 
+/// Deletes a membership and its join-policy acceptances in one transaction.
+///
+/// With `expected_role`, only a member holding exactly that role is removed;
+/// without it, any non-owner is. The member row is locked under that predicate
+/// first, so a concurrent acceptance insert (which must lock the member row for
+/// its foreign key) either commits before the child delete sees it or fails.
+/// Children go before the parent so no foreign-key action is needed.
+async fn delete_member_with_acceptances(
+    connection: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+    expected_role: Option<&str>,
+) -> Result<bool> {
+    let mut tx = sqlx::Connection::begin(connection).await?;
+    let locked = sqlx::query(
+        "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 \
+         AND CASE WHEN $3::text IS NULL THEN role <> 'owner' ELSE role = $3 END \
+         FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(expected_role)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM join_policy_acceptances WHERE community_id = $1 AND pubkey = $2")
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// Removes a relay member atomically, refusing to delete the owner.
 ///
-/// Uses a single conditional `DELETE … WHERE role <> 'owner'` so the
-/// owner-protection check and the deletion are one atomic operation —
-/// no TOCTOU race between a separate read and delete.
+/// The owner-protection check and the deletion run in one transaction under a
+/// row lock, so there is no TOCTOU race between a separate read and delete.
 pub async fn remove_relay_member(
     pool: &PgPool,
     community: CommunityId,
@@ -255,16 +295,7 @@ pub async fn remove_relay_member(
 ) -> Result<RemoveResult> {
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let result = sqlx::query(
-        "DELETE FROM relay_members \
-         WHERE community_id = $1 AND pubkey = $2 AND role <> 'owner'",
-    )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .execute(&mut *connection)
-    .await?;
-
-    if result.rows_affected() > 0 {
+    if delete_member_with_acceptances(&mut *connection, community, pubkey, None).await? {
         return Ok(RemoveResult::Removed);
     }
 
@@ -285,9 +316,8 @@ pub async fn remove_relay_member(
 
 /// Removes a relay member only if their current role matches `expected_role`.
 ///
-/// The delete and the role check are collapsed into a single
-/// `DELETE … WHERE pubkey = $1 AND role = $2`, making the operation atomic —
-/// no TOCTOU race between a prior read and this delete.
+/// The role check and the delete run in one transaction under a row lock, so
+/// there is no TOCTOU race between a prior read and this delete.
 ///
 /// Returns:
 /// - `Removed` — row was deleted.
@@ -304,16 +334,9 @@ pub async fn remove_relay_member_if_role(
 ) -> Result<RemoveResult> {
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let result = sqlx::query(
-        "DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2 AND role = $3",
-    )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .bind(expected_role)
-    .execute(&mut *connection)
-    .await?;
-
-    if result.rows_affected() > 0 {
+    if delete_member_with_acceptances(&mut *connection, community, pubkey, Some(expected_role))
+        .await?
+    {
         return Ok(RemoveResult::Removed);
     }
 
@@ -1383,6 +1406,77 @@ mod postgres_tests {
                 .as_deref(),
             Some(role)
         );
+    }
+
+    async fn acceptances(pool: &PgPool, community: CommunityId, pubkey: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM join_policy_acceptances WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .fetch_one(pool)
+        .await
+        .expect("count acceptances")
+    }
+
+    /// Both removal paths delete acceptance evidence themselves: the pool used
+    /// here runs no foreign-key action, so nothing cascades. Owners and a role
+    /// mismatch keep theirs.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_removal_deletes_acceptances_without_cascades() {
+        let pool = setup_pool().await;
+        let without_cascades = crate::test_support::pool_without_triggers().await;
+        let (community, owner) = owned_community(&pool).await;
+        let version = "a".repeat(64);
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&owner)
+        .bind(&version)
+        .execute(&pool)
+        .await
+        .expect("owner acceptance");
+        let member = test_pubkey();
+        let admin = test_pubkey();
+        for (pubkey, role) in [(&member, "member"), (&admin, "admin")] {
+            claim_relay_membership(&pool, community, pubkey, role, Some(&version))
+                .await
+                .expect("claim membership");
+            assert_eq!(acceptances(&pool, community, pubkey).await, 1);
+        }
+
+        assert_eq!(
+            remove_relay_member(&without_cascades, community, &owner)
+                .await
+                .expect("owner removal"),
+            RemoveResult::IsOwner
+        );
+        assert_eq!(acceptances(&pool, community, &owner).await, 1);
+        assert_eq!(
+            remove_relay_member_if_role(&without_cascades, community, &admin, "member")
+                .await
+                .expect("mismatched removal"),
+            RemoveResult::RoleMismatch
+        );
+        assert_eq!(acceptances(&pool, community, &admin).await, 1);
+
+        assert_eq!(
+            remove_relay_member(&without_cascades, community, &member)
+                .await
+                .expect("member removal"),
+            RemoveResult::Removed
+        );
+        assert_eq!(acceptances(&pool, community, &member).await, 0);
+        assert_eq!(
+            remove_relay_member_if_role(&without_cascades, community, &admin, "admin")
+                .await
+                .expect("role removal"),
+            RemoveResult::Removed
+        );
+        assert_eq!(acceptances(&pool, community, &admin).await, 0);
     }
 
     async fn owned_community(pool: &PgPool) -> (CommunityId, String) {

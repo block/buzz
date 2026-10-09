@@ -82,3 +82,23 @@ pub(crate) fn desired_state_schema_sql() -> String {
 pub(crate) fn desired_state_schema_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema")
 }
+
+/// A pool whose sessions run with `session_replication_role = replica`, which
+/// disables ordinary and foreign-key triggers. A delete path exercised through
+/// it gets no `ON DELETE` cascade, so a test proves the path removes its own
+/// child rows rather than relying on the constraint action.
+pub(crate) async fn pool_without_triggers() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET session_replication_role = replica")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url())
+        .await
+        .expect("connect trigger-free test pool")
+}

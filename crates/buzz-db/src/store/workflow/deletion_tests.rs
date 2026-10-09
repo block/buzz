@@ -174,7 +174,10 @@ async fn workflow_deletion_preserves_newer_definition_and_cleans_legacy_orphan()
     assert_present(&db, &query, id).await;
 
     // Old relay releases deleted the executable row, but not the definition.
-    db.delete_workflow_for_owner(community, id, &owner)
+    sqlx::query("DELETE FROM workflows WHERE community_id = $1 AND id = $2")
+        .bind(community.as_uuid())
+        .bind(id)
+        .execute(&db.pool)
         .await
         .expect("legacy deletion");
     assert_eq!(
@@ -359,4 +362,68 @@ async fn quiescing_community_rejects_workflow_deletion_at_admission_before_repla
             .await
             .expect("count deletion request");
     assert_eq!(stored, 0, "a rejected deletion request must not be stored");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_removes_children_without_cascades() {
+    let (db, community) = setup().await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    let query = seed(&db, community, &keys, id, &d_tag, now).await;
+    let run_id = create_workflow_run(&db.pool, community, id, None, None)
+        .await
+        .expect("run");
+    sqlx::query(
+        "INSERT INTO scheduled_workflow_fires \
+        (community_id, workflow_id, scheduled_for, workflow_run_id) VALUES ($1, $2, NOW(), $3)",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .bind(run_id)
+    .execute(&db.pool)
+    .await
+    .expect("scheduled claim linked to run");
+    crate::workflow::create_approval(
+        &db.pool,
+        crate::workflow::CreateApprovalParams {
+            community_id: community,
+            token: "cascade-free-approval",
+            workflow_id: id,
+            run_id,
+            step_id: "gate",
+            step_index: 0,
+            approver_spec: "@anyone",
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        },
+    )
+    .await
+    .expect("approval");
+
+    // No foreign-key action fires here, so every child must go explicitly.
+    let without_cascades = Db::from_pool(crate::test_support::pool_without_triggers().await);
+    let outcome = without_cascades
+        .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+        .await
+        .expect("delete without cascades");
+    assert!(outcome.changed);
+    assert_absent(&db, &query, id).await;
+    for table in [
+        "workflow_approvals",
+        "scheduled_workflow_fires",
+        "workflow_runs",
+    ] {
+        let left: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE community_id = $1 AND workflow_id = $2"
+        ))
+        .bind(community.as_uuid())
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count children");
+        assert_eq!(left, 0, "{table} rows must be deleted explicitly");
+    }
 }
