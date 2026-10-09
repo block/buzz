@@ -289,7 +289,9 @@ Run them with (requires running infrastructure):
 cargo test -p buzz-test-client -- --ignored
 ```
 
-See `TESTING.md` for the full multi-agent E2E testing guide.
+See `TESTING.md` for the full multi-agent E2E testing guide, and
+[desktop/TESTING.md](desktop/TESTING.md) for desktop behavior that needs a
+manual check on a real OS session, such as Windows notifications.
 
 ### CI Gate
 

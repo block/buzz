@@ -49,6 +49,9 @@ function getRouteMainTimelineTargetId(
     return targetMessageId;
   }
 
+  // Ordinary replies are intentionally absent from the main timeline. Keep
+  // timeline navigation on the containing root; only broadcast replies have
+  // a rendered row whose exact id can be targeted there.
   return targetMessage.rootId ?? targetMessage.parentId;
 }
 
@@ -64,6 +67,7 @@ export function useChannelRouteTarget({
   setThreadReplyTargetId,
   setThreadScrollTargetId,
   targetMessageId,
+  targetMessageView,
   timelineMessages,
 }: {
   activeChannel: Channel | null;
@@ -77,6 +81,7 @@ export function useChannelRouteTarget({
   setThreadReplyTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   targetMessageId: string | null;
+  targetMessageView?: "timeline" | null;
   timelineMessages: TimelineMessage[];
 }) {
   const timelineMessageById = React.useMemo(
@@ -98,7 +103,7 @@ export function useChannelRouteTarget({
       return;
     }
 
-    const targetKey = `${activeChannelId ?? "none"}:${targetMessageId}`;
+    const targetKey = `${activeChannelId ?? "none"}:${targetMessageId}:${targetMessageView ?? "default"}`;
     if (handledThreadRouteTargetRef.current !== targetKey) {
       handledThreadRouteTargetRef.current = null;
     }
@@ -113,6 +118,12 @@ export function useChannelRouteTarget({
 
     const targetMessage = timelineMessageById.get(targetMessageId) ?? null;
     if (!targetMessage) {
+      return;
+    }
+
+    // Explicit timeline intent outranks ancestry-based thread navigation.
+    if (targetMessageView === "timeline") {
+      handledThreadRouteTargetRef.current = targetKey;
       return;
     }
 
@@ -170,6 +181,7 @@ export function useChannelRouteTarget({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
     targetMessageId,
+    targetMessageView,
     timelineMessageById,
   ]);
 

@@ -9,10 +9,18 @@ import test from "node:test";
 
 let pendingActivations = [];
 let hangWindowInvokes = false;
+let rejectListener = false;
+let rejectDrain = false;
+const drainCommands = [];
 
 const tauriInternals = {
   invoke(command) {
-    if (command === "take_pending_activations") {
+    if (
+      command === "take_pending_activations" ||
+      command === "take_pending_windows_activations"
+    ) {
+      drainCommands.push(command);
+      if (rejectDrain) return Promise.reject(new Error("drain unavailable"));
       const drained = pendingActivations;
       pendingActivations = [];
       return Promise.resolve(drained);
@@ -21,6 +29,8 @@ const tauriInternals = {
       return new Promise(() => {});
     }
     if (command === "plugin:event|listen") {
+      if (rejectListener)
+        return Promise.reject(new Error("listener unavailable"));
       return Promise.resolve(1);
     }
     return Promise.resolve(undefined);
@@ -95,6 +105,19 @@ test("window focus re-drains activations stranded by a lost emit", async () => {
   // target. macOS foregrounds the app anyway; WebKit fires window focus.
   pendingActivations = [
     { channelId: "channel-1", eventId: "event-1", kind: 9 },
+    {
+      channelId: "channel-1",
+      eventId: "legacy-reply",
+      kind: 9,
+      threadRootId: "legacy-root",
+    },
+    {
+      channelId: "channel-1",
+      eventId: "timeline-reply",
+      kind: 9,
+      openInThread: false,
+      threadRootId: "legacy-root",
+    },
   ];
   window.dispatchEvent(new Event("focus"));
   await flushPendingWork();
@@ -108,7 +131,30 @@ test("window focus re-drains activations stranded by a lost emit", async () => {
       eventId: "event-1",
       kind: 9,
       pubkey: undefined,
+      openInThread: false,
       threadRootId: null,
+    },
+    {
+      channelId: "channel-1",
+      channelName: null,
+      content: undefined,
+      createdAt: null,
+      eventId: "legacy-reply",
+      kind: 9,
+      pubkey: undefined,
+      openInThread: true,
+      threadRootId: "legacy-root",
+    },
+    {
+      channelId: "channel-1",
+      channelName: null,
+      content: undefined,
+      createdAt: null,
+      eventId: "timeline-reply",
+      kind: 9,
+      pubkey: undefined,
+      openInThread: false,
+      threadRootId: "legacy-root",
     },
   ]);
 
@@ -118,7 +164,7 @@ test("window focus re-drains activations stranded by a lost emit", async () => {
   ];
   window.dispatchEvent(new Event("focus"));
   await flushPendingWork();
-  assert.equal(received.length, 1, "disposed listener must not re-drain");
+  assert.equal(received.length, 3, "disposed listener must not re-drain");
   // Leave the queue empty so the next test's mount-time drain starts clean.
   pendingActivations = [];
 });
@@ -138,4 +184,65 @@ test("visibilitychange re-drains activations stranded by a lost emit", async () 
   assert.equal(received.length, 1);
   assert.equal(received[0].channelId, "channel-3");
   dispose();
+});
+
+for (const [platform, command] of [
+  ["MacIntel", "take_pending_activations"],
+  ["Win32", "take_pending_windows_activations"],
+]) {
+  for (const listenerFails of [false, true]) {
+    test(`${platform} drains a queued target on mount (listener failure: ${listenerFails})`, async (t) => {
+      navigator.platform = platform;
+      rejectListener = listenerFails;
+      drainCommands.length = 0;
+      pendingActivations = [
+        { channelId: "cold-channel", eventId: "cold-event", kind: 9 },
+      ];
+      t.after(() => {
+        navigator.platform = "MacIntel";
+        rejectListener = false;
+        pendingActivations = [];
+      });
+      const received = [];
+      const dispose = await listenForDesktopNotificationActions((target) =>
+        received.push(target),
+      );
+      t.after(dispose);
+      assert.deepEqual(drainCommands, [command]);
+      assert.equal(received.length, 1);
+      assert.equal(received[0].eventId, "cold-event");
+      window.dispatchEvent(new Event("focus"));
+      await flushPendingWork();
+      assert.equal(
+        received.length,
+        1,
+        "drained target must not be delivered twice",
+      );
+      pendingActivations = [
+        { channelId: "next-channel", eventId: "next-event", kind: 9 },
+      ];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await flushPendingWork();
+      assert.equal(received[1].eventId, "next-event");
+      assert.deepEqual(drainCommands, [command, command, command]);
+    });
+  }
+}
+
+test("Windows initial drain failures use platform-neutral diagnostics", async (t) => {
+  navigator.platform = "Win32";
+  rejectDrain = true;
+  t.after(() => {
+    navigator.platform = "MacIntel";
+    rejectDrain = false;
+  });
+  const errors = [];
+  t.mock.method(console, "error", (...args) => errors.push(args));
+  const dispose = await listenForDesktopNotificationActions(() => {});
+  t.after(dispose);
+  assert.equal(errors.length, 1);
+  assert.equal(
+    errors[0][0],
+    "Failed to drain pending notification activations",
+  );
 });

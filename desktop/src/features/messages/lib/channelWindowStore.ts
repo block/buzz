@@ -36,6 +36,8 @@ export type ChannelWindowStore = {
   liveSummaries: Record<string, LiveThreadSummary>;
 };
 
+export const MAX_LIVE_WINDOW_EVENTS = 500;
+
 export const emptyChannelWindowStore = (): ChannelWindowStore => ({
   pages: [],
   liveOverlay: [],
@@ -194,7 +196,12 @@ export function mergeLiveChannelWindowEvent(
     ) {
       return current;
     }
-    return { ...current, liveAux: [...current.liveAux, event] };
+    return {
+      ...current,
+      liveAux: [...current.liveAux, event]
+        .sort(compareRelayOrder)
+        .slice(0, MAX_LIVE_WINDOW_EVENTS),
+    };
   }
   if (
     current.pages.some((page) =>
@@ -217,7 +224,8 @@ export function mergeLiveChannelWindowEvent(
     liveOverlay: current.liveOverlay
       .filter((candidate) => candidate.id !== event.id)
       .concat(event)
-      .sort(compareRelayOrder),
+      .sort(compareRelayOrder)
+      .slice(0, MAX_LIVE_WINDOW_EVENTS),
   };
 }
 

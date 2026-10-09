@@ -13,6 +13,7 @@ import {
 } from "@/shared/hooks/useHistorySearchState";
 import {
   buildAutoSendClearPatch,
+  buildMessageRouteTargetClearPatch,
   CHANNEL_SEARCH_KEYS,
 } from "./channelSearchKeys";
 export type { ChannelSearchKey } from "./channelSearchKeys";
@@ -107,7 +108,7 @@ export function useChannelPanelHistoryState() {
 
   const clearMessageRouteTarget = React.useCallback(
     (options?: PanelSetterOptions) =>
-      applyPatch({ messageId: null, threadRootId: null }, options),
+      applyPatch(buildMessageRouteTargetClearPatch(), options),
     [applyPatch],
   );
 

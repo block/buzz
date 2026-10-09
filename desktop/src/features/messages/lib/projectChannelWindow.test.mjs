@@ -129,6 +129,21 @@ test("test_live_event_during_fetch_survives_refetch_projection", async () => {
   assert.deepEqual(contents(harness), ["initial", "during-fetch"]);
 });
 
+test("projection does not create a fresh message cache for a background channel", () => {
+  const client = new QueryClient();
+  const channelId = "background-channel";
+  const eventToProject = event("background-live", 110);
+  const window = mergeLiveChannelWindowEvent(
+    emptyChannelWindowStore(),
+    eventToProject,
+  );
+  client.setQueryData(channelWindowKey(channelId), window);
+
+  projectChannelWindowMessages(client, channelId);
+
+  assert.equal(client.getQueryData(channelMessagesKey(channelId)), undefined);
+});
+
 test("test_live_event_after_query_resolution_survives_refetch_projection", async () => {
   const harness = createHarness();
   const live = event("post-resolve", 110);
