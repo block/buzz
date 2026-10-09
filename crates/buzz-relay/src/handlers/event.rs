@@ -3202,6 +3202,7 @@ mod tests {
         fn authed_conn(
             keys: &nostr::Keys,
             tenant: buzz_core::tenant::TenantContext,
+            scopes: Vec<buzz_auth::Scope>,
         ) -> (
             std::sync::Arc<crate::connection::ConnectionState>,
             tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
@@ -3220,7 +3221,7 @@ mod tests {
                 auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
-                        scopes: vec![],
+                        scopes,
                         channel_ids: None,
                         auth_method: buzz_auth::AuthMethod::Nip42,
                         agent_owner_pubkey: None,
@@ -3250,7 +3251,19 @@ mod tests {
             keys: &nostr::Keys,
             event: nostr::Event,
         ) -> String {
-            let (conn, mut rx) = authed_conn(keys, tenant.clone());
+            ok_frame_scoped(state, tenant, keys, event, vec![]).await
+        }
+
+        /// [`ok_frame`] with explicit token scopes, so a stored kind gets past
+        /// ingest's scope check to the restriction and fence checks.
+        async fn ok_frame_scoped(
+            state: &std::sync::Arc<crate::state::AppState>,
+            tenant: &buzz_core::tenant::TenantContext,
+            keys: &nostr::Keys,
+            event: nostr::Event,
+            scopes: Vec<buzz_auth::Scope>,
+        ) -> String {
+            let (conn, mut rx) = authed_conn(keys, tenant.clone(), scopes);
             super::super::handle_event(event, conn, std::sync::Arc::clone(state)).await;
             match rx
                 .try_recv()
@@ -3450,6 +3463,73 @@ mod tests {
                     .restriction_cache
                     .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
                 Some(buzz_db::moderation::RestrictionState::default())
+            );
+        }
+
+        fn text_note(keys: &nostr::Keys) -> nostr::Event {
+            nostr::EventBuilder::new(nostr::Kind::TextNote, "stored")
+                .sign_with_keys(keys)
+                .expect("sign text note")
+        }
+
+        /// Stored writes, and NIP-43 leave, skip the cached restriction row:
+        /// a cached ban on a sender Postgres has never restricted refuses
+        /// neither. The leave reaches ingest's later membership check, past
+        /// its uncached restriction check.
+        /// Mutation: make ingest call `enforce_cached_write_restriction`, or
+        /// drop the 28936 carve-out from the `handle_event` gate → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn stored_writes_ignore_cached_ban() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.restriction_cache.insert(
+                (tenant.community(), user.public_key().to_bytes().to_vec()),
+                buzz_db::moderation::RestrictionState {
+                    banned: true,
+                    muted_until: None,
+                },
+            );
+            let scopes = buzz_auth::Scope::all_non_admin();
+
+            let frame =
+                ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+            assert!(
+                frame.contains(",true,"),
+                "a stored write must read the restriction from Postgres; got {frame}"
+            );
+
+            let leave = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
+                "",
+            )
+            .sign_with_keys(&user)
+            .expect("sign leave");
+            let frame = ok_frame_scoped(&state, &tenant, &user, leave, scopes).await;
+            assert!(
+                frame.contains("relay membership is not enabled"),
+                "NIP-43 leave must skip the cached gate and pass ingest's uncached one; got {frame}"
+            );
+        }
+
+        /// Stored writes skip the cached serving state: a cached "fenced"
+        /// for a community Postgres says is active does not refuse them.
+        /// Mutation: make ingest's fence call `is_serving_active_cached` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn stored_writes_ignore_cached_fence() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.serving_active_cache.insert(tenant.community(), false);
+            let frame = ok_frame_scoped(
+                &state,
+                &tenant,
+                &user,
+                text_note(&user),
+                buzz_auth::Scope::all_non_admin(),
+            )
+            .await;
+            assert!(
+                frame.contains(",true,"),
+                "a stored write must read the serving state from Postgres; got {frame}"
             );
         }
 

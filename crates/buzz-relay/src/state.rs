@@ -1323,9 +1323,12 @@ pub struct AppState {
     /// Ephemeral-path cache of the raw ban/timeout row, not the verdict, so a
     /// timeout still lifts the moment `muted_until` passes. (`banned` is
     /// computed at read time, so an expiring ban can outlive its expiry by up
-    /// to the TTL.) Key: (community, pubkey bytes). TTL 30s; moderation
-    /// commands drop the target's entry on the pod that handles them, and
-    /// other pods catch up within the TTL. Persistent ingest stays uncached.
+    /// to the TTL.) Key: (community, pubkey bytes). The 30s TTL is the only
+    /// staleness bound: on every pod and for every restriction writer, the
+    /// ephemeral path sees a ban/timeout change within 30s. As a best effort,
+    /// signed moderation commands (9040–9043) also drop the target's own entry
+    /// on the pod that handles them; owned agents' entries, other pods, and the
+    /// admin/report paths just age out. Persistent ingest stays uncached.
     #[allow(clippy::type_complexity)]
     pub restriction_cache:
         Arc<moka::sync::Cache<(CommunityId, Vec<u8>), buzz_db::moderation::RestrictionState>>,
@@ -1685,8 +1688,10 @@ impl AppState {
         community_id: CommunityId,
     ) -> Result<bool, buzz_db::DbError> {
         if let Some(cached) = self.serving_active_cache.get(&community_id) {
+            metrics::counter!("buzz_serving_active_cache_hits_total").increment(1);
             return Ok(cached);
         }
+        metrics::counter!("buzz_serving_active_cache_misses_total").increment(1);
         let result = buzz_deletion::store(&self.db)
             .is_serving_active(community_id)
             .await?;
@@ -1703,8 +1708,10 @@ impl AppState {
     ) -> Result<buzz_db::moderation::RestrictionState, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
         if let Some(cached) = self.restriction_cache.get(&key) {
+            metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
             return Ok(cached);
         }
+        metrics::counter!("buzz_restriction_cache_misses_total").increment(1);
         let result = self
             .db
             .moderation_restriction_state(community_id, pubkey)
@@ -1713,8 +1720,9 @@ impl AppState {
         Ok(result)
     }
 
-    /// Drop a pubkey's cached restriction row after a ban, unban, timeout or
-    /// untimeout. This pod only; other pods wait out the 30-second TTL.
+    /// Best-effort drop of a pubkey's cached restriction row after a signed
+    /// ban, unban, timeout or untimeout. This pod and this key only; the
+    /// 30-second TTL is the actual bound everywhere else.
     pub fn invalidate_restriction_cache(&self, community_id: CommunityId, pubkey: &[u8]) {
         self.restriction_cache
             .invalidate(&(community_id, pubkey.to_vec()));

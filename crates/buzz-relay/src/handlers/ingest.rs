@@ -6818,32 +6818,6 @@ mod postgres_tests {
         );
     }
 
-    /// Persistent ingest keeps the uncached restriction read even when the
-    /// ephemeral cache holds a stale row; only the ephemeral variant uses it.
-    /// Mutation: make `enforce_write_restriction` read the cache → RED.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn persistent_restriction_check_ignores_ephemeral_cache() {
-        let state = ingest_state().await;
-        let (tenant, _owner, agent) = owned_agent_fixture(&state, "cache-bypass").await;
-        state.restriction_cache.insert(
-            (tenant.community(), agent.public_key().to_bytes().to_vec()),
-            buzz_db::moderation::RestrictionState {
-                banned: true,
-                muted_until: None,
-            },
-        );
-        enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
-            .await
-            .expect("persistent check reads Postgres, where the agent is unrestricted");
-        assert!(
-            enforce_cached_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
-                .await
-                .is_err(),
-            "the ephemeral check honours the cached ban"
-        );
-    }
-
     /// A ban exempts nothing — not even a report — and an owner's ban reaches
     /// its agent until the owner is unbanned.
     #[tokio::test]
