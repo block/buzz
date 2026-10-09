@@ -40,6 +40,15 @@ pub enum ClientMessage {
 
 /// Artifact queries are HTTP-only; reject rather than silently drop their
 /// predicates on the generic WebSocket path.
+/// COUNT has no page to resume, so a history cursor (`before_id`) is
+/// rejected outright rather than dropped by `nostr::Filter` deserialization.
+/// Shared by WS COUNT and HTTP `/count`.
+pub(crate) const COUNT_CURSOR_REJECTED: &str = "before_id is not supported on COUNT";
+
+pub(crate) fn count_filters_have_cursor(filters: &[serde_json::Value]) -> bool {
+    filters.iter().any(|f| f.get("before_id").is_some())
+}
+
 fn reject_artifact_query_filters(filters: &[serde_json::Value]) -> Result<()> {
     use buzz_core::artifact::{route_filter, FilterRoute};
     for filter in filters {
@@ -190,6 +199,9 @@ impl ClientMessage {
                         "COUNT contains {} filters, maximum is {MAX_FILTERS_PER_REQ}",
                         filter_values.len()
                     )));
+                }
+                if count_filters_have_cursor(filter_values) {
+                    return Err(RelayError::InvalidMessage(COUNT_CURSOR_REJECTED.into()));
                 }
                 let filters: Vec<Filter> = filter_values
                     .iter()

@@ -611,7 +611,8 @@ async fn test_instructions_version_history_pages_tied_timestamps() {
 }
 
 /// A `before_id` without `until`, or one that is not 64 hex characters, is
-/// rejected on both transports rather than ignored.
+/// rejected on both transports rather than ignored. COUNT has no page to
+/// resume, so WS COUNT and HTTP `/count` reject any `before_id`, valid or not.
 #[tokio::test]
 #[ignore]
 async fn test_instructions_version_rejects_malformed_cursor() {
@@ -638,8 +639,25 @@ async fn test_instructions_version_rejects_malformed_cursor() {
             RelayMessage::Notice { message } => assert!(message.contains("before_id"), "{message}"),
             other => panic!("WS must reject {filter}, got {other:?}"),
         }
+        assert_count_rejects(&mut ws, &owner, &filter).await;
     }
+    let valid = json!({"kinds": [44300], "authors": [author], "#p": [agent], "until": now(), "before_id": "a".repeat(64)});
+    assert_count_rejects(&mut ws, &owner, &valid).await;
     ws.disconnect().await.expect("disconnect");
+}
+
+async fn assert_count_rejects(ws: &mut BuzzTestClient, owner: &Keys, filter: &Value) {
+    let (status, body) = http_post(owner, "/count", json!([filter])).await;
+    assert_eq!(status, 400, "HTTP /count must reject {filter}: {body}");
+
+    let sid = sub_id("bad-cursor-count");
+    ws.send_raw(&json!(["COUNT", sid, filter]))
+        .await
+        .expect("send COUNT");
+    match ws.recv_event(Duration::from_secs(5)).await.expect("recv") {
+        RelayMessage::Notice { message } => assert!(message.contains("before_id"), "{message}"),
+        other => panic!("WS COUNT must reject {filter}, got {other:?}"),
+    }
 }
 
 /// Full-text search never returns a version, not even to its author.

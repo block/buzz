@@ -1968,6 +1968,12 @@ async fn count_events_authed(
     if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true).await {
         return result;
     }
+    if crate::protocol::count_filters_have_cursor(&raw) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            crate::protocol::COUNT_CURSOR_REJECTED,
+        ));
+    }
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
