@@ -1557,17 +1557,8 @@ fn mask_comments_and_literals(source: &str) -> String {
                 }
                 index += 1;
             }
-            // A char literal such as '{', '"', or '\''. A lifetime has no
-            // closing quote and falls through.
-            b'\''
-                if bytes.get(index + 2) == Some(&b'\'') && bytes.get(index + 1) != Some(&b'\\') =>
-            {
-                index += 3;
-            }
-            b'\''
-                if bytes.get(index + 1) == Some(&b'\\') && bytes.get(index + 3) == Some(&b'\'') =>
-            {
-                index += 4;
+            b'\'' if char_literal_end(source, index).is_some() => {
+                index = char_literal_end(source, index).expect("guard matched");
             }
             _ => {
                 index += 1;
@@ -1577,6 +1568,25 @@ fn mask_comments_and_literals(source: &str) -> String {
         blank(start, index);
     }
     String::from_utf8(masked).expect("masking replaces whole ASCII-delimited spans")
+}
+
+/// The end (exclusive) of the char literal whose opening quote is at `start`,
+/// such as `'{'`, `'é'`, `'\''`, `'\x7f'`, or `'\u{1F600}'`. `None` for a
+/// lifetime, which has no closing quote.
+fn char_literal_end(source: &str, start: usize) -> Option<usize> {
+    // `start` holds an ASCII quote, so `start + 1` is a char boundary.
+    let rest = &source[start + 1..];
+    let body = if let Some(escape) = rest.strip_prefix('\\') {
+        // The longest escape is `\u{10FFFF}`: a backslash and 9 more bytes.
+        // Skip the escaped byte so `'\''` does not close on its own quote.
+        let close = escape.get(1..)?.find('\'')? + 1;
+        (close <= 9).then_some(1 + close)?
+    } else {
+        rest.chars().next()?.len_utf8()
+    };
+    rest[body..]
+        .starts_with('\'')
+        .then_some(start + 1 + body + 1)
 }
 
 #[test]
@@ -1598,6 +1608,11 @@ fn masker_blanks_every_literal_form_and_keeps_code() {
             r"a('\'', '\\', '\n', '{') {}",
             "a(    ,     ,     ,    ) {}",
         ),
+        // Multi-byte and long-escape char literals. Each holds a brace, or
+        // hides one from a scan that misreads the literal's length.
+        ("a('é', '{') {}", "a(    ,    ) {}"),
+        (r"a('\u{1F600}', '{') {}", "a(           ,    ) {}"),
+        (r"a('\x7f', '{') {}", "a(      ,    ) {}"),
         // Code that only looks like a literal stays as it is.
         ("let r#type = 1; {}", "let r#type = 1; {}"),
         ("fn f<'a>(x: &'a str) {}", "fn f<'a>(x: &'a str) {}"),
