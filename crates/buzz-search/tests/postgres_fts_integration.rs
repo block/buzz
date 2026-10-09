@@ -1323,7 +1323,7 @@ async fn author_only_kinds_are_unsearchable() {
         assert!(
             !kinds.contains(&(kind as i32)),
             "AUTHOR_ONLY kind:{kind} MUST NOT be searchable — \
-             schema skip-set is missing this kind. AUTHOR_ONLY_KINDS={AUTHOR_ONLY_KINDS:?}, \
+             schema exclusion or query fence is missing this kind. AUTHOR_ONLY_KINDS={AUTHOR_ONLY_KINDS:?}, \
              hits={kinds:?}",
         );
     }

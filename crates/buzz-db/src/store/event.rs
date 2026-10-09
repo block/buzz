@@ -89,11 +89,13 @@ pub struct EventQuery {
     /// column is NULL (not NIP-33), so this lets identity lookups match before
     /// SQL `LIMIT`. Rows of other kinds are left to the caller's post-filter.
     pub d_tag_values: Option<Vec<String>>,
-    /// Restrict results to events with an exact custom tag pair.
-    /// Uses JSONB containment against `tags` before SQL `LIMIT`.
+    /// Restrict results to events with an exact custom tag pair: a tag whose
+    /// first element is the name and second the value, checked positionally
+    /// (JSONB containment is only the index prefilter) before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
-    /// Restrict results to events with a `t` tag of this value. Uses JSONB
-    /// containment against `tags` before SQL `LIMIT`, so a per-subject read
+    /// Restrict results to events with a `t` tag of this value, checked
+    /// positionally (JSONB containment is only the index prefilter) before
+    /// SQL `LIMIT`, so a per-subject read
     /// (e.g. a kind:44300 team's current version) is not starved by newer
     /// events with other `t` values.
     pub t_tag: Option<String>,
@@ -848,9 +850,6 @@ async fn fetch_with_e_tag_deadline(
     Ok(rows)
 }
 
-/// e-tag pushdown as one array-bound containment test instead of an N-way
-/// `OR` chain, so planner cost does not scale with the number of referenced
-/// ids (the thread aux hop sends one id per reply).
 /// Match a tag whose first element is `name` and second is `value` (NIP-01).
 ///
 /// JSONB containment alone ignores element position and multiplicity:
@@ -875,6 +874,9 @@ fn push_exact_tag_filter(
     .push(")");
 }
 
+/// e-tag pushdown as one array-bound containment test instead of an N-way
+/// `OR` chain, so planner cost does not scale with the number of referenced
+/// ids (the thread aux hop sends one id per reply).
 fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_tags: &[String]) {
     let containments: Vec<serde_json::Value> = e_tags
         .iter()
