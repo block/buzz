@@ -416,7 +416,7 @@ test-unit:
             'package(buzz-cli)'
             # buzz-sdk builder/validation unit tests: pure event-builder and input
             # validation (e.g. the canvas writer-discipline/skew guard and the
-            # canvas_write_survived predicate), no infra. `--lib` runs all unit
+            # canvas_write_survived predicate), no infra. kind(lib) runs all unit
             # tests without the rustdoc dependency-resolution flake the full-package
             # invocation hits. Enumerated explicitly because nothing in CI runs
             # `cargo test --workspace` — membership buys clippy/check, not tests.
@@ -433,13 +433,13 @@ test-unit:
             # additive migration set; legacy cutover/backfill remains an operator
             # script, not startup state) and the tenant-scoping lints. The
             # Postgres-backed buzz-db tests are
-            # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
+            # #[ignore]d, so kind(lib) runs only the infra-free set. Without this gate a
             # stray file in migrations/ or a broken lint ships green.
             'package(buzz-db) & kind(lib)'
             # buzz-db source-policy tests: infra-free scans of the crate sources
             # that enforce the event-write admission chokepoint, metric/provenance
             # contracts, and their fixtures. They live in an integration-test
-            # binary, so `--lib` above does not run them.
+            # binary, so kind(lib) above does not run them.
             'package(buzz-db) & binary_id(buzz-db::observability_source)'
             # Storage accounting crosses three crates whose focused regression
             # suites are otherwise absent from the infra-free unit lane.
@@ -450,7 +450,7 @@ test-unit:
             # Multi-tenant conformance gate (buzz-conformance): the independent
             # replay checker + golden fixtures. No infra — pure in-process trace
             # replay — so it belongs in the unit job. Run all targets (lib + the
-            # tests/replay_fixtures.rs integration test), not just --lib.
+            # tests/replay_fixtures.rs integration test), not just kind(lib).
             'package(buzz-conformance)'
             # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
             # contract/race tests run in the dedicated CI job below.
@@ -486,7 +486,7 @@ test-unit:
             # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
             # and a red one could ship green (exactly how a broken admin test slipped
             # past every gate once). Scoped to api::admin, not the whole buzz-relay
-            # --lib, because api::media has non-ignored tests that require Postgres.
+            # kind(lib), because api::media has non-ignored tests that require Postgres.
             # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
             # lane; the non-ignored ones reject before touching the database. Any
             # new non-ignored test here must stay DB-free: without a database, a
@@ -510,9 +510,10 @@ test-unit:
             # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
             # and the Git transport off_mode_precedence_tests. All are infra-free
             # and finish in well under a second with no DATABASE_URL, so none wait
-            # out the sqlx acquire timeout. `--bin buzz-relay` adds main.rs's
-            # `tests::` module (JWKS refresh cadence) and `composition_tests::`
-            # (JWKS source + refresh-loop composition), which `--lib` cannot reach
+            # out the sqlx acquire timeout. binary_id(buzz-relay::bin/buzz-relay)
+            # adds main.rs's `tests::` module (JWKS refresh cadence) and
+            # `composition_tests::` (JWKS source + refresh-loop composition),
+            # which kind(lib) cannot reach
             # because they live in the binary target; the nested
             # `tests::postgres_tests::` stays in the PostgreSQL lane.
             # The fourth clause adds the startup step timers (startup_steps) and the
@@ -593,13 +594,24 @@ test-unit:
             package=${clause#package(}
             unit_packages+=(-p "${package%%)*}")
         done
+        # Each old per-package command failed when its selection went empty
+        # (nextest exits 4 on zero tests, cargo on a missing --test target).
+        # In the union an empty clause would be absorbed silently, so check
+        # every clause still selects a test. Same -p list: no rebuild.
+        for clause in "${unit_filters[@]}"; do
+            if ! cargo nextest list "${unit_packages[@]}" -E "$clause" \
+                --message-format oneline --cargo-quiet | grep -q .; then
+                echo "test-unit: clause selects no tests: $clause" >&2
+                exit 1
+            fi
+        done
         unit_expr=$(printf ' | (%s)' "${unit_filters[@]}")
         cargo nextest run "${unit_packages[@]}" -E "${unit_expr# | }"
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run
         # doctests, hence this separate step. The verifier's regression suite
-        # lives in the in-crate `#[cfg(test)] mod tests`, so `--lib` above
+        # lives in the in-crate `#[cfg(test)] mod tests`, so kind(lib) above
         # already runs it.
         cargo test -p buzz-auth --doc
         # buzz-db `AdmittedTx` doctests. The `compile_fail` cases prove code
