@@ -55,7 +55,9 @@ cargo test -p buzz-test-client --test community_ban_routes -- --ignored --nocapt
 
 Use a fresh disposable local relay, PostgreSQL, Redis, and MinIO stack for that
 command, and set `DATABASE_URL` or `BUZZ_TEST_DATABASE_URL` to the disposable
-PostgreSQL database. The matrix creates unique tenant hosts and identities; GIF
+PostgreSQL database. Start the relay with `BUZZ_V1_ENABLED=true` so the
+accessory-route cases exercise their production handlers. The matrix creates
+unique tenant hosts and identities; GIF
 requests stop at malformed local input, and Git/workflow requests use absent resources.
 Do not point these tests at a shared, development, or hosted database or relay.
 
@@ -63,8 +65,8 @@ The inventory keeps membership separate from restriction policy. Public NIP-11,
 NIP-05, policy documents, and health probes have no authenticated community
 principal. Anonymous policy-receipt acceptance is pre-membership and has no
 principal to restrict. Invite claim is also pre-membership, but it carries a
-verified NIP-98 principal and remains restriction-enforced: it is the sole
-row marked pending in the inventory until BUZZ-268 qualifies the updated
+verified NIP-98 principal and remains restriction-enforced: its coverage remains
+pending in the inventory until BUZZ-268 qualifies the updated
 v1/v2 lifecycle:
 retain valid unexpired v1 codes and mint only v2, with a 72-hour default and
 30-day maximum lifetime. Both formats reject banned claimants and owners
@@ -76,13 +78,11 @@ identity, so issuer-specific revocation remains limited until a verified fleet
 drain or security approval. Relay-operator APIs, deployment-admin APIs,
 NIP-FI commands, the localhost Git hook, and the gated mesh test endpoint use
 separate auth planes; their exemption reason is recorded on each route row.
-Workflow webhooks also use a secret-authenticated caller with no user principal.
-Before creating a run, the handler separately checks the saved workflow owner's
-channel membership and role, but it does not check that owner's community-ban
-state. The inventory's `not_applicable:webhook_secret_auth` entry is a
-provisional restriction classification based on secret-only caller auth, not
-proof that an owner ban is irrelevant. Whether the owner's ban should gate
-webhook trigger and run creation remains an explicit policy question.
+Workflow webhooks use a secret-authenticated caller with no user principal, but
+run admission must also check the saved workflow owner's community ban. This
+coverage remains explicitly pending BUZZ-272. It is not an exemption for banned
+owners. BUZZ-269 currently has two pending sibling cases: invite claim and
+workflow-owner webhook admission; final integration requires zero pending rows.
 
 Root and huddle admission, final-admission races, fail-closed reads, owner-to-
 agent restriction, timeout behavior, and tenant-scoped eviction point to their
@@ -98,7 +98,7 @@ This scanner is a source-level guard, not a Rust router interpreter. It reads
 direct `.route(...)` calls inside production functions named `router` or ending
 in `_router`; a `.route(...)` elsewhere is a scanner error. It resolves a
 `.nest(...)` prefix only when the relay's `build_router` passes a literal
-prefix and a direct call to another recognized router function. It does not
+or a resolved string constant and a direct call to another recognized router function. It does not
 expand macros, discover `.route_service(...)` or `.nest_service(...)`, resolve
 dynamic path/prefix expressions, or interpret inline nested routers and
 conditional/opaque router composition. It also does not derive auth or
