@@ -1217,6 +1217,7 @@ pub(crate) async fn profile_search_events(
         authors: authors.as_deref(),
         limit,
         offset,
+        include_unprojected: false,
     };
     let hits = db.search_users(community, &params).await?;
     if hits.is_empty() {

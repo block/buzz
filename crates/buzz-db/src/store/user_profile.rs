@@ -865,6 +865,7 @@ mod postgres_tests {
                     authors: None,
                     limit: 10,
                     offset: 0,
+                    include_unprojected: false,
                 },
             )
             .await

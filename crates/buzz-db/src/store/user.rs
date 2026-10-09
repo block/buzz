@@ -56,6 +56,10 @@ pub struct SearchUsersParams<'a> {
     pub limit: u32,
     /// Rows to skip in rank order (the bridge's `page` extension).
     pub offset: u32,
+    /// Also match deactivated members and rows with no live kind-0 head.
+    /// Operator member search sets this; people search leaves it `false` so
+    /// headless rows cannot consume `limit`/`offset` slots.
+    pub include_unprojected: bool,
 }
 
 /// Ensure a user record exists for the given pubkey (upsert).
@@ -286,8 +290,8 @@ pub(crate) fn escape_like(input: &str) -> String {
 /// Results are ranked exact > prefix > contains (name/display_name before
 /// nip05 before pubkey within each tier), then by label, then by pubkey so
 /// the order is total and stable across `offset` pages. Deactivated users
-/// are excluded. Empty queries return an empty vec and do not hit the
-/// database.
+/// are excluded. [`SearchUsersParams::include_unprojected`] lifts both row
+/// filters. Empty queries return an empty vec and do not hit the database.
 pub async fn search_users(
     pool: &PgPool,
     community_id: CommunityId,
@@ -321,8 +325,7 @@ pub async fn search_users(
         SELECT pubkey, name, display_name, avatar_url, nip05_handle
         FROM users
         WHERE community_id = $1
-          AND deactivated_at IS NULL
-          AND metadata_event_id IS NOT NULL
+          AND ($8 OR (deactivated_at IS NULL AND metadata_event_id IS NOT NULL))
           AND ($6::bytea[] IS NULL OR pubkey = ANY($6))
           AND (LOWER(COALESCE(name, '')) LIKE $2 ESCAPE '\'
            OR LOWER(COALESCE(display_name, '')) LIKE $2 ESCAPE '\'
@@ -352,6 +355,7 @@ pub async fn search_users(
     .bind(limit)
     .bind(params.authors)
     .bind(offset)
+    .bind(params.include_unprojected)
     .fetch_all(pool)
     .await?;
 
@@ -1194,6 +1198,7 @@ mod postgres_tests {
                 authors: Some(&authors),
                 limit: 10,
                 offset: 0,
+                include_unprojected: false,
             },
         )
         .await;
@@ -1207,6 +1212,7 @@ mod postgres_tests {
                 authors: Some(&[]),
                 limit: 10,
                 offset: 0,
+                include_unprojected: false,
             },
         )
         .await;
@@ -1304,7 +1310,26 @@ mod postgres_tests {
             },
         )
         .await;
-        assert_eq!(found, vec![active]);
+        assert_eq!(found, vec![active.clone()]);
+
+        let mut every_row = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "wes",
+                limit: 10,
+                include_unprojected: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        every_row.sort();
+        let mut expected = vec![active, deactivated];
+        expected.sort();
+        assert_eq!(
+            every_row, expected,
+            "operator search keeps deactivated rows"
+        );
     }
 
     /// A row without a projected head (AUTH created it; no kind-0 yet) can
@@ -1346,7 +1371,28 @@ mod postgres_tests {
             },
         )
         .await;
-        assert_eq!(all, vec![gabby], "the headless row is never a result");
+        assert_eq!(
+            all,
+            vec![gabby.clone()],
+            "the headless row is never a result"
+        );
+
+        let every_row = search(
+            &db,
+            community,
+            SearchUsersParams {
+                query: "ab",
+                limit: 10,
+                include_unprojected: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            every_row,
+            vec![headless, gabby],
+            "operator search keeps headless rows"
+        );
     }
 
     /// The hex pubkey matches as a prefix only: a one-character query finds

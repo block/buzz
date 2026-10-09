@@ -140,6 +140,7 @@ pub(super) async fn search_members(
             &buzz_db::SearchUsersParams {
                 query: q,
                 limit,
+                include_unprojected: true,
                 ..Default::default()
             },
         )
