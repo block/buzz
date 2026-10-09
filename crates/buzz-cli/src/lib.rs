@@ -127,7 +127,7 @@ struct Cli {
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
-    /// or 'agent' (event reads without signatures or raw tags).
+    /// or 'agent' (event reads without signature material).
     #[arg(long, value_enum, env = "BUZZ_OUTPUT_FORMAT", default_value = "json")]
     format: OutputFormat,
 
@@ -207,8 +207,9 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
-    /// Event reads keep author, kind, and reply target but drop signatures and
-    /// raw tags; other reads match `json`. Default for harness-managed agents.
+    /// Event reads drop signature material (`sig`, NIP-OA `auth`) and lift the
+    /// channel and reply target into fields; other reads match `json`.
+    /// Default for harness-managed agents.
     #[value(name = "agent")]
     Agent,
 }
