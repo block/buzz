@@ -399,9 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn thread_rows_order_newest_first_break_ties_by_root_and_cap_at_five() {
+    fn thread_rows_order_newest_first_break_ties_by_root_and_cap_at_twenty_five() {
         // Literal contract boundaries deliberately do not derive from the constant.
-        for count in [0_u8, 1, 4, 5, 6, 7] {
+        for count in [0_u8, 1, 24, 25, 26, 27] {
             // Pairwise-equal times exercise the tie-break.
             let threads = (0..count)
                 .map(|i| (vec![i; 32], replies(i64::from(i / 2))))
@@ -411,7 +411,7 @@ mod tests {
             expected.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             let expected: Vec<_> = expected
                 .into_iter()
-                .take(5)
+                .take(25)
                 .map(|(_, i)| hex::encode([i; 32]))
                 .collect();
             assert_eq!(roots, expected, "count {count}");
