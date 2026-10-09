@@ -5,8 +5,9 @@
 //! deleted. For a kind in `AUTHOR_ONLY_KINDS` (here the NIP-ER reminder,
 //! kind:30300) the relay must hide that deletion from everyone but its author
 //! on every read surface, and must reject one that omits the matching `k` tag.
-//! A deletion from anyone but the author is rejected before any of that, so
-//! the rejection cannot reveal the target's kind.
+//! A deletion from anyone without authority over its target is rejected
+//! before any of that, with one message whether the target is missing, live,
+//! soft-deleted, or in any channel, so the rejection reveals nothing about it.
 //!
 //! # Running
 //!
@@ -493,20 +494,131 @@ async fn public_deletion_cannot_claim_author_only_kind() {
     );
 }
 
-/// Submit `deletion` as `sender` over HTTP and WS; both must reject it as
-/// not the author's, without revealing the target's kind.
-async fn assert_rejected_as_non_author(client: &Client, sender: &Keys, deletion: nostr::Event) {
-    let (accepted, http_msg) = submit(client, sender, &deletion).await;
-    assert!(!accepted, "HTTP must reject {deletion:?}");
+/// The one rejection a sender without authority over a deletion target gets,
+/// whether the target exists, is soft-deleted, or lives in any channel.
+const DENIED: &str = "invalid: deletion target not found or not deletable by you";
+
+/// Submit `deletion` as `sender` over HTTP and WS and return how each
+/// rejected it: the HTTP status and error, and the WS `OK` message.
+async fn rejection(
+    client: &Client,
+    sender: &Keys,
+    deletion: nostr::Event,
+) -> (u16, String, String) {
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", sender.public_key().to_hex())
+        .json(&deletion)
+        .send()
+        .await
+        .expect("submit event");
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.expect("parse response");
+    let http_msg = body["error"].as_str().unwrap_or("").to_string();
     let mut ws = BuzzTestClient::connect(&relay_url(), sender)
         .await
         .expect("connect");
     let ok = ws.send_event(deletion).await.expect("OK");
     ws.disconnect().await.expect("disconnect");
     assert!(!ok.accepted, "WS must reject the deletion");
-    for msg in [http_msg, ok.message] {
-        assert!(msg.contains("must be event author"), "got: {msg}");
-        assert!(!msg.contains("30300"), "leaks the target kind: {msg}");
+    (status, http_msg, ok.message)
+}
+
+/// Submit `deletion` as `sender` over HTTP and WS; both must give the
+/// generic denial, which cannot reveal the target's kind.
+async fn assert_rejected_as_non_author(client: &Client, sender: &Keys, deletion: nostr::Event) {
+    let (status, http_msg, ws_msg) = rejection(client, sender, deletion).await;
+    assert!(status >= 400, "HTTP must reject the deletion");
+    for msg in [http_msg, ws_msg] {
+        assert_eq!(msg, DENIED);
+    }
+}
+
+async fn create_channel(client: &Client, owner: &Keys, visibility: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            tag(&["h", &id]),
+            tag(&["name", &format!("aod-{id}")]),
+            tag(&["channel_type", "stream"]),
+            tag(&["visibility", visibility]),
+        ])
+        .sign_with_keys(owner)
+        .unwrap();
+    submit_ok(client, owner, &event).await;
+    id
+}
+
+async fn post_message(client: &Client, author: &Keys, channel: &str) -> nostr::Event {
+    let message = EventBuilder::new(Kind::Custom(9), uuid::Uuid::new_v4().to_string())
+        .tags(vec![tag(&["h", channel])])
+        .sign_with_keys(author)
+        .unwrap();
+    submit_ok(client, author, &message).await;
+    message
+}
+
+/// A sender without authority over a deletion target gets one rejection,
+/// identical in HTTP status, HTTP error and WS `OK` message, for kind 5 and
+/// kind 9005 alike, whether the target is missing, live, soft-deleted, in a
+/// private channel the sender has not joined, or in another channel.
+#[tokio::test]
+#[ignore]
+async fn unauthorized_deletion_does_not_reveal_target_existence() {
+    let client = http_client();
+    let author = Keys::generate();
+    let other = Keys::generate();
+    let open = create_channel(&client, &author, "open").await;
+    let private = create_channel(&client, &author, "private").await;
+    // A channel `other` owns, so 9005 there passes as owner/admin authority.
+    let others = create_channel(&client, &other, "open").await;
+    let live = post_message(&client, &author, &open).await;
+    let deleted = post_message(&client, &author, &open).await;
+    submit_ok(
+        &client,
+        &author,
+        &build_deletion(&author, vec![tag(&["e", &deleted.id.to_hex()])]),
+    )
+    .await;
+    let hidden = post_message(&client, &author, &private).await;
+    let reminder = build_reminder(&author);
+    submit_ok(&client, &author, &reminder).await;
+    let missing = "a".repeat(64);
+
+    assert_ne!(live.id, deleted.id);
+    let delete = |target: &str| build_deletion(&other, vec![tag(&["e", target])]);
+    let redact = |target: &str, channel: &str| {
+        EventBuilder::new(Kind::Custom(9005), "")
+            .tags(vec![tag(&["e", target]), tag(&["h", channel])])
+            .sign_with_keys(&other)
+            .unwrap()
+    };
+    let cases = [
+        ("kind 5, missing", delete(&missing)),
+        ("kind 5, live", delete(&live.id.to_hex())),
+        ("kind 5, soft-deleted", delete(&deleted.id.to_hex())),
+        ("kind 5, private channel", delete(&hidden.id.to_hex())),
+        ("kind 5, global reminder", delete(&reminder.id.to_hex())),
+        ("9005, missing", redact(&missing, &others)),
+        ("9005, live", redact(&live.id.to_hex(), &open)),
+        ("9005, soft-deleted", redact(&deleted.id.to_hex(), &open)),
+        (
+            "9005, private channel",
+            redact(&hidden.id.to_hex(), &private),
+        ),
+        ("9005, other channel", redact(&live.id.to_hex(), &others)),
+        ("9005, no channel", redact(&reminder.id.to_hex(), &others)),
+    ];
+    let mut expected = None;
+    for (case, deletion) in cases {
+        let (status, http_msg, ws_msg) = rejection(&client, &other, deletion).await;
+        assert_eq!(http_msg, DENIED, "{case}: HTTP");
+        assert_eq!(ws_msg, DENIED, "{case}: WS");
+        assert_eq!(
+            *expected.get_or_insert(status),
+            status,
+            "{case}: HTTP status"
+        );
     }
 }
 
