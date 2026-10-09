@@ -293,7 +293,7 @@ def builder_prefixes(builders) -> dict[str, str]:
     _, _, path, source, mask, start, _, end = main
     prefixes = {}
     for first, second_mask, second_source in registered_calls(mask, source, start, end, "nest"):
-        prefix = string_value(first)
+        prefix = route_path(first, route_constants())
         target_match = re.search(r"((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s*\(", second_mask)
         if prefix is None or target_match is None:
             continue
@@ -485,9 +485,9 @@ def check_route_inventory() -> tuple[int, int, int]:
             details.append("inventory rows without registered routes: " + ", ".join(map(str, stale)))
         raise ValueError("; ".join(details))
 
-    if len(pending) != 1 or pending[0] != ("invite_claim", "pending:BUZZ-268"):
+    if set(pending) != {("invite_claim", "pending:BUZZ-268"), ("workflow_webhook", "pending:BUZZ-272")}:
         raise ValueError(
-            "the only pending route coverage must be invite_claim pending:BUZZ-268"
+            "pending coverage must explicitly track BUZZ-268 invitations and BUZZ-272 webhook owner bans"
         )
     claim = next((row for row in routes if row["id"] == "invite_claim"), None)
     if claim is None or claim["membership"] != "exempt" or claim["restriction"] != "enforce":
@@ -547,7 +547,7 @@ def main() -> int:
     print(
         "community-ban route inventory passed: "
         f"{route_count} registered routes classified, {case_count} HTTP behavior cases, "
-        f"{regression_count} supporting regressions indexed, {pending_count} BUZZ-268 invite case pending"
+        f"{regression_count} supporting regressions indexed, {pending_count} sibling implementation cases pending"
     )
     return 0
 
