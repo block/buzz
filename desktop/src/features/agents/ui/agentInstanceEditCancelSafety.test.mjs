@@ -55,6 +55,7 @@ let QueryClient;
 let QueryClientProvider;
 let ThemeProvider;
 let AgentInstanceEditDialog;
+let AgentDefinitionDialog;
 
 // Records every Tauri command invocation the mounted dialog issues; unmocked
 // commands reject so a new IPC dependency surfaces as a loud failure.
@@ -437,6 +438,7 @@ before(async () => {
   ));
   ({ ThemeProvider } = await import("@/shared/theme/ThemeProvider"));
   ({ AgentInstanceEditDialog } = await import("./AgentInstanceEditDialog.tsx"));
+  ({ AgentDefinitionDialog } = await import("./AgentDefinitionDialog.tsx"));
 });
 
 afterEach(() => {
@@ -612,6 +614,58 @@ test("untouched self-update policy dispatches no policy setter on Save", async (
       .length,
     0,
     "an unchanged policy must not be rewritten",
+  );
+});
+
+// The review form an agent's draft-update opens when its self-update policy
+// did not fire: the reason must be visible, not stderr-only.
+test("review form shows why a self-update policy did not fire", async () => {
+  installIpc();
+  const client = new QueryClient({
+    defaultOptions: {
+      mutations: { gcTime: 0 },
+      queries: { gcTime: 0, retry: false },
+    },
+  });
+  clients.push(client);
+  const notice =
+    "Not applied automatically: sibling instance bb22 does not allow system_prompt. Review and save to apply it.";
+  await act(async () => {
+    render(
+      createElement(
+        ThemeProvider,
+        { defaultTheme: "buzz" },
+        createElement(
+          QueryClientProvider,
+          { client },
+          createElement(AgentDefinitionDialog, {
+            description: "",
+            embedded: true,
+            error: null,
+            initialValues: {
+              id: rawPersona().id,
+              displayName: rawPersona().display_name,
+              systemPrompt: "Be terse.",
+            },
+            isPending: false,
+            notice,
+            onOpenChange: () => {},
+            onSubmit: async () => {},
+            open: true,
+            runtimes: [],
+            submitLabel: "Save changes",
+            title: "Edit agent",
+          }),
+        ),
+      ),
+    );
+  });
+  const note = screen.getByTestId("persona-dialog-notice");
+  assert.equal(note.textContent, notice);
+  assert.equal(
+    dom.window.document.querySelectorAll(".text-destructive").length,
+    0,
+    "the note is informational, not an error",
   );
 });
 

@@ -104,6 +104,8 @@ type AgentDefinitionDialogProps = {
   submitLabel: string;
   initialValues: CreatePersonaInput | UpdatePersonaInput | null;
   error: Error | null;
+  /** Neutral one-line note rendered above the error slot. */
+  notice?: string | null;
   isPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimeCatalogStatus?: "loading" | "ready" | "error";
@@ -133,6 +135,7 @@ export function AgentDefinitionDialog({
   submitLabel,
   initialValues,
   error,
+  notice = null,
   isPending,
   runtimes,
   runtimeCatalogStatus = "ready" as const,
@@ -1007,6 +1010,14 @@ export function AgentDefinitionDialog({
           </AnimatePresence>
         </div>
 
+        {notice ? (
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="persona-dialog-notice"
+          >
+            {notice}
+          </p>
+        ) : null}
         {error ? (
           <p className="text-sm text-destructive">{error.message}</p>
         ) : null}

@@ -105,7 +105,13 @@ export type AgentSelfUpdateOutcome =
       display_name: string;
       fields: SelfUpdateField[];
     }
-  | { outcome: "review"; reason: string };
+  | {
+      outcome: "review";
+      /** Human-readable reason the policy did not fire. */
+      reason: string;
+      /** `true` when the only reason is the default empty policy. */
+      policy_empty: boolean;
+    };
 
 /**
  * Ask the backend to apply an agent's own draft-update under its

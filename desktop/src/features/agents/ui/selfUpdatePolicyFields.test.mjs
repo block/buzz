@@ -9,6 +9,7 @@ import {
   SELF_UPDATE_FIELDS,
   describeSelfUpdate,
   selfUpdateFieldLabel,
+  selfUpdateReviewNote,
   toggleSelfUpdateField,
 } from "../agentManagement.ts";
 
@@ -34,6 +35,23 @@ test("the audit toast names the agent and every field it changed", () => {
   assert.equal(
     describeSelfUpdate("Scout", []),
     "Scout updated its own definition",
+  );
+});
+
+test("the review note explains a policy that did not fire and stays quiet for the default", () => {
+  assert.equal(
+    selfUpdateReviewNote({
+      reason: "agent has no self-update policy",
+      policy_empty: true,
+    }),
+    null,
+  );
+  assert.equal(
+    selfUpdateReviewNote({
+      reason: "sibling instance bb22 does not allow system_prompt",
+      policy_empty: false,
+    }),
+    "Not applied automatically: sibling instance bb22 does not allow system_prompt. Review and save to apply it.",
   );
 });
 
@@ -93,4 +111,12 @@ test("checked fields render checked and the helper text says review is skipped",
 test("disabled propagates to every checkbox", () => {
   const html = render(["model"], true);
   assert.equal((html.match(/disabled=""/g) ?? []).length, 3);
+});
+
+test("the checked-state copy says siblings must allow the same fields", () => {
+  const html = render(["system_prompt"]);
+  assert.match(
+    html,
+    /Every other agent sharing this definition must allow the same fields/,
+  );
 });

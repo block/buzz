@@ -172,6 +172,19 @@ export function toggleSelfUpdateField(
   );
 }
 
+/**
+ * The short note shown in the review form when a self-update policy exists
+ * but did not fire, so the owner sees why. `null` for the default empty
+ * policy: there is nothing to explain when the owner never opted in.
+ */
+export function selfUpdateReviewNote(outcome: {
+  reason: string;
+  policy_empty: boolean;
+}): string | null {
+  if (outcome.policy_empty) return null;
+  return `Not applied automatically: ${outcome.reason}. Review and save to apply it.`;
+}
+
 /** One line for the audit toast after an agent applied its own update. */
 export function describeSelfUpdate(
   displayName: string,

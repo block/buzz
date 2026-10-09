@@ -7,6 +7,7 @@ import {
   createInputFromRequest,
   describeSelfUpdate,
   requestTargetsEditablePersona,
+  selfUpdateReviewNote,
   type AgentManagementRequest,
   updateInputFromRequest,
 } from "./agentManagement";
@@ -55,6 +56,8 @@ export function useAgentManagement() {
     null,
   );
   const [error, setError] = React.useState<string | null>(null);
+  // Why a self-update policy did not fire for the open review request.
+  const [reviewNote, setReviewNote] = React.useState<string | null>(null);
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
   const pendingRequestId = React.useRef<string | null>(null);
@@ -76,11 +79,13 @@ export function useAgentManagement() {
     agentPubkey: string,
     next: AgentManagementRequest,
     message: string | null,
+    note: string | null = null,
   ) {
     if (pendingRequestId.current !== null) return;
     pendingRequestId.current = next.requestId;
     sourceAgentPubkey.current = agentPubkey;
     setError(message);
+    setReviewNote(note);
     setRequest(next);
   }
 
@@ -108,7 +113,7 @@ export function useAgentManagement() {
       return;
     }
     if (outcome.outcome === "review") {
-      presentForReview(agentPubkey, next, null);
+      presentForReview(agentPubkey, next, null, selfUpdateReviewNote(outcome));
       return;
     }
     await Promise.all([
@@ -329,6 +334,7 @@ export function useAgentManagement() {
   function dismiss() {
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
+    setReviewNote(null);
     setRequest(null);
   }
 
@@ -365,6 +371,7 @@ export function useAgentManagement() {
     editInitialValues,
     editError,
     error,
+    reviewNote,
     ...createdAgentAttachment,
     isPending,
     runtimes: runtimesQuery.data ?? [],

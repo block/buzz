@@ -9,6 +9,12 @@ use chrono::TimeZone;
 const SIGNER: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
 const OTHER: &str = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
 
+/// When the sample drafts were sent: after every fixture definition's last
+/// write (2026-02-02), so the predates-definition rule does not fire by default.
+fn issued() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap()
+}
+
 fn definition(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
         id: id.into(),
@@ -165,18 +171,13 @@ fn policy_never_reaches_an_agent_snapshot() {
 #[test]
 fn stale_undated_or_far_future_drafts_are_not_fresh() {
     let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
-    assert!(draft_is_fresh(Some("2026-10-08T11:55:00Z"), now));
-    assert!(draft_is_fresh(Some("2026-10-08T12:01:30+00:00"), now));
-    assert!(
-        !draft_is_fresh(Some("2026-10-08T11:49:59Z"), now),
-        "older than 10 min"
-    );
-    assert!(
-        !draft_is_fresh(Some("2026-10-08T12:03:00Z"), now),
-        "beyond skew"
-    );
-    assert!(!draft_is_fresh(Some("not a date"), now));
-    assert!(!draft_is_fresh(None, now));
+    let fresh = |raw: Option<&str>| fresh_draft_issued_at(raw, now).is_some();
+    assert!(fresh(Some("2026-10-08T11:55:00Z")));
+    assert!(fresh(Some("2026-10-08T12:01:30+00:00")));
+    assert!(!fresh(Some("2026-10-08T11:49:59Z")), "older than 10 min");
+    assert!(!fresh(Some("2026-10-08T12:03:00Z")), "beyond skew");
+    assert!(!fresh(Some("not a date")));
+    assert!(!fresh(None));
 }
 
 // ── Authorization ────────────────────────────────────────────────────────────
@@ -189,7 +190,8 @@ fn own_prompt_edit_within_policy_is_planned() {
         &[SelfUpdateField::SystemPrompt],
     )];
     let definitions = [definition("scout", "Scout")];
-    let plan = evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft()).unwrap();
+    let plan =
+        evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft(), issued()).unwrap();
     assert_eq!(
         plan,
         SelfUpdatePlan {
@@ -215,7 +217,8 @@ fn signer_pubkey_is_matched_case_insensitively() {
         &SIGNER.to_uppercase(),
         &records,
         &definitions,
-        &prompt_draft()
+        &prompt_draft(),
+        issued()
     )
     .is_ok());
 }
@@ -225,7 +228,7 @@ fn default_empty_policy_keeps_todays_review_path() {
     let records = [record(SIGNER, Some("scout"), &[])];
     let definitions = [definition("scout", "Scout")];
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft()),
+        evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft(), issued()),
         Err(SelfUpdateRejection::PolicyEmpty)
     );
 }
@@ -235,7 +238,7 @@ fn unknown_signer_is_rejected() {
     let records = [record(SIGNER, Some("scout"), &all_fields())];
     let definitions = [definition("scout", "Scout")];
     assert_eq!(
-        evaluate_self_update(OTHER, &records, &definitions, &prompt_draft()),
+        evaluate_self_update(OTHER, &records, &definitions, &prompt_draft(), issued()),
         Err(SelfUpdateRejection::UnknownSigner)
     );
 }
@@ -249,7 +252,7 @@ fn a_different_agent_cannot_use_its_own_policy_on_someone_elses_definition() {
     ];
     let definitions = [definition("scout", "Scout"), definition("pip", "Pip")];
     assert_eq!(
-        evaluate_self_update(OTHER, &records, &definitions, &prompt_draft()),
+        evaluate_self_update(OTHER, &records, &definitions, &prompt_draft(), issued()),
         Err(SelfUpdateRejection::TargetMismatch)
     );
 }
@@ -282,7 +285,7 @@ fn every_non_allowlisted_field_falls_back_to_review() {
         ),
     ] {
         assert_eq!(
-            evaluate_self_update(SIGNER, &records, &definitions, &draft),
+            evaluate_self_update(SIGNER, &records, &definitions, &draft, issued()),
             Err(SelfUpdateRejection::FieldNotAllowed(field)),
             "{field} must never be self-updatable even with the widest policy"
         );
@@ -304,7 +307,7 @@ fn a_field_outside_the_agents_policy_rejects_the_whole_draft() {
         ..prompt_draft()
     };
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &definitions, &draft),
+        evaluate_self_update(SIGNER, &records, &definitions, &draft, issued()),
         Err(SelfUpdateRejection::FieldNotAllowed("model"))
     );
 }
@@ -321,13 +324,13 @@ fn blank_values_count_as_absent() {
         model: Some("   ".into()),
         ..prompt_draft()
     };
-    assert!(evaluate_self_update(SIGNER, &records, &definitions, &draft).is_ok());
+    assert!(evaluate_self_update(SIGNER, &records, &definitions, &draft, issued()).is_ok());
     let empty = SelfUpdateDraft {
         system_prompt: Some("".into()),
         ..prompt_draft()
     };
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &definitions, &empty),
+        evaluate_self_update(SIGNER, &records, &definitions, &empty, issued()),
         Err(SelfUpdateRejection::NoChanges)
     );
 }
@@ -337,7 +340,7 @@ fn definition_less_instance_cannot_self_update() {
     let records = [record(SIGNER, None, &all_fields())];
     let definitions = [definition("scout", "Scout")];
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft()),
+        evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft(), issued()),
         Err(SelfUpdateRejection::NoLinkedDefinition)
     );
 }
@@ -351,7 +354,7 @@ fn draft_naming_a_definition_that_is_not_the_signers_own_is_rejected() {
         ..prompt_draft()
     };
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &definitions, &draft),
+        evaluate_self_update(SIGNER, &records, &definitions, &draft, issued()),
         Err(SelfUpdateRejection::TargetMismatch)
     );
     let missing = SelfUpdateDraft {
@@ -359,7 +362,7 @@ fn draft_naming_a_definition_that_is_not_the_signers_own_is_rejected() {
         ..prompt_draft()
     };
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &definitions, &missing),
+        evaluate_self_update(SIGNER, &records, &definitions, &missing, issued()),
         Err(SelfUpdateRejection::TargetMismatch)
     );
 }
@@ -372,7 +375,7 @@ fn ambiguous_display_name_is_rejected() {
         definition("scout-2", " scout "),
     ];
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft()),
+        evaluate_self_update(SIGNER, &records, &definitions, &prompt_draft(), issued()),
         Err(SelfUpdateRejection::AmbiguousTarget)
     );
 }
@@ -383,7 +386,7 @@ fn team_sourced_definition_is_not_editable() {
     let mut team = definition("scout", "Scout");
     team.source_team = Some("team-1".into());
     assert_eq!(
-        evaluate_self_update(SIGNER, &records, &[team], &prompt_draft()),
+        evaluate_self_update(SIGNER, &records, &[team], &prompt_draft(), issued()),
         Err(SelfUpdateRejection::DefinitionNotEditable)
     );
 }
@@ -396,7 +399,13 @@ fn sibling_sharing_the_definition_must_allow_the_same_field() {
         record(OTHER, Some("scout"), &[SelfUpdateField::Model]),
     ];
     assert_eq!(
-        evaluate_self_update(SIGNER, &locked_sibling, &definitions, &prompt_draft()),
+        evaluate_self_update(
+            SIGNER,
+            &locked_sibling,
+            &definitions,
+            &prompt_draft(),
+            issued()
+        ),
         Err(SelfUpdateRejection::SiblingNotAllowed {
             pubkey: OTHER.into(),
             field: "system_prompt",
@@ -406,13 +415,91 @@ fn sibling_sharing_the_definition_must_allow_the_same_field() {
         record(SIGNER, Some("scout"), &all_fields()),
         record(OTHER, Some("scout"), &[SelfUpdateField::SystemPrompt]),
     ];
-    assert!(evaluate_self_update(SIGNER, &open_sibling, &definitions, &prompt_draft()).is_ok());
+    assert!(evaluate_self_update(
+        SIGNER,
+        &open_sibling,
+        &definitions,
+        &prompt_draft(),
+        issued()
+    )
+    .is_ok());
     // An unrelated agent with no policy is not a sibling and does not block.
     let unrelated = [
         record(SIGNER, Some("scout"), &all_fields()),
         record(OTHER, Some("pip"), &[]),
     ];
-    assert!(evaluate_self_update(SIGNER, &unrelated, &definitions, &prompt_draft()).is_ok());
+    assert!(
+        evaluate_self_update(SIGNER, &unrelated, &definitions, &prompt_draft(), issued()).is_ok()
+    );
+}
+
+// ── Replay across a Desktop restart (predates-definition rule) ──────────────
+
+#[test]
+fn draft_issued_before_the_definitions_last_write_is_refused() {
+    // Scenario: agent applies at T, owner reverts via the form at T+1m,
+    // Desktop restarts at T+3m and the relay replays the frame. In-memory
+    // dedupe is gone and the frame is inside the age window, so only the
+    // definition's own `updated_at` can refuse it.
+    let records = [record(SIGNER, Some("scout"), &all_fields())];
+    let t = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
+    let mut reverted = definition("scout", "Scout");
+    reverted.updated_at = "2026-10-08T12:01:00Z".into(); // owner's revert at T+1m
+    assert_eq!(
+        evaluate_self_update(SIGNER, &records, &[reverted], &prompt_draft(), t),
+        Err(SelfUpdateRejection::PredatesDefinition),
+        "a replayed draft must not clobber a later owner edit"
+    );
+
+    // The first apply itself bumps `updated_at` to the apply time, so even
+    // with no owner edit the replay of the same frame is refused.
+    let mut applied = definition("scout", "Scout");
+    applied.updated_at = "2026-10-08T12:00:00Z".into(); // apply at exactly T
+    assert_eq!(
+        evaluate_self_update(SIGNER, &records, &[applied], &prompt_draft(), t),
+        Err(SelfUpdateRejection::PredatesDefinition),
+        "updated_at equal to issued_at counts as a later write"
+    );
+
+    // A draft sent after the last write is the normal case and still passes.
+    let mut older = definition("scout", "Scout");
+    older.updated_at = "2026-10-08T11:59:59Z".into();
+    assert!(evaluate_self_update(SIGNER, &records, &[older], &prompt_draft(), t).is_ok());
+}
+
+#[test]
+fn unparseable_definition_timestamp_is_treated_as_a_later_write() {
+    let records = [record(SIGNER, Some("scout"), &all_fields())];
+    let mut odd = definition("scout", "Scout");
+    odd.updated_at = String::new();
+    assert_eq!(
+        evaluate_self_update(SIGNER, &records, &[odd], &prompt_draft(), issued()),
+        Err(SelfUpdateRejection::PredatesDefinition)
+    );
+}
+
+#[test]
+fn fresh_draft_issued_at_returns_the_parsed_stamp_only_inside_the_window() {
+    let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
+    assert_eq!(
+        fresh_draft_issued_at(Some("2026-10-08T11:55:00Z"), now),
+        Some(Utc.with_ymd_and_hms(2026, 10, 8, 11, 55, 0).unwrap())
+    );
+    assert_eq!(
+        fresh_draft_issued_at(Some("2026-10-08T11:49:59Z"), now),
+        None
+    );
+    assert_eq!(fresh_draft_issued_at(None, now), None);
+}
+
+#[test]
+fn draft_with_an_unknown_wire_field_does_not_parse() {
+    let json = r#"{"channelId":"c","agentName":"Scout","systemPrompt":"x","envVars":{"A":"1"}}"#;
+    assert!(serde_json::from_str::<SelfUpdateDraft>(json).is_err());
+    let known = r#"{"channelId":"c","agentName":"Scout","systemPrompt":"x"}"#;
+    let draft = serde_json::from_str::<SelfUpdateDraft>(known).unwrap();
+    assert_eq!(draft.system_prompt.as_deref(), Some("x"));
+    assert!(draft.model.is_none());
 }
 
 // ── Request projection ───────────────────────────────────────────────────────

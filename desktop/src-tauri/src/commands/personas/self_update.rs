@@ -12,10 +12,12 @@ use std::sync::{Arc, Mutex};
 
 use tauri::AppHandle;
 
+use chrono::{DateTime, Utc};
+
 use crate::{
     app_state::AppState,
     managed_agents::{
-        draft_is_fresh, evaluate_self_update, load_managed_agents, load_personas,
+        evaluate_self_update, fresh_draft_issued_at, load_managed_agents, load_personas,
         self_update_request, SelfUpdateDraft, SelfUpdateField, SelfUpdatePlan, SelfUpdateRejection,
     },
 };
@@ -29,14 +31,24 @@ use super::retain_persona_pending;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum AgentSelfUpdateOutcome {
+    /// The definition was saved without review.
     Applied {
+        /// Pubkey of the agent whose draft was applied.
         agent_pubkey: String,
+        /// Id of the definition that changed.
         persona_id: String,
+        /// Display name after the apply (the new one, if it was renamed).
         display_name: String,
+        /// Fields the draft changed, in canonical order.
         fields: Vec<SelfUpdateField>,
     },
+    /// The draft stays on the owner-review path.
     Review {
+        /// Human-readable reason, for the review form and the audit line.
         reason: String,
+        /// `true` when the only reason is the default empty policy, so the UI
+        /// can stay quiet instead of explaining a policy the owner never set.
+        policy_empty: bool,
     },
 }
 
@@ -44,6 +56,7 @@ fn plan_under_lock(
     app: &AppHandle,
     agent_pubkey: &str,
     draft: &SelfUpdateDraft,
+    issued_at: DateTime<Utc>,
 ) -> Result<
     Result<(SelfUpdatePlan, crate::managed_agents::UpdatePersonaRequest), SelfUpdateRejection>,
     String,
@@ -57,14 +70,16 @@ fn plan_under_lock(
     let records = load_managed_agents(app)?;
     let personas = load_personas(app)?;
     Ok(
-        evaluate_self_update(agent_pubkey, &records, &personas, draft).and_then(|plan| {
-            let persona = personas
-                .iter()
-                .find(|persona| persona.id == plan.persona_id)
-                .ok_or(SelfUpdateRejection::DefinitionChanged)?;
-            let request = self_update_request(persona, &plan);
-            Ok((plan, request))
-        }),
+        evaluate_self_update(agent_pubkey, &records, &personas, draft, issued_at).and_then(
+            |plan| {
+                let persona = personas
+                    .iter()
+                    .find(|persona| persona.id == plan.persona_id)
+                    .ok_or(SelfUpdateRejection::DefinitionChanged)?;
+                let request = self_update_request(persona, &plan);
+                Ok((plan, request))
+            },
+        ),
     )
 }
 
@@ -79,6 +94,7 @@ fn review(
         draft.agent_name
     );
     Ok(AgentSelfUpdateOutcome::Review {
+        policy_empty: reason == SelfUpdateRejection::PolicyEmpty,
         reason: reason.to_string(),
     })
 }
@@ -90,15 +106,15 @@ pub async fn apply_agent_self_update(
     issued_at: Option<String>,
     app: AppHandle,
 ) -> Result<AgentSelfUpdateOutcome, String> {
-    if !draft_is_fresh(issued_at.as_deref(), chrono::Utc::now()) {
+    let Some(issued_at) = fresh_draft_issued_at(issued_at.as_deref(), Utc::now()) else {
         return review(&agent_pubkey, &draft, SelfUpdateRejection::Stale);
-    }
+    };
 
     let planned = tokio::task::spawn_blocking({
         let app = app.clone();
         let agent_pubkey = agent_pubkey.clone();
         let draft = draft.clone();
-        move || plan_under_lock(&app, &agent_pubkey, &draft)
+        move || plan_under_lock(&app, &agent_pubkey, &draft, issued_at)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
@@ -120,14 +136,17 @@ pub async fn apply_agent_self_update(
               persona: &crate::managed_agents::AgentDefinition| {
             let records = load_managed_agents(app)?;
             let personas = load_personas(app)?;
-            let verdict = evaluate_self_update(&agent_pubkey, &records, &personas, &draft)
-                .and_then(|fresh| {
-                    if fresh.persona_id != persona.id || persona.updated_at != expected_updated_at {
-                        Err(SelfUpdateRejection::DefinitionChanged)
-                    } else {
-                        Ok(())
-                    }
-                });
+            let verdict =
+                evaluate_self_update(&agent_pubkey, &records, &personas, &draft, issued_at)
+                    .and_then(|fresh| {
+                        if fresh.persona_id != persona.id
+                            || persona.updated_at != expected_updated_at
+                        {
+                            Err(SelfUpdateRejection::DefinitionChanged)
+                        } else {
+                            Ok(())
+                        }
+                    });
             match verdict {
                 Ok(()) => Ok(()),
                 Err(rejection) => {

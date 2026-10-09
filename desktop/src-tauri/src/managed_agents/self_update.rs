@@ -25,8 +25,12 @@ use super::{AgentDefinition, ManagedAgentRecord, UpdatePersonaRequest};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfUpdateField {
+    /// The definition's system prompt (`--system-prompt`).
     SystemPrompt,
+    /// The definition's model id (`--model`); the provider stays as it is.
     Model,
+    /// The definition's display name (`--display-name`); linked instances
+    /// still carrying the old name are renamed with it.
     DisplayName,
 }
 
@@ -70,22 +74,32 @@ where
 /// The update draft exactly as the desktop parses it off the observer frame
 /// (`parseAgentManagementRequest`): every field is optional, absent means
 /// "not requested". Any field outside the allowlist that is present sends the
-/// whole draft to owner review.
+/// whole draft to owner review. Unknown keys are refused outright
+/// (`deny_unknown_fields`), so a field added on the TypeScript side without a
+/// Rust twin forces review instead of being applied blind.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SelfUpdateDraft {
+    /// Channel the agent sent the draft from; audit only, not authorization.
     pub channel_id: String,
+    /// Display name of the definition the draft targets.
     pub agent_name: String,
+    /// New display name, when the draft sets one.
     #[serde(default)]
     pub display_name: Option<String>,
+    /// New system prompt, when the draft sets one.
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Never self-updatable; present means review.
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Never self-updatable; present means review.
     #[serde(default)]
     pub provider: Option<String>,
+    /// New model id, when the draft sets one.
     #[serde(default)]
     pub model: Option<String>,
+    /// Never self-updatable; present means review.
     #[serde(default)]
     pub respond_to: Option<String>,
 }
@@ -114,6 +128,11 @@ pub enum SelfUpdateRejection {
     SiblingNotAllowed { pubkey: String, field: &'static str },
     /// The draft is older than [`MAX_SELF_UPDATE_DRAFT_AGE`], or undated.
     Stale,
+    /// The definition was written at or after the draft was issued, so the
+    /// draft predates what it would overwrite. This is what stops a relay
+    /// replay after a Desktop restart: the first apply bumps `updated_at`
+    /// past the draft's timestamp, and an owner revert does the same.
+    PredatesDefinition,
     /// The definition changed between planning and applying.
     DefinitionChanged,
 }
@@ -133,6 +152,9 @@ impl std::fmt::Display for SelfUpdateRejection {
                 write!(f, "sibling instance {pubkey} does not allow {field}")
             }
             Self::Stale => write!(f, "draft is too old"),
+            Self::PredatesDefinition => {
+                write!(f, "definition was changed after the draft was sent")
+            }
             Self::DefinitionChanged => write!(f, "definition changed while applying"),
         }
     }
@@ -141,12 +163,16 @@ impl std::fmt::Display for SelfUpdateRejection {
 /// What an accepted draft will change. Only allowlisted fields can be set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfUpdatePlan {
+    /// Id of the definition (persona) the plan edits.
     pub persona_id: String,
     /// `updated_at` of the definition the plan was built from. The apply step
     /// rejects if the stored value moved, so a concurrent owner edit wins.
     pub expected_updated_at: String,
+    /// New display name, trimmed, when the draft set one.
     pub display_name: Option<String>,
+    /// New system prompt, trimmed, when the draft set one.
     pub system_prompt: Option<String>,
+    /// New model id, trimmed, when the draft set one.
     pub model: Option<String>,
 }
 
@@ -167,38 +193,46 @@ impl SelfUpdatePlan {
     }
 }
 
-/// A draft older than this goes to owner review. Bounds the relay's reconnect
-/// replay (five minutes) so a resurrected draft cannot re-apply silently.
+/// A draft older than this goes to owner review. This is a coarse age cap
+/// only; it is wider than the observer subscription's five-minute reconnect
+/// replay, so it does NOT stop a replay by itself. Replay protection is the
+/// `PredatesDefinition` rule in [`evaluate_self_update`]: a draft issued at or
+/// before the definition's last write is refused, and every apply is a write.
 pub const MAX_SELF_UPDATE_DRAFT_AGE: Duration = Duration::minutes(10);
 /// Tolerated clock skew for a draft stamped slightly in the future.
 pub const MAX_SELF_UPDATE_DRAFT_SKEW: Duration = Duration::minutes(2);
 
-/// Whether a draft's envelope timestamp is recent enough to auto-apply. An
-/// absent or unparseable stamp is treated as stale: review is the safe side.
-pub fn draft_is_fresh(issued_at: Option<&str>, now: DateTime<Utc>) -> bool {
-    let Some(issued_at) = issued_at.and_then(|raw| DateTime::parse_from_rfc3339(raw).ok()) else {
-        return false;
-    };
-    let age = now.signed_duration_since(issued_at.with_timezone(&Utc));
-    age <= MAX_SELF_UPDATE_DRAFT_AGE && age >= -MAX_SELF_UPDATE_DRAFT_SKEW
+/// Parse a draft's envelope timestamp when it is recent enough to auto-apply.
+/// An absent, unparseable, too-old or too-far-future stamp yields `None`:
+/// review is the safe side.
+pub fn fresh_draft_issued_at(issued_at: Option<&str>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let issued_at = DateTime::parse_from_rfc3339(issued_at?)
+        .ok()?
+        .with_timezone(&Utc);
+    let age = now.signed_duration_since(issued_at);
+    (age <= MAX_SELF_UPDATE_DRAFT_AGE && age >= -MAX_SELF_UPDATE_DRAFT_SKEW).then_some(issued_at)
 }
 
 fn normalized_name(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
-/// Decide whether `signer_pubkey`'s draft may be applied without review.
+/// Decide whether `signer_pubkey`'s draft, issued at `issued_at`, may be
+/// applied without review.
 ///
 /// Rules, in order: the signer must be a managed agent with a non-empty
 /// policy; every field the draft sets must be in that policy; the draft must
-/// name exactly one editable definition and it must be the signer's own; every
-/// other instance sharing that definition must allow the same fields, because
-/// a definition edit reaches all of them.
+/// name exactly one editable definition and it must be the signer's own; the
+/// definition must not have been written at or after `issued_at` (so a relay
+/// replay of an already-applied draft, or a draft older than an owner's edit,
+/// is refused); every other instance sharing that definition must allow the
+/// same fields, because a definition edit reaches all of them.
 pub fn evaluate_self_update(
     signer_pubkey: &str,
     records: &[ManagedAgentRecord],
     definitions: &[AgentDefinition],
     draft: &SelfUpdateDraft,
+    issued_at: DateTime<Utc>,
 ) -> Result<SelfUpdatePlan, SelfUpdateRejection> {
     let signer = records
         .iter()
@@ -254,6 +288,14 @@ pub fn evaluate_self_update(
     }
     if definition.id != persona_id {
         return Err(SelfUpdateRejection::TargetMismatch);
+    }
+    // An unparseable `updated_at` cannot prove the draft is newer, so it is
+    // treated as a write that happened after the draft.
+    let last_write = DateTime::parse_from_rfc3339(&definition.updated_at)
+        .ok()
+        .map(|stamp| stamp.with_timezone(&Utc));
+    if last_write.is_none_or(|last_write| last_write >= issued_at) {
+        return Err(SelfUpdateRejection::PredatesDefinition);
     }
 
     for sibling in records.iter().filter(|record| {

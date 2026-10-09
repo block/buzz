@@ -52,7 +52,7 @@ export function SelfUpdatePolicyFields({
       <p className="text-xs text-muted-foreground">
         {value.length === 0
           ? "Every draft-update this agent sends opens a review form; nothing changes until you save it."
-          : "A draft-update from this agent that only touches the checked fields is applied without review and the agent restarts under its auto-restart setting. Anything else still opens the review form."}
+          : "A draft-update from this agent that only touches the checked fields is applied without review and the agent restarts under its auto-restart setting. Every other agent sharing this definition must allow the same fields, since the edit reaches all of them. Anything else still opens the review form."}
       </p>
     </fieldset>
   );

@@ -14183,7 +14183,11 @@ export function maybeInstallE2eTauriMocks() {
       case "apply_agent_self_update":
         // The mock world has no self-update policy: every draft stays on the
         // owner-review path, which is also the real default.
-        return { outcome: "review", reason: "agent has no self-update policy" };
+        return {
+          outcome: "review",
+          reason: "agent has no self-update policy",
+          policy_empty: true,
+        };
       case "set_managed_agent_start_on_app_launch":
         return handleSetManagedAgentStartOnAppLaunch(
           payload as Parameters<

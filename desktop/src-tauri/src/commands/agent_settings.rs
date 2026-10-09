@@ -138,6 +138,14 @@ pub async fn set_managed_agent_self_update_fields(
 
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            // A draft-update edits the linked definition, so a policy on a
+            // definition-less instance could never fire; refuse it rather
+            // than store a setting with no effect.
+            if record.persona_id.is_none() && !self_update_fields.is_empty() {
+                return Err(format!(
+                    "agent {pubkey} has no linked definition to self-update"
+                ));
+            }
             record.self_update_fields = normalize_self_update_fields(self_update_fields);
             record.updated_at = now_iso();
         }
