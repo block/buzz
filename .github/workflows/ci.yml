@@ -48,6 +48,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - 'bin/hermit.hcl'
               - '.config/nextest.toml'
               - 'scripts/postgres-test-*.sh'
               - 'scripts/reconcile-schema-after-pgschema.sql'

@@ -91,6 +91,23 @@ cache_uses.each do |path, location, ref|
   end
 end
 
+# Hermit's rustup package defaults CARGO_HOME to ${HERMIT_ENV}/.hermit/rust.
+# rust-cache keeps only target/ outputs whose manifest is outside the workspace
+# root, so a registry under the checkout makes every dependency look like a
+# workspace member: the root-workspace cache saves an empty target/ and the
+# exact-key hit then blocks every later save. Hermit's environment env wins
+# over a CARGO_HOME exported by a workflow step, so the fix has to live here.
+hermit_config = (root / "bin" / "hermit.hcl").read.force_encoding("UTF-8")
+cargo_home = hermit_config.scan(/^\s*"?CARGO_HOME"?\s*[:=]\s*"([^"]*)"/).flatten
+unless cargo_home.length == 1 && cargo_home.first.start_with?("${HOME}/") &&
+    !cargo_home.first.include?("HERMIT_ENV")
+  abort "bin/hermit.hcl must set CARGO_HOME once to a ${HOME}/ path outside the checkout"
+end
+cargo_bin = "#{cargo_home.first}/bin"
+unless hermit_config.match?(/^\s*"?PATH"?\s*[:=]\s*"#{Regexp.escape(cargo_bin)}:\$\{PATH\}"/)
+  abort "bin/hermit.hcl must put #{cargo_bin} on PATH"
+end
+
 rust_ci_path = root / ".github" / "workflows" / "_ci-rust.yml"
 rust_ci = workflows.fetch(rust_ci_path) { load_workflow.call(rust_ci_path) }
 jobs = rust_ci["jobs"]
