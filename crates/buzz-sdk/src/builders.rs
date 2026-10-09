@@ -803,22 +803,33 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, SdkError> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl (kind 9002).
+/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl/labels
+/// (kind 9002).
 ///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
+///
+/// `labels`: `None` leaves them unchanged; `Some(labels)` replaces the
+/// channel's label set; `Some(&[])` clears it (emits `["t", ""]`).
 pub fn build_update_channel(
     channel_id: Uuid,
     name: Option<&str>,
     about: Option<&str>,
     visibility: Option<&str>,
     ttl: Option<Option<i32>>,
+    labels: Option<&[&str]>,
 ) -> Result<EventBuilder, SdkError> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
+    if name.is_none()
+        && about.is_none()
+        && visibility.is_none()
+        && ttl.is_none()
+        && labels.is_none()
+    {
         return Err(SdkError::InvalidTag(
-            "at least one of name, about, visibility, or ttl must be provided".into(),
+            "at least one of name, about, visibility, ttl, or labels must be provided".into(),
         ));
     }
+    let labels = labels.map(validated_channel_labels).transpose()?;
     if let Some(v) = visibility {
         if v != "open" && v != "private" {
             return Err(SdkError::InvalidTag(
@@ -851,7 +862,32 @@ pub fn build_update_channel(
             None => tags.push(tag(&["ttl", ""])?),
         }
     }
+    match labels.as_deref() {
+        None => {}
+        Some([]) => tags.push(tag(&["t", ""])?),
+        Some(labels) => push_label_tags(&mut tags, labels)?,
+    }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
+}
+
+/// Validate channel labels with the relay's rules (see
+/// [`buzz_core::channel::parse_channel_labels`]). An empty string is
+/// refused here: callers clear labels by passing an empty slice.
+fn validated_channel_labels(labels: &[&str]) -> Result<Vec<String>, SdkError> {
+    if labels.contains(&"") {
+        return Err(SdkError::InvalidTag(
+            "channel label cannot be empty; pass no labels to clear them".into(),
+        ));
+    }
+    buzz_core::channel::parse_channel_labels(labels.iter().copied())
+        .map_err(|e| SdkError::InvalidTag(e.to_string()))
+}
+
+fn push_label_tags(tags: &mut Vec<Tag>, labels: &[String]) -> Result<(), SdkError> {
+    for label in labels {
+        tags.push(tag(&["t", label])?);
+    }
+    Ok(())
 }
 
 /// Build a NIP-29 edit-metadata event for topic (kind 9002).
@@ -877,6 +913,10 @@ pub fn build_set_purpose(channel_id: Uuid, purpose: &str) -> Result<EventBuilder
 /// `ttl`: `Some(secs)` makes the channel ephemeral with that lifetime in
 /// seconds (the relay archives it once the deadline passes without activity);
 /// `None` leaves it permanent.
+///
+/// `labels`: up to 8 labels, each emitted as `["t", <label>]`. The relay
+/// publishes them on the channel's group-state events, so clients can find
+/// the channel with a `#t` filter.
 pub fn build_create_channel(
     channel_id: Uuid,
     name: &str,
@@ -884,11 +924,13 @@ pub fn build_create_channel(
     channel_type: Option<ChannelKind>,
     about: Option<&str>,
     ttl: Option<i32>,
+    labels: &[&str],
 ) -> Result<EventBuilder, SdkError> {
     let name = buzz_core::channel::canonical_channel_name(name);
     if name.trim().is_empty() {
         return Err(SdkError::InvalidTag("channel name is required".into()));
     }
+    let labels = validated_channel_labels(labels)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["name", name])?];
     if let Some(v) = visibility {
         tags.push(tag(&["visibility", v.as_str()])?);
@@ -902,6 +944,7 @@ pub fn build_create_channel(
     if let Some(secs) = ttl {
         tags.push(tag(&["ttl", &secs.to_string()])?);
     }
+    push_label_tags(&mut tags, &labels)?;
     Ok(EventBuilder::new(Kind::Custom(9007), "").tags(tags))
 }
 
@@ -3480,7 +3523,8 @@ mod tests {
     fn update_channel_name_and_about() {
         let cid = uuid();
         let ev = sign(
-            build_update_channel(cid, Some("new-name"), Some("new about"), None, None).unwrap(),
+            build_update_channel(cid, Some("new-name"), Some("new about"), None, None, None)
+                .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "name", "new-name"));
@@ -3489,15 +3533,16 @@ mod tests {
 
     #[test]
     fn update_channel_strips_all_leading_hashes_from_name() {
-        let ev =
-            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
+        let ev = sign(
+            build_update_channel(uuid(), Some("  ###new-name  "), None, None, None, None).unwrap(),
+        );
         assert!(has_tag(&ev, "name", "new-name"));
     }
 
     #[test]
     fn update_channel_rejects_hash_only_name() {
         assert!(matches!(
-            build_update_channel(uuid(), Some("  ###  "), None, None, None),
+            build_update_channel(uuid(), Some("  ###  "), None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3505,8 +3550,9 @@ mod tests {
     #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
-        let ev =
-            sign(build_update_channel(cid, None, None, Some("private"), Some(Some(3600))).unwrap());
+        let ev = sign(
+            build_update_channel(cid, None, None, Some("private"), Some(Some(3600)), None).unwrap(),
+        );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "visibility", "private"));
         assert!(has_tag(&ev, "ttl", "3600"));
@@ -3515,7 +3561,7 @@ mod tests {
     #[test]
     fn update_channel_clears_ttl() {
         let cid = uuid();
-        let ev = sign(build_update_channel(cid, None, None, None, Some(None)).unwrap());
+        let ev = sign(build_update_channel(cid, None, None, None, Some(None), None).unwrap());
         assert!(has_tag(&ev, "ttl", ""));
     }
 
@@ -3523,7 +3569,7 @@ mod tests {
     fn update_channel_invalid_visibility_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, Some("secret"), None),
+            build_update_channel(cid, None, None, Some("secret"), None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3532,9 +3578,75 @@ mod tests {
     fn update_channel_no_fields_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, None, None),
+            build_update_channel(cid, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn update_channel_replaces_and_clears_labels() {
+        let cid = uuid();
+        let ev = sign(
+            build_update_channel(
+                cid,
+                None,
+                None,
+                None,
+                None,
+                Some(&["workspace", "team:core"]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(tag_values(&ev, "t"), vec!["workspace", "team:core"]);
+
+        let ev = sign(build_update_channel(cid, None, None, None, None, Some(&[])).unwrap());
+        assert_eq!(tag_values(&ev, "t"), vec![""]);
+
+        let ev = sign(build_update_channel(cid, Some("x"), None, None, None, None).unwrap());
+        assert!(tag_values(&ev, "t").is_empty());
+    }
+
+    #[test]
+    fn channel_labels_use_the_relay_rules() {
+        for bad in [
+            &["Upper"][..],
+            &["stream"],
+            &[""],
+            &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        ] {
+            assert!(
+                matches!(
+                    build_create_channel(uuid(), "dev", None, None, None, None, bad),
+                    Err(SdkError::InvalidTag(_))
+                ),
+                "create must refuse {bad:?}"
+            );
+            assert!(
+                matches!(
+                    build_update_channel(uuid(), None, None, None, None, Some(bad)),
+                    Err(SdkError::InvalidTag(_))
+                ),
+                "update must refuse {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_channel_carries_labels_as_t_tags() {
+        let ev = sign(
+            build_create_channel(
+                uuid(),
+                "dev",
+                None,
+                Some(ChannelKind::Stream),
+                None,
+                None,
+                &["agent-attention", "agent-attention", "v1"],
+            )
+            .unwrap(),
+        );
+        assert_eq!(tag_values(&ev, "t"), vec!["agent-attention", "v1"]);
+        assert!(has_tag(&ev, "channel_type", "stream"));
     }
 
     #[test]
@@ -3564,6 +3676,7 @@ mod tests {
                 Some(ChannelKind::Stream),
                 Some("General chat"),
                 None,
+                &[],
             )
             .unwrap(),
         );
@@ -3585,6 +3698,7 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                &[],
             )
             .unwrap(),
         );
@@ -3602,6 +3716,7 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                &[],
             )
             .unwrap(),
         );
@@ -3618,6 +3733,7 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                &[],
             ),
             Err(SdkError::InvalidTag(_))
         ));
@@ -3634,6 +3750,7 @@ mod tests {
                 Some(ChannelKind::Stream),
                 None,
                 Some(3600),
+                &[],
             )
             .unwrap(),
         );

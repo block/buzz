@@ -573,7 +573,7 @@ pub enum MessagesCmd {
 pub enum ChannelsCmd {
     /// List channels visible to the current identity
     #[command(
-        after_help = "Examples:\n  buzz channels list\n  buzz channels list --visibility open"
+        after_help = "Examples:\n  buzz channels list\n  buzz channels list --visibility open\n  buzz channels list --label workspace --creator <npub>"
     )]
     List {
         /// Filter by visibility
@@ -582,6 +582,14 @@ pub enum ChannelsCmd {
         /// Only show channels where the current identity is a member
         #[arg(long, default_value_t = false)]
         member: bool,
+        /// Only show channels with this label (repeatable; a channel with
+        /// any of the labels matches)
+        #[arg(long, value_name = "LABEL")]
+        label: Vec<String>,
+        /// Only show channels created by this key (npub or hex). The relay
+        /// writes the creator; clients cannot set it.
+        #[arg(long, value_name = "NPUB_OR_HEX")]
+        creator: Option<String>,
         /// Maximum number of channels to return [default: 500]
         #[arg(long)]
         limit: Option<u32>,
@@ -632,6 +640,11 @@ pub enum ChannelsCmd {
         /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
+        /// Label the channel (repeatable, up to 8). A label uses 1-64
+        /// characters from a-z, 0-9, '.', ':' and '-', and cannot be a
+        /// channel type name.
+        #[arg(long, value_name = "LABEL")]
+        label: Vec<String>,
         /// Apply a desktop-local channel template by name (case-insensitive):
         /// supplies default type/visibility/description/canvas, and resolves
         /// its agent roster against the relay to add as members.
@@ -642,7 +655,7 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, visibility, or ephemeral TTL
+    /// Update channel name, description, visibility, ephemeral TTL, or labels
     #[command(
         after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private"
     )]
@@ -666,6 +679,13 @@ pub enum ChannelsCmd {
         /// Clear an existing TTL, making the channel permanent.
         #[arg(long)]
         no_ttl: bool,
+        /// Replace the channel's labels (repeatable, up to 8). Conflicts
+        /// with --no-labels.
+        #[arg(long, value_name = "LABEL", conflicts_with = "no_labels")]
+        label: Vec<String>,
+        /// Remove all labels from the channel.
+        #[arg(long)]
+        no_labels: bool,
     },
     /// Set the channel topic
     Topic {
