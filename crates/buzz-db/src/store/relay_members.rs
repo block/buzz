@@ -478,14 +478,7 @@ async fn lock_owner_mutation_admission(
         return Ok(OwnerMutationAdmission::Allowed(existing_owners));
     }
 
-    let deletion_pending: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
-         WHERE community_id = $1 AND stage <> 'aborted')",
-    )
-    .bind(community.as_uuid())
-    .fetch_one(&mut **tx)
-    .await?;
-    if deletion_pending {
+    if deletion_pending(tx, community).await? {
         return Ok(OwnerMutationAdmission::DeletionPending);
     }
 
@@ -499,6 +492,21 @@ async fn lock_owner_mutation_admission(
     Ok(OwnerMutationAdmission::Allowed(existing_owners))
 }
 
+/// Whether `community` has a non-aborted deletion request.
+///
+/// A quiescing or fenced community always has one, so owner mutations that
+/// admission refuses report `DeletionPending` rather than a generic lifecycle
+/// conflict.
+async fn deletion_pending(conn: &mut sqlx::PgConnection, community: CommunityId) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+         WHERE community_id = $1 AND stage <> 'aborted')",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(conn)
+    .await?)
+}
+
 async fn bootstrap_owner_with_operation(
     pool: &PgPool,
     community: CommunityId,
@@ -509,11 +517,11 @@ async fn bootstrap_owner_with_operation(
     let connection = observability::acquire_writer(pool, operation).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
-    if let Err(error) = crate::deletion::DeletionStore::new(pool.clone())
-        .guard_transaction(&mut tx, community)
-        .await
-    {
+    if let Err(error) = crate::deletion::guard_community_write(&mut tx, community).await {
         return match error {
+            DbError::AccessDenied(_) if deletion_pending(&mut tx, community).await? => {
+                Ok(ProvisionOwnerResult::DeletionPending)
+            }
             DbError::AccessDenied(_) => Ok(ProvisionOwnerResult::LifecycleConflict),
             other => Err(other),
         };
@@ -742,11 +750,11 @@ pub async fn transfer_ownership(
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
-    if let Err(error) = crate::deletion::DeletionStore::new(pool.clone())
-        .guard_transaction(&mut tx, community)
-        .await
-    {
+    if let Err(error) = crate::deletion::guard_community_write(&mut tx, community).await {
         return match error {
+            DbError::AccessDenied(_) if deletion_pending(&mut tx, community).await? => {
+                Ok(TransferResult::DeletionPending)
+            }
             DbError::AccessDenied(_) => {
                 let exists: bool =
                     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1)")
@@ -865,33 +873,34 @@ pub async fn transfer_ownership(
 /// The empty-table guard prevents re-adding members that were intentionally
 /// removed by an admin after the initial backfill.
 pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> Result<u64> {
+    // The common startup case writes nothing: either the legacy table is gone
+    // or this community already has members. Answer those with plain reads so
+    // an unchanged startup never needs write admission, and a quiescing
+    // deployment community keeps starting as it did before.
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Bootstrap).await?;
-    // Check if pubkey_allowlist table exists.
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
          WHERE table_schema = 'public' AND table_name = 'pubkey_allowlist')",
     )
     .fetch_one(&mut *connection)
     .await?;
-
-    if !exists {
+    if !exists || community_has_members(&mut connection, community).await? {
         return Ok(0);
     }
+    drop(connection);
 
-    // Only backfill if this community's relay_members is empty — once it has
-    // rows (from a previous backfill or manual admin commands), we must not
-    // re-add members that were intentionally removed.
-    let has_members: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM relay_members WHERE community_id = $1)")
-            .bind(community.as_uuid())
-            .fetch_one(&mut *connection)
-            .await?;
-
-    if has_members {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Bootstrap,
+    )
+    .await?;
+    // Re-check under admission: another pod may have backfilled meanwhile.
+    if community_has_members(tx.conn(), community).await? {
+        tx.commit().await?;
         return Ok(0);
     }
-
     let result = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by, created_at) \
          SELECT $1, encode(pubkey, 'hex'), 'member', NULL, added_at \
@@ -900,10 +909,25 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
          ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
     .bind(community.as_uuid())
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
-
+    tx.commit().await?;
     Ok(result.rows_affected())
+}
+
+/// Whether `community` has any `relay_members` row. Once it does (from a
+/// previous backfill or admin commands), the backfill must not re-add members
+/// that were intentionally removed.
+async fn community_has_members(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM relay_members WHERE community_id = $1)")
+            .bind(community.as_uuid())
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 impl Db {

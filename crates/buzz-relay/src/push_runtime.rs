@@ -9,7 +9,7 @@ use buzz_core::filter::{filters_match, reader_authorized_for_event};
 use chrono::{TimeDelta, Utc};
 use nostr::Filter;
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{handlers::push_lease::Subscription, nip98::nip98_header, state::AppState};
 
@@ -397,6 +397,11 @@ async fn delivery_worker_loop(state: &AppState) {
                                 found = true;
                                 deliver_one(state, &http, wake).await;
                             }
+                        }
+                        // The community left `active` after the host scan; the
+                        // next scan skips it, so this is not worth a warning.
+                        Err(e @ buzz_db::DbError::AccessDenied(_)) => {
+                            debug!(%community, "push wake claim refused: {e}")
                         }
                         Err(e) => warn!(%community, "push wake claim failed: {e}"),
                     }

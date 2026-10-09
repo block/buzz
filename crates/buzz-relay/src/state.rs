@@ -2321,9 +2321,7 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
                 metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
                 return;
             }
-            Err(buzz_audit::AuditError::Database(sqlx::Error::Database(database_error)))
-                if database_error.code().as_deref() == Some("55P03") =>
-            {
+            Err(error) if is_lock_timeout(&error) => {
                 retries += 1;
                 metrics::counter!("buzz_audit_log_lock_retries_total").increment(1);
                 tracing::warn!(
@@ -2341,6 +2339,20 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
             }
         }
     }
+}
+
+/// Whether an audit append failed on `lock_timeout` (`55P03`), either on the
+/// audit-chain lock or on the community admission lock taken before it. Both
+/// are transient; the entry is kept and retried. Admission refusal
+/// (`AccessDenied`) is terminal: a quiescing or fenced community refuses for
+/// good.
+fn is_lock_timeout(error: &buzz_audit::AuditError) -> bool {
+    let database_error = match error {
+        buzz_audit::AuditError::Database(sqlx::Error::Database(e))
+        | buzz_audit::AuditError::Admission(buzz_db::DbError::Sqlx(sqlx::Error::Database(e))) => e,
+        _ => return false,
+    };
+    database_error.code().as_deref() == Some("55P03")
 }
 
 impl std::fmt::Debug for AppState {
@@ -2849,7 +2861,25 @@ pub(crate) mod tests {
         Arc::new(state)
     }
 
+    /// The lock an audit-retry test holds while the worker times out on it.
+    #[derive(Clone, Copy)]
+    enum HeldAuditLock {
+        /// The per-community audit-chain lock (`buzz_audit:<community>`).
+        AuditChain,
+        /// The community deletion lock, held EXCLUSIVE as `begin_quiescing`,
+        /// `fence` and `abort` do; audit admission takes it SHARED first.
+        CommunityDeletion,
+    }
+
     async fn audit_worker_retries_lock_timeout_until_original_entry_is_appended_once() {
+        assert_audit_worker_retries_lock_timeout(HeldAuditLock::AuditChain).await;
+    }
+
+    async fn audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once() {
+        assert_audit_worker_retries_lock_timeout(HeldAuditLock::CommunityDeletion).await;
+    }
+
+    async fn assert_audit_worker_retries_lock_timeout(held: HeldAuditLock) {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let observer = sqlx::PgPool::connect(&database_url)
             .await
@@ -2894,11 +2924,21 @@ pub(crate) mod tests {
         // Mirrors buzz_audit::service::AUDIT_LOCK_NAMESPACE.
         let lock_key = format!("buzz_audit:{community_id}");
         let mut holder = observer.acquire().await.expect("acquire lock holder");
-        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
-            .bind(&lock_key)
-            .execute(&mut *holder)
-            .await
-            .expect("hold community audit lock");
+        match held {
+            HeldAuditLock::AuditChain => {
+                sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+                    .bind(&lock_key)
+                    .execute(&mut *holder)
+                    .await
+            }
+            HeldAuditLock::CommunityDeletion => {
+                sqlx::query("SELECT pg_advisory_lock(community_deletion_lock_key($1))")
+                    .bind(community_id)
+                    .execute(&mut *holder)
+                    .await
+            }
+        }
+        .expect("hold lock");
 
         let audit = Arc::new(AuditService::new(audit_pool));
         let worker = tokio::spawn({
@@ -2917,7 +2957,7 @@ pub(crate) mod tests {
                     "SELECT EXISTS (\
                          SELECT 1 FROM pg_stat_activity \
                          WHERE application_name = $1 \
-                           AND query LIKE 'SELECT pg_advisory_lock%' \
+                           AND query LIKE 'SELECT pg_advisory_xact_lock%' \
                            AND wait_event = 'advisory'\
                      )",
                 )
@@ -2939,11 +2979,21 @@ pub(crate) mod tests {
         .await
         .expect("audit worker never retried after lock_timeout");
 
-        sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
-            .bind(&lock_key)
-            .execute(&mut *holder)
-            .await
-            .expect("release community audit lock");
+        match held {
+            HeldAuditLock::AuditChain => {
+                sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                    .bind(&lock_key)
+                    .execute(&mut *holder)
+                    .await
+            }
+            HeldAuditLock::CommunityDeletion => {
+                sqlx::query("SELECT pg_advisory_unlock(community_deletion_lock_key($1))")
+                    .bind(community_id)
+                    .execute(&mut *holder)
+                    .await
+            }
+        }
+        .expect("release lock");
         tokio::time::timeout(std::time::Duration::from_secs(3), worker)
             .await
             .expect("audit worker did not finish after lock release")
@@ -2977,6 +3027,14 @@ pub(crate) mod tests {
         #[ignore = "requires Postgres"]
         async fn audit_worker_retries_lock_timeout_until_original_entry_is_appended_once() {
             super::audit_worker_retries_lock_timeout_until_original_entry_is_appended_once().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once()
+        {
+            super::audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once()
+                .await;
         }
     }
 

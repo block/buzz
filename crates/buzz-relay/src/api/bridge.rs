@@ -8309,14 +8309,19 @@ pub(crate) mod postgres_tests {
                 .await
                 .expect("local Postgres and Redis");
             // A schema whose `users` table can be taken away after the link,
-            // so only the owner-to-agent lookup fails at revoke time.
+            // so only the owner-to-agent lookup fails at revoke time. It
+            // carries `communities` and the deletion lock key so writes pass
+            // community write admission.
             let db_url = crate::test_support::database_url();
             let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
                 "CREATE SCHEMA {schema}; \
                  CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
                  CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
-                 CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL);"
+                 CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL); \
+                 CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
+                 CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
+                 LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
             )))
             .execute(state.db.pool())
             .await
@@ -8334,6 +8339,17 @@ pub(crate) mod postgres_tests {
 
             let tenant = fresh_tenant("late-owner.test");
             let other = fresh_tenant("late-owner-other.test");
+            // Both tenants pass community write admission in the schema.
+            for community in [&tenant, &other] {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "INSERT INTO {schema}.communities (id, host) VALUES ($1, $2)"
+                )))
+                .bind(community.community().as_uuid())
+                .bind(community.host())
+                .execute(&admin)
+                .await
+                .expect("seed admitted community");
+            }
             let (owner, agent) = (Keys::generate(), Keys::generate());
             let agent_bytes = agent.public_key().to_bytes();
 

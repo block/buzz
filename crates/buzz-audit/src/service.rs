@@ -53,9 +53,7 @@ impl AuditService {
     )]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
         let mut tx = self.pool.begin().await?;
-        buzz_db::deletion::DeletionStore::new(self.pool.clone())
-            .guard_transaction(&mut tx, entry.community_id)
-            .await?;
+        buzz_db::deletion::guard_community_write(&mut tx, entry.community_id).await?;
         let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", entry.community_id);
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(&lock_key)
