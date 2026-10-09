@@ -815,8 +815,8 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 /// variable explicitly.
 ///
 /// Every runtime: `buzz` event reads (`messages get/thread/search`, `feed get`)
-/// default to the `agent` format, which drops signatures and raw tags that an
-/// agent never needs but would otherwise pay for on every history read.
+/// default to the `agent` format, which drops signature material and
+/// relocated tags that an agent would otherwise pay for on every history read.
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
     match normalize_agent_command_identity(command).as_str() {
         "hermes" | "hermes-agent" | "hermes-acp" => &[
