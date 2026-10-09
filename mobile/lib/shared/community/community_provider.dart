@@ -130,7 +130,9 @@ Future<void> _deactivateCommunityPushLease(
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
   final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
-  final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
+  final descriptor = await fetchBuzzPushLeaseDescriptor(
+    canonicalBuzzPushRelayHttpUrl(community.relayUrl),
+  );
   final matchingGrant = (await readBuzzPushEndpointGrants())
       .where(
         (grant) =>
