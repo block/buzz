@@ -8,11 +8,11 @@ Channel Labels
 
 ## Abstract
 
-This specification defines bounded, shared string labels for Buzz stream and forum channels. Clients create initial labels with kind `9007`, add or remove labels with kind `9002`, and read the authoritative label set from relay-signed kind `39000` channel metadata.
+This specification defines bounded, shared string labels for Buzz stream and forum channels. Clients create initial labels with kind `9007`, add or remove labels with kind `9002`, and read the authoritative label set from relay-signed kind `39000` channel metadata. Ordinary NIP-01 filters discover authorized channels by label, independently of channel type.
 
 This NIP also defines atomic application and retry behavior for **all kind `9007` creation commands that include `h`, including unlabeled creation**. It does not change the contract for unlabeled creation without `h`.
 
-These tags extend [NIP-29](https://github.com/nostr-protocol/nips/blob/master/29.md); they do not claim standard NIP-29 label semantics. They deliberately use `label`, not [NIP-32](https://github.com/nostr-protocol/nips/blob/master/32.md) `l`/`L` tags: this is a shared channel-metadata set, without NIP-32 namespace semantics or a `#l` query contract.
+The commands extend [NIP-29](https://github.com/nostr-protocol/nips/blob/master/29.md). Snapshots use [NIP-32](https://github.com/nostr-protocol/nips/blob/master/32.md) self-labeling: `l` tags in the single fixed `nip-cl` namespace label the metadata event itself. This NIP defines that event as the authoritative projection of the channel's shared label set. It introduces no kind `1985` label events or third-party label authority.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be interpreted as normative requirements.
 
@@ -20,11 +20,11 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be interpreted a
 
 Labels are channel metadata, not per-user organization. They MUST NOT change channel identity, history, Canvas, membership or permissions. Label values and namespace-like prefixes confer no authority. This specification reserves no values or prefixes and assigns no feature-specific behavior to them.
 
-Version 1 applies only to stream and forum channels. Relays MUST reject initial labels on direct-message channels and label mutations targeting direct-message channels.
+Version 1 applies only to stream and forum channels. Relays MUST reject initial labels and label mutations for all other channel types, including direct-message channels. Supporting labels on another channel type requires an explicit extension of this scope.
 
 Archived channels retain readable labels but MUST reject new label mutations. A client must unarchive the channel separately before submitting a new mutation. Deleted channels MUST NOT accept label mutations or receive new metadata snapshots. A deleted channel UUID MUST NOT be reused for creation.
 
-Replace-all operations, relay-wide label search and consumer interfaces are outside this specification.
+Replace-all operations, consumer interfaces, creator identity tags, immutable channel creation times, duplicate-channel selection and system-channel behavior are outside this specification. Label discovery within the reader's authorized community catalog is in scope; it does not guarantee uniqueness or identify who created a channel.
 
 ## Capability discovery
 
@@ -36,9 +36,9 @@ A supporting relay MUST advertise `nip-cl` in its NIP-11 `supported_extensions` 
 }
 ```
 
-Clients MUST check this capability before submitting labeled creation or label mutation commands, and before relying on this NIP's acknowledgement guarantees for unlabeled `h`-tagged creation. Relays MUST independently enforce whether these operations are enabled. Advertisement alone is not an enforcement mechanism.
+Clients MUST check this capability before submitting labeled creation or label mutation commands, relying on label discovery, or relying on this NIP's acknowledgement guarantees for unlabeled `h`-tagged creation. Relays MUST independently enforce whether these operations are enabled. Advertisement alone is not an enforcement mechanism.
 
-A relay MUST NOT advertise support until all serving command and metadata writers preserve the guarantees in this specification.
+A relay MUST NOT advertise support until all serving command and metadata writers and discovery readers preserve the guarantees in this specification, including canonical snapshots for existing labeled channels.
 
 ## Label values and limits
 
@@ -57,11 +57,10 @@ The following limits apply:
 | Labels stored on one channel | 32 |
 | Bytes in one label value | 64 |
 | Raw label tags in one creation or mutation command, before deduplication | 64 |
-| Bytes in the compact-JSON array of snapshot label tags | 4,096 |
 
-For creation, the raw count covers `label` tags. For mutation, it covers `add-label` and `remove-label` tags combined. Every label or label-operation tag MUST contain exactly two elements: its tag name and its value.
+For creation, the raw count covers `label` tags. For mutation, it covers `add-label` and `remove-label` tags combined. Each of these command tags MUST contain exactly two elements: its tag name and its value. Snapshot `l` and `L` tags have the shapes specified below.
 
-The snapshot-array limit applies to the array containing only the `label` tags, not to the whole snapshot. Existing whole-event and transport-frame limits also apply. A relay MUST reject a command whose resulting snapshot would exceed an applicable limit before applying the command.
+Existing whole-event and transport-frame limits also apply. A relay MUST reject a command whose resulting snapshot would exceed an applicable limit before applying the command.
 
 ## Events
 
@@ -69,9 +68,9 @@ The snapshot-array limit applies to the array containing only the `label` tags, 
 |---|---:|---|---|
 | Create a channel with initial labels | `9007` | `h` | `label` |
 | Add or remove labels | `9002` | `h` | `add-label`, `remove-label` |
-| Read authoritative channel metadata | `39000` | `d` | `label` |
+| Read authoritative channel metadata | `39000` | `d` | `L`, `l` |
 
-Creation and mutation commands are signed by the requesting author. Metadata snapshots are signed by the relay. Existing envelope, authentication and channel-creation requirements continue to apply.
+Creation and mutation commands are signed by the requesting author. Metadata snapshots are signed by the relay. Existing envelope, authentication and channel-creation requirements continue to apply. Relays MUST reject `add-label` or `remove-label` on kind `9007`, `label` on kind `9002`, and `l`, `L` or `t` on either command kind. These are misplaced tags, not alternative label formats; rejection MUST leave all command effects unapplied.
 
 An `h`-tagged creation or label mutation command MUST contain exactly one `h` tag with exactly two elements: `h` and a valid, non-nil channel UUID. Duplicate or malformed channel identifiers, and missing identifiers where required, MUST be rejected before command application. Labeled creation without `h` MUST be rejected.
 
@@ -125,11 +124,11 @@ L' = (L ∪ A) ∖ R
 
 Adding an existing value or removing an absent value succeeds as a no-op, subject to the same validation and authorization as a state-changing command. A new no-op command MUST record committed application but reuse the existing authoritative snapshot without changing its ID or timestamp. It MUST NOT publish a new snapshot solely for the no-op. A missing or stale snapshot MUST be repaired under the publication guarantees below before acknowledging success.
 
-The resulting set, not the intermediate order of tags, determines the stored-label limit. Operations MUST preserve labels not named by the command. Ordinary metadata commands that omit label operations MUST preserve the current label set. `label` tags on kind `9002` MUST NOT be interpreted as replacement or mutation operations.
+The resulting set, not the intermediate order of tags, determines the stored-label limit. Operations MUST preserve labels not named by the command. Ordinary metadata commands that omit label operations MUST preserve the current label set.
 
 ### Metadata snapshot: kind 39000
 
-The relay publishes the complete current label set as `label` tags on the channel metadata snapshot:
+The relay publishes the complete current label set as NIP-32 `l` tags, each marked with the `nip-cl` namespace:
 
 ```json
 {
@@ -138,23 +137,61 @@ The relay publishes the complete current label set as `label` tags on the channe
     ["d", "42fdbd94-13e6-4f82-b065-5812e4a02a8b"],
     ["t", "stream"],
     ["name", "Build Systems"],
-    ["label", "status:active"],
-    ["label", "team:infra"],
-    ["label", "workflow/build"]
+    ["L", "nip-cl"],
+    ["l", "status:active", "nip-cl"],
+    ["l", "team:infra", "nip-cl"],
+    ["l", "workflow/build", "nip-cl"]
   ],
   "content": ""
 }
 ```
 
-Label tags MUST be deduplicated and sorted lexicographically by ASCII value. No `label` tags means an empty label set. The existing `channel_type` creation tag and `t` metadata tag retain their existing meanings; labels do not replace channel type.
+A nonempty label set MUST have exactly one two-element `["L", "nip-cl"]` tag and one three-element `["l", <value>, "nip-cl"]` tag per value. The `l` tags MUST be deduplicated and sorted lexicographically by ASCII value. An empty set MUST omit both `L` and `l` tags. Snapshots MUST NOT contain other `L` namespaces, unmarked or differently marked `l` tags, or legacy `label` tags. Clients MUST discard a noncanonical label representation rather than partially accepting it or treating it as empty.
+
+This single-namespace rule is deliberate: NIP-01 indexes only the first value of a tag. `#L` and `#l` match independently; they cannot require the namespace mark of a particular `l` tag. Allowing other namespaces on the same snapshot could therefore produce false label matches.
+
+The existing `channel_type` creation tag retains its meaning. A snapshot MUST contain exactly one two-element `t` tag identifying its channel type; `t` MUST NOT carry labels. A value such as `stream` is a valid label in `l` and does not change the channel type.
 
 Clients MUST read labels from authorized, relay-signed channel metadata, not infer authoritative state from stored command events. Before accepting a snapshot, a client MUST verify its NIP-01 event ID and signature, and require its signer to match the relay identity obtained from the configured relay's authenticated NIP-11 `self` field or an explicitly trusted out-of-band identity. A valid signature from an arbitrary key is insufficient. The snapshot MUST identify the expected channel with exactly one two-element `d` tag and contain a complete canonical label set within the limits above; otherwise the client MUST discard it, not interpret it as an empty set.
 
 Clients MUST scope cached snapshots to the community and relay identity, and select replacements using NIP-01 ordering: greatest `created_at`, then lowest lexicographic event ID on a tie. An older snapshot arriving later MUST NOT roll labels back.
 
-Existing ACL-filtered discovery and exact channel reads include labels. This extension does not define a `#label` query filter or guarantee a global live metadata feed. Filtering a locally loaded catalog does not establish relay-wide completeness.
-
 Label commands and metadata snapshots are state events, not conversation messages. Receiving them MUST NOT increase chat or reply counts, add chat unreads, mark a conversation read, or generate mention or push notifications from their tags.
+
+## Finding channels
+
+Supporting relays MUST match ordinary [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) `#L` and `#l` filters on the current relay-signed kind `39000` snapshots. These filters compose with the existing `#t` channel-type and `#d` channel-ID filters. Exact channel reads and existing ACL-filtered discovery MUST include the same canonical labels. No custom `#label` filter or new discovery endpoint is introduced.
+
+For example, this filter finds authorized stream channels labeled `team:infra`:
+
+```json
+{
+  "kinds": [39000],
+  "#t": ["stream"],
+  "#L": ["nip-cl"],
+  "#l": ["team:infra"],
+  "limit": 50
+}
+```
+
+To find either of two labels, irrespective of channel type within this NIP's scope:
+
+```json
+{
+  "kinds": [39000],
+  "#L": ["nip-cl"],
+  "#l": ["team:infra", "workflow/build"],
+  "limit": 50
+}
+```
+
+Values within one filter field combine with OR; different fields combine with AND; multiple filter objects combine with OR. `#l: ["a", "b"]` therefore does not require both labels. Clients needing an intersection can query candidates and inspect their complete label sets. `authors`, when supplied, identifies the relay signer, not the channel creator.
+
+Relays MUST select current snapshots, enforce current metadata-read authorization and match all filter predicates **before applying `limit`**, using NIP-01 result ordering. Nonmatching, superseded or inaccessible snapshots MUST NOT consume the result limit. Fetching only the newest unfiltered page and then filtering it is not conformant: an older matching channel must not disappear behind newer nonmatching channels. The same rule applies through the relay's generic HTTP query bridge; this NIP does not add another read-authorization path.
+
+Live delivery remains subject to existing subscription scope, current ACLs and filter matching; this NIP does not promise a global live metadata feed or a complete catalog from one limited query. When a channel loses a queried label, its replacement snapshot no longer matches that filter, so the subscription is not a removal feed. Clients maintaining a catalog MUST reconcile retained entries through authorized exact-channel reads or broader subscriptions. Filtering a partially loaded catalog does not establish relay-wide completeness.
+
+Labels remain mutable shared metadata, not unique IDs or creator provenance. An empty result MUST NOT be treated as proof that no same-labeled channel exists outside the returned query scope, limits or access rights. Two distinct creation commands may create different channels with the same labels; this NIP's exact-event retry guarantee does not deduplicate those channels.
 
 ## Authorization and visibility
 
@@ -198,7 +235,11 @@ Failure of current admission MUST reject this submission without applying anythi
 
 ### Responses and client outcomes
 
-For commands covered by this NIP received as a parseable `EVENT` with an event ID, relays MUST return a NIP-01 `OK` response using the following outcomes. Prefixes in this table are fixed, case-sensitive strings; human-readable details MAY follow them after a space. Clients MUST NOT depend on those details.
+Once a parseable `EVENT` covered by this NIP reaches command-specific handling, the relay MUST respond with a NIP-01 `OK` using the outcomes below. This includes validation and retry-admission failures in that handling. A positive `OK` for a covered command MUST always mean committed application; generic event storage or deduplication MUST NOT acknowledge it as successful without application evidence.
+
+Earlier generic admission or transport failures, such as frame rejection, authentication admission or handler saturation, MAY instead use ordinary NIP-01 rejection responses or close the connection. They are not NIP-CL receipts. Clients MUST treat a negative response without a recognized `nip-cl-rejected` or `nip-cl-unknown` prefix, a disconnect or a missing response as **Unknown** unless committed application is already known, even if this is the first attempt. The relay MUST NOT use `nip-cl-rejected` unless it can prove this submission did not apply.
+
+Prefixes in this table are fixed, case-sensitive strings; human-readable details MAY follow them after a space. Clients MUST NOT depend on those details.
 
 | Relay result | `OK` accepted | Message or required prefix | Meaning |
 | --- | --- | --- | --- |
@@ -233,7 +274,7 @@ Clients MUST persist and reuse the same signed event while delivery is uncertain
 | --- | --- |
 | Positive `OK` for the exact event ID from the target relay | **Committed**, even if an earlier attempt was uncertain. |
 | Explicit `nip-cl-rejected` response, with no earlier uncertain or concurrent attempt for that ID | **Rejected new command**. |
-| `nip-cl-unknown`, timeout, disconnect or an unrecognized response | **Unknown** unless committed application is already known. |
+| `nip-cl-unknown`, generic rejection without a recognized NIP-CL prefix, timeout, disconnect or an unrecognized response | **Unknown** unless committed application is already known. |
 | Later rejection, expiry, missing evidence or failed/inaccessible read after an uncertain attempt | **Unknown**; none proves that the earlier attempt did not commit. |
 
 A later negative response MUST NOT downgrade known committed application. Clients MUST NOT automatically generate a new event ID to resolve an uncertain outcome. Current-label readback is an independent, ACL-filtered observation of current state, not receipt evidence.
@@ -248,6 +289,6 @@ Clients that do not use labels can continue ordinary channel operations. Such op
 
 Relays MUST enforce the canonical value, count, size, command-shape and authorization rules before committing an operation. A label prefix is not a permission, ownership claim or trusted application identity.
 
-Implementations MUST keep every metadata-writing path label-preserving while labels exist. Disabling new label writes is not sufficient to make an incompatible metadata writer safe.
+Implementations MUST keep every metadata-writing path label-preserving while labels exist. Disabling new label writes is not sufficient to make an incompatible metadata writer safe. Competing draft snapshot formats (`label` or additional `t` tags) are not aliases: implementations using them MUST migrate state and republish canonical snapshots before advertising `nip-cl`, without guessing whether an arbitrary `t` value was a label. This specification does not define those migration mechanics.
 
 Labels are shared metadata and are not suitable for secrets or private per-user notes. Exact retries remain subject to current admission; they do not restore access. Current channel metadata remains protected by its current ACL.
