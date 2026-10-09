@@ -1308,7 +1308,9 @@ pub struct AppState {
     /// Key: (community_id, agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// `agent_owner_pubkey` is immutable inside one community, so a long TTL
     /// (5 min) is safe once the community label is part of the key.
-    /// Prevents repeated DB lookups from bursty observer traffic.
+    /// Prevents repeated DB lookups from bursty observer traffic, and lets
+    /// `materialize_nip_oa_owner` skip its writes for a known mapping. Sized
+    /// for every concurrently active agent so per-request HTTP agents hit.
     #[allow(clippy::type_complexity)]
     pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
     /// Cache for the `author_type` metric label on the ingest path.
@@ -1563,7 +1565,7 @@ impl AppState {
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
-                    .max_capacity(1_000)
+                    .max_capacity(100_000)
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),

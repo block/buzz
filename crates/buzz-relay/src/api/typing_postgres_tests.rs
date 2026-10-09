@@ -176,6 +176,62 @@ async fn typing_uses_cached_restriction_row() {
     assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
 }
 
+/// The membership-stage ban gate for HTTP typing reads the same cache: a
+/// cached clear row admits a member Postgres banned within the TTL.
+/// Mutation: route typing through `enforce_relay_membership` (fresh ban
+/// read) → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn typing_ban_gate_uses_cached_restriction_row() {
+    let f = Fixture::new().await;
+    let member = f.member.public_key().to_bytes().to_vec();
+    f.state
+        .db
+        .ban_community_member(
+            f.community,
+            &member,
+            Keys::generate().public_key().as_bytes(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    f.state.restriction_cache.insert(
+        (f.community, member),
+        buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: None,
+        },
+    );
+    let (status, body) = f
+        .post(&f.member, &f.typing(&f.member, Some(f.channel)))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+}
+
+/// Only typing uses the cached ban gate: a persistent post reads ban state
+/// fresh, so a stale cached ban does not refuse a member Postgres cleared.
+/// Mutation: use the cached ban gate for every kind → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn persistent_post_ban_gate_reads_fresh() {
+    let f = Fixture::new().await;
+    f.state.restriction_cache.insert(
+        (f.community, f.member.public_key().to_bytes().to_vec()),
+        buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        },
+    );
+    let message = EventBuilder::new(Kind::Custom(9), "hello")
+        .tags([Tag::parse(["h".to_string(), f.channel.to_string()]).unwrap()])
+        .sign_with_keys(&f.member)
+        .unwrap();
+    let (status, body) = f.post(&f.member, &message).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], true, "{body}");
+}
+
 /// HTTP typing reads the cached serving state, like the WebSocket path.
 /// Mutation: call the uncached `is_serving_active` → RED.
 #[tokio::test]
