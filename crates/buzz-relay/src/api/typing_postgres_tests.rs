@@ -74,6 +74,20 @@ impl Fixture {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
+    /// Subscribes to the channel's Redis topic; acknowledged before returning,
+    /// so a later publish is not missed.
+    async fn subscribe_channel(&self) -> redis::aio::PubSub {
+        let topic = buzz_pubsub::EventTopicKey {
+            community_id: self.community,
+            topic: buzz_pubsub::EventTopic::Channel(self.channel),
+        }
+        .redis_channel();
+        let client = redis::Client::open(self.state.config.redis_url.as_str()).unwrap();
+        let mut pubsub = client.get_async_pubsub().await.unwrap();
+        pubsub.subscribe(&topic).await.unwrap();
+        pubsub
+    }
+
     async fn stored_typing_rows(&self) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 20002",
@@ -91,15 +105,7 @@ impl Fixture {
 async fn member_typing_is_broadcast_and_not_stored() {
     use futures::StreamExt;
     let f = Fixture::new().await;
-    let topic = buzz_pubsub::EventTopicKey {
-        community_id: f.community,
-        topic: buzz_pubsub::EventTopic::Channel(f.channel),
-    }
-    .redis_channel();
-    let client = redis::Client::open(f.state.config.redis_url.as_str()).unwrap();
-    let mut pubsub = client.get_async_pubsub().await.unwrap();
-    // Acknowledged by Redis before returning, so the publish below is not missed.
-    pubsub.subscribe(&topic).await.unwrap();
+    let pubsub = f.subscribe_channel().await;
 
     let event = f.typing(&f.member, Some(f.channel));
     let (status, body) = f.post(&f.member, &event).await;
@@ -227,6 +233,7 @@ async fn oversized_typing_is_rejected() {
                 .collect(),
         ),
     ];
+    let pubsub = f.subscribe_channel().await;
     for (case, content, tags) in cases {
         let event = EventBuilder::new(Kind::Custom(20002), content)
             .tags(tags)
@@ -246,12 +253,12 @@ async fn oversized_typing_is_rejected() {
             "{case}: {body}"
         );
     }
+    assert_nothing_published(pubsub, "oversized typing indicator").await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn fenced_community_typing_is_rejected() {
-    use futures::StreamExt;
     let f = Fixture::new().await;
     // Over HTTP a quiescing community's host no longer binds (404), so the
     // fence only matters when quiescing starts after the request has bound its
@@ -274,14 +281,7 @@ async fn fenced_community_typing_is_rejected() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let topic = buzz_pubsub::EventTopicKey {
-        community_id: f.community,
-        topic: buzz_pubsub::EventTopic::Channel(f.channel),
-    }
-    .redis_channel();
-    let client = redis::Client::open(f.state.config.redis_url.as_str()).unwrap();
-    let mut pubsub = client.get_async_pubsub().await.unwrap();
-    pubsub.subscribe(&topic).await.unwrap();
+    let pubsub = f.subscribe_channel().await;
 
     let err = crate::handlers::event::publish_http_typing(
         &f.state,
@@ -295,11 +295,16 @@ async fn fenced_community_typing_is_rejected() {
         matches!(&err, IngestError::Rejected(msg) if msg == "restricted: community writes are fenced"),
         "{err:?}"
     );
+    assert_nothing_published(pubsub, "fenced typing indicator").await;
+}
+
+async fn assert_nothing_published(pubsub: redis::aio::PubSub, what: &str) {
+    use futures::StreamExt;
     let mut messages = pubsub.into_on_message();
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(500), messages.next())
             .await
             .is_err(),
-        "fenced typing indicator must not be published"
+        "{what} must not be published"
     );
 }
