@@ -37,6 +37,7 @@ export function NonMemberMentionDialog({
   onRestoreFocus,
 }: NonMemberMentionDialogProps) {
   const safeActionRef = React.useRef<HTMLButtonElement>(null);
+  const inviteActionRef = React.useRef<HTMLButtonElement>(null);
   const restoreFocusRef = React.useRef(onRestoreFocus);
   return (
     <AlertDialog
@@ -51,7 +52,7 @@ export function NonMemberMentionDialog({
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           restoreFocusRef.current = onRestoreFocus;
-          safeActionRef.current?.focus();
+          (canInvite ? inviteActionRef : safeActionRef).current?.focus();
         }}
         onCloseAutoFocus={(event) => {
           if (!restoreFocusRef.current) return;
@@ -102,6 +103,7 @@ export function NonMemberMentionDialog({
           </Button>
           {canInvite ? (
             <Button
+              ref={inviteActionRef}
               disabled={isInvitePending}
               onClick={onInvite}
               size="sm"

@@ -2692,7 +2692,8 @@ test("selected relay agents are invited as bots before sending", async ({
     exact: true,
   });
   await expect(inviteButton).toBeVisible();
-  await inviteButton.click();
+  await expect(inviteButton).toBeFocused();
+  await page.keyboard.press("Enter");
 
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
