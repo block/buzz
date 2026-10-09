@@ -1089,35 +1089,106 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     Ok(cnt)
 }
 
+/// SQL predicate over an `events` row for a conforming NIP-RS read-state
+/// coordinate: kind 30078, a `read-state:<32 lowercase hex>` d-tag carried by
+/// exactly one `d` tag, and exactly one `["t", "read-state"]` tag.
+macro_rules! nip_rs_event_predicate {
+    () => {
+        "(kind = 30078 \
+          AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
+          AND (SELECT count(*) \
+               FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
+               WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
+          AND EXISTS (SELECT 1 \
+               FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
+               WHERE jsonb_typeof(tag) = 'array' AND jsonb_array_length(tag) >= 2 \
+                 AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
+          AND (SELECT count(*) \
+               FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
+               WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1)"
+    };
+}
+
+/// SQL predicate over an `events` row for a Buzz mesh heartbeat: kind 30003,
+/// a `buzz-mesh-member-status:` d-tag, and a tag containing both `k` and
+/// `buzz-mesh-status` (jsonb containment, so extra or reordered elements still
+/// match).
+macro_rules! mesh_status_event_predicate {
+    () => {
+        "(kind = 30003 \
+          AND d_tag LIKE 'buzz-mesh-member-status:%' \
+          AND tags @> '[[\"k\", \"buzz-mesh-status\"]]'::jsonb)"
+    };
+}
+
 /// SQL predicate over an `events` row for coordinates that carry no
 /// historical value: NIP-RS read state and Buzz mesh heartbeats. Their
 /// deletion is physical, including the mention index, so soft-deleted payloads
-/// never accumulate. This is exactly the classification used by the migration
-/// 0011 / 0019 purge triggers this path replaces.
+/// never accumulate. These predicates are the only definition of the class:
+/// the replace path asks PostgreSQL through [`classify_retention_free`] rather
+/// than re-implementing them in Rust.
 macro_rules! retention_free_event_predicate {
     () => {
-        "((kind = 30078 \
-           AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
-           AND (SELECT count(*) \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
-           AND EXISTS (SELECT 1 \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE jsonb_typeof(tag) = 'array' AND jsonb_array_length(tag) >= 2 \
-                  AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
-           AND (SELECT count(*) \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1) \
-          OR (kind = 30003 \
-              AND d_tag LIKE 'buzz-mesh-member-status:%' \
-              AND tags @> '[[\"k\", \"buzz-mesh-status\"]]'::jsonb))"
+        concat!(
+            "(",
+            nip_rs_event_predicate!(),
+            " OR ",
+            mesh_status_event_predicate!(),
+            ")"
+        )
     };
 }
 
 /// Kinds that can hold a retention-free coordinate. Cheap Rust gate so
-/// ordinary deletions skip the purge statement entirely.
+/// ordinary writes skip the classification and purge statements entirely.
 fn may_be_retention_free(kind: i32) -> bool {
     kind == 30078 || kind == 30003
+}
+
+/// Which retention-free class an event belongs to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RetentionFreeClass {
+    /// A conforming NIP-RS read-state coordinate.
+    pub(crate) nip_rs: bool,
+    /// A Buzz mesh heartbeat.
+    pub(crate) mesh_status: bool,
+}
+
+impl RetentionFreeClass {
+    /// Superseded and deleted rows of this event are removed physically.
+    pub(crate) fn is_retention_free(self) -> bool {
+        self.nip_rs || self.mesh_status
+    }
+}
+
+/// Classify an event that has not been written yet, using the same SQL
+/// predicates as the purge and delete paths so the two cannot drift.
+pub(crate) async fn classify_retention_free(
+    conn: &mut sqlx::PgConnection,
+    kind: i32,
+    d_tag: &str,
+    tags: &serde_json::Value,
+) -> Result<RetentionFreeClass> {
+    if !may_be_retention_free(kind) {
+        return Ok(RetentionFreeClass::default());
+    }
+    let (nip_rs, mesh_status): (bool, bool) = sqlx::query_as(concat!(
+        "SELECT COALESCE(",
+        nip_rs_event_predicate!(),
+        ", false), COALESCE(",
+        mesh_status_event_predicate!(),
+        ", false) \
+         FROM (SELECT $1::integer AS kind, $2::text AS d_tag, $3::jsonb AS tags) event_row"
+    ))
+    .bind(kind)
+    .bind(d_tag)
+    .bind(tags)
+    .fetch_one(conn)
+    .await?;
+    Ok(RetentionFreeClass {
+        nip_rs,
+        mesh_status,
+    })
 }
 
 /// Soft-delete the live row for an addressable coordinate
@@ -1247,13 +1318,6 @@ async fn purge_retention_free_events(
     target: RetentionFreeTarget<'_>,
 ) -> Result<u64> {
     let community_id = tx.community();
-    // Migration 0011 fences NIP-RS hard deletes behind a transaction-local
-    // opt-in. The fence and this opt-in are removed together once the
-    // migration-only triggers are dropped.
-    sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-        .execute(tx.conn())
-        .await?;
-
     let purged: i64 = match target {
         RetentionFreeTarget::Id(event_id) => {
             sqlx::query_scalar(purge_retention_free_sql!("id = $2"))
