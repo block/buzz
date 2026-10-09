@@ -733,6 +733,23 @@ async fn allowlist_backfill_requires_application_admission() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn empty_allowlist_backfill_skips_admission() {
+    // No members and no legacy allowlist rows: there is nothing to write, so
+    // startup must not fail on admission while the community is fenced.
+    let (db, communities) = fixture().await;
+    for community in &communities[1..] {
+        assert_eq!(
+            super::relay_members::backfill_from_allowlist(&db.pool, *community)
+                .await
+                .expect("empty-allowlist backfill does not need admission"),
+            0
+        );
+        assert_eq!(count_relay_members(&db, *community).await, 0);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn owner_mutations_report_pending_deletion_when_admission_refuses() {
     let (db, communities) = fixture().await;
     let quiescing = communities[1];
