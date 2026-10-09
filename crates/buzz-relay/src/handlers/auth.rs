@@ -2132,6 +2132,63 @@ mod tests {
             assert!(!conns[2].cancel.is_cancelled(), "the bystander stays");
         }
 
+        /// Binds the durable scan to real AUTH enrollment, with Redis unavailable.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn durable_ban_revalidates_real_root_admission_without_delivery() {
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (member, owner, agent, bystander) = (
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+            );
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("owner proof");
+            let tag = serde_json::from_str(&tag).expect("owner tag JSON");
+            let mut connections = Vec::new();
+            for (keys, tag, challenge) in [
+                (&member, None, "durable-member"),
+                (&agent, Some(tag), "durable-agent"),
+                (&bystander, None, "durable-bystander"),
+            ] {
+                let (conn, _control) = registered_pending_conn(&state, community, challenge);
+                handle_auth(
+                    signed_auth(keys, challenge, tag),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+                .await;
+                assert!(matches!(
+                    conn.auth_state_snapshot(),
+                    AuthState::Authenticated(_)
+                ));
+                connections.push(conn);
+            }
+            for key in [&member, &owner] {
+                state
+                    .db
+                    .ban_community_member(
+                        community,
+                        key.public_key().as_bytes(),
+                        bystander.public_key().as_bytes(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("commit ban only");
+            }
+            assert!(connections.iter().all(|conn| !conn.cancel.is_cancelled()));
+            assert_eq!(state.revalidate_live_authorizations().await, 2);
+            assert!(connections[0].cancel.is_cancelled(), "direct member closes");
+            assert!(
+                connections[1].cancel.is_cancelled(),
+                "owner-linked agent closes"
+            );
+            assert!(!connections[2].cancel.is_cancelled(), "bystander stays");
+        }
+
         /// AUTH with NIP-OA records a previously ownerless agent's owner. That
         /// closes the agent's earlier ownerless socket so it reconnects with
         /// the owner attached, but not the socket being admitted, even when

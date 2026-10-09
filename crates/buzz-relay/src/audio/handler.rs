@@ -13894,6 +13894,37 @@ mod tests {
             server.abort();
         }
 
+        /// Binds durable revocation to the real audio AUTH enrollment call.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn durable_ban_revalidates_real_audio_admission_without_delivery() {
+            let state = audio_test_state_real_db()
+                .await
+                .expect("isolated PostgreSQL");
+            let (tenant, channel_id, member) = seed_audio_fixture(state.db.pool()).await;
+            let (mut client, server) =
+                open_admitted_audio_socket(&state, tenant.clone(), channel_id, &member, None).await;
+            state
+                .db
+                .ban_community_member(
+                    tenant.community(),
+                    member.public_key().as_bytes(),
+                    member.public_key().as_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("commit ban only");
+            assert_eq!(
+                state.revalidate_live_authorizations().await,
+                1,
+                "real audio admission must enroll the socket in durable scans"
+            );
+            expect_policy_close(&mut client).await;
+            server.abort();
+            let _ = server.await;
+        }
+
         /// Every frame up to and including the server's close.
         async fn audio_frames_until_close(
             client: &mut tokio_tungstenite::WebSocketStream<
