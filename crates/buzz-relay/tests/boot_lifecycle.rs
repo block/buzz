@@ -177,7 +177,7 @@ fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) 
 fn wait_for_scraped_metrics(process: &mut RelayProcess, port: u16, needles: &[&str]) -> String {
     let requested = needles.join(", ");
     let mut last_scrape = String::new();
-    let mut last_error = None;
+    let mut last_error: Option<String>;
     let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
     loop {
         assert!(
