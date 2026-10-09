@@ -102,6 +102,8 @@ relay to specific external Nostr identities without granting full access.
 ### Group Discovery
 
 The relay emits NIP-29 group state events when channels are created, updated, or membership changes.
+[NIP-CL](docs/nips/NIP-CL.md) defines the channel identity tags on these events and how clients
+use them to find channels.
 All discovery events include a `d` tag set to the channel UUID (NIP-29 addressable event convention):
 
 | Kind | Tags | Content |
