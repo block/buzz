@@ -775,56 +775,6 @@ pub async fn disable_workflows_for_owner_in_channel_on_conn(
     Ok(affected)
 }
 
-/// Delete a workflow and all its runs/approvals (CASCADE).
-///
-/// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
-/// deletion path uses [`delete_workflow_for_owner`], which returns the
-/// `channel_id` needed for invalidation. (No current callers.)
-pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid) -> Result<()> {
-    let affected = sqlx::query("DELETE FROM workflows WHERE community_id = $1 AND id = $2")
-        .bind(community_id.as_uuid())
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
-
-    if affected == 0 {
-        return Err(DbError::NotFound(format!("workflow {id}")));
-    }
-    Ok(())
-}
-
-/// Delete a workflow only when it belongs to `owner_pubkey`.
-///
-/// Used by event-driven deletion paths where the workflow UUID is attacker
-/// controlled. Keeping the owner predicate in the DELETE statement avoids a
-/// check-then-delete race and ensures a caller cannot delete another user's
-/// workflow just by learning its UUID.
-///
-/// Returns the deleted workflow's `channel_id` so the caller can invalidate
-/// the per-channel trigger cache without a separate lookup.
-pub async fn delete_workflow_for_owner(
-    pool: &PgPool,
-    community_id: CommunityId,
-    id: Uuid,
-    owner_pubkey: &[u8],
-) -> Result<Option<Uuid>> {
-    let row = sqlx::query(
-        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3 \
-         RETURNING channel_id",
-    )
-    .bind(community_id.as_uuid())
-    .bind(id)
-    .bind(owner_pubkey)
-    .fetch_optional(pool)
-    .await?;
-
-    match row {
-        Some(row) => Ok(row.try_get("channel_id")?),
-        None => Err(DbError::NotFound(format!("workflow {id}"))),
-    }
-}
-
 // -- Workflow Run CRUD --------------------------------------------------------
 
 /// Insert a new workflow run. Returns the new run's UUID.
@@ -1682,24 +1632,6 @@ impl Db {
             owner_pubkey,
         )
         .await
-    }
-
-    /// Delete a workflow and all its runs/approvals.
-    #[datastore_span(name = "delete_workflow", system = "postgresql")]
-    pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
-        crate::workflow::delete_workflow(&self.pool, community_id, id).await
-    }
-
-    /// Delete a workflow only when it belongs to the provided owner.
-    /// Returns the deleted workflow's `channel_id`.
-    #[datastore_span(name = "delete_workflow_for_owner", system = "postgresql")]
-    pub async fn delete_workflow_for_owner(
-        &self,
-        community_id: CommunityId,
-        id: Uuid,
-        owner_pubkey: &[u8],
-    ) -> Result<Option<Uuid>> {
-        crate::workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
     }
 
     /// Find a workflow by owner pubkey and name within a community. Used for
@@ -2656,9 +2588,9 @@ mod postgres_tests {
     }
 
     /// Issue 4 (workflow lifecycle): deleting `A/id` must not delete `B/id`
-    /// when both communities hold the same workflow UUID. Pre-fix
-    /// `delete_workflow` predicated only on `id`, so a NIP-09 a-tag deletion in
-    /// one community would erase the colliding workflow in every community.
+    /// when both communities hold the same workflow UUID. Pre-fix the workflow
+    /// delete predicated only on `id`, so a NIP-09 a-tag deletion in one
+    /// community would erase the colliding workflow in every community.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn workflow_delete_is_confined_to_its_community() {
@@ -2684,7 +2616,13 @@ mod postgres_tests {
         )
         .await;
 
-        delete_workflow(&pool, community_a, shared_workflow_id)
+        crate::Db::from_pool(pool.clone())
+            .delete_workflow_by_coordinate(
+                community_a,
+                &[0xb2; 32],
+                &shared_workflow_id.to_string(),
+                chrono::Utc::now().timestamp(),
+            )
             .await
             .expect("delete A's workflow");
 
