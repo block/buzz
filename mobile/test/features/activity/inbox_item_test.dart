@@ -157,20 +157,23 @@ void main() {
       item(id: 'c', createdAt: 30, tags: replyTags('root1', 'b')),
     ]);
 
+    bool readUpTo(int time, FeedItem event) => event.createdAt <= time;
+
     test('targets the oldest unread event', () {
-      expect(rows.single.deepLinkTarget(15).id, 'b');
+      expect(rows.single.deepLinkTarget((e) => readUpTo(15, e)).id, 'b');
     });
 
     test('targets the oldest event when nothing is read', () {
-      expect(rows.single.deepLinkTarget(5).id, 'a');
+      expect(rows.single.deepLinkTarget((_) => false).id, 'a');
     });
 
     test('falls back to the latest event when all are read', () {
-      expect(rows.single.deepLinkTarget(99).id, 'c');
+      expect(rows.single.deepLinkTarget((_) => true).id, 'c');
     });
 
-    test('falls back to the latest event without a read marker', () {
-      expect(rows.single.deepLinkTarget(null).id, 'c');
+    test('checks each event, not a single time', () {
+      // Only the middle reply is unread, though the newest is read.
+      expect(rows.single.deepLinkTarget((e) => e.id != 'b').id, 'b');
     });
   });
 

@@ -50,11 +50,11 @@ import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
-import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'sticky_date_header.dart';
+import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
@@ -65,7 +65,6 @@ part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
-part 'thread_detail_page/read_state.dart';
 part 'thread_detail_page/app_bar.dart';
 
 const _landingHighlightDuration = Duration(seconds: 3);
@@ -705,7 +704,79 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
-    _useThreadReplyReadState(ref, threadHead.id, replies);
+    void readVisibleReplies() {
+      final readState = ref.read(readStateProvider);
+      if (!context.mounted ||
+          !readState.isReady ||
+          !viewportHeight.isFinite ||
+          viewportHeight <= 0) {
+        return;
+      }
+      // Rows hidden under the app bar, the composer or the keyboard are not
+      // read. The keyboard covers rows even when the list does not follow
+      // the tail, so this uses the whole covered height.
+      final topEdge = topOverlayFraction - 0.01;
+      final bottomEdge =
+          1 - ((Grid.xs + navigationBottomInset) / viewportHeight) + 0.01;
+      final visible = <TimelineMessage>[];
+      for (final position in itemPositionsListener.itemPositions.value) {
+        if (position.itemLeadingEdge < topEdge ||
+            position.itemTrailingEdge > bottomEdge) {
+          continue;
+        }
+        if (position.index == headIndex) {
+          // The head is read like a reply. A thread opened directly, from
+          // a link or a notification, may be the only place it is seen.
+          if (!liveDeletionHidesHead) visible.add(liveHead);
+          continue;
+        }
+        final replyIndex = position.index - indexForReply(0);
+        if (replyIndex < 0 || replyIndex >= replies.length) continue;
+        visible.add(replies[replyIndex]);
+      }
+      final isDm =
+          ref
+              .read(channelsProvider)
+              .value
+              ?.where((candidate) => candidate.id == channelId)
+              .firstOrNull
+              ?.isDm ??
+          false;
+      final marks = readingMarks(
+        readState: readState,
+        channelId: channelId,
+        isDm: isDm,
+        currentPubkey: currentPubkey,
+        loaded: allMsgs,
+        visible: visible,
+        bottom: replies.isNotEmpty && threadTailIsVisible()
+            ? replies.last
+            : null,
+        threadRootId: queryRootId,
+        isRootThread: threadHead.parentId == null,
+      );
+      final notifier = ref.read(readStateProvider.notifier);
+      for (final mark in marks.entries) {
+        notifier.markContextRead(mark.key, mark.value);
+      }
+    }
+
+    // Reading starts once the thread holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    useReadingDwell(
+      positions: itemPositionsListener.itemPositions,
+      active:
+          threadViewportVisible &&
+          readStateReady &&
+          appInUse &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
+      onDwell: readVisibleReplies,
+      keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
+    );
 
     // Thread-scoped typing indicators (exclude self).
     final allTyping = ref.watch(channelTypingProvider(channelId));

@@ -11,6 +11,7 @@ class _MessageList extends HookConsumerWidget {
   final Set<String> initialForcedUnreadMessageIds;
   final bool hasInitialUnread;
   final String channelId;
+  final bool isDm;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -30,6 +31,7 @@ class _MessageList extends HookConsumerWidget {
     required this.initialForcedUnreadMessageIds,
     required this.hasInitialUnread,
     required this.channelId,
+    required this.isDm,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -537,6 +539,83 @@ class _MessageList extends HookConsumerWidget {
         appBarTitleContentHeight,
         composerBottomInset,
       ],
+    );
+
+    void readVisibleRows() {
+      final readState = ref.read(readStateProvider);
+      final viewportHeight = timelineViewportHeight.value;
+      if (!context.mounted ||
+          !readState.isReady ||
+          isAutoScrolling.value ||
+          viewportHeight <= 0 ||
+          entries.isEmpty) {
+        return;
+      }
+      // Rows hidden under the app bar, the composer or the keyboard are not
+      // read. The keyboard covers rows even when the list does not follow
+      // the latest message, so this uses the whole covered height, not the
+      // list's own bottom inset.
+      final bottomEdge =
+          (navigationBottomInset / viewportHeight).clamp(0.0, 1.0) - 0.01;
+      final topEdge =
+          1 -
+          frostedAppBarHeight(
+                context,
+                titleContentHeight: appBarTitleContentHeight,
+              ) /
+              viewportHeight +
+          0.01;
+      final visible = <TimelineMessage>[];
+      for (final position in itemPositionsListener.itemPositions.value) {
+        if (position.index >= displayEntries.length ||
+            position.itemLeadingEdge < bottomEdge ||
+            position.itemTrailingEdge > topEdge) {
+          continue;
+        }
+        final group =
+            displayEntries[displayEntries.length - 1 - position.index];
+        visible.addAll(group.map((entry) => entry.message));
+      }
+      final latest = entries.last.message;
+      final atBottom =
+          latestIsAtBoundary() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge >= bottomEdge,
+          );
+      final marks = readingMarks(
+        readState: readState,
+        channelId: channelId,
+        isDm: isDm,
+        currentPubkey: currentPubkey,
+        loaded: allMessages,
+        visible: visible,
+        bottom: atBottom ? latest : null,
+      );
+      final notifier = ref.read(readStateProvider.notifier);
+      // Reading to the bottom ends a manual "mark unread" on the channel.
+      if (atBottom && readState.isForcedUnread(channelId)) {
+        notifier.clearForcedUnread(channelId);
+      }
+      for (final mark in marks.entries) {
+        notifier.markContextRead(mark.key, mark.value);
+      }
+    }
+
+    // Reading starts once the timeline holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    useReadingDwell(
+      positions: itemPositionsListener.itemPositions,
+      active:
+          readStateReady &&
+          appInUse &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
+      onDwell: readVisibleRows,
+      keys: [channelId, readingContentKey(allMessages), navigationBottomInset],
     );
 
     useEffect(() {

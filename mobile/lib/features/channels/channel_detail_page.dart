@@ -78,6 +78,7 @@ import 'small_avatar.dart';
 import 'sticky_date_header.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
+import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
@@ -206,29 +207,21 @@ Future<void Function()> _subscribeToDmIdentityUpdates(
   }
 }
 
-int? _channelReadTimestamp({
+/// The time that opening [channel] reads it through, or null when opening it
+/// reads nothing. Forums read through their last activity. DMs read through
+/// the newest loaded message, including replies, or the last activity before
+/// messages load.
+int? _openReadTimestamp({
   required Channel channel,
   required AsyncValue<List<NostrEvent>> messagesState,
 }) {
-  if (channel.isForum) {
-    return dateTimeToUnixSeconds(channel.lastMessageAt);
+  if (channel.isForum) return dateTimeToUnixSeconds(channel.lastMessageAt);
+  if (!channel.isDm) return null;
+  var latest = 0;
+  for (final event in messagesState.value ?? const <NostrEvent>[]) {
+    if (event.createdAt > latest) latest = event.createdAt;
   }
-
-  final events = messagesState.value;
-  if (events != null && events.isNotEmpty) {
-    var latest = 0;
-    for (final event in events) {
-      if (event.threadReference.parentId != null) continue;
-      if (event.createdAt > latest) {
-        latest = event.createdAt;
-      }
-    }
-    if (latest > 0) {
-      return latest;
-    }
-  }
-
-  return dateTimeToUnixSeconds(channel.lastMessageAt);
+  return latest > 0 ? latest : dateTimeToUnixSeconds(channel.lastMessageAt);
 }
 
 bool _isOneToOneAgentDm(Channel channel, Set<String> agentPubkeys) {
@@ -512,7 +505,11 @@ class ChannelDetailPage extends HookConsumerWidget {
         !messagesNotifier.hasLoadedMessages;
     final appBarTitleContentHeight = _twoLineAppBarTitleContentHeight(context);
 
-    final readTimestamp = _channelReadTimestamp(
+    // Opening a forum or a DM reads the whole channel: a forum has no
+    // timeline to read row by row, and a DM is all for the reader. Other
+    // timelines write their read marks while the reader looks at rows; see
+    // `readingMarks`.
+    final openReadTimestamp = _openReadTimestamp(
       channel: resolvedChannel,
       messagesState: messagesState,
     );
@@ -545,19 +542,25 @@ class ChannelDetailPage extends HookConsumerWidget {
       ],
     );
 
+    // Opening reads only while this page is in front and the app is in use.
+    // A covered or backgrounded DM must not read a reply that loads meanwhile;
+    // it reads through it when it is shown again.
+    final openReadActive =
+        isAppInUse(useAppLifecycleState()) &&
+        (ModalRoute.of(context)?.isCurrent ?? true);
     useEffect(() {
-      if (!readState.isReady || readTimestamp == null) {
+      if (!readState.isReady || !openReadActive || openReadTimestamp == null) {
         return null;
       }
       return deferReadStateUpdate(context, () {
         ref
             .read(readStateProvider.notifier)
-            .markContextRead(channel.id, readTimestamp);
+            .markContextRead(channel.id, openReadTimestamp);
         ref
             .read(channelsProvider.notifier)
-            .clearObservedUnreadCoveredByRead(channel.id, readTimestamp);
+            .clearObservedUnreadCoveredByRead(channel.id, openReadTimestamp);
       });
-    }, [channel.id, readState.isReady, readTimestamp]);
+    }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
 
     final dmHeader = resolvedChannel.isDm
         ? _watchDmHeader(ref, resolvedChannel, currentPubkey)
@@ -766,6 +769,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                                       initialOldestOrdinaryUnreadMessageId !=
                                           null),
                               channelId: channel.id,
+                              isDm: resolvedChannel.isDm,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
                               isArchived: resolvedChannel.isArchived,

@@ -2093,7 +2093,9 @@ void main() {
       expect(find.byType(SkeletonReveal), findsNothing);
     });
 
-    testWidgets('defers read-state mark until after build', (tester) async {
+    testWidgets('reading the bottom writes the catch-up mark after the dwell', (
+      tester,
+    ) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -2125,9 +2127,618 @@ void main() {
 
       expect(tester.takeException(), isNull);
       await tester.pump();
+      // Opening the channel does not read it; holding still at the bottom
+      // does, without moving the channel mark.
+      expect(readState.markedContexts, isEmpty);
 
-      expect(readState.markedContexts, {_channelId: 1200});
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts, {'activity:$_channelId': 1200});
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('reading the bottom ends a manual channel unread only', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+          forcedUnreadContexts: {_channelId: _channelId, 'msg:old': _channelId},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Latest',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      expect(readState.clearedForcedContexts, isEmpty);
+
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.clearedForcedContexts, [_channelId]);
+      // The channel mark does not move, and a message the reader marked
+      // unread stays unread.
+      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.state.isForcedUnread('msg:old'), isTrue);
+    });
+
+    testWidgets('opening a DM reads the whole DM', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'First',
+              createdAt: 1100,
+            ),
+            _textMsg(
+              id: 'reply1',
+              pubkey: 'alice',
+              content: 'Newest reply',
+              createdAt: 1300,
+              extraTags: const [
+                ['e', 'msg1', '', 'reply'],
+              ],
+            ),
+          ],
+          channel: dmChannel,
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+
+      // No dwell needed: opening the DM reads through its newest message,
+      // replies included.
+      expect(readState.markedContexts[_channelId], 1300);
+    });
+
+    for (final covered in ['a sheet', 'the app switcher']) {
+      testWidgets('a DM behind $covered reads a new reply only '
+          'when shown again', (tester) async {
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final first = _textMsg(
+          id: 'msg1',
+          pubkey: 'alice',
+          content: 'First',
+          createdAt: 1100,
+        );
+        final messages = _FakeMessagesNotifier([first]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messages,
+            channel: Channel(
+              id: _channelId,
+              name: 'DM',
+              channelType: 'dm',
+              visibility: 'private',
+              description: 'Direct message',
+              createdBy: 'self',
+              createdAt: DateTime(2025),
+              memberCount: 2,
+              participants: const ['Self', 'Alice'],
+              participantPubkeys: const ['self', 'alice'],
+              isMember: true,
+            ),
+            relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            readStateNotifier: readState,
+          ),
+        );
+        await tester.pump();
+        expect(readState.markedContexts[_channelId], 1100);
+
+        if (covered == 'a sheet') {
+          // A sheet keeps the page on screen, so its providers stay live.
+          unawaited(
+            showModalBottomSheet<void>(
+              context: tester.element(find.byType(ChannelDetailPage)),
+              builder: (_) => const Text('Cover'),
+            ),
+          );
+          await tester.pumpAndSettle();
+        } else {
+          // Inactive, unlike paused, still draws frames.
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.inactive,
+          );
+          await tester.pump();
+        }
+        messages.setMessages([
+          first,
+          _textMsg(
+            id: 'reply1',
+            pubkey: 'alice',
+            content: 'Unseen reply',
+            createdAt: 1300,
+            extraTags: const [
+              ['e', 'msg1', '', 'reply'],
+            ],
+          ),
+        ]);
+        await tester.pump();
+        await tester.pump();
+
+        // The reply loaded while the DM was covered, so it stays unread.
+        expect(readState.markedContexts[_channelId], 1100);
+
+        if (covered == 'a sheet') {
+          Navigator.of(tester.element(find.text('Cover'))).pop();
+          await tester.pumpAndSettle();
+        } else {
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          );
+          await tester.pump();
+          await tester.pump();
+        }
+
+        // Shown again, the DM reads through the reply.
+        expect(readState.markedContexts[_channelId], 1300);
+      });
+    }
+
+    testWidgets('reading away from the bottom marks only visible rows', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'm$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          initialMessageId: 'm5',
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final marked = readState.markedContexts;
+      expect(marked['msg:m5'], 1005);
+      expect(marked.keys.where((key) => !key.startsWith('msg:')), isEmpty);
+      // Rows below the viewport are not read.
+      expect(marked, isNot(contains('msg:m30')));
+      expect(marked, isNot(contains('msg:m39')));
+    });
+
+    testWidgets('reading a thread tail writes the thread catch-up mark', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 3; i++)
+          _textMsg(
+            id: 'reply$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          threadReplies: {'root': replies},
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(readState.markedContexts, {'activity:$_channelId': 1000});
+      readState.markedContexts.clear();
+
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: formatTimeline([root]).single,
+            allMessages: formatTimeline([root, ...replies]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // A catch-up mark reads the thread. Each visible reply keeps its own
+      // mark too, as in `buzz-app`: the thread mark reads a reply only while
+      // its root is loaded. The covered channel page does not read meanwhile.
+      expect(readState.markedContexts, {
+        'thread-activity:root': 1102,
+        'msg:reply0': 1100,
+        'msg:reply1': 1101,
+        'msg:reply2': 1102,
+      });
+    });
+
+    testWidgets('a thread opened directly reads its head', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      // A mention: no catch-up mark reads it, so only its own mark does.
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root for @self',
+        createdAt: 1000,
+        extraTags: const [
+          ['p', 'self'],
+        ],
+      );
+      final reply = _textMsg(
+        id: 'reply0',
+        pubkey: 'bob',
+        content: 'Reply 0',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, reply],
+          threadReplies: {
+            'root': [reply],
+          },
+          initialThreadRootId: 'root',
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(readState.markedContexts['msg:root'], 1000);
+      expect(readState.markedContexts['thread-activity:root'], 1100);
+    });
+
+    testWidgets('a thread with no replies reads its head', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root for @self',
+        createdAt: 1000,
+        extraTags: const [
+          ['p', 'self'],
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          threadReplies: const {'root': []},
+          readStateNotifier: readState,
+          home: ThreadDetailPage(
+            threadHead: formatTimeline([root]).single,
+            allMessages: formatTimeline([root]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts, {'msg:root': 1000});
+    });
+
+    testWidgets('rows under the Android keyboard are not read in history', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+        addTearDown(tester.view.reset);
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final messages = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'm$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+              extraTags: const [
+                ['p', 'self'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            readStateNotifier: readState,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Message #general'));
+        await tester.pump();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pump();
+        await tester.pump(androidImeMetricsSettleDelay);
+        await tester.pumpAndSettle();
+
+        // Leave the latest message, then stop with history rows under the
+        // keyboard.
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        final messageListElement = tester.element(messageList);
+        UserScrollNotification(
+          metrics: FixedScrollMetrics(
+            minScrollExtent: 0,
+            maxScrollExtent: 100,
+            pixels: 0,
+            viewportDimension: 100,
+            axisDirection: AxisDirection.down,
+            devicePixelRatio: 1,
+          ),
+          context: messageListElement,
+          direction: ScrollDirection.reverse,
+        ).dispatch(messageListElement);
+        tester
+            .widget<ScrollablePositionedList>(messageList)
+            .itemScrollController!
+            .jumpTo(index: 20);
+        await tester.pumpAndSettle();
+        readState.markedContexts.clear();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        expect(textField.focusNode?.hasFocus, isTrue);
+        final coveredTop = tester
+            .getTopLeft(find.byKey(const ValueKey('channel-composer-dock')))
+            .dy;
+        final marked = readState.markedContexts.keys.toSet();
+        var hiddenRows = 0;
+        for (var i = 0; i < 40; i++) {
+          final row = find.byKey(ValueKey('channel-message-group-m$i'));
+          if (row.evaluate().isEmpty) continue;
+          final hidden = tester.getTopLeft(row).dy >= coveredTop;
+          if (hidden) {
+            hiddenRows++;
+            expect(marked, isNot(contains('msg:m$i')), reason: 'm$i');
+          }
+          if (marked.contains('msg:m$i')) {
+            // The reading edge allows 1% of the list height.
+            expect(
+              tester.getBottomLeft(row).dy,
+              lessThanOrEqualTo(coveredTop + 10),
+              reason: 'm$i',
+            );
+          }
+        }
+        // Rows sit under the keyboard, and rows above it are read.
+        expect(hiddenRows, greaterThan(0));
+        expect(marked, isNotEmpty);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('thread rows under the Android keyboard are not read', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+        addTearDown(tester.view.reset);
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {},
+            version: 0,
+          ),
+        );
+        final root = _textMsg(
+          id: 'root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'reply$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root],
+            threadReplies: {'root': replies},
+            readStateNotifier: readState,
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([root]).single,
+              allMessages: formatTimeline([root, ...replies]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Scroll into history, open the keyboard, then scroll toward newer
+        // replies without reaching the tail. An upward drag keeps the
+        // keyboard open.
+        final messageList = find.byKey(const ValueKey('thread-message-list'));
+        await tester.drag(messageList, const Offset(0, 600));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pump();
+        await tester.pump(androidImeMetricsSettleDelay);
+        await tester.pumpAndSettle();
+        await tester.drag(messageList, const Offset(0, -150));
+        await tester.pumpAndSettle();
+        readState.markedContexts.clear();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        expect(textField.focusNode?.hasFocus, isTrue);
+        final coveredTop = tester
+            .getTopLeft(find.byKey(const ValueKey('thread-composer-dock')))
+            .dy;
+        final marked = readState.markedContexts.keys.toSet();
+        expect(marked, isNot(contains('thread-activity:root')));
+        var hiddenRows = 0;
+        for (var i = 0; i < 40; i++) {
+          final row = find.byKey(ValueKey('thread-message-group-reply$i'));
+          if (row.evaluate().isEmpty) continue;
+          if (tester.getTopLeft(row).dy >= coveredTop) {
+            hiddenRows++;
+            expect(marked, isNot(contains('msg:reply$i')), reason: 'reply$i');
+          }
+          if (marked.contains('msg:reply$i')) {
+            // The reading edge allows 1% of the list height.
+            expect(
+              tester.getBottomLeft(row).dy,
+              lessThanOrEqualTo(coveredTop + 10),
+              reason: 'reply$i',
+            );
+          }
+        }
+        // Replies sit under the keyboard. Replies above it were read
+        // before the keyboard opened, so they need no new marks.
+        expect(hiddenRows, greaterThan(0));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('shows forum posts view for forum channels', (tester) async {
@@ -15896,6 +16507,23 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  final List<String> clearedForcedContexts = [];
+
+  @override
+  void clearForcedUnread(String contextId) {
+    clearedForcedContexts.add(contextId);
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: {
+        for (final entry in state.forcedUnreadContexts.entries)
+          if (entry.key != contextId) entry.key: entry.value,
+      },
+    );
   }
 }
 
