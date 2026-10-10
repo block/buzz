@@ -383,16 +383,7 @@ async fn author_only_deletion_live_fanout_reaches_only_author() {
     submit_ok(&client, &author, &deletion).await;
 
     for (i, (mut ws, sid)) in subscribers.into_iter().enumerate() {
-        let mut delivered = false;
-        while let Ok(msg) = ws.recv_event(Duration::from_secs(2)).await {
-            if let RelayMessage::Event {
-                subscription_id,
-                event,
-            } = msg
-            {
-                delivered |= subscription_id == sid && event.id == deletion.id;
-            }
-        }
+        let delivered = live_event_ids(&mut ws, &sid).await.contains(&deletion.id);
         let is_author = i == 0;
         assert_eq!(delivered, is_author, "live delivery to subscriber {i}");
         ws.disconnect().await.expect("disconnect");
@@ -838,12 +829,29 @@ async fn archived_target_deletion_does_not_reveal_target() {
 
 /// Whether `reader`'s open subscription `sid` receives any event within 2s.
 async fn receives_any(ws: &mut BuzzTestClient, sid: &str) -> bool {
-    let mut delivered = false;
-    while let Ok(msg) = ws.recv_event(Duration::from_secs(2)).await {
-        delivered |=
-            matches!(msg, RelayMessage::Event { subscription_id, .. } if subscription_id == sid);
+    !live_event_ids(ws, sid).await.is_empty()
+}
+
+/// IDs of the events subscription `sid` receives until 2s pass with no
+/// message. A dropped connection or a `CLOSED` for `sid` fails the test, so
+/// a dead subscription can never pass for one that saw nothing.
+async fn live_event_ids(ws: &mut BuzzTestClient, sid: &str) -> Vec<EventId> {
+    let mut ids = Vec::new();
+    loop {
+        match ws.recv_event(Duration::from_secs(2)).await {
+            Ok(RelayMessage::Event {
+                subscription_id,
+                event,
+            }) if subscription_id == sid => ids.push(event.id),
+            Ok(RelayMessage::Closed {
+                subscription_id,
+                message,
+            }) if subscription_id == sid => panic!("{sid} closed: {message}"),
+            Ok(_) => {}
+            Err(TestClientError::Timeout) => return ids,
+            Err(e) => panic!("{sid} receive failed: {e}"),
+        }
     }
-    delivered
 }
 
 /// Deleting a private deletion would store a public event naming it, so the
@@ -1026,21 +1034,7 @@ async fn soft_deleted_target_keeps_its_channel() {
     let [member_ids, outsider_ids] = {
         let mut out = [Vec::new(), Vec::new()];
         for (slot, (mut ws, sid)) in out.iter_mut().zip(watchers) {
-            loop {
-                match ws.recv_event(Duration::from_secs(2)).await {
-                    Ok(RelayMessage::Event {
-                        subscription_id,
-                        event,
-                    }) if subscription_id == sid => slot.push(event.id),
-                    Ok(RelayMessage::Closed {
-                        subscription_id,
-                        message,
-                    }) if subscription_id == sid => panic!("{sid} closed: {message}"),
-                    Ok(_) => {}
-                    Err(TestClientError::Timeout) => break,
-                    Err(e) => panic!("{sid} receive failed: {e}"),
-                }
-            }
+            *slot = live_event_ids(&mut ws, &sid).await;
             ws.disconnect().await.expect("disconnect");
         }
         out
