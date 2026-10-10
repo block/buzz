@@ -243,14 +243,11 @@ export function buildTimelineItems(
       continue;
     }
 
-    // Pending rows render with their own header so the send status can sit
-    // beside the timestamp. Keep the timeline spacing and row estimate in
-    // that same standalone state until the send acknowledgement arrives.
+    // Pending rows group exactly like acknowledged ones, so the send
+    // acknowledgement never changes the row's chrome, height, or estimate.
     const isContinuation =
-      !message.pending &&
       !startsNewMessageGroup(message) &&
       previousGroupEntry !== null &&
-      !previousGroupEntry.message.pending &&
       hasSameMessageAuthor(previousGroupEntry.message, message) &&
       isWithinGroupingWindow(
         previousGroupEntry.message.createdAt,
