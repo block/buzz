@@ -311,21 +311,36 @@ async fn writes_use_channel_gates_for_home_and_move_source() {
         .as_array()
         .unwrap()
         .contains(&json!(["prev", peer_edit.id.to_hex()])));
+    // An unwritable source answers exactly like a move of a missing artifact.
+    let missing_move =
+        |key: &Keys| f.revision_as(key, f.home, Uuid::new_v4(), "move", Some(&moved));
+    let (status, body) = f.try_publish(&missing_move(&f.peer)).await;
+    let peer_missing = (status, without_event_id(body));
+    assert!(!peer_missing.0.is_success(), "{peer_missing:?}");
     // The peer can write the destination but not the private source.
     let back = f.revision_as(&f.peer, f.home, d, "move", Some(&moved));
     let (status, body) = f.try_publish(&back).await;
-    assert!(!status.is_success() || body["accepted"] == false, "{body}");
-    assert!(body.to_string().contains("not a channel member"), "{body}");
+    assert_eq!((status, without_event_id(body)), peer_missing);
     sqlx::query("UPDATE channels SET archived_at=now() WHERE community_id=$1 AND id=$2")
         .bind(f.community.as_uuid())
         .bind(f.private)
         .execute(&f.pool)
         .await
         .unwrap();
+    let (status, body) = f.try_publish(&missing_move(&f.owner)).await;
+    let owner_missing = (status, without_event_id(body));
+    assert!(!owner_missing.0.is_success(), "{owner_missing:?}");
     let archived_source = f.revision_as(&f.owner, f.home, d, "move", Some(&moved));
     let (status, body) = f.try_publish(&archived_source).await;
-    assert!(!status.is_success() || body["accepted"] == false, "{body}");
-    assert!(body.to_string().contains("archived"), "{body}");
+    assert_eq!((status, without_event_id(body)), owner_missing);
+}
+
+/// Drop the per-event id so rejections of different events compare exactly.
+fn without_event_id(mut body: Value) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("event_id");
+    }
+    body
 }
 
 /// Re-sign an artifact revision with extra tags and an explicit timestamp.
