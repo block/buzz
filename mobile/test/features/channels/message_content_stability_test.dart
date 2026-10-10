@@ -75,9 +75,8 @@ class _Fixture {
   }
 }
 
-List<MarkdownComponent> _components(WidgetTester tester) => tester
-    .widget<GptMarkdown>(find.byType(GptMarkdown).first)
-    .inlineComponents!;
+List<InlinePattern> _components(WidgetTester tester) =>
+    tester.widget<GptMarkdown>(find.byType(GptMarkdown).first).inlinePatterns!;
 
 void main() {
   testWidgets('explicit channel links retain the current callback', (

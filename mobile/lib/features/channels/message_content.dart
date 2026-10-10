@@ -224,9 +224,10 @@ class MessageContent extends HookConsumerWidget {
       for (final entry in parseImetaTags(tags).entries)
         normalizeMarkdownDestination(entry.key): entry.value,
     };
-    final normalizedContent = useMemoized(() => normalizeBareLinks(content), [
-      content,
-    ]);
+    final normalizedContent = useMemoized(
+      () => normalizeMarkdownLinks(content),
+      [content],
+    );
     final trailingGallery = maxLines == null
         ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
@@ -272,8 +273,11 @@ class MessageContent extends HookConsumerWidget {
       final mentionParts = markdownContent.split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
+        // Restore exactly the backticks split removed: wrapping each odd part
+        // adds a stray one when the count is odd, e.g. a ```` fence closer.
+        if (i > 0) mentionBuf.write('`');
         if (i.isOdd) {
-          mentionBuf.write('`${mentionParts[i]}`');
+          mentionBuf.write(mentionParts[i]);
         } else {
           var segment = mentionParts[i];
           for (final range in mentionOccurrences(
@@ -324,18 +328,14 @@ class MessageContent extends HookConsumerWidget {
         finalContent,
         style: style,
         followLinkColor: false,
-        // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
-        autolink: false,
+        // Bare Buzz permalinks render as chips through inlineLinkBuilder.
+        autolinkSchemes: const {'buzz'},
         codeBuilder: (context, name, code, closed) =>
             _MessageCodeBlock(name: name, code: code),
-        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
-          context,
+        inlineLinkBuilder: (link) => _buildLink(
           ref,
-          linkText,
-          url,
-          imetaByUrl[url],
-          linkStyle,
+          link,
+          imetaByUrl[link.url],
           style,
           resolvedChannelTap,
           resolvedChannelNames,
@@ -349,7 +349,7 @@ class MessageContent extends HookConsumerWidget {
         ),
         textAlign: textAlign,
         maxLines: maxLines,
-        inlineComponents: inlineComponents,
+        inlinePatterns: inlineComponents,
       ),
     );
     if (trailingGallery == null) return markdown;
@@ -408,29 +408,23 @@ class MessageContent extends HookConsumerWidget {
     );
   }
 
-  Widget _buildLink(
-    BuildContext context,
+  InlineSpan _buildLink(
     WidgetRef ref,
-    InlineSpan linkText,
-    String url,
+    LinkBuildDetails link,
     ImetaEntry? imeta,
-    TextStyle linkStyle,
     TextStyle? fallbackStyle,
     void Function(String channelId) resolvedChannelTap,
     Map<String, String> resolvedChannelNames,
   ) {
-    String text = '';
-    linkText.visitChildren((span) {
-      if (span is TextSpan && span.text != null) {
-        text += span.text!;
-      }
-      return true;
-    });
-
-    final baseStyle = fallbackStyle ?? linkStyle;
+    final context = link.context;
+    final url = link.url;
+    // Not `link.label`: it still carries gpt_markdown's placeholders for
+    // inline-pattern matches, such as the encoded brackets in a filename.
+    final text = TextSpan(children: link.labelSpans).toPlainText();
+    final baseStyle = fallbackStyle ?? link.style;
     if (imeta != null &&
         classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.audio) {
-      return _buildMedia(context, url, imeta);
+      return link.asWidgetSpan(_buildMedia(context, url, imeta));
     }
     final uri = Uri.tryParse(url);
     final buzzLink = uri?.scheme == 'buzz'
@@ -479,80 +473,94 @@ class MessageContent extends HookConsumerWidget {
       _ => null,
     };
 
+    // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
+    // instead of exposing a control whose tap cannot do anything.
+    final opensLink = buzzLink is! EntityDeepLink;
+    void open() =>
+        unawaited(_openLink(context, ref, url, text, resolvedChannelTap));
+
+    if (isCanonicalBuzzLabel && buzzPresentation != null) {
+      final chip = _TokenPill(
+        key: ValueKey('buzz-link-chip:$url'),
+        icon: buzzPresentation.icon,
+        interactive: buzzPresentation.interactive,
+        semanticLabel: buzzPresentation.semanticLabel,
+        text: buzzPresentation.label,
+        textStyle: baseStyle.copyWith(fontWeight: FontWeight.w600),
+      );
+      // Its own semantics node: otherwise this chip's placeholder merges the
+      // whole paragraph, mention and channel pills included, into one
+      // screen-reader stop with a single label and tap action.
+      return link.asWidgetSpan(
+        Semantics(
+          container: true,
+          child: opensLink
+              ? GestureDetector(onTap: open, child: chip)
+              : IgnorePointer(child: chip),
+        ),
+      );
+    }
+
     final authoredLinkStyle = baseStyle.copyWith(
       color: context.colors.primary,
       decoration: TextDecoration.underline,
       decorationColor: context.colors.primary,
     );
-    final linkTextWidget = isCanonicalBuzzLabel
-        ? Text(
-            text,
-            style: baseStyle.copyWith(
-              color: context.colors.primary,
-              fontWeight: FontWeight.w600,
-            ),
-          )
-        : Text.rich(TextSpan(style: authoredLinkStyle, children: [linkText]));
+    if (!opensLink) {
+      return TextSpan(style: authoredLinkStyle, children: link.labelSpans);
+    }
+    return LinkTextSpan.wrapping(
+      children: link.labelSpans,
+      url: url,
+      linkStyle: link.linkStyle,
+      style: authoredLinkStyle,
+      onTap: open,
+    );
+  }
 
-    final renderedLink = isCanonicalBuzzLabel && buzzPresentation != null
-        ? _TokenPill(
-            key: ValueKey('buzz-link-chip:$url'),
-            icon: buzzPresentation.icon,
-            interactive: buzzPresentation.interactive,
-            semanticLabel: buzzPresentation.semanticLabel,
-            text: buzzPresentation.label,
-            textStyle: baseStyle.copyWith(fontWeight: FontWeight.w600),
-          )
-        : linkTextWidget;
+  Future<void> _openLink(
+    BuildContext context,
+    WidgetRef ref,
+    String url,
+    String text,
+    void Function(String channelId) resolvedChannelTap,
+  ) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
 
-    // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
-    // instead of exposing a control whose tap cannot do anything.
-    if (buzzLink is EntityDeepLink) {
-      return IgnorePointer(child: renderedLink);
+    // Rendered channel URLs must use the same callback as `#channel`
+    // references so detail-page callers can suppress self-navigation.
+    // Message and join links still need the top-level authenticated
+    // dispatcher.
+    if (uri.scheme == 'buzz') {
+      final deepLink = parseBuzzDeepLink(uri);
+      if (deepLink case ChannelDeepLink(:final channelId)) {
+        resolvedChannelTap(channelId);
+      } else if (deepLink is MessageDeepLink || deepLink is InviteDeepLink) {
+        ref.read(pendingDeepLinkProvider.notifier).open(uri);
+      }
+      return;
+    }
+    if (uri.scheme != 'http' && uri.scheme != 'https') return;
+
+    final auth = ref.read(mediaGetAuthServiceProvider);
+    if (!auth.isRelayMediaUrl(url)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return;
     }
 
-    return GestureDetector(
-      onTap: () async {
-        final uri = Uri.tryParse(url);
-        if (uri == null) return;
-
-        // Rendered channel URLs must use the same callback as `#channel`
-        // references so detail-page callers can suppress self-navigation.
-        // Message and join links still need the top-level authenticated
-        // dispatcher.
-        if (uri.scheme == 'buzz') {
-          final deepLink = parseBuzzDeepLink(uri);
-          if (deepLink case ChannelDeepLink(:final channelId)) {
-            resolvedChannelTap(channelId);
-          } else if (deepLink is MessageDeepLink ||
-              deepLink is InviteDeepLink) {
-            ref.read(pendingDeepLinkProvider.notifier).open(uri);
-          }
-          return;
-        }
-        if (uri.scheme != 'http' && uri.scheme != 'https') return;
-
-        final auth = ref.read(mediaGetAuthServiceProvider);
-        if (!auth.isRelayMediaUrl(url)) {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
-          return;
-        }
-
-        try {
-          await ref.read(openDownloadedFileProvider)(
-            url,
-            auth.headersFor(url),
-            text,
-          );
-        } catch (_) {
-          if (!context.mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            const SnackBar(content: Text('Could not open attachment')),
-          );
-        }
-      },
-      child: renderedLink,
-    );
+    try {
+      await ref.read(openDownloadedFileProvider)(
+        url,
+        auth.headersFor(url),
+        text,
+      );
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Could not open attachment')),
+      );
+    }
   }
 }
 
@@ -822,47 +830,28 @@ class _MessageCodeBlock extends HookWidget {
   }
 }
 
-class _MentionMd extends InlineMd {
-  final Map<String, Set<String>> bindings;
-  final Map<String, String> displayLabels;
-  final Map<String, String> mentionNames;
-  final Map<String, String> mentionLabels;
-  final Set<String> agentMentionPubkeys;
-  final void Function(String pubkey)? onMentionTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '@',
-    knownNames: bindings.keys.map(_markdownMentionName),
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
-  );
-
-  _MentionMd({
-    required this.bindings,
-    required this.displayLabels,
-    required this.mentionNames,
-    required this.mentionLabels,
-    required this.agentMentionPubkeys,
-    this.onMentionTap,
-  });
-
-  @override
-  RegExp get exp => _exp;
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
-    final raw = exp.firstMatch(text.trim())?.group(0);
-    if (raw == null) {
-      return TextSpan(text: text, style: config.style);
-    }
-
+/// `@mention` tokens. The default scopes keep this out of link labels: its
+/// [WidgetSpan] nested inside the link's own placeholder does not paint on
+/// iOS, so an authored `[@mention](url)` would render as nothing. Link
+/// resolution wins over token detection inside a label.
+InlinePattern _mentionPattern({
+  required Map<String, Set<String>> bindings,
+  required Map<String, String> displayLabels,
+  required Map<String, String> mentionNames,
+  required Map<String, String> mentionLabels,
+  required Set<String> agentMentionPubkeys,
+  void Function(String pubkey)? onMentionTap,
+}) => InlinePattern.prefixed(
+  prefix: '@',
+  knownNames: bindings.keys.map(_markdownMentionName),
+  genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
+  builder: (context, match, style) {
+    final raw = match.group(0)!;
     final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
     final matches = bindings[name] ?? const <String>{};
     final pubkey = matches.length == 1 ? matches.single : null;
     if (bindings.containsKey(name) && matches.length != 1) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: raw, style: style);
     }
     final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
         ? displayLabels[name]
@@ -879,17 +868,17 @@ class _MentionMd extends InlineMd {
       label: visibleLabel,
       semanticsLabel: fullLabel,
       isAgent: isAgent,
-      textStyle: config.style,
+      textStyle: style,
     );
 
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
       child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
+          ? GestureDetector(onTap: () => onMentionTap(pubkey), child: pill)
           : pill,
     );
-  }
-}
+  },
+);
 
 String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');

@@ -261,20 +261,21 @@ class _ReplyContext extends ConsumerWidget {
                     // image or long note can't blow up the page.
                     ConstrainedBox(
                       constraints: const BoxConstraints(maxHeight: 132),
-                      child: ClipRect(
-                        child: Align(
-                          alignment: Alignment.topLeft,
-                          heightFactor: 1,
-                          child: MessageContent(
-                            content: note.content,
-                            mentionLabels: {
-                              for (final key in mentionPubkeys)
-                                key: labels.labelFor(key),
-                            },
-                            tags: note.tags,
-                            baseStyle: messageBodyTextStyle.copyWith(
-                              color: context.colors.onSurface,
-                            ),
+                      // Lay the note out at its natural height and clip it;
+                      // squeezing it instead overflows the block column.
+                      child: UnconstrainedBox(
+                        constrainedAxis: Axis.horizontal,
+                        alignment: Alignment.topLeft,
+                        clipBehavior: Clip.hardEdge,
+                        child: MessageContent(
+                          content: note.content,
+                          mentionLabels: {
+                            for (final key in mentionPubkeys)
+                              key: labels.labelFor(key),
+                          },
+                          tags: note.tags,
+                          baseStyle: messageBodyTextStyle.copyWith(
+                            color: context.colors.onSurface,
                           ),
                         ),
                       ),

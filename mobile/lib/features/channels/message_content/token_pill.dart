@@ -7,33 +7,20 @@ String? _channelNameForId(Map<String, String> channels, String channelId) {
   return null;
 }
 
-class _ChannelLinkMd extends InlineMd {
-  final Map<String, String> channelNames;
-  final void Function(String channelId)? onChannelTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '#',
-    knownNames: channelNames.keys,
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_-]*',
-  );
-
-  _ChannelLinkMd({required this.channelNames, this.onChannelTap});
-
-  @override
-  RegExp get exp => _exp;
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
-    final raw = exp.firstMatch(text.trim())?.group(0);
-    if (raw == null) {
-      return TextSpan(text: text, style: config.style);
-    }
-
-    final channelId = channelNames[raw.substring(1).toLowerCase()];
-    final channelName = raw.substring(1);
+/// `#channel` tokens. The default scopes keep this out of link labels: its
+/// [WidgetSpan] nested inside the link's own placeholder does not paint on
+/// iOS, so an authored `[#channel](url)` would render as nothing. Link
+/// resolution wins over token detection inside a label.
+InlinePattern _channelLinkPattern({
+  required Map<String, String> channelNames,
+  void Function(String channelId)? onChannelTap,
+}) => InlinePattern.prefixed(
+  prefix: '#',
+  knownNames: channelNames.keys,
+  genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_-]*',
+  builder: (context, match, style) {
+    final channelName = match.group(0)!.substring(1);
+    final channelId = channelNames[channelName.toLowerCase()];
     final opensChannel = channelId != null && onChannelTap != null;
     final child = _TokenPill(
       icon: BuzzIcons.hash,
@@ -42,18 +29,18 @@ class _ChannelLinkMd extends InlineMd {
           ? 'Open channel $channelName'
           : 'Channel $channelName',
       text: channelName,
-      textStyle: config.style?.copyWith(fontWeight: FontWeight.w500),
+      textStyle: style.copyWith(fontWeight: FontWeight.w500),
     );
 
     return WidgetSpan(
       alignment: PlaceholderAlignment.baseline,
       baseline: TextBaseline.alphabetic,
       child: opensChannel
-          ? GestureDetector(onTap: () => onChannelTap!(channelId), child: child)
+          ? GestureDetector(onTap: () => onChannelTap(channelId), child: child)
           : child,
     );
-  }
-}
+  },
+);
 
 class _TokenPill extends StatelessWidget {
   final IconData? icon;
@@ -102,37 +89,4 @@ class _TokenPill extends StatelessWidget {
       child: ExcludeSemantics(child: pill),
     );
   }
-}
-
-RegExp _buildPrefixPattern({
-  required String prefix,
-  required Iterable<String> knownNames,
-  required String genericTokenPattern,
-}) {
-  final names =
-      knownNames
-          .map((name) => name.trim())
-          .where((name) => name.isNotEmpty)
-          .toSet()
-          .toList()
-        ..sort((a, b) => b.length.compareTo(a.length));
-
-  final escapedPrefix = RegExp.escape(prefix);
-  const leadingBoundary = r'(?<![\w./:-])';
-  const trailingBoundary = r'(?=$|[\s,;.!?:)\]}])';
-
-  if (names.isEmpty) {
-    return RegExp(
-      '$leadingBoundary$escapedPrefix(?:$genericTokenPattern)$trailingBoundary',
-      caseSensitive: false,
-      multiLine: true,
-    );
-  }
-
-  final knownAlternatives = names.map(RegExp.escape).join('|');
-  return RegExp(
-    '$leadingBoundary$escapedPrefix(?:(?:$knownAlternatives)$trailingBoundary|(?:$genericTokenPattern)$trailingBoundary)',
-    caseSensitive: false,
-    multiLine: true,
-  );
 }

@@ -54,7 +54,7 @@ class MessageSkeletonBody extends StatelessWidget {
     var overflow = false;
     // Consume code before embeds so media-looking text in code stays text.
     // Ordinary links remain inline, except metadata-backed audio links, as in
-    // MessageContent's linkBuilder. One traversal replaces per-URL rewrites.
+    // MessageContent's inlineLinkBuilder. One traversal replaces per-URL rewrites.
     final tokens = RegExp(
       r'```[\s\S]*?(?:```|$)|`[^`\n]*`|(!?)\[([^\]\n]*)\]\((https?://[^\s)]+)\)|https?://[^\s)<>]+',
     );
