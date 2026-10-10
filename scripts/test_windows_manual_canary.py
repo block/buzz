@@ -1,5 +1,4 @@
 """Manual Windows test lane: execute the actual dispatch guard, offline."""
-import hashlib
 import os
 from pathlib import Path
 import re
@@ -81,9 +80,11 @@ class ManualCanaryTests(unittest.TestCase):
         self.assertNotIn('contents: write', source)
         self.assertNotIn('gh release create', source)
         self.assertIn('"createUpdaterArtifacts": false', source)
-        # Existing signed BW pipeline must remain byte-identical.
-        bw = (ROOT / '.github/workflows/windows-fork-integration.yml').read_bytes()
-        self.assertEqual(hashlib.sha256(bw).hexdigest(), 'b28eeac06afafa5e3b61d5c24a62fb0e6d90bc4ddf67f04a049b9d0d3b1b9eae')
+        # Integration now also admits explicitly manual builds. BW checks remain
+        # conditional on real request metadata, never fabricated by this canary.
+        bw = (ROOT / '.github/workflows/windows-fork-integration.yml').read_text()
+        self.assertIn("- name: Validate dispatch bindings\n        if: inputs.build_request_event_id != ''", bw)
+        self.assertIn('scripts/windows_build_manifest.py preflight', bw)
 
 
 if __name__ == '__main__':

@@ -15,7 +15,7 @@ class WindowsWorkflowContractTests(unittest.TestCase):
         source = WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn(
-            "run-name: Windows ${{ inputs.release_id }} @ ${{ inputs.freeze_sha }} request ${{ inputs.build_request_event_id }}",
+            "run-name: Windows Fork Integration ${{ inputs.build_request_event_id && 'BW' || 'manual' }} @ ${{ inputs.freeze_sha }}",
             source,
         )
         for name in (
@@ -31,7 +31,7 @@ class WindowsWorkflowContractTests(unittest.TestCase):
                 re.compile(
                     rf"(?m)^      {name}:\n"
                     r"        description: .+\n"
-                    r"        required: true\n"
+                    rf"        required: {'true' if name == 'freeze_sha' else 'false'}\n"
                     r"        type: string$"
                 ),
             )
@@ -69,7 +69,7 @@ class WindowsWorkflowContractTests(unittest.TestCase):
         self.assertIn('--installer-dir "$BUNDLE_DIR/nsis"', source)
         self.assertIn('--output-dir "$ARTIFACT_DIR"', source)
         self.assertIn(
-            "name: buzz-windows-${{ github.sha }}", source
+            "name: ${{ inputs.build_request_event_id && format('buzz-windows-{0}', github.sha) || format('buzz-windows-integration-{0}', github.sha) }}", source
         )
         self.assertIn("path: windows-build-artifact", source)
         self.assertIn("Upload unsigned installer and bound manifest", source)

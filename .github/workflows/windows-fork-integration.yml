@@ -1,33 +1,33 @@
 name: Windows Fork Integration Build
-run-name: Windows ${{ inputs.release_id }} @ ${{ inputs.freeze_sha }} request ${{ inputs.build_request_event_id }}
+run-name: Windows Fork Integration ${{ inputs.build_request_event_id && 'BW' || 'manual' }} @ ${{ inputs.freeze_sha }}
 
 # Fork-only unsigned NSIS build for explicit testing. Never submit upstream.
 on:
   workflow_dispatch:
     inputs:
       release_id:
-        description: Frozen release label from the Relay release set
-        required: true
+        description: Frozen release label from the Relay release set (BW only; leave empty for manual build)
+        required: false
         type: string
       freeze_sha:
         description: Frozen canonical Relay commit SHA
         required: true
         type: string
       build_request_event_id:
-        description: BW build-request event ID
-        required: true
+        description: BW build-request event ID (BW only; leave empty for manual build)
+        required: false
         type: string
       pipeline_event_id:
-        description: BW release-pipeline event ID
-        required: true
+        description: BW release-pipeline event ID (BW only; leave empty for manual build)
+        required: false
         type: string
       expected_workflow_sha256:
-        description: SHA-256 of this committed workflow file
-        required: true
+        description: SHA-256 of this committed workflow file (BW only; leave empty for manual build)
+        required: false
         type: string
       expected_manifest_schema_sha256:
-        description: SHA-256 of the committed manifest schema
-        required: true
+        description: SHA-256 of the committed manifest schema (BW only; leave empty for manual build)
+        required: false
         type: string
 
 permissions:
@@ -59,7 +59,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Validate manual or BW source
+        shell: bash
+        env:
+          FREEZE_SHA: ${{ inputs.freeze_sha }}
+          BUILD_REQUEST_EVENT_ID: ${{ inputs.build_request_event_id }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          PIPELINE_EVENT_ID: ${{ inputs.pipeline_event_id }}
+          EXPECTED_WORKFLOW_SHA256: ${{ inputs.expected_workflow_sha256 }}
+          EXPECTED_MANIFEST_SCHEMA_SHA256: ${{ inputs.expected_manifest_schema_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == Jari81/buzz ]]
+          [[ "$FREEZE_SHA" =~ ^[0-9a-f]{40}$ && "$FREEZE_SHA" == "$GITHUB_SHA" ]]
+          if [[ -n "$BUILD_REQUEST_EVENT_ID" ]]; then
+            [[ "$GITHUB_REF_NAME" == windows ]]
+            # Full BW metadata and pinned digest checks follow; no fallback.
+          else
+            [[ "$GITHUB_REF_NAME" == windows || "$GITHUB_REF_NAME" == windows-integration ]]
+            [[ -z "$RELEASE_ID$PIPELINE_EVENT_ID$EXPECTED_WORKFLOW_SHA256$EXPECTED_MANIFEST_SCHEMA_SHA256" ]]
+          fi
+
       - name: Validate dispatch bindings
+        if: inputs.build_request_event_id != ''
         id: contract
         shell: bash
         env:
@@ -103,6 +125,16 @@ jobs:
           fi
           git fetch --no-tags origin "$previous_sha"
           echo "sha=$previous_sha" >> "$GITHUB_OUTPUT"
+          # Keep both the historical integration stream and temporary canary cumulative.
+          for lane in 'windows-fork-integration.yml:windows-integration' 'windows-canary.yml:windows'; do
+            workflow="${lane%%:*}"
+            branch="${lane#*:}"
+            baseline=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${branch}&status=success&per_page=1" --jq '.workflow_runs[].head_sha')
+            if [[ -n "$baseline" ]]; then
+              git fetch --no-tags origin "$baseline"
+              scripts/verify-windows-client-lineage.sh "$baseline" "$GITHUB_SHA" "$CANONICAL_WINDOWS_BRANCH"
+            fi
+          done
 
       - name: Verify cumulative lineage and retained client surfaces
         shell: bash
@@ -111,8 +143,9 @@ jobs:
         run: |
           set -euo pipefail
           scripts/verify-windows-client-lineage.sh \
-            "$PREVIOUS_SHA" "$GITHUB_SHA" "$GITHUB_REF_NAME"
+            "$PREVIOUS_SHA" "$GITHUB_SHA" "$CANONICAL_WINDOWS_BRANCH"
           scripts/check-windows-client-contract.sh "$GITHUB_SHA"
+          python3 -m unittest -q scripts.test_windows_integration_manual scripts.test_windows_workflow_contract scripts.test_windows_build_manifest
 
   build:
     name: Build unsigned Windows installer and bound manifest
@@ -192,6 +225,7 @@ jobs:
         run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --config src-tauri/tauri.canary.conf.json
 
       - name: Stage installer and generate bound manifest
+        if: inputs.build_request_event_id != ''
         shell: bash
         env:
           RELEASE_ID: ${{ inputs.release_id }}
@@ -226,10 +260,35 @@ jobs:
             --workflow-file "$WORKFLOW_PATH" \
             --manifest-schema-file "$MANIFEST_SCHEMA_PATH"
 
+      - name: Stage manual test installer
+        if: inputs.build_request_event_id == ''
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          files = list(Path("desktop/src-tauri/target").glob(os.environ["TARGET"] + "/release/bundle/nsis/*.exe"))
+          if len(files) != 1:
+              raise SystemExit(f"Expected exactly one NSIS installer, found {len(files)}")
+          target = Path("windows-build-artifact")
+          target.mkdir(exist_ok=False)
+          installer = target / files[0].name
+          shutil.copyfile(files[0], installer)
+          receipt = {
+              "kind": "manual-test-only", "unsigned": True, "product_accepted": False,
+              "commit": os.environ["GITHUB_SHA"], "ref": os.environ["GITHUB_REF"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "filename": installer.name, "bytes": installer.stat().st_size,
+              "sha256": hashlib.sha256(installer.read_bytes()).hexdigest(),
+          }
+          (target / "manual-test-build.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+          PY
+
       - name: Upload unsigned installer and bound manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: buzz-windows-${{ github.sha }}
+          name: ${{ inputs.build_request_event_id && format('buzz-windows-{0}', github.sha) || format('buzz-windows-integration-{0}', github.sha) }}
           path: windows-build-artifact
           if-no-files-found: error
           retention-days: 7
