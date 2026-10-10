@@ -25,6 +25,7 @@ type TrayAgentActivity = {
 
 type TrayAction =
   | { kind: "newChannel" }
+  | { kind: "openSettings" }
   | { kind: "openChannel"; channelId: string };
 
 const MAX_RECENT_TRAY_ACTIVITIES = 5;
@@ -37,10 +38,12 @@ export function useTrayMenu({
   channels,
   goChannel,
   openCreateChannel,
+  openSettings,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
   openCreateChannel: () => void;
+  openSettings: () => void;
 }): void {
   const activeTurns = useActiveAgentTurnsByChannel();
   const now = useNow(1000);
@@ -134,6 +137,8 @@ export function useTrayMenu({
       for (const action of actions) {
         if (action.kind === "newChannel") {
           openCreateChannel();
+        } else if (action.kind === "openSettings") {
+          openSettings();
         } else {
           void goChannel(action.channelId);
         }
@@ -156,5 +161,5 @@ export function useTrayMenu({
       disposed = true;
       unlisten?.();
     };
-  }, [goChannel, openCreateChannel]);
+  }, [goChannel, openCreateChannel, openSettings]);
 }
