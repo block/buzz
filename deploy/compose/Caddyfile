@@ -1,5 +1,13 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
-  reverse_proxy relay:3000
+  # Device-pairing sidecar (compose.pair.yml). If the pairing overlay is
+  # disabled, requests to /pair fail with 502 instead of reaching the relay.
+  handle /pair {
+    reverse_proxy pair-relay:5000
+  }
+
+  handle {
+    reverse_proxy relay:3000
+  }
 }
