@@ -16,8 +16,8 @@ name: Docker image
 # the relay image version tracks crates/buzz-relay/Cargo.toml, never desktop.
 #
 # Triggers:
-#   - push to main           → :main + :sha-<7>
-#                              + :debug-main + :debug-sha-<7>
+#   - push to main           → :main + :sha-<7> + :main-<commit UTC>-<7>
+#                              + the matching :debug-* tags
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
 #                              + matching :debug-* tags
 #                              (+ :latest/:debug-latest for stable releases)
@@ -33,6 +33,12 @@ name: Docker image
 #   match=^relay-v(.*)$ regex simply no-ops (it warns, leaving the value
 #   intact) and the bare version flows straight to the semver parser. On a
 #   real push event value= is empty and the match strips relay-v from the ref.
+#
+# :main-<YYYYMMDDHHmmss>-<7> names the same main build as :sha-<7>, prefixed
+# with its UTC commit time so the tag sorts by build order. Kargo's Lexical
+# strategy picks the newest from the tag list alone; :sha-<7> cannot be
+# ordered without fetching every image's metadata. It uses the commit date,
+# not the run date, so a rerun of the same commit re-pushes the same tag.
 #
 # The :latest tag tracks the latest STABLE relay release: metadata-action's
 # `flavor.latest=auto` (its default) emits :latest only for non-prerelease
@@ -162,6 +168,7 @@ jobs:
             type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=raw,value=main-{{commit_date 'YYYYMMDDHHmmss'}}-{{sha}},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           labels: |
             org.opencontainers.image.title=Buzz
             org.opencontainers.image.description=WebSocket relay server for the Buzz communications platform
@@ -371,6 +378,7 @@ jobs:
             type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=raw,value=main-{{commit_date 'YYYYMMDDHHmmss'}}-{{sha}},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Create and push manifest list
         id: manifest
