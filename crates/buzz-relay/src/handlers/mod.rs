@@ -14,6 +14,8 @@ pub mod community_provisioning;
 pub mod count;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
+#[cfg(test)]
+pub(crate) mod group_state_postgres_tests;
 /// NIP-IA identity archive request handler (kinds 9035–9036).
 pub mod identity_archive;
 /// imeta tag validation helpers.

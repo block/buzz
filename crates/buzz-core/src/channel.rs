@@ -17,6 +17,39 @@ pub fn canonical_channel_name(name: &str) -> &str {
         .trim_end()
 }
 
+/// Tags that identify a channel on every NIP-29 group-state event the relay
+/// signs (kinds 39000–39003), in this order:
+///
+/// 1. `["t", <channel_type>]`. It comes first, so a client that reads the
+///    first `t` tag gets the channel type.
+/// 2. `["P", <creator hex>]`: the key that signed the channel's kind:9007.
+///    It comes from the database and does not change when ownership moves.
+///    Uppercase `P` names the author of the root object, as in NIP-22,
+///    NIP-34 and NIP-72; lowercase `p` already means members and DM
+///    participants on these kinds.
+///
+/// Filters such as `{kinds:[39000], #P:[<key>]}` select by these tags.
+pub fn group_state_identity_tags(
+    channel_type: &str,
+    created_by: &[u8],
+) -> Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
+    Ok(vec![
+        nostr::Tag::parse(["t", channel_type])?,
+        nostr::Tag::parse(["P", &hex::encode(created_by)])?,
+    ])
+}
+
+/// Tag on kind:39000 that holds the channel's creation time in Unix seconds.
+///
+/// The event's own `created_at` is the time of the last edit, so it cannot
+/// rank channels by age.
+pub const CHANNEL_CREATED_AT_TAG: &str = "created_at";
+
+/// The [`CHANNEL_CREATED_AT_TAG`] tag for a channel created at `unix_seconds`.
+pub fn channel_created_at_tag(unix_seconds: i64) -> Result<nostr::Tag, nostr::event::tag::Error> {
+    nostr::Tag::parse([CHANNEL_CREATED_AT_TAG, &unix_seconds.to_string()])
+}
+
 /// Whether a channel is publicly visible or invite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelVisibility {
@@ -180,7 +213,24 @@ impl FromStr for MemberRole {
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_channel_name;
+    use super::{canonical_channel_name, group_state_identity_tags};
+
+    #[test]
+    fn group_state_identity_tags_put_the_type_first_then_the_creator() {
+        let creator = [0xab; 32];
+        let tags: Vec<Vec<String>> = group_state_identity_tags("forum", &creator)
+            .expect("valid tags")
+            .into_iter()
+            .map(|tag| tag.to_vec())
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                vec!["t".to_string(), "forum".to_string()],
+                vec!["P".to_string(), "ab".repeat(32)],
+            ]
+        );
+    }
 
     #[test]
     fn channel_names_trim_whitespace_and_drop_all_leading_hashes() {
