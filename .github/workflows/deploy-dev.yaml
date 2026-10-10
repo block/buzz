@@ -4,10 +4,12 @@ run-name: buzz dev ⇐ ${{ github.ref_name }}
 # DO-4081: builds the relay image and pushes it to the dev ECR repo (buzz-dev).
 # The ArgoCD Application (DO-4082, dev-infrastructure) consumes the image URI
 # from the Slack thread / job log; this workflow does not touch meq-eks-workloads.
-# Manual trigger from a non-main branch (main would target a buzz-prod repo that
-# config/aws/ecr.yaml does not create).
+# There is no buzz prod: every push to main builds and pushes to buzz-dev.
+# Other branches can be built manually via workflow_dispatch.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +17,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  MEQ_ENV: dev
   AWS_REGION: us-east-1
   SLACK_CHANNEL_ID: C01879LTTJQ
 
@@ -46,31 +47,72 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
 
   build:
-    name: Build and Deploy
+    name: Build and Push
     needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
-      - name: Build and push image
-        uses: meQuilibrium/github-actions/build-and-deploy-k8s@main
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          project-name: buzz
-          application-type: rust
-          MEQ_ENV: ${{ env.MEQ_ENV }}
-          APP_ENV: prod
-          AWS_REGION: ${{ env.AWS_REGION }}
-          slack-channel-id: ${{ env.SLACK_CHANNEL_ID }}
-          slack-thread: ${{ needs.setup.outputs.slack-thread }}
-          chatops-slack-bot-token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
           aws-access-key-id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
-          # Empty skips the meq-eks-workloads imageTag bump.
-          kubernetes-manifest-editor-github-token: ''
+          aws-region: ${{ env.AWS_REGION }}
 
+      - name: Ensure ECR repository
+        run: |
+          aws cloudformation deploy \
+            --stack-name buzz-ecr-dev \
+            --template-file config/aws/ecr.yaml \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides CLASS=dev
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image tag
+        id: image
+        run: |
+          branch="${GITHUB_REF_NAME//\//-}"
+          tag="${branch}-${GITHUB_SHA::7}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "uri=${{ steps.login-ecr.outputs.registry }}/buzz-dev:$tag" >> "$GITHUB_OUTPUT"
+          if aws ecr describe-images --repository-name buzz-dev --image-ids imageTag="$tag" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.image.outputs.exists == 'false'
+
+      - name: Build and push
+        if: steps.image.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ steps.image.outputs.uri }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report image
+        run: |
+          echo "Image: ${{ steps.image.outputs.uri }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: "Notify Slack: Image pushed"
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ env.SLACK_CHANNEL_ID }}
+            text: "Pushed image `${{ steps.image.outputs.uri }}`"
+            thread_ts: "${{ needs.setup.outputs.slack-thread }}"
 
       - name: "Notify Slack: Build failed"
         if: ${{ failure() }}
