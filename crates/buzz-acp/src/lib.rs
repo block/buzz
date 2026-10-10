@@ -43,7 +43,7 @@ use buzz_core::observer::{
 use clap::Parser;
 use config::{
     AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    MultipleEventHandling, ProvidersArgs, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -73,6 +73,12 @@ fn is_subcommand(name: &str) -> bool {
 
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for the goose provider-inventory custom request issued alongside
+/// model discovery. Adapters without the extension answer immediately with a
+/// JSON-RPC error; the bound only matters if a future adapter accepts the
+/// request and then stalls.
+const PROVIDERS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
@@ -2753,6 +2759,17 @@ async fn tokio_main() -> Result<()> {
             .collect();
         let args = ModelsArgs::parse_from(&filtered);
         return run_models(args).await;
+    }
+
+    if is_subcommand("providers") {
+        // Strip the subcommand token so clap doesn't reject it as a positional.
+        let filtered: Vec<String> = std::env::args()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a)
+            .collect();
+        let args = ProvidersArgs::parse_from(&filtered);
+        return run_providers(args).await;
     }
 
     if is_subcommand("auth-methods") {
@@ -6303,6 +6320,40 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
     }
 }
 
+/// Normalize goose's `_goose/unstable/providers/list` entries into the stable
+/// shape the desktop consumes.
+///
+/// Unknown/malformed entries are dropped rather than surfaced as blanks, and
+/// the goose-only `acp` marker is preserved so callers can distinguish
+/// ACP-backed providers from plain LLM providers.
+fn normalize_provider_entries(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    result
+        .get("entries")
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let id = entry.get("providerId").and_then(|v| v.as_str())?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "id": id,
+                        "name": entry.get("providerName").and_then(|v| v.as_str()),
+                        "configured": entry
+                            .get("configured")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        "defaultModel": entry.get("defaultModel").and_then(|v| v.as_str()),
+                        "acp": entry.get("acp").and_then(|v| v.as_bool()).unwrap_or(false),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
@@ -6435,6 +6486,92 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
         if !has_models {
             println!("No model information available from this agent.");
+        }
+    }
+
+    client.shutdown().await;
+    Ok(())
+}
+
+/// Flow: spawn → initialize → `_goose/unstable/providers/list` → print → shutdown.
+///
+/// Standalone provider-inventory probe. Unlike `models` it creates no session:
+/// goose answers `providers/list` straight after `initialize`, and opening a
+/// session would resolve a provider this probe exists to report on.
+async fn run_providers(args: ProvidersArgs) -> Result<()> {
+    let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
+
+    // Spawn outside the timeout so we always own the child for cleanup.
+    let mut client =
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: failed to spawn agent: {e}");
+                std::process::exit(1);
+            }
+        };
+
+    // initialize + provider inventory under one timeout. Client is owned above,
+    // so shutdown() runs on all paths (success, error, timeout).
+    let protocol_result = tokio::time::timeout(PROVIDERS_TIMEOUT, async {
+        let init = client.initialize().await?;
+        let inventory = client.goose_list_providers(Vec::new()).await?;
+        Ok::<_, acp::AcpError>((init, inventory))
+    })
+    .await;
+
+    let (init_result, inventory) = match protocol_result {
+        Ok(Ok(tuple)) => tuple,
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: agent communication failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: agent timed out ({PROVIDERS_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    };
+
+    let info_obj = init_result
+        .get("serverInfo")
+        .or_else(|| init_result.get("agentInfo"));
+    let agent_name = info_obj
+        .and_then(|ai| ai.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let agent_version = info_obj
+        .and_then(|ai| ai.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let providers = normalize_provider_entries(&inventory);
+
+    if args.json {
+        let output = serde_json::json!({
+            "agent": {
+                "name": agent_name,
+                "version": agent_version,
+            },
+            "providers": providers,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if providers.is_empty() {
+        println!("{agent_name} v{agent_version} publishes no provider inventory.");
+    } else {
+        println!("{agent_name} v{agent_version} providers:");
+        for provider in &providers {
+            let id = provider.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let name = provider.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+            let configured = provider
+                .get("configured")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            println!(
+                "  - {name} (id: {id}){}",
+                if configured { " [configured]" } else { "" }
+            );
         }
     }
 

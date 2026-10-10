@@ -683,6 +683,10 @@ pub struct AcpRuntimeCatalogEntry {
     pub model_env_var: Option<String>,
     /// Environment variable used to apply the selected LLM provider, when supported.
     pub provider_env_var: Option<String>,
+    /// Whether the harness publishes its own LLM provider inventory over ACP
+    /// (goose's `_goose/unstable/providers/list`). Drives the provider
+    /// dropdown's discovered rows; never a hardcoded harness-id check.
+    pub provider_inventory: bool,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
     /// Canonical accepted effort values for this runtime, in display order.
@@ -801,6 +805,37 @@ pub struct AgentModelsResponse {
     pub selected_model: Option<String>,
     /// Whether this agent supports model switching.
     pub supports_switching: bool,
+}
+
+/// Response from `discover_agent_providers` — the harness's own LLM provider
+/// inventory, normalized for the frontend.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProvidersResponse {
+    pub agent_name: String,
+    pub agent_version: String,
+    /// Providers the harness publishes, in harness order. Empty when the
+    /// harness does not implement the provider-inventory extension.
+    pub providers: Vec<AgentProviderInfo>,
+}
+
+/// A single LLM provider the harness knows about.
+///
+/// Sourced from goose's provider inventory; `id` is the value a harness
+/// accepts on its provider env var (e.g. `GOOSE_PROVIDER`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderInfo {
+    /// Canonical provider id used for persistence (e.g. `aws_bedrock`).
+    pub id: String,
+    /// Human-readable provider name (e.g. `Amazon Bedrock`).
+    pub name: Option<String>,
+    /// Whether goose already has credentials/configuration for this provider.
+    pub configured: bool,
+    /// The provider's default model, when it publishes one.
+    pub default_model: Option<String>,
+    /// True when the provider is an ACP agent rather than a plain LLM API.
+    pub acp: bool,
 }
 
 /// A single model available from an agent.

@@ -688,6 +688,17 @@ type E2eConfig = {
     discoverAgentModelsError?: string;
     /** Delay (ms) before `discover_agent_models` settles. */
     discoverAgentModelsDelayMs?: number;
+    /**
+     * Override the `discover_agent_providers` mock response. When set, returns
+     * this inventory instead of the default per-harness list (goose only).
+     */
+    discoverAgentProviders?: Array<{
+      id: string;
+      name: string | null;
+      configured: boolean;
+      defaultModel: string | null;
+      acp: boolean;
+    }>;
     /** Config surface returned for every agent instead of the per-runtime mocks. */
     agentConfigSurface?: Record<string, unknown>;
     /** ACP commands returned by the discovery IPC in mock mode. */
@@ -1662,6 +1673,58 @@ const CHANNEL_WINDOW_AUX_DELETION_KINDS = new Set([
 // in e2e (instead of the `buzz-media://` fallback). The reaction guard
 // asserts against this exact port.
 const MOCK_MEDIA_PROXY_PORT = 54321;
+
+/**
+ * Provider inventory returned for the goose harness by the
+ * `discover_agent_providers` mock. A short, deliberately non-alphabetical
+ * slice of what goose really publishes — it must include providers the
+ * built-in catalog does NOT list (Ollama, Together AI, Amazon Bedrock) so
+ * specs can prove the dropdown is driven by the harness, not the static table.
+ */
+const MOCK_GOOSE_PROVIDERS = [
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    configured: false,
+    defaultModel: null,
+    acp: false,
+  },
+  {
+    id: "aws_bedrock",
+    name: "Amazon Bedrock",
+    configured: true,
+    defaultModel: "global.anthropic.claude-sonnet-5",
+    acp: false,
+  },
+  {
+    id: "ollama",
+    name: "Ollama",
+    configured: false,
+    defaultModel: "qwen3",
+    acp: false,
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    configured: false,
+    defaultModel: null,
+    acp: false,
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    configured: false,
+    defaultModel: null,
+    acp: false,
+  },
+  {
+    id: "together",
+    name: "Together AI",
+    configured: false,
+    defaultModel: null,
+    acp: false,
+  },
+];
 let mockMediaProxyPort = MOCK_MEDIA_PROXY_PORT;
 
 // A relay-hosted custom emoji used by the reaction guard. Its URL matches
@@ -8589,6 +8652,9 @@ async function handleDiscoverAcpRuntimes(
       auth_status: { status: "not_applicable" },
       source: "builtin",
       login_hint: undefined,
+      // Goose publishes its own provider inventory over ACP, which is what
+      // drives the provider dropdown's discovered rows in the agent dialogs.
+      provider_inventory: true,
     },
     {
       id: "claude",
@@ -14186,6 +14252,28 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: false,
         };
+      case "discover_agent_providers": {
+        // Harness-published LLM provider inventory (goose). Mirrors the shape
+        // of `buzz-acp providers --json` normalized by the Rust command.
+        const providerInput = (
+          payload as { input?: { agentCommand?: string } } | null
+        )?.input;
+        const providerAgentCommand = providerInput?.agentCommand?.trim() ?? "";
+        const providerOverride = activeConfig?.mock?.discoverAgentProviders;
+        if (providerOverride) {
+          return {
+            agentName: providerAgentCommand || "mock-agent",
+            agentVersion: "0.0.0",
+            providers: providerOverride,
+          };
+        }
+        return {
+          agentName: providerAgentCommand || "mock-agent",
+          agentVersion: "0.0.0",
+          providers:
+            providerAgentCommand === "goose" ? MOCK_GOOSE_PROVIDERS : [],
+        };
+      }
       case "discover_agent_models": {
         const discoverDelayMs = activeConfig?.mock?.discoverAgentModelsDelayMs;
         if (discoverDelayMs) {
