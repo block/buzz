@@ -2304,6 +2304,98 @@ test("members sidebar exposes view-activity for a viewer-owned relay agent", asy
   ).toBeVisible();
 });
 
+test("channel managers change an agent's role in place", async ({ page }) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OWNED_RELAY_AGENT_PUBKEY,
+        name: "nadia",
+        agentType: "goose",
+        capabilities: ["search", "summaries"],
+        channelNames: ["agents"],
+        respondTo: "anyone",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+
+  // nadia is seeded as a plain member, the role a self-joined agent lands in
+  // (block/buzz#6561). The row names it rather than hiding it behind "agent".
+  const agentRow = page.getByTestId(
+    `sidebar-member-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(agentRow).toContainText("agent · member");
+
+  // Pointer: agents are offered the agent designation and read-only guest,
+  // never the people permission tiers.
+  await openMemberMenu(page, OWNED_RELAY_AGENT_PUBKEY);
+  await page
+    .getByTestId(`sidebar-change-role-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(
+    page.getByTestId(`sidebar-role-guest-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`sidebar-role-admin-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`sidebar-role-member-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+  await page
+    .getByTestId(`sidebar-role-bot-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(agentRow).not.toContainText("agent · member");
+  await expect(agentRow).toContainText("agent");
+
+  // Keyboard: the submenu opens from its trigger and marks the current role.
+  await openMemberMenu(page, OWNED_RELAY_AGENT_PUBKEY);
+  const changeRole = page.getByTestId(
+    `sidebar-change-role-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await changeRole.focus();
+  await changeRole.press("ArrowRight");
+  await expect(
+    page.getByTestId(`sidebar-role-bot-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toHaveText("Agent (current)");
+  const guest = page.getByTestId(
+    `sidebar-role-guest-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await guest.focus();
+  await guest.press("Enter");
+  await expect(agentRow).toContainText("agent · guest");
+
+  // In place: each change is one role update, never a remove and re-add.
+  const membershipCommands = await page.evaluate(() =>
+    (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    )
+      .filter((entry) =>
+        [
+          "add_channel_members",
+          "remove_channel_member",
+          "change_channel_member_role",
+        ].includes(entry.command),
+      )
+      .map((entry) => ({
+        command: entry.command,
+        role: (entry.payload as { role?: string }).role,
+      })),
+  );
+  expect(membershipCommands).toEqual([
+    { command: "change_channel_member_role", role: "bot" },
+    { command: "change_channel_member_role", role: "guest" },
+  ]);
+});
+
 test("profile renders live activity for a viewer-owned relay agent", async ({
   page,
 }) => {

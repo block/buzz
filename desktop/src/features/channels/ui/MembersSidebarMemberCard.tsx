@@ -30,6 +30,7 @@ import {
 import { truncateNpub } from "@/shared/lib/pubkey";
 import type {
   ChannelMember,
+  ChannelRole,
   ManagedAgent,
   ManagedAgentRuntimeStatus,
   PresenceStatus,
@@ -97,7 +98,9 @@ const MEMBER_ROW_INSET_DIVIDER_CLASS =
 
 function formatRoleLabel(member: ChannelMember, memberIsBot: boolean) {
   if (memberIsBot) {
-    return "agent";
+    // An agent's channel role decides what it may do there, so name any role
+    // other than the agent designation instead of hiding it.
+    return member.role === "bot" ? "agent" : `agent · ${member.role}`;
   }
 
   if (member.role === "owner" || member.role === "admin") {
@@ -157,9 +160,14 @@ export function MembersSidebarMemberCard({
   // owner (whom no moderator can restrict).
   const canModerateMember =
     canModerate && !memberIsBot && member.role !== "owner";
+  // Ownership moves through a transfer flow, never through a role change.
+  const canChangeMemberRole = canChangeRole && member.role !== "owner";
   const hasActions = memberIsBot
-    ? Boolean(managedAgent) || canRemoveMember || canViewActivity
-    : canRemoveMember || canChangeRole || canModerateMember;
+    ? Boolean(managedAgent) ||
+      canRemoveMember ||
+      canViewActivity ||
+      canChangeMemberRole
+    : canRemoveMember || canChangeMemberRole || canModerateMember;
 
   const memberIdentity = (
     <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-3">
@@ -275,7 +283,7 @@ export function MembersSidebarMemberCard({
       {memberIdentity}
       {hasActions ? (
         <MemberActionsMenu
-          canChangeRole={canChangeRole}
+          canChangeRole={canChangeMemberRole}
           canModerateMember={canModerateMember}
           canRemoveMember={canRemoveMember}
           canViewActivity={canViewActivity}
@@ -301,7 +309,17 @@ export function MembersSidebarMemberCard({
   );
 }
 
+// People move between permission tiers. Agents take the agent designation or
+// read-only guest, the roles change_channel_member_role reserves for bots.
 const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
+const AGENT_ROLES = ["bot", "guest"] as const;
+
+const ROLE_LABELS: Record<Exclude<ChannelRole, "owner">, string> = {
+  admin: "Admin",
+  member: "Member",
+  guest: "Guest",
+  bot: "Agent",
+};
 
 function MemberActionsMenu({
   availability,
@@ -346,8 +364,7 @@ function MemberActionsMenu({
   onViewActivity?: (pubkey: string) => void;
   pairAction?: ManagedAgentPairAction;
 }) {
-  const showChangeRole =
-    canChangeRole && !memberIsBot && member.role !== "owner";
+  const roles = memberIsBot ? AGENT_ROLES : PEOPLE_ROLES;
   const isBanned = moderationState?.banned ?? false;
   const isTimedOut = moderationState?.timedOut ?? false;
 
@@ -410,12 +427,12 @@ function MemberActionsMenu({
                 Manage agent access...
               </DropdownMenuItem>
             ) : null}
-            {canRemoveMember || showChangeRole ? (
+            {canRemoveMember || canChangeRole ? (
               <DropdownMenuSeparator />
             ) : null}
           </>
         ) : null}
-        {showChangeRole ? (
+        {canChangeRole ? (
           <DropdownMenuSub>
             <DropdownMenuSubTrigger
               data-testid={`sidebar-change-role-${member.pubkey}`}
@@ -425,15 +442,14 @@ function MemberActionsMenu({
               Change role
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
-              {PEOPLE_ROLES.map((role) => (
+              {roles.map((role) => (
                 <DropdownMenuItem
                   data-testid={`sidebar-role-${role}-${member.pubkey}`}
                   disabled={disabled || member.role === role}
                   key={role}
                   onClick={() => onChangeRole(member, role)}
                 >
-                  {role[0]?.toUpperCase()}
-                  {role.slice(1)}
+                  {ROLE_LABELS[role]}
                   {member.role === role ? " (current)" : ""}
                 </DropdownMenuItem>
               ))}
@@ -442,7 +458,7 @@ function MemberActionsMenu({
         ) : null}
         {canRemoveMember ? (
           <>
-            {showChangeRole ? <DropdownMenuSeparator /> : null}
+            {canChangeRole ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
               className="text-destructive focus:text-destructive"
               data-testid={`sidebar-remove-member-${member.pubkey}`}
@@ -456,7 +472,7 @@ function MemberActionsMenu({
         ) : null}
         {canModerateMember ? (
           <>
-            {canRemoveMember || showChangeRole ? (
+            {canRemoveMember || canChangeRole ? (
               <DropdownMenuSeparator />
             ) : null}
             {isTimedOut ? (
