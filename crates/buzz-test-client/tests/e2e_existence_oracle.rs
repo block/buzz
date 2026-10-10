@@ -618,3 +618,59 @@ async fn workflow_trigger_does_not_reveal_workflow() {
     // Positive control: the owner triggers their workflow.
     submit_ok(&client, &author, &trigger(&author, &live)).await;
 }
+
+/// GET `path` as `reader` and return the HTTP status and parsed body.
+async fn read_as(client: &Client, reader: &Keys, path: &str) -> (u16, Value) {
+    let resp = client
+        .get(format!("{}{path}", relay_http_url()))
+        .header("X-Pubkey", reader.public_key().to_hex())
+        .send()
+        .await
+        .expect("read workflow");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.expect("parse response"))
+}
+
+/// Reading the runs or approvals of a workflow in a channel the caller cannot
+/// read answers exactly like reading a workflow that does not exist.
+#[tokio::test]
+#[ignore]
+async fn workflow_read_does_not_reveal_workflow() {
+    let client = http_client();
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let channel = create_channel(&client, &owner, "private").await;
+    let define = |id: &str| {
+        sign(
+            &owner,
+            30620,
+            "name: existence-oracle\ntrigger:\n  on: message_posted\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n",
+            vec![tag(&["d", id]), tag(&["h", &channel])],
+        )
+    };
+    let live = uuid::Uuid::new_v4().to_string();
+    submit_ok(&client, &owner, &define(&live)).await;
+    let missing = uuid::Uuid::new_v4().to_string();
+    let run = uuid::Uuid::new_v4();
+    let paths = |id: &str| {
+        [
+            format!("/workflows/{id}/runs"),
+            format!("/workflows/{id}/runs/{run}/approvals"),
+        ]
+    };
+
+    for (missing_path, live_path) in paths(&missing).iter().zip(paths(&live).iter()) {
+        let expected = read_as(&client, &outsider, missing_path).await;
+        assert_eq!(expected.0, 404, "{missing_path}: {:?}", expected.1);
+        assert_eq!(
+            read_as(&client, &outsider, live_path).await,
+            expected,
+            "{live_path} must answer like a missing workflow"
+        );
+    }
+
+    // Positive control: the owner reads their workflow's runs.
+    let (status, body) = read_as(&client, &owner, &paths(&live)[0]).await;
+    assert_eq!(status, 200, "owner read failed: {body}");
+    assert!(body["runs"].is_array());
+}

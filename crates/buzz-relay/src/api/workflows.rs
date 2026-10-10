@@ -102,19 +102,19 @@ async fn authorize_workflow_read(
     .await
     .map_err(|e| e.into_response())?;
 
-    let workflow = state
-        .db
-        .get_workflow(tenant.community(), workflow_id)
-        .await
-        .map_err(|error| match error {
-            buzz_db::error::DbError::NotFound(_) => {
-                api_error(StatusCode::NOT_FOUND, "workflow not found").into_response()
-            }
-            other => internal_error(&format!("get workflow for run read: {other}")).into_response(),
-        })?;
-    let channel_id = workflow.channel_id.ok_or_else(|| {
-        api_error(StatusCode::FORBIDDEN, "workflow is not channel-scoped").into_response()
-    })?;
+    // A workflow the caller cannot read answers exactly like a missing one, so
+    // the response never reveals which workflow IDs exist.
+    let not_found = || api_error(StatusCode::NOT_FOUND, "workflow not found").into_response();
+    let workflow = match state.db.get_workflow(tenant.community(), workflow_id).await {
+        Ok(workflow) => workflow,
+        Err(buzz_db::error::DbError::NotFound(_)) => return Err(not_found()),
+        Err(other) => {
+            return Err(
+                internal_error(&format!("get workflow for run read: {other}")).into_response(),
+            )
+        }
+    };
+    let channel_id = workflow.channel_id.ok_or_else(not_found)?;
     let accessible = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
@@ -122,7 +122,7 @@ async fn authorize_workflow_read(
             internal_error(&format!("workflow channel access lookup: {error}")).into_response()
         })?;
     if !accessible.contains(&channel_id) {
-        return Err(api_error(StatusCode::FORBIDDEN, "workflow is not accessible").into_response());
+        return Err(not_found());
     }
 
     Ok(tenant)
