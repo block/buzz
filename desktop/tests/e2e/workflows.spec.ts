@@ -1104,6 +1104,9 @@ test("workflow list reports a rejected trigger and lets the user retry", async (
   }, workflowId);
   expect(runs).toMatchObject({ runs: [] });
 
+  // Let the original notification expire before checking the retry's feedback.
+  await expect(errorToast).toHaveCount(0);
+
   await page.evaluate(() => {
     if (!window.__BUZZ_E2E__?.mock) throw new Error("mock bridge unavailable");
     delete window.__BUZZ_E2E__.mock.workflowTriggerError;
@@ -1120,8 +1123,7 @@ test("workflow list reports a rejected trigger and lets the user retry", async (
       return (result as { runs: unknown[] }).runs.length;
     })
     .toBe(1);
-  // A successful retry must not emit a second failure notification.
-  await expect(errorToast).toHaveCount(1);
+  await expect(errorToast).toHaveCount(0);
 });
 
 test("missing workflow routes show an unavailable modal with close and retry", async ({
