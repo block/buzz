@@ -1,0 +1,26 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "sh.inference.buzz-pack",
+  "name": "inference.sh",
+  "version": "0.1.0",
+  "description": "An agent with access to AI apps on inference.sh — image generation, video, audio, search, and more.",
+  "author": "inference.sh",
+  "license": "MIT",
+  "homepage": "https://inference.sh",
+  "keywords": ["inference", "image-generation", "video", "audio", "multimodal"],
+  "personas": [
+    "agents/shelly.persona.md"
+  ],
+  "mcp_config": ".mcp.json",
+  "defaults": {
+    "model": "anthropic:claude-sonnet-4-20250514",
+    "temperature": 0.7,
+    "triggers": {
+      "mentions": true,
+      "keywords": [],
+      "all_messages": false
+    },
+    "thread_replies": true,
+    "broadcast_replies": false
+  }
+}
