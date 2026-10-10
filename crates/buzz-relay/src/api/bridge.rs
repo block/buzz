@@ -1118,17 +1118,33 @@ async fn submit_event_authed(
         }
     };
 
+    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
+
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
+    // Typing pulses arrive every few seconds per working agent, so their ban
+    // check uses the same short-TTL cache as their write-restriction check.
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    let nip_oa_owner = match super::relay_members::enforce_relay_membership(
-        state,
-        tenant.community(),
-        &pubkey_bytes,
-        auth_tag,
-        signed_auth_created_at,
-    )
-    .await
-    {
+    let membership = if is_typing {
+        super::relay_members::enforce_relay_membership_ephemeral(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            auth_tag,
+            signed_auth_created_at,
+        )
+        .await
+    } else {
+        super::relay_members::enforce_relay_membership(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            auth_tag,
+            signed_auth_created_at,
+        )
+        .await
+    };
+    let nip_oa_owner = match membership {
         Ok(owner) => owner.or_else(|| {
             if !state.config.require_relay_membership {
                 super::relay_members::extract_nip_oa_owner(
@@ -1151,7 +1167,6 @@ async fn submit_event_authed(
         super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
 
-    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
@@ -1159,7 +1174,7 @@ async fn submit_event_authed(
     };
 
     // Typing indicators are ephemeral: broadcast to the channel, never stored.
-    let result = if kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR {
+    let result = if is_typing {
         let event_id = event.id.to_hex();
         crate::handlers::event::publish_http_typing(state, tenant, event, pubkey)
             .await
@@ -8481,6 +8496,53 @@ pub(crate) mod postgres_tests {
 
         drop(conn);
         fx.drop().await;
+    }
+
+    /// HTTP agents reach `materialize_nip_oa_owner` on every request. Once the
+    /// owner link is confirmed in `observer_owner_cache` the call writes
+    /// nothing: the link is set once and never cleared.
+    /// Mutation: drop the cache short-circuit → the agent row is recreated → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn known_owner_link_skips_materialize_writes() {
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("owner-link-{}.local", uuid::Uuid::new_v4());
+        state.db.ensure_configured_community(&host).await.unwrap();
+        let tenant = crate::tenant::bind_community(&state.db, &host)
+            .await
+            .unwrap();
+        let (owner, agent_key) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let materialize = || {
+            super::super::relay_members::materialize_nip_oa_owner(
+                &state, &tenant, &agent_key, &owner,
+            )
+        };
+        let agent_rows = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM users WHERE community_id = $1 AND pubkey = $2",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(agent_key.to_bytes().as_slice())
+            .fetch_one(state.db.pool())
+            .await
+            .unwrap()
+        };
+
+        assert!(materialize().await, "first call records the link");
+        assert_eq!(agent_rows().await, 1);
+
+        // Remove the row behind the cache's back: a call that still wrote
+        // would recreate it.
+        sqlx::query("DELETE FROM users WHERE community_id = $1 AND pubkey = $2")
+            .bind(tenant.community().as_uuid())
+            .bind(agent_key.to_bytes().as_slice())
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+        assert!(materialize().await, "a known link is still confirmed");
+        assert_eq!(agent_rows().await, 0, "a known link writes nothing");
     }
 
     /// An agent socket admitted with no owner, then linked to its owner by a
