@@ -89,7 +89,9 @@ mod external_infra_live {
 
     async fn closed(mut socket: Socket, since: Instant, label: &str) -> Duration {
         for _ in 0..64 {
-            if let Message::Close(Some(close)) = frame(&mut socket).await {
+            let message = frame(&mut socket).await;
+            if let Message::Close(close) = message {
+                let close = close.unwrap_or_else(|| panic!("{label}: close without policy reason"));
                 assert_eq!(u16::from(close.code), 1008, "{label}: {close:?}");
                 let elapsed = since.elapsed();
                 assert!(elapsed < Duration::from_secs(30), "{label}: {elapsed:?}");
@@ -140,14 +142,19 @@ mod external_infra_live {
                 .execute(&db)
                 .await
                 .unwrap();
-            sqlx::query(
-                "INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'member')",
-            )
-            .bind(community)
-            .bind(key.public_key().to_hex())
-            .execute(&db)
-            .await
-            .unwrap();
+            // Admit the agent through its verified owner on both routes.
+            // Direct root membership bypasses first-use owner materialization;
+            // later audio materialization intentionally revokes that ownerless socket.
+            if key.public_key() != agent.public_key() {
+                sqlx::query(
+                    "INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'member')",
+                )
+                .bind(community)
+                .bind(key.public_key().to_hex())
+                .execute(&db)
+                .await
+                .unwrap();
+            }
             sqlx::query("INSERT INTO channel_members(community_id,channel_id,pubkey,role) VALUES($1,$2,$3,'member')").bind(community).bind(channel).bind(key.public_key().to_bytes().to_vec()).execute(&db).await.unwrap();
         }
         let root_member = open(&base, &host, None, &member, None).await;
@@ -155,6 +162,8 @@ mod external_infra_live {
         let audio_member = open(&base, &host, Some(channel), &member, None).await;
         let audio_agent = open(&base, &host, Some(channel), &agent, Some(&owner)).await;
         let mut control = open(&base, &host, None, &bystander, None).await;
+        // Keep the huddle active while its restricted participants leave.
+        let audio_control = open(&base, &host, Some(channel), &bystander, None).await;
         // No moderation event or pub/sub operation: only authoritative DB commits.
         let since = Instant::now();
         for key in [&member, &owner] {
@@ -181,7 +190,6 @@ mod external_infra_live {
         }
         assert!(pong, "clear bystander responds within the frame bound");
         println!("clear bystander remains responsive after durable bans");
-        let audio_control = open(&base, &host, Some(channel), &bystander, None).await;
         // This test owns a disposable database. Restore the schema even on failure.
         sqlx::query("ALTER TABLE community_bans RENAME TO live_unavailable_bans")
             .execute(&db)
