@@ -28,12 +28,32 @@ use nostr::PublicKey;
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
+/// Parse a pubkey supplied on the command line, rejecting keys that are not
+/// points on the secp256k1 curve.
+///
+/// `PublicKey::from_hex` only hex-decodes 32 bytes, so an x-coordinate with no
+/// corresponding curve point (e.g. `00…05`) parses successfully and only fails
+/// later, inside NIP-44 ECDH. Validating here keeps that failure a `Usage`
+/// error naming the bad flag instead of an error surfaced from deep in the
+/// engram layer. Same shape as `buzz_core::private_managed_agent`'s
+/// `parse_canonical_pubkey`, which curve-checks with `xonly()` for the same
+/// reason.
+fn parse_pubkey_flag(flag: &str, value: &str) -> Result<PublicKey, CliError> {
+    let key = PublicKey::from_hex(value)
+        .map_err(|e| CliError::Usage(format!("{flag} must be a 64-hex pubkey: {e}")))?;
+    key.xonly().map_err(|e| {
+        CliError::Usage(format!(
+            "{flag} is not a point on the secp256k1 curve: {value} ({e})"
+        ))
+    })?;
+    Ok(key)
+}
+
 /// Resolve the agent's owner pubkey: explicit `--owner` flag wins, otherwise
 /// fall back to the NIP-OA `auth_tag` (which carries owner pubkey in slot 1).
 fn resolve_owner(client: &BuzzClient, owner_flag: Option<&str>) -> Result<PublicKey, CliError> {
     if let Some(s) = owner_flag {
-        return PublicKey::from_hex(s)
-            .map_err(|e| CliError::Usage(format!("--owner must be a 64-hex pubkey: {e}")));
+        return parse_pubkey_flag("--owner", s);
     }
     let tag = client.auth_tag_owner_hex().ok_or_else(|| {
         CliError::Usage(
@@ -41,8 +61,16 @@ fn resolve_owner(client: &BuzzClient, owner_flag: Option<&str>) -> Result<Public
                 .into(),
         )
     })?;
-    PublicKey::from_hex(&tag)
-        .map_err(|e| CliError::Other(format!("auth_tag owner pubkey is not valid hex: {e}")))
+    let owner = PublicKey::from_hex(&tag)
+        .map_err(|e| CliError::Other(format!("auth_tag owner pubkey is not valid hex: {e}")))?;
+    // An auth_tag is attacker-influenced input too: hex-valid but off-curve
+    // owner keys must not reach ECDH.
+    owner.xonly().map_err(|e| {
+        CliError::Other(format!(
+            "auth_tag owner pubkey is not a point on the secp256k1 curve: {tag} ({e})"
+        ))
+    })?;
+    Ok(owner)
 }
 
 /// Resolve the read perspective for `mem ls/get/hash`.
@@ -62,8 +90,7 @@ fn resolve_reader(
                 "--owner and --agent are mutually exclusive for read commands".into(),
             ));
         }
-        let agent = PublicKey::from_hex(agent)
-            .map_err(|e| CliError::Usage(format!("--agent must be a 64-hex pubkey: {e}")))?;
+        let agent = parse_pubkey_flag("--agent", agent)?;
         if agent == client.keys().public_key() {
             return Err(CliError::Usage(
                 "--agent must differ from the CLI identity; omit --agent for agent-side reads"
@@ -144,7 +171,8 @@ async fn fetch_head(
     } else {
         agent
     };
-    let k_c = conversation_key(client.keys().secret_key(), their_pubkey);
+    let k_c = conversation_key(client.keys().secret_key(), their_pubkey)
+        .map_err(|e| CliError::Usage(e.to_string()))?;
     let d = d_tag(&k_c, slug);
 
     let filter = serde_json::json!({
@@ -391,6 +419,13 @@ fn sha256_hex(s: &str) -> String {
 /// the hunk — at which point regenerating the patch is the correct response,
 /// not silently landing the change at a different position.
 ///
+/// **Scope: the preimage only.** `Line::Insert` is filtered out below, so the
+/// replacement text is never examined. A patch whose context and deletions
+/// quote the current value exactly, but whose insertions are unrelated
+/// content, satisfies this function. It is a positional-integrity check on
+/// what is being replaced, not an authenticity check on what replaces it —
+/// see `tests::strict_position_authenticates_preimage_only_not_postimage`.
+///
 /// Returns `Ok(())` on a clean match, `Err(message)` otherwise.
 ///
 /// Line-number convention: unified-diff `@@ -N,M @@` uses 1-based line
@@ -526,14 +561,30 @@ pub async fn cmd_hash(
 /// content fuzz; diffy will refuse a hunk whose context lines don't match
 /// the file verbatim), and writes the result.
 ///
-/// Safety properties:
+/// Safety properties — all of them about the value being *replaced*:
 /// - `--base-hash <hex>` is **required** unless `--no-base-hash` is passed.
-///   This makes concurrent edits safe: if the slug has changed since the
-///   patch was generated, the write is refused.
+///   It proves the slug still holds the value the patch was generated
+///   against: if another writer moved the head first, the write is refused
+///   with `Conflict` (exit 5).
+/// - Hunk context and deletions must match the current value verbatim at the
+///   declared line numbers (see [`verify_hunks_at_declared_position`]).
 /// - The result is rejected if it would be empty, unless `--allow-empty`.
 /// - `--dry-run` prints the post-application diff and exits without writing.
 /// - On a successful write, the new sha256 is printed to stderr so callers
 ///   can chain edits.
+///
+/// **What these checks do NOT do.** They authenticate the *preimage* only.
+/// `verify_hunks_at_declared_position` filters `Line::Insert` out before
+/// comparing, and `--base-hash` hashes the pre-edit value — so a patch whose
+/// context and `-` lines quote the real current value while its `+` lines
+/// carry content from somewhere else entirely passes every check here and is
+/// written. Pinned by
+/// `tests::strict_position_authenticates_preimage_only_not_postimage`.
+///
+/// To gain confidence in the *postimage*, the caller must inspect the bytes
+/// being written: `--dry-run` reports the sha256 that would be published, and
+/// re-reading the slug after the write and diffing it against the intended
+/// content is the only check that inspects what actually landed.
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_patch(
     client: &BuzzClient,
@@ -1041,5 +1092,301 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+
+    /// Pins the *limit* of `mem patch`'s safety, which the docs must not
+    /// overstate: the strict-position check reads only `Context` and `Delete`
+    /// lines (it filters `Insert` out), so it authenticates the **preimage**
+    /// side of the edit and says nothing about the postimage.
+    ///
+    /// Consequence: a patch that quotes the real current value in its context
+    /// and deletions, but whose `+` lines are content from somewhere else
+    /// entirely, is **accepted**. `--base-hash` does not change this — it
+    /// hashes the pre-edit value, which such a patch matches exactly. The
+    /// only defence is checking the postimage, e.g. re-reading the slug after
+    /// the write and diffing it against the bytes you meant to publish.
+    ///
+    /// Positive control included: corrupting the *preimage* side of the same
+    /// patch is refused, proving the check runs at all rather than being a
+    /// no-op that accepts everything.
+    #[test]
+    fn strict_position_authenticates_preimage_only_not_postimage() {
+        let current = "mine: alpha\nmine: beta\n";
+
+        // Real preimage (context + deletion quote the current value exactly),
+        // foreign postimage (the `+` line is another agent's content).
+        let foreign_postimage = "\
+--- a/x
++++ b/x
+@@ -1,2 +1,2 @@
+ mine: alpha
+-mine: beta
++SOMEONE ELSE'S MEMORY
+";
+        let patch = diffy::Patch::from_str(foreign_postimage).unwrap();
+        verify_hunks_at_declared_position(current, &patch)
+            .expect("preimage-side check accepts a foreign postimage — this is the known limit");
+
+        // And it really does apply, producing content the operator never wrote.
+        assert_eq!(
+            diffy::apply(current, &patch).unwrap(),
+            "mine: alpha\nSOMEONE ELSE'S MEMORY\n"
+        );
+
+        // `--base-hash` cannot catch it either: the gate compares against the
+        // *pre-edit* value, which this patch's preimage matches verbatim.
+        // (`cmd_patch` compares `sha256_hex(&current)` to the flag.)
+        assert_eq!(
+            sha256_hex(current),
+            sha256_hex("mine: alpha\nmine: beta\n"),
+            "base-hash is computed over the preimage, which the patch matches"
+        );
+
+        // Positive control: corrupt the preimage side and the same check
+        // refuses. Only the `-` line differs from the accepted patch above.
+        let foreign_preimage = "\
+--- a/x
++++ b/x
+@@ -1,2 +1,2 @@
+ mine: alpha
+-SOMEONE ELSE'S MEMORY
++mine: gamma
+";
+        let patch = diffy::Patch::from_str(foreign_preimage).unwrap();
+        assert!(
+            verify_hunks_at_declared_position(current, &patch).is_err(),
+            "preimage-side corruption must be refused"
+        );
+    }
+
+    // ── Off-curve pubkey handling ─────────────────────────────────────────
+    //
+    // `PublicKey::from_hex` only hex-decodes 32 bytes, so a hex-valid
+    // x-coordinate with no curve point (here `00…05`) used to travel all the
+    // way into NIP-44 ECDH and abort the process. Every `buzz mem` subcommand
+    // that took such a key from `--agent`/`--owner` exited 101 with
+    // `valid keys produce conversation key: Key(Secp256k1(InvalidPublicKey))`.
+    // These tests pin the replacement behaviour: a `Usage` error (exit 1) that
+    // names the offending flag and key.
+
+    /// An x-coordinate with no corresponding curve point. `x = 5` has no
+    /// square root of `x³ + 7` mod p; `x = 1` does, which is why the two make
+    /// a discriminating pair (see `conversation_key_rejects_off_curve_pubkey`
+    /// in buzz-core).
+    fn off_curve_hex() -> String {
+        format!("{:0>64}", 5)
+    }
+
+    /// Same length, same alphabet, but a real curve point — the positive
+    /// control for every off-curve assertion below.
+    fn on_curve_hex() -> String {
+        format!("{:0>64}", 1)
+    }
+
+    #[test]
+    fn parse_pubkey_flag_rejects_off_curve_but_accepts_on_curve() {
+        // Positive control first: an always-Err guard would pass the negative
+        // assertion alone.
+        parse_pubkey_flag("--owner", &on_curve_hex()).expect("x=1 is a curve point");
+
+        let err = parse_pubkey_flag("--owner", &off_curve_hex()).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("--owner"), "must name the flag: {msg}");
+        assert!(msg.contains(&off_curve_hex()), "must name the key: {msg}");
+        assert!(
+            msg.contains("secp256k1 curve"),
+            "must say why it was refused: {msg}"
+        );
+        assert_eq!(crate::error::exit_code(&err), 1, "usage errors exit 1");
+    }
+
+    #[test]
+    fn resolve_reader_rejects_off_curve_agent_flag() {
+        let client = test_client(nostr::Keys::generate());
+
+        // Positive control: a real agent pubkey resolves.
+        let other = nostr::Keys::generate();
+        resolve_reader(&client, None, Some(&other.public_key().to_hex())).unwrap();
+
+        let err = resolve_reader(&client, None, Some(&off_curve_hex())).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "got: {err:?}");
+        assert!(err.to_string().contains("--agent"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_owner_rejects_off_curve_owner_flag() {
+        let client = test_client(nostr::Keys::generate());
+
+        let owner = nostr::Keys::generate();
+        resolve_owner(&client, Some(&owner.public_key().to_hex())).unwrap();
+
+        let err = resolve_owner(&client, Some(&off_curve_hex())).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "got: {err:?}");
+        assert!(err.to_string().contains("--owner"), "got: {err}");
+    }
+
+    /// The owner pubkey can also arrive from `BUZZ_AUTH_TAG` rather than a
+    /// flag. That slot is attacker-influenced too, so it gets the same
+    /// curve check — surfaced as `Other` (exit 4) because a bad auth tag is
+    /// an environment defect, not a mistyped argument.
+    #[test]
+    fn resolve_owner_rejects_off_curve_auth_tag_owner() {
+        fn client_with_auth_tag(owner_hex: &str) -> BuzzClient {
+            let tag =
+                nostr::Tag::parse(["auth", owner_hex, "conditions", &"b".repeat(128)]).unwrap();
+            BuzzClient::new(
+                "http://127.0.0.1:9".into(),
+                nostr::Keys::generate(),
+                Some(tag),
+                None,
+            )
+            .unwrap()
+        }
+
+        // Positive control: a real pubkey in the same slot resolves.
+        let real = nostr::Keys::generate().public_key().to_hex();
+        let owner = resolve_owner(&client_with_auth_tag(&real), None).unwrap();
+        assert_eq!(owner.to_hex(), real);
+
+        let err = resolve_owner(&client_with_auth_tag(&off_curve_hex()), None).unwrap_err();
+        assert!(matches!(err, CliError::Other(_)), "got: {err:?}");
+        assert!(err.to_string().contains("secp256k1 curve"), "got: {err}");
+    }
+
+    /// Spin up a relay stub that answers `POST /query` with an empty event
+    /// array, so read commands can reach their "no head" branch without
+    /// network flakiness. Only `/query` is served: any command that tried to
+    /// *write* would 404 rather than silently pass.
+    async fn empty_query_relay() -> String {
+        use axum::body::Body;
+        use axum::http::{Response, StatusCode};
+        use axum::Router;
+
+        let app = Router::new().route(
+            "/query",
+            axum::routing::post(|| async {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from("[]"))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// Which subcommand to drive, and through which flag the pubkey arrives.
+    #[derive(Copy, Clone, Debug)]
+    enum Sub {
+        Get,
+        Hash,
+        Ls,
+        Set,
+        Rm,
+        Patch,
+    }
+
+    /// Drive one subcommand with `pubkey` supplied via `--owner` (or
+    /// `--agent` when `via_agent_flag`). Everything else is fixed.
+    async fn run_sub(
+        sub: Sub,
+        via_agent_flag: bool,
+        pubkey: &str,
+        relay_url: &str,
+        patch_path: &str,
+    ) -> Result<(), CliError> {
+        let client =
+            BuzzClient::new(relay_url.to_string(), nostr::Keys::generate(), None, None).unwrap();
+        let (owner, agent) = if via_agent_flag {
+            (None, Some(pubkey))
+        } else {
+            (Some(pubkey), None)
+        };
+        match sub {
+            Sub::Get => cmd_get(&client, "mem/x", owner, agent).await,
+            Sub::Hash => cmd_hash(&client, "mem/x", owner, agent).await,
+            Sub::Ls => cmd_ls(&client, owner, agent, true).await,
+            Sub::Set => cmd_set(&client, "mem/x", "value", owner, false).await,
+            Sub::Rm => cmd_rm(&client, "mem/x", owner).await,
+            // no_base_hash + dry_run: the base-hash gate and the write are
+            // orthogonal to key validation, and both need a head that the
+            // stub relay does not have.
+            Sub::Patch => {
+                cmd_patch(
+                    &client,
+                    "mem/x",
+                    Some(patch_path),
+                    None,
+                    true,
+                    true,
+                    false,
+                    owner,
+                )
+                .await
+            }
+        }
+    }
+
+    /// End-to-end over every subcommand that used to abort the process.
+    ///
+    /// The panic surface was wider than `--agent`: `get`/`hash`/`set`/`rm`
+    /// with `--owner` aborted too (measured at `a2d8be5e`). `ls` and `patch`
+    /// already failed cleanly, and are included so a future refactor cannot
+    /// regress them.
+    ///
+    /// Each command runs twice: once with a real curve point (must NOT be a
+    /// `Usage` error — the positive control proving the guard is not simply
+    /// refusing every key) and once with the off-curve key (must be `Usage`,
+    /// exit 1, never a panic).
+    #[tokio::test]
+    async fn off_curve_flags_are_usage_errors_across_mem_subcommands() {
+        let url = empty_query_relay().await;
+
+        // A patch file keeps `mem patch` off stdin.
+        let dir = tempfile::tempdir().unwrap();
+        let patch_path = dir.path().join("p.diff");
+        std::fs::write(&patch_path, "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n").unwrap();
+        let patch_path = patch_path.to_str().unwrap().to_string();
+
+        for (sub, via_agent_flag) in [
+            (Sub::Get, false),
+            (Sub::Get, true),
+            (Sub::Hash, false),
+            (Sub::Hash, true),
+            (Sub::Ls, false),
+            (Sub::Ls, true),
+            (Sub::Set, false),
+            (Sub::Rm, false),
+            (Sub::Patch, false),
+        ] {
+            let flag = if via_agent_flag { "--agent" } else { "--owner" };
+
+            // Positive control: a real key must get past key validation. It
+            // may still fail later (no head on the stub relay, which serves
+            // no write route) — it must not fail as a *usage* error.
+            let real = nostr::Keys::generate().public_key().to_hex();
+            let ok = run_sub(sub, via_agent_flag, &real, &url, &patch_path).await;
+            assert!(
+                !matches!(ok, Err(CliError::Usage(_))),
+                "{sub:?} {flag} with a real pubkey must not be a usage error: {ok:?}"
+            );
+
+            let err = run_sub(sub, via_agent_flag, &off_curve_hex(), &url, &patch_path)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, CliError::Usage(_)),
+                "{sub:?} {flag}: expected Usage, got {err:?}"
+            );
+            assert_eq!(
+                crate::error::exit_code(&err),
+                1,
+                "{sub:?} {flag} must exit 1"
+            );
+        }
     }
 }
