@@ -618,6 +618,13 @@ fn inert_env_vars<'a>(names: &[&'a str], lookup: impl Fn(&str) -> Option<String>
         .collect()
 }
 
+/// True when `BUZZ_RELAY_URL` (the agent-side name) is set but `RELAY_URL`,
+/// the variable the relay reads, is not. `lookup` is injected like
+/// `inert_env_vars`'s, so the predicate tests don't touch process env.
+fn relay_url_env_misnamed(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    lookup("BUZZ_RELAY_URL").is_some() && lookup("RELAY_URL").is_none()
+}
+
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -705,6 +712,14 @@ impl Config {
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+
+        if relay_url_env_misnamed(|n| std::env::var(n).ok()) {
+            warn!(
+                "BUZZ_RELAY_URL is set but the relay reads RELAY_URL; relay_url falls back \
+                 to ws://localhost:3000 and requests for any other host will 404. Set \
+                 RELAY_URL (BUZZ_RELAY_URL is the agent-side name)."
+            );
+        }
 
         let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
             .ok()
@@ -1560,6 +1575,83 @@ mod tests {
         assert!(found.is_empty(), "unrelated vars must not warn: {found:?}");
     }
 
+    /// The case the issue reports: an operator sets `BUZZ_RELAY_URL` and never
+    /// touches `RELAY_URL`.
+    #[test]
+    fn relay_url_env_misnamed_when_only_buzz_prefixed_is_set() {
+        assert!(relay_url_env_misnamed(env_of(&[(
+            "BUZZ_RELAY_URL",
+            "wss://relay.example.test"
+        )])));
+    }
+
+    /// Both set is not the misnamed case — `RELAY_URL` wins at the read site,
+    /// so there is nothing to warn about.
+    #[test]
+    fn relay_url_env_misnamed_false_when_both_are_set() {
+        assert!(!relay_url_env_misnamed(env_of(&[
+            ("BUZZ_RELAY_URL", "wss://relay.example.test"),
+            ("RELAY_URL", "wss://relay.example.test"),
+        ])));
+    }
+
+    /// The correct configuration must stay quiet.
+    #[test]
+    fn relay_url_env_misnamed_false_when_only_relay_url_is_set() {
+        assert!(!relay_url_env_misnamed(env_of(&[(
+            "RELAY_URL",
+            "wss://relay.example.test"
+        )])));
+    }
+
+    /// Neither set: defaults apply, nothing was misnamed.
+    #[test]
+    fn relay_url_env_misnamed_false_when_neither_is_set() {
+        assert!(!relay_url_env_misnamed(env_of(&[])));
+    }
+
+    /// Binds the regression to `Config::from_env()` itself, not just to the
+    /// pure predicate: with `BUZZ_RELAY_URL` set and `RELAY_URL` unset, the
+    /// real startup path must log exactly one WARN naming both variables.
+    #[test]
+    fn relay_url_env_misnamed_warns_on_the_real_config_from_env_path() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let (config, captured) = config_with_relay_url_env_capturing_logs(&[
+            ("BUZZ_RELAY_URL", Some("wss://relay.example.test")),
+            ("RELAY_URL", None),
+        ]);
+        assert!(config.is_ok(), "config must still load: {config:?}");
+
+        let matching_warns = captured
+            .lines()
+            .filter(|line| {
+                line.contains("WARN")
+                    && line.contains("BUZZ_RELAY_URL is set")
+                    && line.contains("the relay reads RELAY_URL")
+            })
+            .count();
+        assert_eq!(
+            matching_warns, 1,
+            "expected exactly one WARN naming BUZZ_RELAY_URL and RELAY_URL: {captured:?}"
+        );
+    }
+
+    /// Negative case on the same real path: `RELAY_URL` set must stay quiet,
+    /// even with `BUZZ_RELAY_URL` unset.
+    #[test]
+    fn relay_url_env_misnamed_stays_quiet_on_the_real_config_from_env_path() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let (config, captured) = config_with_relay_url_env_capturing_logs(&[
+            ("BUZZ_RELAY_URL", None),
+            ("RELAY_URL", Some("wss://relay.example.test")),
+        ]);
+        assert!(config.is_ok(), "config must still load: {config:?}");
+        assert!(
+            !captured.contains("BUZZ_RELAY_URL is set but"),
+            "must not warn when RELAY_URL is set: {captured:?}"
+        );
+    }
+
     #[test]
     fn defaults_are_valid() {
         let _guards = env_guards();
@@ -1708,6 +1800,74 @@ mod tests {
             None => std::env::remove_var("BUZZ_OPERATOR_LISTENERS"),
         }
         result
+    }
+
+    /// Like `config_with_admin_env_capturing_logs`, but drives the real
+    /// `Config::from_env()` path with `BUZZ_RELAY_URL`/`RELAY_URL` forced to
+    /// `values`, so the regression test below is bound to production code
+    /// (not just to the pure `relay_url_env_misnamed` predicate).
+    fn config_with_relay_url_env_capturing_logs(
+        values: &[(&str, Option<&str>)],
+    ) -> (Result<Config, ConfigError>, String) {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct CapturingMakeWriter {
+            buf: Arc<Mutex<Vec<u8>>>,
+        }
+        struct CapturingWriter {
+            buf: Arc<Mutex<Vec<u8>>>,
+        }
+        impl std::io::Write for CapturingWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.buf.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingMakeWriter {
+            type Writer = CapturingWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturingWriter {
+                    buf: Arc::clone(&self.buf),
+                }
+            }
+        }
+
+        const KEYS: [&str; 2] = ["BUZZ_RELAY_URL", "RELAY_URL"];
+        let previous: Vec<_> = KEYS
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+        for (key, value) in values {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CapturingMakeWriter {
+                buf: Arc::clone(&buf),
+            })
+            .with_ansi(false)
+            .finish();
+        let config = tracing::subscriber::with_default(subscriber, Config::from_env);
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap_or_default();
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        (config, captured)
     }
 
     /// Assert `captured` contains a WARN naming the removal of `BUZZ_ADMIN_TOKEN`
