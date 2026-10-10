@@ -1402,4 +1402,98 @@ mod postgres_tests {
             "expected InvalidInput, got {err:?}"
         );
     }
+
+    /// A workflow reply to a parent the owner cannot use, in another channel
+    /// or unreadable to them, fails exactly like a reply to a missing parent.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_reply_to_unusable_parent_matches_missing() {
+        let state = test_state().await;
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let stranger = nostr::Keys::generate();
+        let host = format!("wf-unusable-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let open_channel = |name: &'static str| {
+            let state = Arc::clone(&state);
+            let owner = owner.public_key().to_bytes();
+            async move {
+                state
+                    .db
+                    .create_channel(
+                        community,
+                        name,
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        &owner,
+                        None,
+                    )
+                    .await
+                    .expect("create channel")
+            }
+        };
+        let channel = open_channel("wf-unusable").await;
+        let elsewhere = open_channel("wf-elsewhere").await;
+        let insert = |keys: &nostr::Keys, kind: u32, channel_id: Uuid| {
+            let state = Arc::clone(&state);
+            let event = EventBuilder::new(Kind::from(kind as u16), "parent")
+                .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+                .sign_with_keys(keys)
+                .expect("sign parent");
+            async move {
+                state
+                    .db
+                    .insert_event(community, &event, Some(channel_id))
+                    .await
+                    .expect("insert parent");
+                event.id.to_hex()
+            }
+        };
+        let other_channel = insert(&owner, KIND_STREAM_MESSAGE, elsewhere.id).await;
+        let unreadable = insert(&stranger, buzz_core::kind::KIND_EVENT_REMINDER, channel.id).await;
+        let readable = insert(&owner, KIND_STREAM_MESSAGE, channel.id).await;
+
+        let sink = RelayActionSink::new(&state);
+        let reply = |parent: String| {
+            let sink = &sink;
+            let channel = channel.id.to_string();
+            let owner_hex = owner_hex.clone();
+            async move {
+                sink.send_message(
+                    community,
+                    &channel,
+                    "reply",
+                    "reply",
+                    &owner_hex,
+                    Some(&parent),
+                )
+                .await
+            }
+        };
+        let missing = nostr::Keys::generate().public_key().to_hex();
+        for (case, parent) in [
+            ("missing", missing),
+            ("other channel", other_channel),
+            ("unreadable", unreadable),
+        ] {
+            match reply(parent).await {
+                Err(ActionSinkError::InvalidInput(msg)) => {
+                    assert_eq!(msg, "reply parent not found", "{case}")
+                }
+                other => panic!("{case}: expected the missing-parent error, got {other:?}"),
+            }
+        }
+
+        // Positive control: the owner replies to a readable parent.
+        reply(readable).await.expect("reply to a readable parent");
+    }
 }
