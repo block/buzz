@@ -1,7 +1,18 @@
 use super::{
-    pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+    pairing_connection_error, pairing_relay_from_nip11, probe_pairing_relay,
+    resolve_pairing_relay_url, PairingEndpointSource, PairingRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::tungstenite::{http::Response, Error as WebSocketError};
+
+fn websocket_http_error(status: u16) -> WebSocketError {
+    WebSocketError::Http(Box::new(
+        Response::builder()
+            .status(status)
+            .body(None)
+            .expect("build test HTTP response"),
+    ))
+}
 
 #[tokio::test]
 async fn live_nip11_probe_discovers_configured_pairing_relay() {
@@ -101,4 +112,55 @@ fn main_relay_pairing_uses_main_relay_url() {
     .expect("resolve main pairing relay");
 
     assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
+}
+
+#[test]
+fn legacy_pairing_404_explains_the_missing_pairing_service() {
+    let error = websocket_http_error(404);
+    let message = pairing_connection_error(
+        "wss://relay.example.com/pair?token=do-not-display#fragment",
+        PairingEndpointSource::LegacyPath,
+        &error,
+    );
+
+    assert_eq!(
+        message,
+        "Pairing endpoint wss://relay.example.com/pair returned 404. This relay advertises \
+         NIP-43 without a pairing_relay_url, but nothing serves /pair. Set \
+         BUZZ_PAIRING_RELAY_URL or route /pair to buzz-pair-relay, then try again."
+    );
+    assert!(!message.contains("do-not-display"));
+}
+
+#[test]
+fn configured_pairing_error_names_configured_endpoint_and_remedy() {
+    let error = websocket_http_error(404);
+    let message = pairing_connection_error(
+        "wss://pairing.example.com/connect?token=do-not-display#fragment",
+        PairingEndpointSource::Configured,
+        &error,
+    );
+
+    assert_eq!(
+        message,
+        "Connection to configured pairing endpoint wss://pairing.example.com/connect failed: \
+         HTTP error: 404 Not Found. Check the relay's pairing_relay_url and that the pairing \
+         service is reachable, then try again."
+    );
+    assert!(!message.contains("do-not-display"));
+    assert!(!message.contains("route /pair"));
+}
+
+#[test]
+fn main_relay_pairing_404_keeps_the_generic_connection_error() {
+    let error = websocket_http_error(404);
+
+    assert_eq!(
+        pairing_connection_error(
+            "wss://pairing.example.com",
+            PairingEndpointSource::MainRelay,
+            &error,
+        ),
+        "WebSocket connection failed: HTTP error: 404 Not Found"
+    );
 }
