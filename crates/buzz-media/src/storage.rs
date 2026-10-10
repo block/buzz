@@ -970,6 +970,69 @@ mod tests {
         }
     }
 
+    /// Cloudflare R2 rejects a ranged GET whose signature covers
+    /// `content-length`/`content-type` (403 SignatureDoesNotMatch, surfaced as a
+    /// 500 from `/media`). MinIO accepts those headers, so only inspecting the
+    /// request on the wire catches a client that sends them.
+    #[tokio::test]
+    async fn get_range_does_not_send_or_sign_body_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read request");
+                assert_ne!(read, 0, "client closed before sending headers");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/10\r\n\
+                      Content-Length: 4\r\nConnection: close\r\n\r\nbuzz",
+                )
+                .await
+                .expect("write response");
+            String::from_utf8(request).expect("request head is UTF-8")
+        });
+
+        let mut config = storage_config("buzz_dev", "buzz_dev_secret");
+        config.s3_endpoint = format!("http://{addr}");
+        let storage = MediaStorage::new(&config).expect("static client");
+        let bytes = storage
+            .get_range("blob", 0, 3)
+            .await
+            .expect("ranged read succeeds");
+        assert_eq!(bytes, b"buzz");
+
+        let request = server.await.expect("server task");
+        let headers: HashMap<String, String> = request
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        assert_eq!(headers.get("range").map(String::as_str), Some("bytes=0-3"));
+        assert!(!headers.contains_key("content-length"), "{request}");
+        assert!(!headers.contains_key("content-type"), "{request}");
+
+        let authorization = headers.get("authorization").expect("signed request");
+        let signed: Vec<&str> = authorization
+            .split_once("SignedHeaders=")
+            .and_then(|(_, rest)| rest.split(',').next())
+            .expect("SignedHeaders in Authorization")
+            .split(';')
+            .collect();
+        assert!(signed.contains(&"range"), "{authorization}");
+        assert!(!signed.contains(&"content-length"), "{authorization}");
+        assert!(!signed.contains(&"content-type"), "{authorization}");
+    }
+
     /// Static keys present: builds a client without touching the AWS
     /// credential chain (no env/metadata access), and the signing region
     /// comes from config rather than a hardcoded "us-east-1".
