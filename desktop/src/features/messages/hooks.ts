@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 import {
   type QueryClient,
   useMutation,
@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { sendStatus } from "@/shared/lib/sendStatus";
 
 import {
   channelMessagesKey,
@@ -513,13 +514,102 @@ export function useChannelSubscription(channel: Channel | null) {
   }, [channelId, channelType]);
 }
 
+// ── send robustness (web / slow remote signer) ──────────────────────────────────────────────────────────────────────────────
+// Hard cap: a send either resolves or fails visibly. A failed row is KEPT ("Failed — Retry") instead of rolled back; Retry re-runs the
+// send and the signer layer reuses the already-signed event, so it can never double-sign or double-post. Desktop is unchanged
+// (sendStatus.keepFailedRows() is false there).
+type SendVars = {
+  channelId?: string;
+  targetChannel?: Channel;
+  content: string;
+  mentionPubkeys?: string[];
+  parentEventId?: string | null;
+  mediaTags?: string[][];
+  forceRest?: boolean;
+  sentFromThreadRootId?: string | null;
+  sentFromThreadRootExcerpt?: string | null;
+  transport?: "auto" | "http";
+};
+const SEND_HARD_TIMEOUT_MS = 35_000;
+const lateSuccess = new WeakMap<object, (message: RelayEvent) => void>();
+
+function withSendTimeout(
+  vars: object,
+  run: () => Promise<RelayEvent>,
+): Promise<RelayEvent> {
+  if (!sendStatus.keepFailedRows()) return run();
+  const p = run();
+  return new Promise<RelayEvent>((resolve, reject) => {
+    const t = window.setTimeout(() => {
+      reject(
+        new Error(
+          "Timed out: your signer or the relay did not answer in time.",
+        ),
+      );
+      // The work is still running: if it lands after all, flip the row back to sent.
+      void p.then((m) => lateSuccess.get(vars)?.(m), () => {});
+    }, SEND_HARD_TIMEOUT_MS);
+    p.then(
+      (m) => {
+        window.clearTimeout(t);
+        resolve(m);
+      },
+      (e) => {
+        window.clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+function removeOptimisticRow(
+  queryClient: QueryClient,
+  context: MessageQueryContext,
+) {
+  const windowKey = channelWindowKey(context.channelId);
+  const current =
+    queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+    emptyChannelWindowStore();
+  queryClient.setQueryData(windowKey, {
+    ...current,
+    liveOverlay: current.liveOverlay.filter(
+      (event) => event.id !== context.optimisticId,
+    ),
+  });
+  projectChannelWindowMessages(queryClient, context.channelId);
+}
+
+function applySentMessage(
+  queryClient: QueryClient,
+  context: MessageQueryContext,
+  message: RelayEvent,
+) {
+  const windowKey = channelWindowKey(context.channelId);
+  const current =
+    queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+    emptyChannelWindowStore();
+  const withoutPending: ChannelWindowStore = {
+    ...current,
+    liveOverlay: current.liveOverlay.filter(
+      (event) => event.id !== context.optimisticId,
+    ),
+  };
+  const next = mergeLiveChannelWindowEvent(withoutPending, {
+    ...message,
+    localKey: context.optimisticId,
+  });
+  queryClient.setQueryData(windowKey, next);
+  projectChannelWindowMessages(queryClient, context.channelId);
+}
+
 export function useSendMessageMutation(
   channel: Channel | null,
   identity: Identity | undefined,
 ) {
   const queryClient = useQueryClient();
+  const mutationRef = useRef<{ mutate: (v: SendVars) => void } | null>(null);
 
-  return useMutation<
+  const mutation = useMutation<
     RelayEvent,
     Error,
     {
@@ -536,18 +626,19 @@ export function useSendMessageMutation(
     },
     MessageQueryContext | undefined
   >({
-    mutationFn: async ({
-      channelId: capturedChannelId,
-      targetChannel,
-      content,
-      mentionPubkeys,
-      parentEventId,
-      mediaTags,
-      forceRest,
-      sentFromThreadRootId,
-      sentFromThreadRootExcerpt,
-      transport = "auto",
-    }) => {
+    mutationFn: (vars) => withSendTimeout(vars, async () => {
+      const {
+        channelId: capturedChannelId,
+        targetChannel,
+        content,
+        mentionPubkeys,
+        parentEventId,
+        mediaTags,
+        forceRest,
+        sentFromThreadRootId,
+        sentFromThreadRootExcerpt,
+        transport = "auto",
+      } = vars;
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
       // cannot redirect the message. Legacy callers without either value use
@@ -693,7 +784,7 @@ export function useSendMessageMutation(
         recipientPubkeys,
         [...mentionTags, ...(sentFromThreadTag ? [sentFromThreadTag] : [])],
       );
-    },
+    }),
     onMutate: async ({
       channelId: capturedChannelId,
       targetChannel,
@@ -755,6 +846,7 @@ export function useSendMessageMutation(
       queryClient.setQueryData(windowKey, nextWindow);
       projectChannelWindowMessages(queryClient, effectiveChannel.id);
 
+      sendStatus.begin(optimisticMessage.id);
       return {
         optimisticId: optimisticMessage.id,
         previousMessages,
@@ -763,12 +855,38 @@ export function useSendMessageMutation(
         queryKey,
       };
     },
-    onError: (error, _variables, context) => {
+    onError: (error, variables, context) => {
       // A community timeout surfaces here as the relay's `OK false` reason.
       // Record it so the composer can show the timeout chip and block further
       // sends until it expires; other errors fall through to the caller.
       recordTimeoutFromRejection(error?.message);
       if (!context) {
+        return;
+      }
+      if (sendStatus.keepFailedRows()) {
+        // Keep the optimistic row, marked "Failed — <reason>" with Retry.
+        const id = context.optimisticId;
+        lateSuccess.set(variables, (message) => {
+          lateSuccess.delete(variables);
+          sendStatus.clear(id);
+          applySentMessage(queryClient, context, message);
+          sendStatus.published(message.id);
+        });
+        const discard = () => {
+          lateSuccess.delete(variables);
+          sendStatus.clear(id);
+          removeOptimisticRow(queryClient, context);
+        };
+        const retry = () => {
+          discard();
+          mutationRef.current?.mutate({ ...variables });
+        };
+        sendStatus.fail(
+          id,
+          (error?.message ?? "send failed").slice(0, 140),
+          retry,
+          discard,
+        );
         return;
       }
 
@@ -786,24 +904,13 @@ export function useSendMessageMutation(
         return;
       }
 
-      const windowKey = channelWindowKey(context.channelId);
-      const current =
-        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-        emptyChannelWindowStore();
-      const withoutPending: ChannelWindowStore = {
-        ...current,
-        liveOverlay: current.liveOverlay.filter(
-          (event) => event.id !== context.optimisticId,
-        ),
-      };
-      const next = mergeLiveChannelWindowEvent(withoutPending, {
-        ...message,
-        localKey: context.optimisticId,
-      });
-      queryClient.setQueryData(windowKey, next);
-      projectChannelWindowMessages(queryClient, context.channelId);
+      sendStatus.clear(context.optimisticId);
+      sendStatus.published(message.id);
+      applySentMessage(queryClient, context, message);
     },
   });
+  mutationRef.current = mutation;
+  return mutation;
 }
 
 export function useToggleReactionMutation() {
