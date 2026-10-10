@@ -621,6 +621,7 @@ export function RepositoryFilesPanel({
   profiles,
   fallbackAuthorPubkey,
   onContextChange,
+  onPathChange,
   onOpenCommit,
   sourceControls,
   unavailableMessage,
@@ -634,6 +635,7 @@ export function RepositoryFilesPanel({
   profiles?: UserProfileLookup;
   fallbackAuthorPubkey?: string;
   onContextChange?: (context: RepositoryFilesContext) => void;
+  onPathChange?: (path: string | null) => void;
   onOpenCommit?: (commitHash: string) => void;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
@@ -650,6 +652,7 @@ export function RepositoryFilesPanel({
     files,
     initialPath,
     onContextChange,
+    onPathChange,
     pageSize: REPOSITORY_ENTRY_PAGE_SIZE,
   });
   const entries = React.useMemo(

@@ -6386,6 +6386,14 @@ function buildMockProjectEvents(): RelayEvent[] {
             : roll < 0.85
               ? KIND_GIT_PULL_REQUEST
               : KIND_GIT_ISSUE;
+        const eventId = `f00d${projectIndex
+          .toString(16)
+          .padStart(2, "0")}${dayOffset.toString(16).padStart(4, "0")}${index
+          .toString(16)
+          .padStart(4, "0")}${kind.toString(16).padStart(4, "0")}`.padEnd(
+          64,
+          "0",
+        );
         const tags = [
           ["a", repoAddress],
           ["subject", subject],
@@ -6399,7 +6407,9 @@ function buildMockProjectEvents(): RelayEvent[] {
             : []),
         ];
 
-        events.push(createMockEvent(kind, subject, tags, author, createdAt));
+        events.push(
+          createMockEvent(kind, subject, tags, author, createdAt, eventId),
+        );
       }
     }
   }
