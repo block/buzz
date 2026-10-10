@@ -480,8 +480,8 @@ Every Pod the chart renders — relay, pairing relay, storage accounting, and th
 deletion drain operator job — carries a chart-owned
 `tags.datadoghq.com/version` label derived from the deployed image:
 `image.tag` when set, otherwise `image.digest`, otherwise `Chart.AppVersion`.
-The tag is preferred because it is the readable build name (`sha-<commit>`)
-dashboards already use; promotion tooling writes it together with the digest
+The tag is preferred because it is the readable build name (`sha-<sha7>`, or
+`main-<UTC commit time>-<sha7>` for Kargo-promoted main builds) dashboards use; promotion tooling writes it together with the digest
 that actually pins the image.
 
 ```yaml

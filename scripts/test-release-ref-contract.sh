@@ -52,6 +52,14 @@ fi
 
 grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/release.yml"
 grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/docker.yml"
+# Kargo's buzz-image warehouse selects Lexical over ^main-[0-9]{14}-[0-9a-f]{7}$;
+# a drifted format stops Freight discovery silently, so pin both image legs.
+sortable_main_tag="            type=raw,value=main-{{commit_date 'YYYYMMDDHHmmss'}}-{{sha}},enable=\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+sortable_count="$(grep -Fxc "$sortable_main_tag" "$repo_root/.github/workflows/docker.yml" || true)"
+if [ "$sortable_count" != 2 ]; then
+  echo "docker.yml must publish the sortable main-<UTC>-<sha7> tag on both image legs (found $sortable_count)" >&2
+  exit 1
+fi
 grep -q 'test-release-ref-contract\.sh' "$repo_root/.github/workflows/ci.yml"
 "$repo_root/scripts/test-signed-canary-contract.sh"
 "$repo_root/scripts/test-desktop-release-cache-key.sh"
