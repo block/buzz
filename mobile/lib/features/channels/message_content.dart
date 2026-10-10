@@ -539,10 +539,12 @@ class MessageContent extends HookConsumerWidget {
         }
 
         try {
+          // Prefer the attachment's imeta filename so a prose link label
+          // ("Quarterly report") does not replace the real name and extension.
           await ref.read(openDownloadedFileProvider)(
             url,
             auth.headersFor(url),
-            text,
+            imeta?.filename ?? text,
           );
         } catch (_) {
           if (!context.mounted) return;
