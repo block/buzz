@@ -2578,10 +2578,10 @@ async fn ingest_event_inner(
     // Community moderation commands (9040–9044) are direct, community-global
     // mutations. They are never stored or fanned out as ordinary events; the
     // handler writes the durable audit/enforcement rows after its own capability
-    // authorization. These commands are intentionally routed before the
-    // timeout/write-block gate below so a timed-out admin can lift a timeout.
-    // The handler independently checks the durable ban state before executing
-    // any command, which also covers NIP-98 and missed live disconnects.
+    // authorization. The write-restriction gate above permits only unban and
+    // untimeout commands during an active timeout. The handler independently
+    // checks durable ban state before executing any command, which also covers
+    // NIP-98 and missed live disconnects.
     if buzz_core::kind::is_moderation_command_kind(kind_u32) {
         super::moderation_commands::handle_moderation_command(tenant, state, &event)
             .await
@@ -2757,9 +2757,8 @@ async fn ingest_event_inner(
     }
 
     // Handled directly — these mutate relay_members and do NOT get stored.
-    // The handler enforces the durable community ban itself: the write-path
-    // gate above exempts relay-admin kinds so timed-out admins keep their
-    // administrative capability, which leaves bans to the handler.
+    // The write-restriction gate above rejects banned and timed-out actors
+    // before this handler; the handler also checks durable community-ban state.
     if is_relay_admin_kind(event.kind.as_u16() as u32) {
         crate::handlers::relay_admin::handle_relay_admin_event(tenant, state, &event)
             .await

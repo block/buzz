@@ -347,6 +347,8 @@ jobs:
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
       - name: Start relay
+        env:
+          BUZZ_V1_ENABLED: "true"
         run: |
           chmod +x ./target/ci/buzz-relay
           nohup env \
@@ -545,6 +547,8 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/workflow_sink/)'
       - name: Start relay
+        env:
+          BUZZ_V1_ENABLED: "true"
         run: |
           chmod +x ./target/ci/buzz-relay
           nohup env \
@@ -614,17 +618,25 @@ jobs:
           merge-multiple: true
           path: target/ci
       - name: Start relay
+        env:
+          BUZZ_V1_ENABLED: "true"
         run: |
           chmod +x ./target/ci/buzz-relay ./target/ci/git-credential-nostr
           ./scripts/start-relay-for-tests.sh --no-build
       - name: Relay E2E tests
         run: |
           cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_thread_roots --test e2e_project -- --ignored --nocapture
+          cargo test -p buzz-test-client --test community_ban_routes -- --ignored --nocapture
+          cargo test -p buzz-test-client --test regression_relay_admin_ban_gate -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_departure_wire -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
+          RELAY_HTTP_URL: http://localhost:3000
+          REPRO_RELAY_HTTP: http://localhost:3000
+          REPRO_HOST: localhost:3000
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
       - name: Media read-auth e2e
         # Reads require kind:24242 `t=get` auth, so these binaries are the only

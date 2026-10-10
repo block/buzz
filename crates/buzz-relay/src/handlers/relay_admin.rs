@@ -147,12 +147,12 @@ pub(super) enum RelayAdminError {
     Internal(String),
 }
 
-/// Decide whether a durable restriction state admits a relay-admin command.
+/// Apply the relay-admin handler's local ban check.
 ///
-/// Ban only, deliberately: a timeout is a write-block on *content*, and
-/// `ingest_event` exempts relay-admin kinds from its durable write-path gate
-/// precisely so restricted-but-not-banned admins retain their administrative
-/// capability. Mirrors `moderation_commands::ensure_actor_not_banned`.
+/// `ingest_event` runs the shared write-restriction gate before relay-admin
+/// dispatch, where active timeouts are rejected. This check independently
+/// preserves the handler's durable-ban invariant; passing it does not mean a
+/// timed-out command passed the earlier gate.
 ///
 /// Split out as a pure function so the admission rule itself is unit-testable
 /// without a live relay: the end-to-end HTTP test proves the transport, this
@@ -178,17 +178,14 @@ pub(super) async fn handle_relay_admin_event(
     state: &Arc<AppState>,
     event: &Event,
 ) -> Result<(), RelayAdminError> {
-    // A ban is an admission boundary, not only a WebSocket-auth check. HTTP
-    // NIP-98 requests and already-authenticated sockets reach this handler
-    // without passing through a fresh NIP-42 challenge, and `ingest_event`
-    // exempts relay-admin kinds from its durable write-path gate so a *timed
-    // out* admin can still administer the roster. That exemption is ban-blind,
-    // so the ban must be enforced here or not at all: a banned admin otherwise
-    // keeps mutating `relay_members` — the very table `moderation_authz`
-    // derives moderator capability from — until someone manually deletes the
-    // row. Mirrors `moderation_commands.rs`, which defends the same boundary
-    // for 9040–9044, and holds that file's stated invariant that a direct
-    // command handler rejects a banned actor on every transport.
+    // HTTP NIP-98 requests and already-authenticated sockets reach this handler
+    // without a fresh NIP-42 challenge. The shared write-restriction gate in
+    // `ingest_event` rejects bans and active timeouts before kind dispatch; this
+    // handler repeats the durable-ban check as defense in depth before any
+    // roster mutation. A banned admin must not change `relay_members` — the
+    // table `moderation_authz` derives moderator capability from. This mirrors
+    // `moderation_commands.rs`, which applies the same handler-level ban check
+    // for kinds 9040–9044.
     //
     // This gate wraps execution rather than opening it so no future early
     // return inside the command body can precede it.
@@ -505,11 +502,10 @@ mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    /// The vulnerability this file's ban gate closes: `ingest_event` exempts
-    /// relay-admin kinds 9030–9033 from its durable write-path restriction
-    /// gate, so a **banned** admin could add/remove relay members and change
-    /// the workspace icon over signed NIP-98 `POST /events`. Deleting the
-    /// admission check must fail here, in the default (non-ignored) suite.
+    /// The handler-level ban check protects relay-admin commands that reach it
+    /// after authenticated admission. The shared `ingest_event` restriction
+    /// gate rejects active timeouts before dispatch; this default (non-ignored)
+    /// unit test pins the handler's independent durable-ban check.
     #[test]
     fn banned_actor_is_not_admitted_to_a_relay_admin_command() {
         let banned = buzz_db::moderation::RestrictionState {
@@ -523,18 +519,17 @@ mod postgres_tests {
         );
     }
 
-    /// The counter-invariant, and the reason the ingest exemption exists at
-    /// all: a timeout restricts *content* writes, not administrative
-    /// capability. Widening this gate to timeouts would silently change policy.
+    /// A timeout is not a ban at this handler-local check. The shared ingest
+    /// gate rejects timed-out relay-admin requests before this check runs.
     #[test]
-    fn timed_out_actor_is_still_admitted() {
+    fn timed_out_actor_passes_local_ban_check() {
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
             muted_until: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
         };
         assert!(
             admits_relay_admin_command(&timed_out).is_ok(),
-            "a timed-out admin must still administer the roster"
+            "the local ban check must not classify a timeout as a ban"
         );
     }
 
