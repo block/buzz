@@ -1068,6 +1068,62 @@ test("card click opens the animated trigger inspector, triggers a run, and hides
   ).toHaveCount(0);
 });
 
+test("workflow list reports a rejected trigger and lets the user retry", async ({
+  page,
+}, testInfo) => {
+  const workflowName = "Trigger feedback test";
+  await navigateToWorkflows(page);
+  await createWorkflow(page, workflowName);
+  const card = page
+    .locator('div[data-testid^="workflow-card-"]')
+    .filter({ hasText: workflowName });
+  const workflowId = (await card.getAttribute("data-testid"))?.replace(
+    "workflow-card-",
+    "",
+  );
+  expect(workflowId).toBeTruthy();
+  await page.evaluate(() => {
+    if (!window.__BUZZ_E2E__) throw new Error("mock bridge unavailable");
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.workflowTriggerError = "Relay is unavailable";
+  });
+
+  await card.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Trigger", exact: true }).click();
+  const errorToast = page.locator('[data-sonner-toast][data-type="error"]');
+  await expect(errorToast).toContainText("Couldn’t start workflow");
+  await expect(errorToast).toContainText("Relay is unavailable");
+  await expect(card).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: testInfo.outputPath("trigger-feedback.png") });
+
+  const runs = await page.evaluate(async (id) => {
+    return window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_workflow_runs", {
+      workflowId: id,
+    });
+  }, workflowId);
+  expect(runs).toMatchObject({ runs: [] });
+
+  await page.evaluate(() => {
+    if (!window.__BUZZ_E2E__?.mock) throw new Error("mock bridge unavailable");
+    delete window.__BUZZ_E2E__.mock.workflowTriggerError;
+  });
+  await card.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Trigger", exact: true }).click();
+  await expect
+    .poll(async () => {
+      const result = await page.evaluate(async (id) => {
+        return window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_workflow_runs", {
+          workflowId: id,
+        });
+      }, workflowId);
+      return (result as { runs: unknown[] }).runs.length;
+    })
+    .toBe(1);
+  // A successful retry must not emit a second failure notification.
+  await expect(errorToast).toHaveCount(1);
+});
+
 test("missing workflow routes show an unavailable modal with close and retry", async ({
   page,
 }) => {

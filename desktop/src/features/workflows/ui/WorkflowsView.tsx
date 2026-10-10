@@ -154,6 +154,14 @@ export function WorkflowsView({
 
   const triggerMutation = useMutation({
     mutationFn: (workflowId: string) => triggerWorkflow(workflowId),
+    onError: (error) => {
+      toast.error("Couldn’t start workflow", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The workflow was not started. Try again.",
+      });
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] === "workflow-runs",
