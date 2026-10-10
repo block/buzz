@@ -1253,18 +1253,18 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
     teardown(pool, &schema).await;
 }
 
-/// Tripwire: every Rust-side author-only kind MUST be excluded from
-/// `search_tsv` at the storage layer.
+/// Tripwire: no Rust-side author-only kind is returned by `SearchService`.
 ///
-/// The schema generated column hard-codes the privacy skip-set, while
-/// `AUTHOR_ONLY_KINDS` is a Rust const. If a future author-only kind is added
-/// without the matching schema migration, search would still spend FTS budget on
-/// those private hits before the relay post-filter rejects them. Catch that
-/// drift here by inserting one row per author-only kind and proving only the
-/// public kind:9 control is searchable.
+/// Exclusion comes from two layers: the `search_tsv` skip-set in the schema
+/// (most author-only kinds) and query-time fences in `buzz-search` (kind:44300
+/// instructions versions, which the desired-state `search_tsv` does index).
+/// `AUTHOR_ONLY_KINDS` is a Rust const, so a new author-only kind added
+/// without either layer would spend FTS budget on private hits before the
+/// relay post-filter rejects them. Insert one row per author-only kind and
+/// prove only the public kind:9 control is searchable.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn author_only_kinds_are_storage_level_unsearchable() {
+async fn author_only_kinds_are_unsearchable() {
     let (pool, schema) = setup().await;
 
     let c = mk_community(&pool, "author-only-tripwire.example").await;
@@ -1323,7 +1323,7 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
         assert!(
             !kinds.contains(&(kind as i32)),
             "AUTHOR_ONLY kind:{kind} MUST NOT be searchable — \
-             schema skip-set is missing this kind. AUTHOR_ONLY_KINDS={AUTHOR_ONLY_KINDS:?}, \
+             schema exclusion or query fence is missing this kind. AUTHOR_ONLY_KINDS={AUTHOR_ONLY_KINDS:?}, \
              hits={kinds:?}",
         );
     }
@@ -1354,7 +1354,7 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
 /// storage-layer defense does not apply to them regardless of the schema
 /// CASE. `p_gated_filters_authorized` remains their sole defense by design.
 ///
-/// Companion to `author_only_kinds_are_storage_level_unsearchable`: that test
+/// Companion to `author_only_kinds_are_unsearchable`: that test
 /// covers `AUTHOR_ONLY_KINDS` drift; this one covers `P_GATED_KINDS`
 /// persistent-subset drift. Together they tripwire both Rust-side privacy
 /// constants against the schema literal.

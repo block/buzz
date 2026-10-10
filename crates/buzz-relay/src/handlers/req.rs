@@ -1117,6 +1117,18 @@ fn filter_to_query_params(
         }
     });
 
+    // Push single-value #t tag into SQL as an exact positional tag match, for
+    // the same reason as #p: a per-subject read (NIP-AP kind:44300 `#t:[team]`,
+    // `limit:1`) must not lose its rows to newer events with other `t` values.
+    let t_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::T);
+    let t_tag = filter.generic_tags.get(&t_tag_key).and_then(|values| {
+        if values.len() == 1 {
+            values.iter().next().map(|v| v.to_string())
+        } else {
+            None
+        }
+    });
+
     // Push single-value #d tag into SQL via the d_tag column (NIP-33).
     // Critical for parameterized replaceable lookups (authors + kinds + #d)
     // where many events from the same author would push the target past LIMIT.
@@ -1175,6 +1187,7 @@ fn filter_to_query_params(
         ids,
         e_tags,
         d_tag_values,
+        t_tag,
         ..EventQuery::for_community(community)
     }
 }

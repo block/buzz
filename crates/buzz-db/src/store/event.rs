@@ -89,9 +89,16 @@ pub struct EventQuery {
     /// column is NULL (not NIP-33), so this lets identity lookups match before
     /// SQL `LIMIT`. Rows of other kinds are left to the caller's post-filter.
     pub d_tag_values: Option<Vec<String>>,
-    /// Restrict results to events with an exact custom tag pair.
-    /// Uses JSONB containment against `tags` before SQL `LIMIT`.
+    /// Restrict results to events with an exact custom tag pair: a tag whose
+    /// first element is the name and second the value, checked positionally
+    /// (JSONB containment is only the index prefilter) before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
+    /// Restrict results to events with a `t` tag of this value, checked
+    /// positionally (JSONB containment is only the index prefilter) before
+    /// SQL `LIMIT`, so a per-subject read
+    /// (e.g. a kind:44300 team's current version) is not starved by newer
+    /// events with other `t` values.
+    pub t_tag: Option<String>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -152,6 +159,7 @@ impl EventQuery {
             e_tags: None,
             d_tag_values: None,
             custom_tag: None,
+            t_tag: None,
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -736,9 +744,11 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     }
 
     if let Some((ref name, ref value)) = q.custom_tag {
-        let containment = serde_json::json!([[name, value]]);
-        qb.push(format!(" AND {col_prefix}tags @> "))
-            .push_bind(containment);
+        push_exact_tag_filter(&mut qb, col_prefix, name, value);
+    }
+
+    if let Some(ref t) = q.t_tag {
+        push_exact_tag_filter(&mut qb, col_prefix, "t", t);
     }
 
     if let Some(s) = q.since {
@@ -850,6 +860,30 @@ async fn fetch_with_e_tag_deadline(
     let rows = qb.build().fetch_all(&mut *tx).await?;
     tx.rollback().await?;
     Ok(rows)
+}
+
+/// Match a tag whose first element is `name` and second is `value` (NIP-01).
+///
+/// JSONB containment alone ignores element position and multiplicity:
+/// `[["t","t"]]` is contained in `["t","other"]`, and `[["t","v"]]` in
+/// `["meta","t","v"]`. Over-matching before `LIMIT` lets a non-matching newer
+/// row take the slot, so containment stays only as the GIN-indexed prefilter
+/// and the positional check makes the predicate exact.
+fn push_exact_tag_filter(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    name: &str,
+    value: &str,
+) {
+    qb.push(format!(" AND {col_prefix}tags @> "))
+        .push_bind(serde_json::json!([[name, value]]));
+    qb.push(format!(
+        " AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag WHERE tag->>0 = "
+    ))
+    .push_bind(name.to_owned())
+    .push(" AND tag->>1 = ")
+    .push_bind(value.to_owned())
+    .push(")");
 }
 
 /// e-tag pushdown as one array-bound containment test instead of an N-way

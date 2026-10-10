@@ -21,20 +21,20 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_INSTRUCTIONS_VERSION, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -504,7 +504,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
+        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | KIND_INSTRUCTIONS_VERSION
+        | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
@@ -722,6 +723,9 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_MANAGED_AGENT
             | KIND_PRIVATE_MANAGED_AGENT
             | KIND_TEAM_CATALOG
+            // NIP-AP: instructions versions (44300) belong to no channel; ingest
+            // rejects an `h` tag outright rather than ignoring it.
+            | KIND_INSTRUCTIONS_VERSION
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -1580,21 +1584,29 @@ fn single_bounded_d_tag<'a>(event: &'a Event, label: &str) -> Result<&'a str, St
         ));
     }
     let d = d_tags[0].unwrap_or_default();
-    if d.is_empty() {
-        return Err(format!("{label} `d` tag must not be empty"));
+    validate_team_id_value(d, label, "d")?;
+    Ok(d)
+}
+
+/// The team id grammar (NIP-AP "Team identity"): non-empty, at most 64
+/// characters, no control characters or whitespace. Shared by the kind:30178
+/// `d` tag and the kind:44300 `t` subject tag so the two cannot drift.
+fn validate_team_id_value(value: &str, label: &str, tag: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{label} `{tag}` tag must not be empty"));
     }
-    let char_count = d.chars().count();
+    let char_count = value.chars().count();
     if char_count > 64 {
         return Err(format!(
-            "{label} `d` tag too long ({char_count} chars, max 64)"
+            "{label} `{tag}` tag too long ({char_count} chars, max 64)"
         ));
     }
-    if d.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(format!(
-            "{label} `d` tag must not contain control characters or whitespace"
+            "{label} `{tag}` tag must not contain control characters or whitespace"
         ));
     }
-    Ok(d)
+    Ok(())
 }
 
 /// Validate the envelope of a kind:30175 persona event.
@@ -1637,6 +1649,65 @@ fn validate_team_catalog_envelope(event: &Event) -> Result<(), String> {
     const LABEL: &str = "team-catalog event";
     validate_shared_tag(event, LABEL)?;
     single_bounded_d_tag(event, LABEL)?;
+    Ok(())
+}
+
+/// Largest kind:44300 `content`: NIP-44 v2 ciphertext of a maximal `v1:`
+/// plaintext (NIP-AP "Instructions versions: kind:44300", Content).
+const INSTRUCTIONS_VERSION_MAX_CONTENT_BYTES: usize = 218_548;
+
+/// Validate the envelope of a kind:44300 instructions version.
+///
+/// Exactly one subject tag — `["p", <64-char lowercase hex>]` or
+/// `["t", <team id>]` — counted by first element, so `p`+`t`, two of either,
+/// or a valueless tag all fail. No `h` tag, and non-empty `content` within the
+/// ciphertext bound. The plaintext is opaque here; clients validate it.
+fn validate_instructions_version_envelope(event: &Event) -> Result<(), String> {
+    const LABEL: &str = "instructions version";
+    let mut subjects = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .filter(|parts| matches!(parts.first().map(|name| name.as_str()), Some("p" | "t")));
+    let (Some(subject), None) = (subjects.next(), subjects.next()) else {
+        return Err(format!(
+            "{LABEL} must have exactly one `p` or `t` subject tag"
+        ));
+    };
+    let [name, value] = subject else {
+        return Err(format!(
+            "{LABEL} subject tag must have exactly two elements"
+        ));
+    };
+    if name == "p" {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(format!(
+                "{LABEL} `p` tag must be a 64-char lowercase hex pubkey"
+            ));
+        }
+    } else {
+        validate_team_id_value(value, LABEL, "t")?;
+    }
+    if event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(|name| name.as_str()) == Some("h"))
+    {
+        return Err(format!("{LABEL} must not carry an `h` tag"));
+    }
+    if event.content.is_empty() {
+        return Err(format!("{LABEL} content must not be empty"));
+    }
+    if event.content.len() > INSTRUCTIONS_VERSION_MAX_CONTENT_BYTES {
+        return Err(format!(
+            "{LABEL} content too large ({} bytes, max {INSTRUCTIONS_VERSION_MAX_CONTENT_BYTES})",
+            event.content.len()
+        ));
+    }
     Ok(())
 }
 
@@ -3016,6 +3087,11 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_TEAM_CATALOG {
         validate_team_catalog_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_INSTRUCTIONS_VERSION {
+        validate_instructions_version_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 

@@ -130,6 +130,7 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_EVENT_REMINDER,
     KIND_PUSH_LEASE,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_INSTRUCTIONS_VERSION,
 ];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
@@ -546,6 +547,16 @@ pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 /// See `docs/nips/NIP-AM.md`.
 pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 
+/// NIP-AP: instructions version — one owner-signed save of an agent's or a
+/// team's instructions.
+///
+/// Regular stored event (append-only, never replaced), so a subject's events
+/// are its history. Exactly one subject tag: `p` (agent pubkey) or `t` (team
+/// id); no `h` tag. Content is NIP-44 v2 ciphertext from the owner to itself.
+/// Stored globally; reads are author-only (see [`AUTHOR_ONLY_KINDS`]) and the
+/// kind is never full-text searchable. See `docs/nips/NIP-AP.md`.
+pub const KIND_INSTRUCTIONS_VERSION: u32 = 44300;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -665,6 +676,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MANAGED_AGENT,
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
+    KIND_INSTRUCTIONS_VERSION,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
@@ -898,6 +910,10 @@ const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
 const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
+// Compile-time: KIND_INSTRUCTIONS_VERSION is a regular stored kind.
+const _: () = assert!(!is_ephemeral(KIND_INSTRUCTIONS_VERSION));
+const _: () = assert!(!is_replaceable(KIND_INSTRUCTIONS_VERSION));
+const _: () = assert!(!is_parameterized_replaceable(KIND_INSTRUCTIONS_VERSION));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
 // 1984 is a regular event (persisted to the queue, never fanned out);
