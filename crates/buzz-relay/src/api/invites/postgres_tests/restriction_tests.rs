@@ -204,9 +204,9 @@ async fn cutoff_rejects_only_v1_and_restriction_lookup_failure_never_admits() {
     let code = mint_code(state.clone(), &host, &issuer, serde_json::json!({})).await;
     let key = derive_invite_key(&state.relay_keypair);
     let (legacy, _) = crate::invite_token::mint_invite(&key, community, 3600);
-    let mut state = Arc::try_unwrap(state)
-        .ok()
-        .expect("exclusive fixture state");
+    let Ok(mut state) = Arc::try_unwrap(state) else {
+        panic!("exclusive fixture state");
+    };
     Arc::make_mut(&mut state.config).invite_v1_invalid_after = Some(0);
     let state = Arc::new(state);
     let response = post_json(
