@@ -180,6 +180,13 @@ pub async fn claim_relay_membership(
     let connection =
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    crate::deletion::DeletionStore::new(pool.clone())
+        .guard_transaction(&mut tx, community)
+        .await?;
+    super::relay_invite::lock_admission(&mut tx, community).await?;
+    if super::relay_invite::principal_restricted(&mut tx, community, pubkey).await? {
+        return Err(DbError::InviteRestricted);
+    }
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, 'invite') \

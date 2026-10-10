@@ -146,6 +146,31 @@ backgrounded or you lost the terminal: `pkill -f buzz-relay`. Leaving
 it running will collide with the next reviewer who follows this doc on
 the same machine.
 
+### Invitation compatibility and revocation
+
+New invitations are durable v2 bearers. A community ban permanently revokes
+outstanding v2 invitations issued by that principal or its recorded agents.
+Unban does not restore them; an unrestricted issuer can mint new invitations.
+Claim and mint restriction reads use the writer inside a transaction serialized
+with community restriction and agent-owner writes. Admission committed first
+precedes the ban; a ban committed first prevents subsequent admission. Restriction
+lookup failures deny admission, and onboarding does not require prior membership.
+
+Legacy v1 bearers contain no issuer identity. Unset `BUZZ_INVITE_V1_INVALID_AFTER`
+preserves their natural expiry and claimant restriction checks, but cannot revoke
+an individual legacy issuer's bearers. Drain for at most 30 days from the last
+possible v1 issuance across **all serving and rollback versions**; do not use merge
+time as the start. Full issuer-revocation coverage requires completing that drain
+or an explicitly approved compatibility scope decision.
+
+Operators may set `BUZZ_INVITE_V1_INVALID_AFTER` to an absolute UTC RFC3339
+whole-second timestamp (for example `2026-12-01T00:00:00Z`). v1 verification
+rejects at and after that instant, never extends bearer expiry, and leaves v2
+unchanged. Invalid or empty values fail configuration. Apply the same setting to
+all serving pods and retain it on compatible rollbacks; rolling back to a version
+without this setting's enforcement restores legacy acceptance until natural expiry.
+This change does not choose or deploy a cutoff.
+
 ### 4. Smoke test the CLI against the relay
 
 End-to-end: generate an identity, create a channel, post a message, read it

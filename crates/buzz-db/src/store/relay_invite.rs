@@ -54,6 +54,10 @@ pub enum ClaimOutcome {
     Exhausted,
     /// No invite row matches `(community_id, token_hash)`.
     Invalid,
+    /// The issuer's invitation was permanently revoked.
+    Revoked,
+    /// The claimant or its verified owner is banned or timed out.
+    Restricted,
 }
 
 /// A freshly minted v2 invite, including the plaintext code and metadata.
@@ -125,6 +129,10 @@ pub async fn mint_relay_invite(
     crate::deletion::DeletionStore::new(pool.clone())
         .guard_transaction(&mut tx, community)
         .await?;
+    lock_admission(&mut tx, community).await?;
+    if principal_restricted(&mut tx, community, created_by).await? {
+        return Err(crate::DbError::InviteRestricted);
+    }
     let row = sqlx::query(
         "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by) \
          VALUES ($1, $2, $3, $4, $5) \
@@ -148,6 +156,46 @@ pub async fn mint_relay_invite(
         uses_remaining: max_uses,
         invite_id,
     })
+}
+
+/// Lock invitation admission against community restriction and owner writes.
+/// Call before reading restrictions or locking an invite row, and hold to commit.
+pub(crate) async fn lock_admission(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+) -> Result<()> {
+    sqlx::query("SELECT invite_admission_lock($1)")
+        .bind(community.as_uuid())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Authoritative, transaction-local lookup; nonmembers need no user row.
+pub(crate) async fn principal_restricted(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<bool> {
+    let bytes = hex::decode(pubkey)
+        .map_err(|_| crate::DbError::InvalidData("invalid invitation principal".into()))?;
+    if bytes.len() != 32 {
+        return Err(crate::DbError::InvalidData(
+            "invalid invitation principal".into(),
+        ));
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM community_bans \
+         WHERE community_id = $1 AND pubkey IN (\
+             SELECT $2::bytea UNION ALL \
+             SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2\
+         ) AND ((banned AND (ban_expires_at IS NULL OR ban_expires_at > clock_timestamp())) \
+                OR muted_until > clock_timestamp()))",
+    )
+    .bind(community.as_uuid())
+    .bind(bytes)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 fn log_claim_outcome(
@@ -233,9 +281,17 @@ pub async fn claim_relay_invite(
     .await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
+    crate::deletion::DeletionStore::new(pool.clone())
+        .guard_transaction(&mut tx, community)
+        .await?;
+    lock_admission(&mut tx, community).await?;
+    if principal_restricted(&mut tx, community, claimer_pubkey).await? {
+        return Ok(ClaimOutcome::Restricted);
+    }
+
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
     let row = sqlx::query(
-        "SELECT id, max_uses, use_count, expires_at \
+        "SELECT id, max_uses, use_count, expires_at, created_by, revoked_at \
          FROM relay_invites \
          WHERE community_id = $1 AND token_hash = $2 \
          FOR UPDATE",
@@ -270,6 +326,12 @@ pub async fn claim_relay_invite(
             Some(use_count),
         );
         return Ok(ClaimOutcome::Expired);
+    }
+
+    let revoked_at: Option<DateTime<Utc>> = invite.try_get("revoked_at")?;
+    let issuer: String = invite.try_get("created_by")?;
+    if revoked_at.is_some() || principal_restricted(&mut tx, community, &issuer).await? {
+        return Ok(ClaimOutcome::Revoked);
     }
 
     let uses_remaining = || max_uses.map(|mu| mu - use_count);
@@ -617,7 +679,7 @@ mod postgres_tests {
             .await
             .expect("begin quiescing");
 
-        let error = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let error = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect_err("quiescing must reject invite minting");
         assert!(matches!(error, crate::error::DbError::AccessDenied(_)));
@@ -642,7 +704,7 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -688,7 +750,7 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -732,7 +794,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community_a, "owner", 3600, Some(2))
+        let invite = mint_relay_invite(&pool, community_a, &test_pubkey(), 3600, Some(2))
             .await
             .expect("mint invite");
         let hash = hash_v2_code(&invite.code);
@@ -769,10 +831,10 @@ mod postgres_tests {
     async fn retention_sweep_deletes_only_invites_older_than_cutoff() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let old = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint old invite");
-        let recent = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let recent = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint recent invite");
         let cutoff = Utc::now() - chrono::Duration::days(30);
@@ -874,7 +936,7 @@ mod postgres_tests {
     async fn unlimited_invites_count_each_new_member() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, None)
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, None)
             .await
             .expect("mint unlimited invite");
         let hash = hash_v2_code(&invite.code);
@@ -900,7 +962,7 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
         let pubkey = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -923,3 +985,10 @@ mod postgres_tests {
         delete_test_community(&pool, community).await;
     }
 }
+
+#[cfg(test)]
+mod revocation_postgres_tests;
+
+#[cfg(test)]
+#[path = "relay_invite/upgrade_postgres_tests.rs"]
+mod upgrade_postgres_tests;

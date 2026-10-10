@@ -37,6 +37,10 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// Invitation admission or minting was denied by authoritative restrictions.
+    #[error("invitation principal is restricted")]
+    InviteRestricted,
+
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
