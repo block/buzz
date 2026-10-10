@@ -24,8 +24,9 @@ import { installMockBridge } from "../helpers/bridge";
  *           live markdown message lands every 2s.
  *
  * Absolute ms are machine-specific; the quiet-vs-busy DELTA on one machine
- * is the signal. Run it (from desktop/):
- *   pnpm build
+ * is the signal. Run it (from desktop/) — build:e2e, not build; a plain build
+ * strips the mock bridge:
+ *   pnpm build:e2e
  *   npx playwright test --config=playwright.perf.config.ts typing-latency.perf.ts
  */
 
