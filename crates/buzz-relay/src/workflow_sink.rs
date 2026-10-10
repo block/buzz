@@ -94,13 +94,21 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
         Some(ci - start)
     };
 
-    // A mention is anchored on `@` at a left boundary (start / whitespace / `(`)
-    // and the matched name must not be followed by a name-continuation char —
-    // otherwise `@Will` would match inside `@Willow`. Combined with matching the
-    // longest member name first, this is the whole rule: no punctuation allowlist
-    // to get wrong, and it is unicode-safe (em-dash, emoji all terminate a name).
-    let is_left_boundary = |i: usize| i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(';
-    let extends_name = |c: char| c.is_alphanumeric() || c == '_';
+    // A mention is anchored on `@` at a left boundary (start / whitespace / `(` /
+    // markdown emphasis `*` `_` / table `|`) and the matched name must not be
+    // followed by a name-continuation char — otherwise `@Will` would match inside
+    // `@Willow`. Emphasis markers matter for machine-generated workflow text
+    // like `**@Robby**` (#2686 / #2526). Combined with matching the longest
+    // member name first, this is the whole rule: no punctuation allowlist to get
+    // wrong, and it is unicode-safe (em-dash, emoji all terminate a name).
+    let is_left_boundary = |i: usize| {
+        i == 0 || chars[i - 1].is_whitespace() || matches!(chars[i - 1], '(' | '*' | '_' | '|')
+    };
+    // Underscore is a left/right emphasis delimiter (`_@Name_`), not a name
+    // continuation — otherwise `_@Robby_` fails the right-boundary check after
+    // matching `Robby`. Underscore display names (e.g. `will_smith`) still bind
+    // fully because longer member names match first.
+    let extends_name = |c: char| c.is_alphanumeric();
 
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -494,6 +502,35 @@ mod tests {
         assert_eq!(
             resolve_mention_pubkeys("heads up @Robby — please take a look", &members),
             vec![pk('a')]
+        );
+    }
+
+    #[test]
+    fn resolves_mentions_wrapped_in_markdown_emphasis() {
+        let members = vec![m("Robby", &pk('a'))];
+        assert_eq!(
+            resolve_mention_pubkeys("please ping **@Robby** for review", &members),
+            vec![pk('a')],
+            "left-boundary must accept markdown emphasis so workflow text wakes agents"
+        );
+        assert_eq!(
+            resolve_mention_pubkeys("_@Robby_ take a look", &members),
+            vec![pk('a')],
+            "italic underscores must not extend the name past Robby"
+        );
+        assert_eq!(
+            resolve_mention_pubkeys("also *@Robby*", &members),
+            vec![pk('a')]
+        );
+    }
+
+    #[test]
+    fn underscore_display_names_still_bind_fully() {
+        let members = vec![m("will_smith", &pk('a')), m("will", &pk('b'))];
+        assert_eq!(
+            resolve_mention_pubkeys("ping @will_smith please", &members),
+            vec![pk('a')],
+            "longer underscore names must win over the shorter prefix"
         );
     }
 
