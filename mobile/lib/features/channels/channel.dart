@@ -69,7 +69,7 @@ class Channel {
     participantPubkeys:
         (json['participant_pubkeys'] as List<dynamic>? ?? const [])
             .cast<String>(),
-    isMember: json['is_member'] as bool? ?? false,
+    isMember: json['is_member'] as bool? ?? true,
     ttlSeconds: json['ttl_seconds'] as int?,
     ttlDeadline: json['ttl_deadline'] != null
         ? DateTime.parse(json['ttl_deadline'] as String)
