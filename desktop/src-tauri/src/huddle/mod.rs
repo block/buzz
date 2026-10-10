@@ -35,6 +35,7 @@ pub mod jitter;
 mod latency_bench;
 mod local_barge_in;
 pub mod models;
+mod openai_stt;
 pub mod pipeline;
 pub mod playout;
 pub mod pocket;
