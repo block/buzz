@@ -652,18 +652,10 @@ async fn workflow_read_does_not_reveal_workflow() {
     let owner = Keys::generate();
     let outsider = Keys::generate();
     let channel = create_channel(&client, &owner, "private").await;
-    let define = |id: &str| {
-        sign(
-            &owner,
-            30620,
-            "name: existence-oracle\ntrigger:\n  on: message_posted\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n",
-            vec![tag(&["d", id]), tag(&["h", &channel])],
-        )
-    };
     let live = uuid::Uuid::new_v4().to_string();
-    submit_ok(&client, &owner, &define(&live)).await;
+    let secret = save_webhook_workflow(&client, &owner, &channel, &live).await;
+    let run = start_webhook_run(&client, &live, &secret).await;
     let missing = uuid::Uuid::new_v4().to_string();
-    let run = uuid::Uuid::new_v4();
     let paths = |id: &str| {
         [
             format!("/workflows/{id}/runs"),
@@ -681,10 +673,53 @@ async fn workflow_read_does_not_reveal_workflow() {
         );
     }
 
-    // Positive control: the owner reads their workflow's runs.
-    let (status, body) = read_as(&client, &owner, &paths(&live)[0]).await;
-    assert_eq!(status, 200, "owner read failed: {body}");
-    assert!(body["runs"].is_array());
+    // Positive control: the owner reads their workflow's run and its approvals.
+    let [runs_path, approvals_path] = paths(&live);
+    let (status, body) = read_as(&client, &owner, &runs_path).await;
+    assert_eq!(status, 200, "owner runs read failed: {body}");
+    assert!(
+        body["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().any(|r| r["id"] == run.as_str())),
+        "owner runs must include {run}: {body}"
+    );
+    let (status, body) = read_as(&client, &owner, &approvals_path).await;
+    assert_eq!(status, 200, "owner approvals read failed: {body}");
+    assert!(body["approvals"].is_array());
+}
+
+/// Save a webhook-triggered workflow `id` in `channel` and return its secret.
+async fn save_webhook_workflow(client: &Client, owner: &Keys, channel: &str, id: &str) -> String {
+    let definition = sign(
+        owner,
+        30620,
+        "name: existence-oracle\ntrigger:\n  on: webhook\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n",
+        vec![tag(&["d", id]), tag(&["h", channel])],
+    );
+    let (accepted, message) = submit(client, owner, &definition).await;
+    assert!(accepted, "webhook workflow rejected: {message}");
+    let response: Value = serde_json::from_str(
+        message
+            .strip_prefix("response:")
+            .expect("workflow save response"),
+    )
+    .expect("parse workflow save response");
+    response["webhook_secret"]
+        .as_str()
+        .expect("webhook secret")
+        .to_string()
+}
+
+/// Call webhook `id` with the right secret, assert it starts a run exactly as
+/// documented, and return the run id.
+async fn start_webhook_run(client: &Client, id: &str, secret: &str) -> String {
+    let (status, body) = call_webhook(client, id, Some(secret)).await;
+    assert_eq!(status, 202, "valid webhook call failed: {body}");
+    body["run_id"]
+        .as_str()
+        .and_then(|run| uuid::Uuid::parse_str(run).ok())
+        .unwrap_or_else(|| panic!("webhook response lacks a run_id: {body}"))
+        .to_string()
 }
 
 /// POST the public webhook endpoint for `id` with an optional secret header and
@@ -708,29 +743,16 @@ async fn webhook_does_not_reveal_workflow() {
     let client = http_client();
     let owner = Keys::generate();
     let channel = create_channel(&client, &owner, "open").await;
-    let define = |id: &str, trigger: &str| {
-        sign(
-            &owner,
-            30620,
-            &format!("name: existence-oracle\ntrigger:\n  on: {trigger}\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n"),
-            vec![tag(&["d", id]), tag(&["h", &channel])],
-        )
-    };
     let webhook = uuid::Uuid::new_v4().to_string();
-    let (accepted, message) = submit(&client, &owner, &define(&webhook, "webhook")).await;
-    assert!(accepted, "webhook workflow rejected: {message}");
-    let response: Value = serde_json::from_str(
-        message
-            .strip_prefix("response:")
-            .expect("workflow save response"),
-    )
-    .expect("parse workflow save response");
-    let secret = response["webhook_secret"]
-        .as_str()
-        .expect("webhook secret")
-        .to_string();
+    let secret = save_webhook_workflow(&client, &owner, &channel, &webhook).await;
     let other_trigger = uuid::Uuid::new_v4().to_string();
-    submit_ok(&client, &owner, &define(&other_trigger, "message_posted")).await;
+    let message_posted = sign(
+        &owner,
+        30620,
+        "name: existence-oracle\ntrigger:\n  on: message_posted\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n",
+        vec![tag(&["d", &other_trigger]), tag(&["h", &channel])],
+    );
+    submit_ok(&client, &owner, &message_posted).await;
 
     let missing = uuid::Uuid::new_v4().to_string();
     let expected = call_webhook(&client, &missing, Some(&secret)).await;
@@ -752,6 +774,5 @@ async fn webhook_does_not_reveal_workflow() {
     }
 
     // Positive control: the right secret starts a run.
-    let (status, body) = call_webhook(&client, &webhook, Some(&secret)).await;
-    assert!(status < 300, "valid webhook call failed: {status} {body}");
+    start_webhook_run(&client, &webhook, &secret).await;
 }
