@@ -10,7 +10,10 @@ import {
   SCHEDULE_FREQUENCIES,
   SCHEDULE_FREQUENCY_LABELS,
   scheduleFormFromTrigger,
+  scheduleTimezoneLabel,
+  scheduleTimezoneOptions,
   scheduleTriggerFromForm,
+  updateScheduleTrigger,
   scheduleWeekdaysFromCronField,
 } from "./workflowSchedule";
 import type { ScheduleFormState } from "./workflowSchedule";
@@ -26,6 +29,14 @@ const WEEKDAYS = [
 ] as const;
 
 const MONTH_DAYS = Array.from({ length: 31 }, (_, index) => String(index + 1));
+
+function timezoneOptionLabel(timezone: string, localTimezone: string): string {
+  if (timezone === localTimezone && timezone !== "UTC") {
+    return `Local time (${timezone})`;
+  }
+  const label = scheduleTimezoneLabel(timezone);
+  return label === timezone ? timezone : `${label} (${timezone})`;
+}
 
 function monthlyDayWarning(monthDay: string): string | null {
   return Number(monthDay) > 28
@@ -68,9 +79,13 @@ export function WorkflowScheduleFields({
       }
     : parsedSchedule;
   const updateSchedule = (updates: Partial<ScheduleFormState>) => {
-    onUpdate(scheduleTriggerFromForm({ ...schedule, ...updates }));
+    onUpdate(updateScheduleTrigger(schedule, updates));
   };
   const usesTime = ["daily", "weekly", "monthly"].includes(schedule.frequency);
+  const usesTimezone = usesTime || schedule.frequency === "custom_cron";
+  const selectedTimezone = schedule.timezone ?? "UTC";
+  const timezoneOptions = scheduleTimezoneOptions(schedule.timezone);
+  const localTimezone = timezoneOptions[0];
   const selectedWeekdays = new Set(
     scheduleWeekdaysFromCronField(schedule.weekday),
   );
@@ -211,9 +226,32 @@ export function WorkflowScheduleFields({
         </div>
       ) : null}
 
+      {usesTimezone ? (
+        <div className="space-y-1.5">
+          <FieldLabel htmlFor="wf-trigger-timezone">Time zone</FieldLabel>
+          <FormSelect
+            disabled={disabled}
+            id="wf-trigger-timezone"
+            onChange={(timezone) => updateSchedule({ timezone })}
+            value={selectedTimezone}
+          >
+            {timezoneOptions.map((timezone) => (
+              <option key={timezone} value={timezone}>
+                {timezoneOptionLabel(timezone, localTimezone)}
+              </option>
+            ))}
+          </FormSelect>
+          <p className="text-xs text-muted-foreground">
+            Cron schedules follow this zone, including daylight saving changes.
+          </p>
+        </div>
+      ) : null}
+
       {usesTime ? (
         <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-time">Run time (UTC)</FieldLabel>
+          <FieldLabel htmlFor="wf-trigger-time">
+            Run time ({scheduleTimezoneLabel(schedule.timezone)})
+          </FieldLabel>
           <Input
             disabled={disabled}
             id="wf-trigger-time"
@@ -228,6 +266,7 @@ export function WorkflowScheduleFields({
         <CronExpressionInput
           disabled={disabled}
           onChange={(customCron) => updateSchedule({ customCron })}
+          timezoneLabel={scheduleTimezoneLabel(schedule.timezone)}
           value={schedule.customCron}
         />
       ) : null}
@@ -248,8 +287,7 @@ export function WorkflowScheduleFields({
             value={schedule.customInterval}
           />
           <p className="text-xs text-muted-foreground">
-            Keep this legacy interval or choose a repeat option above. All
-            schedules use UTC.
+            Keep this legacy elapsed interval or choose a repeat option above.
           </p>
         </div>
       ) : null}

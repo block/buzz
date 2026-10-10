@@ -10,6 +10,7 @@ import {
   yamlToFormState,
   DEFAULT_FORM_STATE,
 } from "./workflowFormTypes.ts";
+import { defaultScheduleTrigger } from "./workflowSchedule.ts";
 
 function accepted(yaml) {
   const result = yamlToFormState(yaml);
@@ -59,6 +60,7 @@ const acceptedFixtures = [
   `name: Legacy actions\ntrigger:\n  on: diff_posted\n  filter: str_contains(trigger_text, "deploy")\nsteps:\n  - id: dm\n    action: send_dm\n    to: abc123\n    text: hello\n  - id: approval\n    action: request_approval\n    from: manager\n    message: Approve?\n    timeout: 24h\n  - id: topic\n    action: set_channel_topic\n    topic: Deployed\n  - id: wait\n    action: delay\n    duration: 5m\n`,
   `name: Scheduled preset\ntrigger:\n  on: schedule\n  interval: 15m\nsteps:\n  - id: notify\n    action: send_message\n    text: hello\n`,
   `name: Scheduled custom\ntrigger:\n  on: schedule\n  cron: 0 */2 * * 1,3,5\nsteps:\n  - id: notify\n    action: send_message\n    text: hello\n`,
+  `name: Scheduled Central\ntrigger:\n  on: schedule\n  cron: 0 9 * * *\n  timezone: America/Chicago\nsteps:\n  - id: notify\n    action: send_message\n    text: hello\n`,
   `name: Scheduled legacy interval\ntrigger:\n  on: schedule\n  interval: 2h30m\nsteps:\n  - id: notify\n    action: send_message\n    text: hello\n`,
 ];
 
@@ -155,8 +157,13 @@ test("malformed and unowned schedule definitions stay losslessly in YAML mode", 
     `name: Missing\ntrigger: { on: schedule }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
     `name: Both\ntrigger: { on: schedule, cron: "0 9 * * *", interval: 1h }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
     `name: Numeric\ntrigger: { on: schedule, interval: 30 }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
-    `name: Unknown\ntrigger: { on: schedule, cron: "0 9 * * *", timezone: UTC }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Unknown\ntrigger: { on: schedule, cron: "0 9 * * *", future_timezone_rule: fixed }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
     `name: Invalid cron\ntrigger: { on: schedule, cron: "60 9 * * *" }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Empty timezone\ntrigger: { on: schedule, cron: "0 9 * * *", timezone: "" }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Invalid timezone\ntrigger: { on: schedule, cron: "0 9 * * *", timezone: Not/AZone }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Offset timezone\ntrigger: { on: schedule, cron: "0 9 * * *", timezone: "+01:00" }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Numeric timezone\ntrigger: { on: schedule, cron: "0 9 * * *", timezone: 5 }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Interval timezone\ntrigger: { on: schedule, interval: 1h, timezone: America/Chicago }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
   ];
 
   for (const yaml of fixtures) {
@@ -166,6 +173,23 @@ test("malformed and unowned schedule definitions stay losslessly in YAML mode", 
     assert.match(result.error, /YAML editor/);
     assert.equal(yaml, original);
   }
+});
+
+test("cron timezone schema values survive YAML and legacy UTC stays absent", () => {
+  for (const timezone of ["America/Chicago", "UTC", "Europe/London"]) {
+    const yaml = `name: Zoned\ntrigger: { on: schedule, cron: "0 9 * * *", timezone: ${timezone} }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`;
+    const state = accepted(yaml);
+    assert.equal(state.trigger.timezone, timezone);
+    assert.equal(parseYaml(formStateToYaml(state)).trigger.timezone, timezone);
+  }
+
+  const legacyYaml = `name: Legacy UTC\ntrigger: { on: schedule, cron: "0 9 * * *" }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`;
+  const legacyState = accepted(legacyYaml);
+  assert.equal(legacyState.trigger.timezone, undefined);
+  assert.equal(
+    "timezone" in parseYaml(formStateToYaml(legacyState)).trigger,
+    false,
+  );
 });
 
 test("the serializer emits only one schedule representation", () => {
@@ -180,6 +204,35 @@ test("the serializer emits only one schedule representation", () => {
     on: "schedule",
     cron: "0 9 * * *",
   });
+
+  const intervalYaml = formStateToYaml({
+    name: "Elapsed",
+    description: "",
+    enabled: true,
+    trigger: {
+      on: "schedule",
+      interval: "1h",
+      timezone: "America/Chicago",
+    },
+    steps: [{ id: "s1", action: "send_message", text: "hi" }],
+  });
+  assert.deepEqual(parseYaml(intervalYaml).trigger, {
+    on: "schedule",
+    interval: "1h",
+  });
+});
+
+test("serializes a new daily schedule with its explicit local timezone", () => {
+  const trigger = defaultScheduleTrigger();
+  assert.equal(typeof trigger.timezone, "string");
+  const yaml = formStateToYaml({
+    name: "Daily",
+    description: "",
+    enabled: true,
+    trigger,
+    steps: [{ id: "s1", action: "send_message", text: "hi" }],
+  });
+  assert.deepEqual(parseYaml(yaml).trigger, trigger);
 });
 
 test("presents step timeout seconds as durations and serializes them numerically", () => {

@@ -199,73 +199,116 @@ test("inserts template variables with keyboard control and restores the caret", 
   await expect(textarea).toBeFocused();
 });
 
-test("round-trips schedule presets and saves a custom UTC cron", async ({
-  page,
-}) => {
-  const name = `schedule_controls_${Date.now()}`;
-  const dialog = await openCreateWorkflow(page, name);
-  await selectTrigger(page, dialog, "Schedule");
+for (const timezoneCase of [
+  { optionLabel: "UTC", timezoneId: "UTC", timezoneLabel: "UTC" },
+  {
+    optionLabel: "Local time (America/Chicago)",
+    timezoneId: "America/Chicago",
+    timezoneLabel: "Central Time",
+  },
+] as const) {
+  test.describe(`schedule controls in ${timezoneCase.timezoneId}`, () => {
+    test.use({ timezoneId: timezoneCase.timezoneId });
 
-  await expect(dialog.getByRole("radio", { name: "Daily" })).toBeChecked();
-  await expect(dialog.getByLabel("Run time (UTC)")).toHaveValue("09:00");
+    test("round-trips schedule presets and retains the local cron timezone", async ({
+      page,
+    }) => {
+      const name = `schedule_controls_${timezoneCase.timezoneId.replace("/", "_")}_${Date.now()}`;
+      const dialog = await openCreateWorkflow(page, name);
+      await selectTrigger(page, dialog, "Schedule");
 
-  await dialog.getByText("Every 15 minutes", { exact: true }).click();
-  await dialog.getByRole("tab", { name: "YAML" }).click();
-  const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
-  let definition = parseYaml(await yamlEditor.inputValue());
-  expect(definition.trigger).toEqual({ on: "schedule", interval: "15m" });
+      await expect(dialog.getByRole("radio", { name: "Daily" })).toBeChecked();
+      await expect(
+        dialog.getByLabel(`Run time (${timezoneCase.timezoneLabel})`),
+      ).toHaveValue("09:00");
+      const timezoneSelect = dialog.getByLabel("Time zone");
+      await expect(timezoneSelect).toHaveValue(timezoneCase.timezoneId);
+      await expect(timezoneSelect.locator("option:checked")).toHaveText(
+        timezoneCase.optionLabel,
+      );
 
-  await dialog.getByRole("tab", { name: "Form" }).click();
-  await openTriggerInspector(dialog);
-  await expect(
-    dialog.getByRole("radio", { name: "Every 15 minutes" }),
-  ).toBeChecked();
+      await dialog.getByText("Every 15 minutes", { exact: true }).click();
+      await expect(dialog.getByLabel("Time zone")).toHaveCount(0);
+      await dialog.getByRole("tab", { name: "YAML" }).click();
+      const yamlEditor = dialog.getByRole("textbox", {
+        name: "Workflow YAML",
+      });
+      let definition = parseYaml(await yamlEditor.inputValue());
+      expect(definition.trigger).toEqual({ on: "schedule", interval: "15m" });
 
-  await dialog.getByText("Monthly", { exact: true }).click();
-  await dialog.getByLabel("Day of month").selectOption("31");
-  await expect(
-    dialog.getByText("This schedule won’t run in some months."),
-  ).toBeVisible();
+      await dialog.getByRole("tab", { name: "Form" }).click();
+      await openTriggerInspector(dialog);
+      await expect(
+        dialog.getByRole("radio", { name: "Every 15 minutes" }),
+      ).toBeChecked();
 
-  await dialog.getByText("Custom cron", { exact: true }).click();
-  await dialog.getByRole("textbox", { name: "Minute", exact: true }).fill("5");
-  await dialog.getByRole("textbox", { name: "Hour", exact: true }).fill("*/2");
-  await dialog.getByRole("textbox", { name: "Day", exact: true }).fill("*");
-  await dialog.getByRole("textbox", { name: "Month", exact: true }).fill("*");
-  await dialog
-    .getByRole("textbox", { name: "Weekday", exact: true })
-    .fill("2-4");
-  await expect(dialog.getByText(/UTC · Paste all 5 fields/)).toBeVisible();
+      await dialog.getByText("Monthly", { exact: true }).click();
+      await expect(dialog.getByLabel("Time zone")).toHaveValue(
+        timezoneCase.timezoneId,
+      );
+      await dialog.getByLabel("Day of month").selectOption("31");
+      await expect(
+        dialog.getByText("This schedule won’t run in some months."),
+      ).toBeVisible();
 
-  await dialog.getByRole("tab", { name: "YAML" }).click();
-  definition = parseYaml(await yamlEditor.inputValue());
-  expect(definition.trigger).toEqual({
-    on: "schedule",
-    cron: "5 */2 * * 2-4",
+      await dialog.getByText("Custom cron", { exact: true }).click();
+      await dialog
+        .getByRole("textbox", { name: "Minute", exact: true })
+        .fill("5");
+      await dialog
+        .getByRole("textbox", { name: "Hour", exact: true })
+        .fill("*/2");
+      await dialog.getByRole("textbox", { name: "Day", exact: true }).fill("*");
+      await dialog
+        .getByRole("textbox", { name: "Month", exact: true })
+        .fill("*");
+      await dialog
+        .getByRole("textbox", { name: "Weekday", exact: true })
+        .fill("2-4");
+      await expect(
+        dialog.getByText(`${timezoneCase.timezoneLabel} · Paste all 5 fields`),
+      ).toBeVisible();
+
+      await dialog.getByRole("tab", { name: "YAML" }).click();
+      definition = parseYaml(await yamlEditor.inputValue());
+      expect(definition.trigger).toEqual({
+        on: "schedule",
+        cron: "5 */2 * * 2-4",
+        timezone: timezoneCase.timezoneId,
+      });
+      await dialog.getByRole("tab", { name: "Form" }).click();
+      await openTriggerInspector(dialog);
+      await expect(
+        dialog.getByRole("radio", { name: "Custom cron" }),
+      ).toBeChecked();
+      await expect(
+        dialog.getByRole("textbox", { name: "Weekday", exact: true }),
+      ).toHaveValue("2-4");
+
+      await addMessageStep(page, dialog);
+      await createEnabled(page, dialog);
+      const reopened = await reopenWorkflow(page, name);
+      await openTriggerInspector(reopened);
+      await expect(reopened.getByLabel("Time zone")).toHaveValue(
+        timezoneCase.timezoneId,
+      );
+      await expect(
+        reopened.getByRole("radio", { name: "Custom cron" }),
+      ).toBeChecked();
+      await expect(
+        reopened.getByRole("textbox", { name: "Minute", exact: true }),
+      ).toHaveValue("5");
+      await expect(
+        reopened.getByRole("textbox", { name: "Weekday", exact: true }),
+      ).toHaveValue("2-4");
+      await expect(
+        reopened.getByText(
+          `${timezoneCase.timezoneLabel} · Paste all 5 fields`,
+        ),
+      ).toBeVisible();
+    });
   });
-  await dialog.getByRole("tab", { name: "Form" }).click();
-  await openTriggerInspector(dialog);
-  await expect(
-    dialog.getByRole("radio", { name: "Custom cron" }),
-  ).toBeChecked();
-  await expect(
-    dialog.getByRole("textbox", { name: "Weekday", exact: true }),
-  ).toHaveValue("2-4");
-
-  await addMessageStep(page, dialog);
-  await createEnabled(page, dialog);
-  const reopened = await reopenWorkflow(page, name);
-  await openTriggerInspector(reopened);
-  await expect(
-    reopened.getByRole("radio", { name: "Custom cron" }),
-  ).toBeChecked();
-  await expect(
-    reopened.getByRole("textbox", { name: "Minute", exact: true }),
-  ).toHaveValue("5");
-  await expect(
-    reopened.getByRole("textbox", { name: "Weekday", exact: true }),
-  ).toHaveValue("2-4");
-});
+}
 
 test("round-trips and reopens structured message-text conditions", async ({
   page,

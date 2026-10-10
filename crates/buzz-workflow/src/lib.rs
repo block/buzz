@@ -542,13 +542,21 @@ impl WorkflowEngine {
                     schema::TriggerDef::Schedule {
                         cron: Some(expr),
                         interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
+                        timezone,
+                    } => match cron_fire_instant_in_timezone(
+                        expr,
+                        timezone.as_deref(),
+                        now,
+                        60,
+                        workflow.id,
+                    ) {
                         Some(instant) => (instant, "cron"),
                         None => continue,
                     },
                     schema::TriggerDef::Schedule {
                         cron: None,
                         interval: Some(dur),
+                        timezone: None,
                     } => {
                         // Cheap pre-filter: skip the claim attempt when the
                         // in-memory clock says we're clearly mid-interval. The
@@ -762,8 +770,26 @@ impl WorkflowEngine {
 ///
 /// Returns `None` (and logs a warning) if the expression is invalid or nothing
 /// is due in the window.
+#[cfg(test)]
 fn cron_fire_instant(
     expr: &str,
+    now: DateTime<Utc>,
+    window_secs: i64,
+    workflow_id: Uuid,
+) -> Option<DateTime<Utc>> {
+    cron_fire_instant_in_timezone(expr, None, now, window_secs, workflow_id)
+}
+
+/// Find the cron schedule instant in a named timezone, returning a UTC claim
+/// anchor. A missing timezone preserves the legacy UTC calculation exactly.
+///
+/// Named zones are evaluated by scanning the bounded UTC-second window and
+/// matching each real instant after conversion to local time. A nonexistent
+/// spring-forward wall time therefore never matches, while both real UTC
+/// instants for a repeated fall-back wall time match independently.
+fn cron_fire_instant_in_timezone(
+    expr: &str,
+    timezone: Option<&str>,
     now: DateTime<Utc>,
     window_secs: i64,
     workflow_id: Uuid,
@@ -772,7 +798,24 @@ fn cron_fire_instant(
     match normalized.parse::<cron::Schedule>() {
         Ok(sched) => {
             let window_start = now - chrono::Duration::seconds(window_secs);
-            sched.after(&window_start).next().filter(|t| *t <= now)
+            let Some(timezone_name) = timezone else {
+                return sched.after(&window_start).next().filter(|t| *t <= now);
+            };
+            let timezone = match timezone_name.parse::<chrono_tz::Tz>() {
+                Ok(timezone) => timezone,
+                Err(e) => {
+                    tracing::warn!(
+                        workflow_id = %workflow_id,
+                        "Cron tick: invalid timezone '{timezone_name}': {e}"
+                    );
+                    return None;
+                }
+            };
+
+            let first_second = window_start.timestamp().saturating_add(1);
+            (first_second..=now.timestamp())
+                .filter_map(|second| DateTime::<Utc>::from_timestamp(second, 0))
+                .find(|instant| sched.includes(instant.with_timezone(&timezone)))
         }
         Err(e) => {
             tracing::warn!(
@@ -1144,6 +1187,91 @@ mod postgres_tests {
     }
 
     #[test]
+    fn cron_fire_instant_in_chicago_tracks_standard_and_daylight_time() {
+        let wf_id = Uuid::new_v4();
+        let winter_now = chrono::DateTime::parse_from_rfc3339("2026-01-15T15:00:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let summer_now = chrono::DateTime::parse_from_rfc3339("2026-07-15T14:00:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            cron_fire_instant_in_timezone(
+                "0 9 * * *",
+                Some("America/Chicago"),
+                winter_now,
+                60,
+                wf_id,
+            ),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-01-15T15:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        assert_eq!(
+            cron_fire_instant_in_timezone(
+                "0 9 * * *",
+                Some("America/Chicago"),
+                summer_now,
+                60,
+                wf_id,
+            ),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-07-15T14:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_in_chicago_skips_nonexistent_spring_time() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-08T08:30:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(
+            cron_fire_instant_in_timezone(
+                "30 2 * * *",
+                Some("America/Chicago"),
+                now,
+                60,
+                Uuid::new_v4(),
+            )
+            .is_none(),
+            "02:30 does not exist when Chicago advances to daylight time"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_in_chicago_matches_both_repeated_fall_times() {
+        let wf_id = Uuid::new_v4();
+        for (now, expected) in [
+            ("2026-11-01T06:30:30Z", "2026-11-01T06:30:00Z"),
+            ("2026-11-01T07:30:30Z", "2026-11-01T07:30:00Z"),
+        ] {
+            let now = chrono::DateTime::parse_from_rfc3339(now)
+                .unwrap()
+                .with_timezone(&Utc);
+            let expected = chrono::DateTime::parse_from_rfc3339(expected)
+                .unwrap()
+                .with_timezone(&Utc);
+            assert_eq!(
+                cron_fire_instant_in_timezone(
+                    "30 1 * * *",
+                    Some("America/Chicago"),
+                    now,
+                    60,
+                    wf_id,
+                ),
+                Some(expected),
+                "each repeated 01:30 wall time needs its own durable UTC claim anchor"
+            );
+        }
+    }
+
+    #[test]
     fn interval_fire_instant_quantizes_to_bucket_boundary() {
         // Two pods ticking at different sub-interval offsets must compute the
         // *same* bucket boundary so they collide on one claim. 1h interval,
@@ -1408,6 +1536,7 @@ steps:
         let trigger = TriggerDef::Schedule {
             cron: Some("0 9 * * 1-5".to_owned()),
             interval: None,
+            timezone: None,
         };
         // Schedule triggers are fired by the cron loop, not by events.
         assert!(!trigger_matches_event(
@@ -1520,6 +1649,7 @@ steps:
         let sched_trigger = TriggerDef::Schedule {
             cron: None,
             interval: Some("1h".to_owned()),
+            timezone: None,
         };
         let webhook_trigger = TriggerDef::Webhook;
 

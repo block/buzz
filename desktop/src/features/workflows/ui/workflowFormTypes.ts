@@ -6,6 +6,7 @@ import {
 } from "@/shared/lib/nostrUtils";
 
 import { cronExpressionError } from "./cronExpression";
+import { isValidScheduleTimezone } from "./workflowSchedule";
 import {
   formatDurationSeconds,
   parseDurationSeconds,
@@ -57,6 +58,7 @@ export type TriggerConfig = {
   emoji?: string;
   cron?: string;
   interval?: string;
+  timezone?: string;
 };
 
 export type HeaderFormState = {
@@ -262,6 +264,9 @@ export function formStateToYaml(state: WorkflowFormState): string {
   if (state.trigger.on === "schedule") {
     if (state.trigger.cron) {
       trigger.cron = state.trigger.cron;
+      if (state.trigger.timezone !== undefined) {
+        trigger.timezone = state.trigger.timezone;
+      }
     } else if (state.trigger.interval) {
       trigger.interval = state.trigger.interval;
     }
@@ -315,7 +320,7 @@ const TRIGGER_KEYS: Record<TriggerType, ReadonlySet<string>> = {
   reaction_added: new Set(["on", "emoji", "filter"]),
   diff_posted: new Set(["on", "filter"]),
   webhook: new Set(["on"]),
-  schedule: new Set(["on", "cron", "interval"]),
+  schedule: new Set(["on", "cron", "interval", "timezone"]),
 };
 const COMMON_STEP_KEYS = ["id", "name", "action", "if", "timeout_secs"];
 const ACTION_STEP_KEYS: Record<ActionType, ReadonlySet<string>> = {
@@ -459,7 +464,13 @@ export function yamlToFormState(
         error: `Unsupported ${triggerOn} trigger field "${triggerUnknown}" — use the YAML editor`,
       };
     }
-    for (const key of ["filter", "emoji", "cron", "interval"] as const) {
+    for (const key of [
+      "filter",
+      "emoji",
+      "cron",
+      "interval",
+      "timezone",
+    ] as const) {
       const error = optionalOwnedStringError(rawTrigger, key, `trigger.${key}`);
       if (error) {
         return {
@@ -491,6 +502,24 @@ export function yamlToFormState(
           };
         }
       }
+      if (rawTrigger.timezone !== undefined) {
+        if (hasInterval) {
+          return {
+            ok: false,
+            error:
+              "trigger.timezone is only supported for cron schedules — use the YAML editor",
+          };
+        }
+        if (
+          typeof rawTrigger.timezone === "string" &&
+          !isValidScheduleTimezone(rawTrigger.timezone)
+        ) {
+          return {
+            ok: false,
+            error: `Invalid IANA timezone "${rawTrigger.timezone}" — use the YAML editor`,
+          };
+        }
+      }
     }
     const trigger: TriggerConfig = {
       on: triggerOn,
@@ -498,6 +527,7 @@ export function yamlToFormState(
       emoji: rawTrigger.emoji as string | undefined,
       cron: rawTrigger.cron as string | undefined,
       interval: rawTrigger.interval as string | undefined,
+      timezone: rawTrigger.timezone as string | undefined,
     };
 
     if (!Array.isArray(parsed.steps)) {
