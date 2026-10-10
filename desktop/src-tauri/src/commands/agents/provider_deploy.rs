@@ -127,7 +127,7 @@ pub(crate) async fn deploy_to_provider<R: tauri::Runtime>(
         .find(|r| r.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
-    let result = apply_deploy_result(rec, deploy_result, &deployed_agent_json);
+    let result = apply_deploy_result(rec, &provider_id, deploy_result, &deployed_agent_json);
     save_managed_agents(app, &records)?;
     result
 }
@@ -236,10 +236,24 @@ fn policy_matches_payload(
 
 fn apply_deploy_result(
     record: &mut crate::managed_agents::ManagedAgentRecord,
+    provider_id: &str,
     deploy_result: Result<String, String>,
     deployed_agent_json: &serde_json::Value,
 ) -> Result<(), String> {
+    let still_on_provider = matches!(
+        &record.backend,
+        BackendKind::Provider { id, .. } if id == provider_id
+    );
     match deploy_result {
+        Ok(_) if !still_on_provider => {
+            let error = format!(
+                "This agent was moved while it was being deployed with the {provider_id} \
+                 provider. That deployment may still be running there and was not recorded."
+            );
+            record.last_error = Some(error.clone());
+            record.updated_at = now_iso();
+            Err(error)
+        }
         Ok(backend_agent_id) => {
             record.backend_agent_id = Some(backend_agent_id);
             if policy_matches_payload(record, deployed_agent_json) {
@@ -269,7 +283,8 @@ mod tests {
             "turn_timeout_seconds": 0, "system_prompt": null, "created_at": "",
             "updated_at": "", "last_started_at": null, "last_stopped_at": null,
             "last_exit_code": null, "last_error": null,
-            "provider_policy_pending": true
+            "provider_policy_pending": true,
+            "backend": {"type": "provider", "id": "docker", "config": {}}
         }))
         .unwrap()
     }
@@ -425,6 +440,7 @@ mod tests {
 
         apply_deploy_result(
             &mut record,
+            "docker",
             Ok("provider-agent".into()),
             &policy_payload("owner-only"),
         )
@@ -442,6 +458,7 @@ mod tests {
 
         apply_deploy_result(
             &mut record,
+            "docker",
             Ok("provider-agent".into()),
             &policy_payload("owner-only"),
         )
@@ -456,6 +473,7 @@ mod tests {
 
         let error = apply_deploy_result(
             &mut record,
+            "docker",
             Err("provider unavailable".into()),
             &policy_payload("owner-only"),
         )
@@ -464,5 +482,31 @@ mod tests {
         assert_eq!(error, "provider unavailable");
         assert!(record.provider_policy_pending);
         assert_eq!(record.last_error.as_deref(), Some("provider unavailable"));
+    }
+
+    #[test]
+    fn deploy_finishing_after_the_agent_moved_is_not_recorded() {
+        for moved in [
+            BackendKind::Local,
+            BackendKind::Provider {
+                id: "kubernetes".into(),
+                config: serde_json::json!({}),
+            },
+        ] {
+            let mut record = record();
+            record.backend = moved;
+
+            let error = apply_deploy_result(
+                &mut record,
+                "docker",
+                Ok("provider-agent".into()),
+                &policy_payload("owner-only"),
+            )
+            .expect_err("a deploy for a provider the agent left must not be recorded");
+
+            assert!(error.contains("docker"), "{error}");
+            assert_eq!(record.backend_agent_id, None);
+            assert_eq!(record.last_error.as_deref(), Some(error.as_str()));
+        }
     }
 }

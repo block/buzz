@@ -25,7 +25,7 @@ export type RunOnSummary =
  * word-split the create-time gate uses (`validate_provider_config`,
  * src-tauri managed_agents/backend.rs) so there is one definition of
  * "looks like a secret", not two that drift. That gate already rejects
- * secret-shaped keys on the only non-test write path to `agent.backend` —
+ * secret-shaped keys on every non-test write path to `agent.backend` —
  * this display-side redaction is screenshot hygiene, not the missing
  * credential fix: a value that is fine in `managed-agents.json` on the
  * owner's own disk is not fine in a dialog that gets screenshotted into a
