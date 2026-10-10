@@ -124,3 +124,18 @@
     dynamic-range-limit: standard;
   }
 }
+
+/*
+ * Glass surfaces lower their tint under `supports-[backdrop-filter]:` because
+ * the blur is meant to carry legibility. WebKitGTK without accelerated
+ * compositing passes that `@supports` check but blurs nothing, so text behind
+ * them shows through sharp. When the native side reports that (see
+ * `backdropFilterSupport.ts`), make those surfaces solid. Unlayered on purpose
+ * so it beats the utilities layer.
+ */
+:root[data-backdrop-filter-unpainted]
+  [class*="backdrop-filter]:bg-background/"],
+:root[data-backdrop-filter-unpainted]
+  [class*="backdrop-filter:bg-background/"] {
+  background-color: hsl(var(--background));
+}

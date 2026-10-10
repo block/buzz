@@ -598,6 +598,7 @@ pub fn run() {
             search_users,
             get_presence,
             get_os_idle_seconds,
+            get_backdrop_filter_unpainted,
             get_default_relay_url,
             auto_connect_default_relay_enabled,
             get_legacy_workspace_storage,
