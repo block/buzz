@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  CLASS:
+    Type: String
+    Default: dev
+    AllowedValues: ['dev']
+
+Resources:
+  BuzzRelayRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'buzz-${CLASS}'
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire images older than 180 days",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 180
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: buzz
+        - Key: Owner
+          Value: cto@mequilibrium.com
