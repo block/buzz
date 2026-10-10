@@ -1,7 +1,22 @@
-//! Canonical relay identities shared by runtime components.
+//! Relay identity and transport settings shared by runtime components.
 
 use thiserror::Error;
 use url::{Host, Url};
+
+/// Default inbound event/frame limit, shared by relay and operator publishers.
+pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
+
+/// Resolve the transport limit with the relay's positive-integer fallback policy.
+pub fn max_frame_bytes_from_env() -> usize {
+    parse_max_frame_bytes(std::env::var("BUZZ_MAX_FRAME_BYTES").ok().as_deref())
+}
+
+fn parse_max_frame_bytes(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_FRAME_BYTES)
+}
 
 /// Errors returned while canonicalizing a relay URL for runtime identity.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -80,6 +95,14 @@ pub fn normalize_relay_url(raw: &str) -> Result<String, NormalizeRelayUrlError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_limit_accepts_only_positive_integers() {
+        for value in [None, Some(""), Some("0"), Some("bad"), Some("-1")] {
+            assert_eq!(parse_max_frame_bytes(value), DEFAULT_MAX_FRAME_BYTES);
+        }
+        assert_eq!(parse_max_frame_bytes(Some("262144")), 262144);
+    }
 
     #[test]
     fn loopback_spellings_have_one_identity() {

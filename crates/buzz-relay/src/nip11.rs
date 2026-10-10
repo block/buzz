@@ -381,6 +381,11 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if state.config.nip_cl_enabled && relay_self.is_some() {
+            info.supported_extensions
+                .get_or_insert_default()
+                .push("nip-cl".to_owned());
+        }
         if state.config.buzz_v1_enabled {
             use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
             info.buzz_v1 = Some(BuzzV1Descriptor {

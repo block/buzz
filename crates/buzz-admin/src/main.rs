@@ -20,6 +20,7 @@
 //! newest timestamp and collide on the bumped second. run.sh serialization is
 //! the guard against parallel adds (e.g. `xargs -P`).
 
+mod channel_metadata;
 mod communities;
 mod deletions;
 
@@ -112,10 +113,10 @@ enum Command {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
     },
-    /// Emit missing kind:39000/39001/39002 channel discovery events, or
+    /// Repair missing or stale kind:39000 channel metadata and discovery, or
     /// republish only a targeted channel's kind:39002 roster.
     ///
-    /// Without `--channel`, only channels missing discovery metadata are
+    /// Without `--channel`, channels with missing or stale metadata are
     /// reconciled. With `--channel`, only that channel's member snapshot is
     /// replaced; canonical metadata and admin events remain untouched.
     ReconcileChannels {
@@ -124,8 +125,7 @@ enum Command {
         channel: Option<String>,
 
         /// Relay private key (hex) for signing events. Falls back to
-        /// BUZZ_RELAY_PRIVATE_KEY env var. If neither is set, generates
-        /// an ephemeral key (events will be unverifiable after restart).
+        /// BUZZ_RELAY_PRIVATE_KEY env var. A configured relay identity is required.
         #[arg(long)]
         relay_key: Option<String>,
     },
@@ -739,36 +739,17 @@ async fn reconcile_channels(
     channel_arg: Option<String>,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
-    use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
-    use buzz_db::event::EventQuery;
-
     let db = connect_db().await?;
 
-    // Resolve relay signing key: arg > env > ephemeral. Force-republish must
-    // never use an ephemeral key because it replaces an existing authoritative
-    // snapshot.
-    let configured_relay_key =
-        relay_key_arg.or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok());
-    if channel_arg.is_some() && configured_relay_key.is_none() {
-        return Err(anyhow::anyhow!(
-            "--channel requires --relay-key or BUZZ_RELAY_PRIVATE_KEY"
-        ));
-    }
-    let relay_keys = match configured_relay_key {
-        Some(key_hex) => {
-            Keys::parse(&key_hex).map_err(|e| anyhow::anyhow!("invalid relay key: {e}"))?
-        }
-        None => {
-            let k = Keys::generate();
-            eprintln!(
-                "Warning: no relay key provided — using ephemeral key {}",
-                k.public_key().to_hex()
-            );
-            eprintln!("Events signed with this key won't be verifiable after this run.");
-            eprintln!("Pass --relay-key or set BUZZ_RELAY_PRIVATE_KEY for production use.");
-            k
-        }
-    };
+    // Repair is authoritative publication. An ephemeral signer would create
+    // untrusted metadata, not repair the configured relay's head.
+    let configured_relay_key = relay_key_arg
+        .or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("reconciliation requires --relay-key or BUZZ_RELAY_PRIVATE_KEY")
+        })?;
+    let relay_keys = Keys::parse(&configured_relay_key)
+        .map_err(|e| anyhow::anyhow!("invalid relay key: {e}"))?;
 
     let tenant = resolve_admin_tenant(&db).await?;
     let target_channel = channel_arg
@@ -776,119 +757,18 @@ async fn reconcile_channels(
         .map(uuid::Uuid::parse_str)
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid --channel UUID: {e}"))?;
-    let channels = if let Some(target) = target_channel {
-        vec![db
-            .get_channel(tenant.community(), target)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("channel {target} not found in community {}", tenant.host())
-            })?]
-    } else {
-        db.list_channels(tenant.community(), None).await?
-    };
-    if channels.is_empty() {
-        println!("No channels in database.");
-        return Ok(());
-    }
-
-    let mut reconciled = 0u32;
-    let mut skipped = 0u32;
-
-    for channel in &channels {
-        let channel_id_str = channel.id.to_string();
-
-        // Check if kind:39000 already exists
-        let existing = db
-            .query_events(&EventQuery {
-                kinds: Some(vec![39000]),
-                d_tag: Some(channel_id_str.clone()),
-                limit: Some(1),
-                ..EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-
-        if !existing.is_empty() && target_channel.is_none() {
-            skipped += 1;
-            continue;
-        }
-
-        let members = db.get_members(tenant.community(), channel.id).await?;
-
-        // A targeted repair is deliberately roster-only. kind:39000 metadata
-        // is richer than this legacy backfill builder, and kind:39001 is not
-        // part of the stale-roster incident; replacing either can destroy
-        // canonical state. Full backfill still creates all three event kinds
-        // for channels with no discovery metadata.
-        if target_channel.is_none() {
-            // kind:39000 — channel metadata
-            {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                tags.push(Tag::parse(["name", &channel.name])?);
-                if let Some(ref desc) = channel.description {
-                    if !desc.is_empty() {
-                        tags.push(Tag::parse(["about", desc])?);
-                    }
-                }
-                if channel.visibility == "private" {
-                    tags.push(Tag::parse(["private"])?);
-                } else {
-                    tags.push(Tag::parse(["public"])?);
-                }
-                if channel.channel_type == "dm" {
-                    tags.push(Tag::parse(["hidden"])?);
-                }
-                tags.push(Tag::parse(["closed"])?);
-                tags.push(Tag::parse(["t", &channel.channel_type])?);
-
-                let event = EventBuilder::new(Kind::Custom(39000), "")
-                    .tags(tags)
-                    .sign_with_keys(&relay_keys)
-                    .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
-                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                    .await?;
-            }
-
-            // kind:39001 — admins
-            {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                for m in members
-                    .iter()
-                    .filter(|m| m.role == "owner" || m.role == "admin")
-                {
-                    let pk = hex::encode(&m.pubkey);
-                    tags.push(Tag::parse(["p", &pk, &m.role])?);
-                }
-                let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
-                    .tags(tags)
-                    .sign_with_keys(&relay_keys)
-                    .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                    .await?;
-            }
-        }
-
-        // kind:39002 — members
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in &members {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, "", &m.role])?);
-            }
-            let event = EventBuilder::new(Kind::Custom(39002), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39002: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
-        }
-
-        reconciled += 1;
-    }
-
+    let summary = channel_metadata::reconcile(&db, &tenant, target_channel, &relay_keys).await?;
     println!(
-        "Reconciled {reconciled} channels ({skipped} already had events, {} total).",
-        channels.len()
+        "Reconciled {} channels ({} already current, {} failed, {} total).",
+        summary.repaired,
+        summary.skipped,
+        summary.failed,
+        summary.repaired + summary.skipped + summary.failed
+    );
+    anyhow::ensure!(
+        summary.failed == 0,
+        "channel reconciliation incomplete: {} failed",
+        summary.failed
     );
     Ok(())
 }
