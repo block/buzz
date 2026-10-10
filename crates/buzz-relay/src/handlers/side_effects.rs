@@ -475,6 +475,13 @@ pub async fn validate_standard_deletion_event(
                 "artifacts cannot be deleted with kind 5; use op=delete or kind 9005 redaction"
             );
         }
+        // A deletion of a private deletion would be stored publicly and reveal
+        // the private one's id and timing; NIP-09 gives it no effect anyway.
+        if target_event.event.kind.as_u16() == 5
+            && buzz_core::kind::is_author_only_event_kind(&target_event.event)
+        {
+            anyhow::bail!("cannot delete a private deletion request");
+        }
         check_deletion_privacy_k_tag(event, event_kind_u32(&target_event.event))?;
     }
 
