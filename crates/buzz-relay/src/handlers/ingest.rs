@@ -2593,6 +2593,23 @@ async fn ingest_event_inner(
         });
     }
 
+    // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
+    // `a` tag (addressable/parameterized-replaceable events like kind:30620).
+    // Checked before any target lookup so every target faces the gates below.
+    if kind_u32 == KIND_NIP29_DELETE_EVENT || kind_u32 == KIND_DELETION {
+        let e_count = count_e_tags(&event);
+        let a_count = event
+            .tags
+            .iter()
+            .filter(|t| t.kind().to_string() == "a")
+            .count();
+        if (e_count + a_count) != 1 {
+            return Err(IngestError::Rejected(format!(
+                "invalid: deletion events must reference exactly one target via e or a tag (got e={e_count}, a={a_count})"
+            )));
+        }
+    }
+
     // A kind 5 targeting an event derives its channel from that target, so
     // every channel gate below would reveal the target's existence or
     // location. Their rejections all collapse to the shared denial.
@@ -2629,10 +2646,9 @@ async fn ingest_event_inner(
     } else if kind_u32 == KIND_DELETION {
         // Standard deletion (kind:5): decide authority over the target before
         // the channel gates below, whose errors would otherwise reveal whether
-        // the target exists and where. Then derive the channel from the live
-        // target (kind:5 carries no h-tag) so token-channel, membership, and
-        // archived checks run against it. No e-tag is caught by single-target
-        // enforcement (step 12).
+        // the target exists and where. The target's channel, soft-deleted or
+        // not (kind:5 carries no h-tag), then faces the token-channel,
+        // membership, and archived checks.
         match crate::handlers::side_effects::extract_target_event_ids(&event).first() {
             Some(target_id) => {
                 let actor = effective_message_author(&event, &state.relay_keypair.public_key());
@@ -2643,19 +2659,8 @@ async fn ingest_event_inner(
                 .map_err(|e| {
                     IngestError::Internal(format!("error: looking up deletion target: {e}"))
                 })?
-                .ok_or_else(deletion_denied)?;
-                match state
-                    .db
-                    .get_event_by_id_for_event_write(tenant.community(), target_id)
-                    .await
-                {
-                    Ok(target) => target.and_then(|t| t.channel_id),
-                    Err(e) => {
-                        return Err(IngestError::Internal(format!(
-                            "error: looking up deletion target: {e}"
-                        )));
-                    }
-                }
+                .ok_or_else(deletion_denied)?
+                .channel_id
             }
             None => None,
         }
@@ -2909,6 +2914,15 @@ async fn ingest_event_inner(
     }
 
     if kind_u32 == KIND_DELETION {
+        // The target's archived channel blocks the deletion, so it must
+        // reject before the validator's target-kind diagnostics.
+        if deletion_targets_event
+            && channel_row
+                .as_ref()
+                .is_some_and(|ch| ch.archived_at.is_some())
+        {
+            return Err(deletion_denied());
+        }
         crate::handlers::side_effects::validate_standard_deletion_event(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -2925,11 +2939,7 @@ async fn ingest_event_inner(
         if !is_unarchive {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
-                    return Err(if deletion_targets_event {
-                        deletion_denied()
-                    } else {
-                        IngestError::Rejected("invalid: channel is archived".into())
-                    });
+                    return Err(IngestError::Rejected("invalid: channel is archived".into()));
                 }
             }
         }
@@ -2951,22 +2961,6 @@ async fn ingest_event_inner(
             );
         }
         return Ok(result);
-    }
-
-    // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
-    // `a` tag (addressable/parameterized-replaceable events like kind:30620).
-    if kind_u32 == KIND_NIP29_DELETE_EVENT || kind_u32 == KIND_DELETION {
-        let e_count = count_e_tags(&event);
-        let a_count = event
-            .tags
-            .iter()
-            .filter(|t| t.kind().to_string() == "a")
-            .count();
-        if (e_count + a_count) != 1 {
-            return Err(IngestError::Rejected(format!(
-                "invalid: deletion events must reference exactly one target via e or a tag (got e={e_count}, a={a_count})"
-            )));
-        }
     }
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
@@ -6863,6 +6857,36 @@ mod postgres_tests {
                     Err(other) => panic!("target {target}: {other:?}"),
                     Ok(_) => panic!("target {target}: deletion accepted"),
                 }
+            }
+        }
+        // Kind 9005 from the author's out-of-scope token, naming the channel
+        // the token covers, cannot reveal where the target lives either.
+        let redact = |target: &str| {
+            publish(
+                KIND_NIP29_DELETE_EVENT as u16,
+                vec![
+                    Tag::parse(["e", target]).unwrap(),
+                    Tag::parse(["h", &channels[1].to_string()]).unwrap(),
+                ],
+                &author,
+            )
+        };
+        for target in ["a".repeat(64), live.id.to_hex(), global.id.to_hex()] {
+            match ingest_event_inner(
+                &state,
+                &tracer,
+                &tenant,
+                redact(&target),
+                scoped_auth(&author, channels[1]),
+            )
+            .await
+            {
+                Err(IngestError::Rejected(msg)) => assert_eq!(
+                    msg, "invalid: deletion target not found or not deletable by you",
+                    "9005 target {target}"
+                ),
+                Err(other) => panic!("9005 target {target}: {other:?}"),
+                Ok(_) => panic!("9005 target {target}: deletion accepted"),
             }
         }
         // A token scoped to the target's channel still deletes.

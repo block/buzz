@@ -705,3 +705,133 @@ async fn removed_author_deletion_does_not_reveal_target() {
     let still_writable = post_message(&client, &author, &own).await;
     submit_ok(&client, &author, &delete(&still_writable.id.to_hex())).await;
 }
+
+/// An NIP-AR artifact revision by `author` homed in `channel`.
+fn artifact_revision(
+    author: &Keys,
+    artifact: &str,
+    channel: &str,
+    op: &str,
+    prev: Option<&EventId>,
+) -> nostr::Event {
+    let mut tags = vec![
+        tag(&["ar", "1"]),
+        tag(&["d", artifact]),
+        tag(&["h", channel]),
+        tag(&["type", "buzz.task"]),
+        tag(&["op", op]),
+        tag(&["title", "Task"]),
+    ];
+    tags.extend(prev.map(|p| tag(&["prev", &p.to_hex()])));
+    EventBuilder::new(Kind::Custom(45010), "")
+        .tags(tags)
+        .sign_with_keys(author)
+        .unwrap()
+}
+
+/// A live artifact by `author` homed in `channel`.
+async fn post_artifact(client: &Client, author: &Keys, channel: &str) -> nostr::Event {
+    let create = artifact_revision(
+        author,
+        &uuid::Uuid::new_v4().to_string(),
+        channel,
+        "create",
+        None,
+    );
+    submit_ok(client, author, &create).await;
+    create
+}
+
+/// An archived channel blocks every deletion of its events, so kind 5 and
+/// kind 9005 must reject as for a missing target before any error about the
+/// target's kind or location, even for the author who owns the channel.
+#[tokio::test]
+#[ignore]
+async fn archived_target_deletion_does_not_reveal_target() {
+    let client = http_client();
+    let owner = Keys::generate();
+    let archived = create_channel(&client, &owner, "open").await;
+    let active = create_channel(&client, &owner, "open").await;
+    let message = post_message(&client, &owner, &archived).await;
+    let artifact = post_artifact(&client, &owner, &archived).await;
+    // Moving an artifact out of a channel leaves a removal marker there.
+    let moved = post_artifact(&client, &owner, &archived).await;
+    let d = moved.tags.identifier().unwrap().to_string();
+    submit_ok(
+        &client,
+        &owner,
+        &artifact_revision(&owner, &d, &active, "move", Some(&moved.id)),
+    )
+    .await;
+    let marker = http_query_ids(
+        &client,
+        &owner,
+        &Filter::new().kind(Kind::Custom(45011)).custom_tag(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            archived.clone(),
+        ),
+    )
+    .await
+    .pop()
+    .expect("artifact removal marker");
+    let archive = EventBuilder::new(Kind::Custom(9002), "")
+        .tags(vec![tag(&["h", &archived]), tag(&["archived", "true"])])
+        .sign_with_keys(&owner)
+        .unwrap();
+    submit_ok(&client, &owner, &archive).await;
+    let missing = "a".repeat(64);
+
+    let delete = |target: &str, k: Option<&str>| {
+        let mut tags = vec![tag(&["e", target])];
+        tags.extend(k.map(|k| tag(&["k", k])));
+        build_deletion(&owner, tags)
+    };
+    let redact = |target: &str, channel: &str| {
+        EventBuilder::new(Kind::Custom(9005), "")
+            .tags(vec![tag(&["e", target]), tag(&["h", channel])])
+            .sign_with_keys(&owner)
+            .unwrap()
+    };
+    let message_id = message.id.to_hex();
+    let cases = [
+        ("kind 5, missing", delete(&missing, None)),
+        ("kind 5, message", delete(&message_id, None)),
+        ("kind 5, wrong k", delete(&message_id, Some("30300"))),
+        ("kind 5, artifact", delete(&artifact.id.to_hex(), None)),
+        ("9005, missing", redact(&missing, &active)),
+        ("9005, archived target", redact(&message_id, &active)),
+    ];
+    let mut expected = None;
+    for (case, deletion) in cases {
+        let (status, http_msg, ws_msg) = rejection(&client, &owner, deletion).await;
+        assert_eq!(http_msg, DENIED, "{case}: HTTP");
+        assert_eq!(ws_msg, DENIED, "{case}: WS");
+        assert_eq!(
+            *expected.get_or_insert(status),
+            status,
+            "{case}: HTTP status"
+        );
+    }
+    // A 9005 naming the archived channel is refused for that channel before
+    // the target is read, so the removal marker matches a missing target.
+    assert_eq!(
+        rejection(&client, &owner, redact(&marker, &archived)).await,
+        rejection(&client, &owner, redact(&missing, &archived)).await,
+    );
+
+    // In an active channel the owner still gets the target diagnostics.
+    let live = post_message(&client, &owner, &active).await;
+    let (_, http_msg, _) =
+        rejection(&client, &owner, delete(&live.id.to_hex(), Some("30300"))).await;
+    assert!(
+        http_msg.contains("does not match the deletion target's kind"),
+        "{http_msg}"
+    );
+    let live_artifact = post_artifact(&client, &owner, &active).await;
+    let (_, http_msg, _) =
+        rejection(&client, &owner, delete(&live_artifact.id.to_hex(), None)).await;
+    assert!(
+        http_msg.contains("artifacts cannot be deleted with kind 5"),
+        "{http_msg}"
+    );
+}

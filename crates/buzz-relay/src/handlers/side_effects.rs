@@ -817,40 +817,21 @@ pub async fn validate_admin_event(
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
 
-            // Only someone who could delete the target where it actually lives
-            // may learn that it lives outside the `h` channel; channel
-            // authority covers only that channel's events.
-            let authorized = match target_event.channel_id {
-                Some(target_channel) => {
-                    may_delete_channel_event(
-                        tenant,
-                        state,
-                        event,
-                        target_channel,
-                        &author,
-                        &actor_bytes,
-                    )
-                    .await?
-                }
-                None => {
-                    author == actor_bytes
-                        || state
-                            .db
-                            .is_agent_owner(tenant.community(), &author, &actor_bytes)
-                            .await?
-                }
-            };
-            if !authorized {
+            // A target outside the `h` channel is denied like a missing one:
+            // telling where it lives would need every access gate of a second
+            // channel. The `h` channel's token and archive gates already ran.
+            if target_event.channel_id != Some(channel_id)
+                || !may_delete_channel_event(
+                    tenant,
+                    state,
+                    event,
+                    channel_id,
+                    &author,
+                    &actor_bytes,
+                )
+                .await?
+            {
                 return Err(denied());
-            }
-            match target_event.channel_id {
-                Some(target_channel) if target_channel != channel_id => {
-                    return Err(anyhow::anyhow!(
-                        "target event belongs to a different channel"
-                    ));
-                }
-                None => return Err(anyhow::anyhow!("target event has no channel")),
-                Some(_) => {}
             }
             if target_event.event.kind.as_u16() == 45011 {
                 return Err(anyhow::anyhow!(
