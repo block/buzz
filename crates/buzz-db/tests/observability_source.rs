@@ -613,6 +613,10 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
             "channel_members",
             include_str!("../src/store/channel_members.rs"),
         ),
+        (
+            "channel_member_snapshots",
+            include_str!("../src/store/channel_members/snapshot.rs"),
+        ),
         ("archived_identities", archived_identities),
         ("event", event),
         ("git_repo", include_str!("../src/store/git_repo.rs")),
