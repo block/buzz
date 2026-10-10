@@ -126,8 +126,9 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
-    /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
-    #[arg(long, value_enum, default_value = "json")]
+    /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
+    /// or 'agent' (event reads without signature material).
+    #[arg(long, value_enum, env = "BUZZ_OUTPUT_FORMAT", default_value = "json")]
     format: OutputFormat,
 
     #[command(subcommand)]
@@ -206,6 +207,11 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
+    /// Event reads drop signature material (`sig`, NIP-OA `auth`) and fold
+    /// NIP-10 thread markers into `reply_to`; other reads match `json`.
+    /// Default for harness-managed agents.
+    #[value(name = "agent")]
+    Agent,
 }
 
 #[derive(Subcommand)]

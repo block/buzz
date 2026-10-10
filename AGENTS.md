@@ -363,8 +363,11 @@ canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
-`--format compact` is a **global** flag — it goes before the subcommand:
+`--format` is a **global** flag — it goes before the subcommand:
 `buzz --format compact channels list`, NOT `buzz channels list --format compact`.
+It also reads `BUZZ_OUTPUT_FORMAT`; buzz-acp sets that to `agent` for agent
+processes, so their event reads drop `sig` and the NIP-OA `auth` tag and fold the
+NIP-10 `root`/`reply` tags into `reply_to`; other tags remain.
 
 See `crates/buzz-cli/TESTING.md` for the full live-testing runbook.
 
