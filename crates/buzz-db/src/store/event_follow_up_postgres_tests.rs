@@ -1018,13 +1018,30 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
          endpoint_grant, max_class, subscriptions, expires_at, updated_at) \
          SELECT $1, author, installation_id, source_event_id, source_created_at, generation, \
          active, endpoint_enabled, endpoint_hash, endpoint_grant, max_class, \
-         subscriptions, expires_at, clock_timestamp() FROM push_leases WHERE community_id=$2",
+         subscriptions, expires_at, \
+         (SELECT received_at + interval '1 second' FROM events WHERE community_id=$1 AND id=$3) \
+         FROM push_leases WHERE community_id=$2",
     )
     .bind(later.as_uuid())
     .bind(community.as_uuid())
+    .bind(before_enrollment.id.as_bytes().as_slice())
     .execute(&mut *activation)
     .await
     .unwrap();
+    let leases_strictly_newer: bool = sqlx::query_scalar(
+        "SELECT count(*) > 0 AND bool_and(l.updated_at > e.received_at) \
+         FROM push_leases l JOIN events e ON e.community_id=l.community_id \
+         WHERE l.community_id=$1 AND e.id=$2",
+    )
+    .bind(later.as_uuid())
+    .bind(before_enrollment.id.as_bytes().as_slice())
+    .fetch_one(&mut *activation)
+    .await
+    .unwrap();
+    assert!(
+        leases_strictly_newer,
+        "fixture leases must follow recorded receipt"
+    );
     activation.commit().await.unwrap();
     assert_eq!(match_count(&isolated, later, &before_enrollment).await, 0);
     assert_eq!(
