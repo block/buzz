@@ -467,6 +467,9 @@ pub fn build_event(
 
     EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ciphertext)
         .tags(tags)
+        // NIP-AE requires `p` as the owner address even when owner == agent.
+        // rust-nostr otherwise strips author-matching `p` tags while signing.
+        .allow_self_tagging()
         .custom_created_at(nostr::Timestamp::from(created_at))
         .sign_with_keys(agent_keys)
         .map_err(|e| EngramError::Sign(e.to_string()))
@@ -829,6 +832,54 @@ mod tests {
         .unwrap();
         assert_eq!(decoded_agent, decoded);
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn build_event_addresses_self_and_cross_owner_with_one_p_tag() {
+        let agent = keys_from_hex(SECKEY_A);
+        let other_owner = keys_from_hex(SECKEY_O);
+        let body = Body::Memory {
+            slug: "mem/example".into(),
+            value: Some("owner-addressing-control".into()),
+        };
+
+        for owner in [agent.public_key(), other_owner.public_key()] {
+            let event = build_event(&agent, &owner, &body, 1_700_000_000).unwrap();
+            let p_values: Vec<_> = event
+                .tags
+                .iter()
+                .filter(|tag| tag.kind().to_string() == "p")
+                .filter_map(|tag| tag.content().map(str::to_owned))
+                .collect();
+
+            assert_eq!(p_values, vec![owner.to_hex()]);
+        }
+    }
+
+    #[test]
+    fn validate_and_decrypt_rejects_wrong_owner_p_tag() {
+        let agent = keys_from_hex(SECKEY_A);
+        let owner = keys_from_hex(SECKEY_O);
+        let wrong_owner = Keys::generate();
+        let body = Body::Memory {
+            slug: "mem/example".into(),
+            value: Some("wrong-owner-control".into()),
+        };
+        let event = build_event(&agent, &owner.public_key(), &body, 1_700_000_000).unwrap();
+
+        let err = validate_and_decrypt(
+            &event,
+            &agent.public_key(),
+            &wrong_owner.public_key(),
+            agent.secret_key(),
+            &owner.public_key(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EngramError::InvalidEnvelope(ref message) if message == "p tag != expected_owner"
+        ));
     }
 
     #[test]
