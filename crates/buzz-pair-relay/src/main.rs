@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 #[tokio::main]
 async fn main() {
     let addr_raw =
-        std::env::var("BUZZ_PAIR_RELAY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:5000".to_string());
+        std::env::var("BUZZ_PAIR_RELAY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:18765".to_string());
     let addr: SocketAddr = match addr_raw.parse() {
         Ok(addr) => addr,
         Err(e) => {
