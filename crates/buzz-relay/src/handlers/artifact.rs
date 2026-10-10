@@ -24,10 +24,14 @@ pub(crate) async fn accept(
             .artifact_home(tenant.community(), env.id)
             .await
             .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?
-            .ok_or_else(|| {
-                IngestError::CanvasConflict("conflict: artifact head unavailable".into())
+            .ok_or_else(head_unavailable)?;
+        // A source the sender cannot write answers like a missing artifact.
+        super::ingest::check_channel_write(tenant, state, auth, source)
+            .await
+            .map_err(|e| match e {
+                IngestError::Internal(_) => e,
+                _ => head_unavailable(),
             })?;
-        super::ingest::check_channel_write(tenant, state, auth, source).await?;
         Some(source)
     } else {
         None
@@ -62,6 +66,10 @@ pub(crate) async fn accept(
         accepted: true,
         message: String::new(),
     })
+}
+
+fn head_unavailable() -> IngestError {
+    IngestError::CanvasConflict(format!("conflict: {}", buzz_db::artifact::HEAD_UNAVAILABLE))
 }
 
 /// Live delivery only; unlike kind 9 there are no audit, workflow, or thread
