@@ -521,6 +521,9 @@ impl AgentHarness {
             .env("DATABRICKS_HOST", base_url)
             .env("DATABRICKS_MODEL", model)
             .env_remove("DATABRICKS_TOKEN")
+            // A filter inherited from a developer or agent shell would hide the
+            // fake server's models and break the discovery assertions.
+            .env_remove("DATABRICKS_MODEL_FILTER")
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "2")
