@@ -11,6 +11,7 @@ import {
   canSendMessageToChannel,
 } from "@/features/messages/lib/canSendToChannel";
 import type { TimelineMessage } from "@/features/messages/types";
+import { SendEntrance } from "@/features/messages/ui/SendEntrance";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
@@ -162,9 +163,6 @@ export const MessageRow = React.memo(
     videoReviewCommentRootId?: string;
     videoReviewContext?: VideoReviewContext;
   }) {
-    // Keep the transient send state with its timestamp rather than collapsing
-    // it into a grouped message row with no header.
-    const isDisplayedAsContinuation = isContinuation && !message.pending;
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
     );
@@ -194,6 +192,12 @@ export const MessageRow = React.memo(
         : undefined;
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
+    );
+    // A row that first mounts while its send is pending is the user's own
+    // message appearing. It keeps its render key through the acknowledgement,
+    // so the entrance plays once and never replays when the send lands.
+    const [mountedWhilePending] = React.useState(
+      () => message.pending === true,
     );
     const handleEntranceAnimationEnd = React.useCallback(
       (event: React.AnimationEvent<HTMLElement>) => {
@@ -532,7 +536,7 @@ export const MessageRow = React.memo(
       </div>
     );
 
-    const avatarGutterNode = isDisplayedAsContinuation ? (
+    const avatarGutterNode = isContinuation ? (
       continuationTimestampGutter
     ) : message.pubkey ? (
       <UserProfilePopover
@@ -609,25 +613,35 @@ export const MessageRow = React.memo(
       </div>
     );
 
+    // A grouped row has no header to carry the send status, so it stays
+    // screen-reader only there: a visible line would collapse on
+    // acknowledgement and shift the timeline. The dimmed body shows it instead.
+    const sendStatusNode = message.pending ? (
+      <p
+        className={cn(
+          "font-normal text-muted-foreground/70",
+          isContinuation && "sr-only",
+        )}
+        data-testid="message-send-status"
+      >
+        Sending…
+      </p>
+    ) : null;
+
+    const editedStatusNode = message.edited ? (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <p className="text-muted-foreground/70">(edited)</p>
+        </TooltipTrigger>
+        <TooltipContent>This message has been edited</TooltipContent>
+      </Tooltip>
+    ) : null;
+
     const statusMetadataNode =
-      message.pending || message.edited ? (
+      sendStatusNode || editedStatusNode ? (
         <>
-          {message.pending ? (
-            <p
-              className="font-normal text-muted-foreground/70"
-              data-testid="message-send-status"
-            >
-              Sending…
-            </p>
-          ) : null}
-          {message.edited ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <p className="text-muted-foreground/70">(edited)</p>
-              </TooltipTrigger>
-              <TooltipContent>This message has been edited</TooltipContent>
-            </Tooltip>
-          ) : null}
+          {sendStatusNode}
+          {editedStatusNode}
         </>
       ) : null;
 
@@ -646,14 +660,18 @@ export const MessageRow = React.memo(
         </span>
       ) : null;
 
-    const continuationMetadataNode =
-      isDisplayedAsContinuation && statusMetadataNode ? (
-        <div className="mt-0.5 flex items-baseline gap-2 text-xs">
-          {statusMetadataNode}
-        </div>
-      ) : null;
+    const continuationMetadataNode = isContinuation ? (
+      <>
+        {sendStatusNode}
+        {editedStatusNode ? (
+          <div className="mt-0.5 flex items-baseline gap-2 text-xs">
+            {editedStatusNode}
+          </div>
+        ) : null}
+      </>
+    ) : null;
 
-    const headerNode = isDisplayedAsContinuation ? null : (
+    const headerNode = isContinuation ? null : (
       // pe reserves the measured action-rail footprint (0px until measured) so
       // header content ends before the rail's left edge in every rail state.
       <MessageHeaderRow className="pe-[var(--message-action-rail-width,0px)]">
@@ -679,9 +697,11 @@ export const MessageRow = React.memo(
         />
       </MessageHeaderRow>
     );
-    const bodyContainerClass = isDisplayedAsContinuation
-      ? "mt-0"
-      : bodyOffsetClass;
+    const bodyContainerClass = cn(
+      isContinuation ? "mt-0" : bodyOffsetClass,
+      "transition-opacity motion-reduce:transition-none",
+      message.pending && "opacity-60",
+    );
 
     const messageBodyNode = (
       <>
@@ -728,7 +748,7 @@ export const MessageRow = React.memo(
       </>
     );
 
-    return (
+    const rowNode = (
       <div
         className="relative"
         style={
@@ -900,7 +920,7 @@ export const MessageRow = React.memo(
                 ? "mx-1 px-2"
                 : "px-2",
             "flex gap-2.5",
-            isDisplayedAsContinuation ? "items-center" : "items-start",
+            isContinuation ? "items-center" : "items-start",
             hasActiveReminder ? "bg-blue-500/10" : "",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
@@ -935,6 +955,12 @@ export const MessageRow = React.memo(
           {actionBarNode}
         </article>
       </div>
+    );
+
+    return mountedWhilePending ? (
+      <SendEntrance>{rowNode}</SendEntrance>
+    ) : (
+      rowNode
     );
     // Callbacks (onReply, onToggleReaction) intentionally excluded: inline arrows
     // from parent create new refs every render — including them defeats memo.

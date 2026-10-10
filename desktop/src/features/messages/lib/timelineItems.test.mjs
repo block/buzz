@@ -416,7 +416,7 @@ test("buildTimelineItems: consecutive same-author messages within the window are
   );
 });
 
-test("buildTimelineItems: pending messages remain standalone until acknowledged", () => {
+test("buildTimelineItems: pending messages group like acknowledged ones", () => {
   const entries = [
     entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
     entry({
@@ -438,11 +438,11 @@ test("buildTimelineItems: pending messages remain standalone until acknowledged"
 
   assert.deepEqual(
     messageItems.map((item) => item.isContinuation),
-    [false, false, false],
+    [false, true, true],
   );
   assert.deepEqual(
     messageItems.map((item) => item.isFollowedByContinuation),
-    [false, false, false],
+    [true, true, false],
   );
 });
 

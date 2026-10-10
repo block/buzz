@@ -186,6 +186,46 @@ test("test_projection_replaces_pending_send_with_authoritative_event", () => {
   assert.equal(projected[1]?.localKey, pending.id);
 });
 
+test("test_pageless_projection_keeps_pending_send_after_same_second_event", () => {
+  // A pageless window projects the cache directly; the optimistic id must not
+  // place the newest local send above an earlier same-second message.
+  const pending = {
+    ...event("pending", 110),
+    id: "optimistic-00000000-0000-4000-8000-000000000000",
+    pending: true,
+  };
+
+  assert.deepEqual(
+    reconcileChannelWindowMessages(emptyChannelWindowStore(), [
+      pending,
+      event("a", 110),
+    ]).map((item) => item.content),
+    ["a", "pending"],
+  );
+});
+
+test("test_live_pending_send_projects_after_same_second_window_events", () => {
+  // Mirrors the send mutation: the optimistic event enters the window's live
+  // overlay, then the channel projection runs.
+  const harness = createHarness();
+  const pending = {
+    ...event("pending", 110),
+    id: "optimistic-00000000-0000-4000-8000-000000000000",
+    pending: true,
+  };
+  const window = replaceNewestChannelWindow(
+    harness.client.getQueryData(harness.windowKey),
+    newestPage([event("a", 110), event("b", 110), event("initial", 100)]),
+  );
+  harness.client.setQueryData(
+    harness.windowKey,
+    mergeLiveChannelWindowEvent(window, pending),
+  );
+  projectChannelWindowMessages(harness.client, harness.channelId);
+
+  assert.deepEqual(contents(harness), ["initial", "b", "a", "pending"]);
+});
+
 test("test_reconciliation_preserves_dense_second_window_order", () => {
   const first = {
     ...newestPage([event("a", 100), event("b", 100)]),
