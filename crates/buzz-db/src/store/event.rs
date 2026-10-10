@@ -19,6 +19,11 @@ use buzz_datastore_tracing::datastore_span;
 use crate::error::{DbError, Result};
 use crate::{AdmittedTx, Db};
 
+mod metadata_filter;
+mod tag_filter;
+
+pub use metadata_filter::ChannelMetadataRead;
+
 // Compatibility exports preserve the pre-extraction public event-store paths.
 pub use crate::reminder::{
     claim_due_reminder, claim_due_reminder_with_stamp, query_due_reminders, release_due_reminder,
@@ -92,6 +97,13 @@ pub struct EventQuery {
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
+    /// Exact NIP-01 tag predicates, applied before LIMIT and by COUNT.
+    /// Values within a key use OR; keys use AND. Only tag positions 0 and 1
+    /// participate, unlike JSONB containment alone (which ignores array order).
+    pub tag_filters: Vec<(String, Vec<String>)>,
+    /// Current relay metadata and read ACL, checked in SQL before filtering/limits.
+    /// Queries with this authorization predicate must use the writer pool.
+    pub channel_metadata_read: Option<ChannelMetadataRead>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -152,6 +164,8 @@ impl EventQuery {
             e_tags: None,
             d_tag_values: None,
             custom_tag: None,
+            tag_filters: Vec::new(),
+            channel_metadata_read: None,
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -735,6 +749,9 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
     }
 
+    metadata_filter::push_predicates(&mut qb, col_prefix, q.channel_metadata_read.as_ref());
+    tag_filter::push_predicates(&mut qb, col_prefix, &q.tag_filters);
+
     if let Some((ref name, ref value)) = q.custom_tag {
         let containment = serde_json::json!([[name, value]]);
         qb.push(format!(" AND {col_prefix}tags @> "))
@@ -1062,6 +1079,9 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     if let Some(ref values) = q.d_tag_values {
         push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
     }
+
+    metadata_filter::push_predicates(&mut qb, col_prefix, q.channel_metadata_read.as_ref());
+    tag_filter::push_predicates(&mut qb, col_prefix, &q.tag_filters);
 
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))
@@ -2202,6 +2222,10 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if q.channel_metadata_read.is_some() {
+            Self::record_route(path, "writer", "metadata_authorization");
+            return self.query_events(q).await;
+        }
         let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
         match self
             .route_read(
@@ -2262,6 +2286,10 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if q.channel_metadata_read.is_some() {
+            Self::record_route(path, "writer", "metadata_authorization");
+            return self.query_events(q).await;
+        }
         match self
             .route_read(
                 path,
@@ -2326,6 +2354,10 @@ impl Db {
     /// the error to the accepted budget `B`.
     #[datastore_span(name = "count_events_routed", system = "postgresql")]
     pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
+        if q.channel_metadata_read.is_some() {
+            Self::record_route(path, "writer", "metadata_authorization");
+            return self.count_events(q).await;
+        }
         match self
             .route_read(
                 path,

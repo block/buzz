@@ -2535,6 +2535,33 @@ async fn ingest_event_inner(
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
 
+    // NIP-CL owns covered commands end-to-end. It must precede cached channel
+    // admission, pre-creation, generic dedup and post-storage side effects.
+    if let Some(result) =
+        super::channel_labels::handle_if_covered(tenant, state, &event, &auth).await
+    {
+        let result = result?;
+        if result.accepted {
+            let channel = extract_channel_id(&event)
+                .ok_or_else(|| IngestError::Internal("error: missing command channel".into()))?;
+            let action = if result.message.starts_with("duplicate:") {
+                TraceAction::WriteDuplicate {
+                    msg_id: msg_id_label(event.id.as_bytes()),
+                    channel: channel_label(channel),
+                    claimed_community: claimed_community_from_event(&event),
+                }
+            } else {
+                TraceAction::WriteInsert {
+                    msg_id: msg_id_label(event.id.as_bytes()),
+                    channel: channel_label(channel),
+                    claimed_community: claimed_community_from_event(&event),
+                }
+            };
+            emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+        }
+        return Ok(result);
+    }
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {

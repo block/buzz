@@ -1428,10 +1428,14 @@ async fn query_events_authed(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
-        .await
-        .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = crate::handlers::req::accessible_channels_for_filters(
+        state,
+        tenant.community(),
+        &pubkey_bytes,
+        &filters,
+    )
+    .await
+    .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
@@ -2024,10 +2028,14 @@ async fn count_events_authed(
     }
 
     // Get channels this user can access.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
-        .await
-        .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = crate::handlers::req::accessible_channels_for_filters(
+        state,
+        tenant.community(),
+        &pubkey_bytes,
+        &filters,
+    )
+    .await
+    .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
@@ -2949,6 +2957,10 @@ mod artifact_postgres_tests;
 #[cfg(test)]
 #[path = "typing_postgres_tests.rs"]
 mod typing_postgres_tests;
+
+#[cfg(test)]
+#[path = "channel_labels_postgres_tests.rs"]
+mod channel_labels_postgres_tests;
 
 #[cfg(test)]
 pub(crate) mod postgres_tests {

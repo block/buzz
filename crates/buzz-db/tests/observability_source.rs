@@ -179,7 +179,19 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     let side_effects = include_str!("../../buzz-relay/src/handlers/side_effects.rs");
     assert!(side_effects.contains("query_events_for_event_write"));
     assert!(side_effects.contains("query_events_for_bootstrap"));
-    assert!(side_effects.contains(".list_channels_for_bootstrap("));
+    assert!(side_effects.contains(".channel_metadata_repair_page("));
+    let metadata_activation = include_str!("../src/store/channel_metadata/activation.rs");
+    let repair_page = metadata_activation
+        .split_once("pub async fn channel_metadata_repair_page(")
+        .expect("metadata repair must expose a paged bootstrap read")
+        .1
+        .split_once("/// Verify that every live channel")
+        .expect("repair paging must precede activation verification")
+        .0;
+    assert!(repair_page.contains("WriterOperation::Bootstrap"));
+    assert!(repair_page.contains("observability::acquire_writer("));
+    assert!(repair_page.contains("fetch_all(&mut *connection)"));
+    assert!(!repair_page.contains("fetch_all(&self.pool)"));
 
     let deletion = include_str!("../src/store/deletion.rs");
     let public_serving_catalog = deletion

@@ -1,4 +1,5 @@
 pub mod agents;
+pub(crate) mod channel_labels;
 pub mod channel_templates;
 pub mod channels;
 pub mod dms;

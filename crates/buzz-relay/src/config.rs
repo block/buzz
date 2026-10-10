@@ -1,5 +1,7 @@
 //! Relay configuration from environment variables.
 
+mod channel_labels;
+
 use std::time::Duration;
 use std::{collections::HashMap, net::SocketAddr};
 
@@ -330,6 +332,9 @@ pub struct Config {
     /// Example: `BUZZ_EPHEMERAL_TTL_OVERRIDE=60` → all ephemeral channels expire
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
+
+    /// NIP-CL command/advertisement gate. Activation requires an offline writer cutover.
+    pub nip_cl_enabled: bool,
 
     /// Root directory for the relay's local git scratch. No authoritative
     /// repository state lives here — runtime reads/writes hydrate ephemeral
@@ -916,6 +921,7 @@ impl Config {
             .collect();
 
         let relay_private_key = std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok();
+        let nip_cl_enabled = channel_labels::enabled_from_env(relay_private_key.is_some())?;
 
         let uds_path = std::env::var("BUZZ_UDS_PATH")
             .ok()
@@ -1418,6 +1424,7 @@ impl Config {
             media_uploads_per_minute,
             audit_enabled,
             ephemeral_ttl_override,
+            nip_cl_enabled,
             git_repo_path,
             git_pack_cache_path,
             git_max_pack_bytes,

@@ -80,9 +80,13 @@ pub async fn handle_count(
         };
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = match state
-        .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
-        .await
+    let mut accessible_channels = match super::req::accessible_channels_for_filters(
+        &state,
+        conn.tenant.community(),
+        &pubkey_bytes,
+        &filters,
+    )
+    .await
     {
         Ok(ids) => ids,
         Err(e) => {

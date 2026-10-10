@@ -32,6 +32,8 @@ CREATE TABLE channels (
     participant_hash BYTEA,
     ttl_seconds     INT,
     ttl_deadline    TIMESTAMPTZ,
+    labels          TEXT[] NOT NULL DEFAULT '{}',
+    CONSTRAINT chk_channel_labels_count CHECK (cardinality(labels) <= 32),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

@@ -705,7 +705,18 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations.len(), 61);
+        assert_eq!(migrations[60].version, 61);
+        assert!(migrations[60]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE channels ADD COLUMN labels"));
+        assert!(migrations[60]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE events ADD COLUMN nip_cl_applied"));
+        assert!(!migrations[60].sql.as_str().contains("CREATE FUNCTION"));
+        assert!(!migrations[60].sql.as_str().contains("CREATE TRIGGER"));
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[59].version, 60);
