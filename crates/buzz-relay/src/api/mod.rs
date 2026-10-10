@@ -247,6 +247,47 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+        enforce_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            false,
+        )
+        .await
+    }
+
+    /// [`enforce_relay_membership`] for HTTP typing pulses: the ban check
+    /// reads through the 30-second ephemeral-path restriction cache, the same
+    /// staleness bound the pulse's own write-restriction check already has.
+    /// Every other HTTP request reads ban state fresh.
+    pub async fn enforce_relay_membership_ephemeral(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+        enforce_membership(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            true,
+        )
+        .await
+    }
+
+    async fn enforce_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        cached_ban: bool,
+    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
         match check_relay_membership(
             state,
             community,
@@ -263,6 +304,7 @@ pub mod relay_members {
                     pubkey_bytes,
                     auth_tag_header,
                     signed_auth_created_at,
+                    cached_ban,
                 )
                 .await?;
                 Ok(None)
@@ -274,6 +316,7 @@ pub mod relay_members {
                     pubkey_bytes,
                     auth_tag_header,
                     signed_auth_created_at,
+                    cached_ban,
                 )
                 .await?;
                 Ok(Some(owner))
@@ -301,6 +344,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        cached: bool,
     ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
             return Err(super::internal_error("invalid pubkey for ban check"));
@@ -311,6 +355,7 @@ pub mod relay_members {
             pubkey,
             auth_tag_header,
             signed_auth_created_at,
+            cached,
         )
         .await
         {
@@ -359,12 +404,24 @@ pub mod relay_members {
     /// Both principals are ensured first because `agent_owner_pubkey` has a
     /// community-scoped foreign key. The mapping is first-write-wins; an
     /// existing mapping is accepted only when it names the same owner.
+    ///
+    /// A mapping already confirmed in `observer_owner_cache` returns early:
+    /// `agent_owner_pubkey` is set once and never cleared, so the writes
+    /// below would all be no-ops. HTTP agents call this on every request.
     pub async fn materialize_nip_oa_owner(
         state: &AppState,
         tenant: &TenantContext,
         agent: &nostr::PublicKey,
         owner: &nostr::PublicKey,
     ) -> bool {
+        let owner_key = (
+            tenant.community(),
+            agent.to_bytes().to_vec(),
+            owner.to_bytes().to_vec(),
+        );
+        if state.observer_owner_cache.get(&owner_key) == Some(true) {
+            return true;
+        }
         for (role, pubkey) in [("agent", agent), ("owner", owner)] {
             match state
                 .db
@@ -417,14 +474,7 @@ pub mod relay_members {
             state
                 .author_type_cache
                 .insert((tenant.community(), agent.to_bytes().to_vec()), true);
-            state.observer_owner_cache.insert(
-                (
-                    tenant.community(),
-                    agent.to_bytes().to_vec(),
-                    owner.to_bytes().to_vec(),
-                ),
-                true,
-            );
+            state.observer_owner_cache.insert(owner_key, true);
         }
         materialized
     }
