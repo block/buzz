@@ -90,6 +90,8 @@ class SendMessage {
 
     // Two-field `mention` tags are references; they go through the same
     // writer as recipients so a bad key rejects the message.
+    // Recipients are intentional @mentions only. Reply routing stays on `e`
+    // tags so relay offline notices never treat a reply-author `p` as a mention.
     bool isReference(List<String> tag) =>
         tag.length == 2 && tag[0] == 'mention';
     final references = [
