@@ -45,20 +45,49 @@ pub(crate) const AGENTS_MD: &str = include_str!("nest_agents.md");
 /// Written to ~/.buzz/.agents/skills/buzz-cli/SKILL.md on first init.
 const BUZZ_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 
+/// Memory guidance loaded on demand, alongside the CLI skill.
+const BUZZ_MEMORY_SKILL_MD: &str = include_str!("nest_memory_skill.md");
+
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
 /// Version 1 is implicitly "before this mechanism existed" (no version file).
 const NEST_AGENTS_VERSION: u32 = 6;
 
-/// Template content version for SKILL.md.
+/// Template content version for the buzz-cli SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
-const NEST_SKILL_VERSION: u32 = 6;
+const NEST_SKILL_VERSION: u32 = 7;
+
+/// Bump when changing `nest_memory_skill.md` to refresh existing installs.
+const NEST_MEMORY_SKILL_VERSION: u32 = 1;
+
+/// A skill template installed into every nest.
+struct BundledSkill {
+    /// Directory name under `.agents/skills`.
+    name: &'static str,
+    /// Embedded `SKILL.md` content.
+    template: &'static str,
+    /// Template version recorded in `.skill-version`.
+    version: u32,
+}
+
+const BUNDLED_SKILLS: &[BundledSkill] = &[
+    BundledSkill {
+        name: "buzz-cli",
+        template: BUZZ_CLI_SKILL_MD,
+        version: NEST_SKILL_VERSION,
+    },
+    BundledSkill {
+        name: "buzz-memory",
+        template: BUZZ_MEMORY_SKILL_MD,
+        version: NEST_MEMORY_SKILL_VERSION,
+    },
+];
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
 const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
 
-/// Canonical skill directory path relative to the nest root.
-const CANONICAL_SKILL_DIR: &str = ".agents/skills/buzz-cli";
+/// Canonical skills directory path relative to the nest root.
+const CANONICAL_SKILLS_DIR: &str = ".agents/skills";
 
 /// Nest directory name for production builds.
 const NEST_DIR_PROD: &str = ".buzz";
@@ -124,9 +153,9 @@ pub fn ensure_nest() -> Result<(), String> {
 ///
 /// - Creates the root directory and all subdirectories.
 /// - Writes `AGENTS.md` only if it doesn't already exist.
-/// - Writes `.agents/skills/buzz-cli/SKILL.md` only if it doesn't already exist.
+/// - Installs bundled skills under `.agents/skills/<name>/SKILL.md`.
 /// - Creates harness-specific symlinks pointing to the canonical
-///   `.agents/skills/buzz-cli` directory for each known provider.
+///   skill directories for each known provider.
 /// - Sets 700 permissions on the root, all subdirectories, and the skill
 ///   directory tree (Unix).
 ///
@@ -190,27 +219,28 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         }
     }
 
-    // Write buzz-cli skill to the harness-agnostic .agents path.
-    // The first-init write uses the new canonical path; migration from
-    // the old .claude path is handled in refresh_skill_md_if_stale.
-    let agents_skill_dir = root.join(CANONICAL_SKILL_DIR);
-    fs::create_dir_all(&agents_skill_dir)
-        .map_err(|e| format!("create {}: {e}", agents_skill_dir.display()))?;
+    // Install each skill independently, including on existing nests whose
+    // other skill templates are already current.
+    for skill in BUNDLED_SKILLS {
+        let agents_skill_dir = root.join(CANONICAL_SKILLS_DIR).join(skill.name);
+        fs::create_dir_all(&agents_skill_dir)
+            .map_err(|e| format!("create {}: {e}", agents_skill_dir.display()))?;
 
-    let skill_md = agents_skill_dir.join("SKILL.md");
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&skill_md)
-    {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(BUZZ_CLI_SKILL_MD.as_bytes())
-                .map_err(|e| format!("write {}: {e}", skill_md.display()))?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            return Err(format!("create {}: {e}", skill_md.display()));
+        let skill_md = agents_skill_dir.join("SKILL.md");
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&skill_md)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(skill.template.as_bytes())
+                    .map_err(|e| format!("write {}: {e}", skill_md.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(format!("create {}: {e}", skill_md.display()));
+            }
         }
     }
 
@@ -221,7 +251,9 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
 
     // Refresh static content if the embedded template version is newer.
     refresh_agents_md_if_stale(root)?;
-    refresh_skill_md_if_stale(root)?;
+    for skill in BUNDLED_SKILLS {
+        refresh_skill_md_if_stale(root, skill)?;
+    }
 
     // Set owner-only permissions on root and all subdirectories.
     // Skip any path that is a symlink — chmod would affect the target.
@@ -257,12 +289,13 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         // Skill directory trees inside root get 700.
         // Build the list from canonical path + all known provider skill dirs.
         let mut skill_perm_dirs = Vec::new();
-        {
-            let mut accumulated = std::path::PathBuf::new();
-            for component in std::path::Path::new(CANONICAL_SKILL_DIR).components() {
-                accumulated.push(component);
-                skill_perm_dirs.push(root.join(&accumulated));
-            }
+        let mut accumulated = std::path::PathBuf::new();
+        for component in Path::new(CANONICAL_SKILLS_DIR).components() {
+            accumulated.push(component);
+            skill_perm_dirs.push(root.join(&accumulated));
+        }
+        for skill in BUNDLED_SKILLS {
+            skill_perm_dirs.push(root.join(CANONICAL_SKILLS_DIR).join(skill.name));
         }
         for skill_dir in known_skill_dirs() {
             // Ensure every ancestor dir gets 700, not just the leaf.
@@ -295,15 +328,18 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
     for skill_dir in known_skill_dirs() {
         let parent = root.join(skill_dir);
         fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        let link = parent.join("buzz-cli");
-        if link.symlink_metadata().is_ok() {
-            continue; // symlink or real path exists — skip
+        for skill in BUNDLED_SKILLS {
+            let name = skill.name;
+            let link = parent.join(name);
+            if link.symlink_metadata().is_ok() {
+                continue; // symlink or real path exists — skip
+            }
+            let depth = std::path::Path::new(skill_dir).components().count();
+            let prefix = "../".repeat(depth);
+            let target = format!("{prefix}{CANONICAL_SKILLS_DIR}/{name}");
+            create_symlink(std::path::Path::new(&target), &link)
+                .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
         }
-        let depth = std::path::Path::new(skill_dir).components().count();
-        let prefix = "../".repeat(depth);
-        let target = format!("{prefix}{CANONICAL_SKILL_DIR}");
-        create_symlink(std::path::Path::new(&target), &link)
-            .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
     }
     Ok(())
 }
@@ -445,28 +481,32 @@ fn refresh_agents_md_if_stale(root: &Path) -> Result<(), String> {
 /// Refresh SKILL.md if the template version has changed.
 ///
 /// SKILL.md has no user-editable sections — it is fully overwritten on version bump.
-fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
-    let agents_skill_dir = root.join(".agents/skills/buzz-cli");
+fn refresh_skill_md_if_stale(root: &Path, skill: &BundledSkill) -> Result<(), String> {
+    let BundledSkill {
+        name,
+        template,
+        version,
+    } = *skill;
+    let agents_skill_dir = root.join(CANONICAL_SKILLS_DIR).join(name);
     let version_path = agents_skill_dir.join(".skill-version");
-    if read_version_file(&version_path) >= NEST_SKILL_VERSION {
+    if read_version_file(&version_path) >= version {
         return Ok(());
     }
 
-    // Migration: if .claude/skills/buzz-cli exists as a real directory
-    // (pre-migration install), copy user's SKILL.md to the new location
-    // then remove the old directory so we can replace it with a symlink.
-    let old_skill_dir = root.join(".claude/skills/buzz-cli");
+    // Only buzz-cli had a historical Claude-only layout. Other real provider
+    // directories may contain user-installed skills and supporting resources.
+    let old_skill_dir = root.join(".claude/skills").join(name);
     let old_is_real_dir = old_skill_dir
         .symlink_metadata()
         .map(|m| m.file_type().is_dir())
         .unwrap_or(false);
+    let migrate_legacy_cli = name == "buzz-cli" && old_is_real_dir;
 
-    let skill_content = if old_is_real_dir {
+    let skill_content = if migrate_legacy_cli {
         // Preserve user-edited content during migration.
-        fs::read_to_string(old_skill_dir.join("SKILL.md"))
-            .unwrap_or_else(|_| BUZZ_CLI_SKILL_MD.to_string())
+        fs::read_to_string(old_skill_dir.join("SKILL.md")).unwrap_or_else(|_| template.to_string())
     } else {
-        BUZZ_CLI_SKILL_MD.to_string()
+        template.to_string()
     };
 
     // Ensure the canonical .agents skill directory exists.
@@ -486,18 +526,18 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
         .map_err(|e| format!("persist {}: {e}", skill_md.display()))?;
 
     // Replace old real directory with a symlink.
-    if old_is_real_dir {
+    if migrate_legacy_cli {
         fs::remove_dir_all(&old_skill_dir)
             .map_err(|e| format!("remove {}: {e}", old_skill_dir.display()))?;
     }
 
-    // Create/replace the .claude/skills/buzz-cli symlink.
+    // Create/replace the Claude skill symlink, preserving custom real directories.
     #[cfg(unix)]
-    {
+    if !old_is_real_dir || migrate_legacy_cli {
         let claude_skills_dir = root.join(".claude/skills");
         fs::create_dir_all(&claude_skills_dir)
             .map_err(|e| format!("create {}: {e}", claude_skills_dir.display()))?;
-        let symlink_path = root.join(".claude/skills/buzz-cli");
+        let symlink_path = claude_skills_dir.join(name);
         // Remove any stale symlink before (re)creating.
         let symlink_exists = symlink_path
             .symlink_metadata()
@@ -508,13 +548,13 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
                 .map_err(|e| format!("remove symlink {}: {e}", symlink_path.display()))?;
         }
         create_symlink(
-            std::path::Path::new("../../.agents/skills/buzz-cli"),
+            &Path::new("../..").join(CANONICAL_SKILLS_DIR).join(name),
             &symlink_path,
         )
         .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
     }
 
-    fs::write(&version_path, format!("{NEST_SKILL_VERSION}\n"))
+    fs::write(&version_path, format!("{version}\n"))
         .map_err(|e| format!("write {}: {e}", version_path.display()))?;
 
     Ok(())

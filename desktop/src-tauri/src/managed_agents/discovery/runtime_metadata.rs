@@ -95,8 +95,8 @@ pub(crate) struct KnownAcpRuntime {
     /// Human-readable hint about installing the ACP adapter.
     pub adapter_install_hint: &'static str,
     /// Harness-specific skill discovery directory (e.g. `.goose/skills`).
-    /// `Some(dir)` → Buzz creates a symlink at `<nest>/<dir>/buzz-cli`
-    /// pointing to the canonical `.agents/skills/buzz-cli`. `None` → this
+    /// `Some(dir)` → Buzz links bundled skills under `<nest>/<dir>/<name>`
+    /// to their canonical `.agents/skills/<name>` directories. `None` → this
     /// runtime reads the canonical path directly or has no skill support.
     pub skill_dir: Option<&'static str>,
     /// Whether this runtime handles model switching via ACP protocol natively.
