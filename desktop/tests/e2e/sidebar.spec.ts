@@ -35,8 +35,10 @@ async function loadTheme(page: Page, theme: string) {
 
 async function openAddCommunityDialog(page: Page) {
   await page.getByTestId("sidebar-profile-avatar-button").click();
-  await page.getByTestId("community-switcher").click();
-  await page.getByRole("menuitem", { name: "Add a community" }).click();
+  await page
+    .getByTestId("profile-popover")
+    .getByRole("menuitem", { name: "Add a community" })
+    .click();
 }
 
 // Regression guard for the "Leave channel" lockup: with two bundled copies of
@@ -193,6 +195,18 @@ test("sidebar rows separate hover, selected, and reorder states", async ({
       draggableRow.evaluate((element) => getComputedStyle(element).transform),
     )
     .toBe("none");
+});
+
+test("keeps Add a community in the account profile menu", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+
+  const profileMenu = page.getByTestId("profile-popover");
+  await expect(
+    profileMenu.getByRole("menuitem", { name: "Add a community" }),
+  ).toBeVisible();
+  await profileMenu.getByRole("menuitem", { name: "Add a community" }).click();
+  await expect(page.getByTestId("add-community-dialog")).toBeVisible();
 });
 
 test("add community starts with create and join choices", async ({ page }) => {
