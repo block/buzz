@@ -154,3 +154,47 @@ test("homeRepositoriesToBind ignores repos already on the signed project", () =>
   });
   assert.equal(homeRepositoriesToBind(project, [repo.repoAddress]).length, 0);
 });
+
+test("absorbStandaloneProjectRepositories keeps a removed owner slug repo off a project that already lists another repo", () => {
+  const kept = "30617:" + OWNER + ":real-code";
+  const project = explicitProject({
+    repositoryAddresses: [kept],
+    primaryRepositoryAddress: kept,
+  });
+  const repoCard = standaloneRepo({
+    owner: OWNER,
+    repository: { channelId: CHANNEL, owner: OWNER },
+  });
+  const folded = absorbStandaloneProjectRepositories([project, repoCard]);
+
+  assert.equal(folded.length, 2);
+  assert.deepEqual(folded[0].repositoryAddresses, [kept]);
+  assert.equal(folded[1].legacy, true);
+});
+
+test("homeRepositoriesToBind does not resurrect an owner repo omitted from a non-empty signed project", () => {
+  const slug = standaloneRepo({
+    owner: OWNER,
+    repository: { channelId: CHANNEL, owner: OWNER },
+  }).repositories[0];
+  const kept = "30617:" + OWNER + ":real-code";
+  const project = explicitProject({
+    repositories: [slug],
+    repositoryAddresses: [slug.repoAddress, kept],
+  });
+
+  assert.deepEqual(homeRepositoriesToBind(project, [kept]), []);
+});
+
+test("homeRepositoriesToBind still binds the owner slug repo onto an empty signed project", () => {
+  const slug = standaloneRepo({
+    owner: OWNER,
+    repository: { channelId: null, owner: OWNER },
+  }).repositories[0];
+  const project = explicitProject({
+    repositories: [slug],
+    repositoryAddresses: [slug.repoAddress],
+  });
+
+  assert.equal(homeRepositoriesToBind(project, []).length, 1);
+});

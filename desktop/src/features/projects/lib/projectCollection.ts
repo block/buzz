@@ -32,6 +32,22 @@ function repositoryAuthorizesProjectOwner(
   );
 }
 
+/**
+ * The owner already published a project event that lists other repositories
+ * and omits this one. Desktop must not fold it back in: that is how an
+ * auto-created slug repo survives `projects remove-repo`.
+ */
+function ownerOmittedRepository(
+  project: Project,
+  repository: Repository,
+): boolean {
+  return (
+    repository.owner.toLowerCase() === project.owner.toLowerCase() &&
+    project.repositoryAddresses.length > 0 &&
+    !project.repositoryAddresses.includes(repository.repoAddress)
+  );
+}
+
 function hostForStandaloneRepository(
   explicitProjects: Project[],
   repository: Repository,
@@ -40,13 +56,16 @@ function hostForStandaloneRepository(
     ? explicitProjects.find(
         (project) =>
           project.projectChannelId === repository.channelId &&
-          repositoryAuthorizesProjectOwner(project, repository),
+          repositoryAuthorizesProjectOwner(project, repository) &&
+          !ownerOmittedRepository(project, repository),
       )
     : undefined;
   if (channelHost) return channelHost;
   return explicitProjects.find(
     (project) =>
-      project.owner === repository.owner && project.dtag === repository.dtag,
+      project.owner === repository.owner &&
+      project.dtag === repository.dtag &&
+      !ownerOmittedRepository(project, repository),
   );
 }
 
@@ -73,11 +92,20 @@ export function homeRepositoriesToBind(
   signedAddresses: ReadonlyArray<string> | ReadonlySet<string>,
 ): Repository[] {
   const signed = new Set(signedAddresses);
-  return project.repositories.filter(
-    (repository) =>
-      !signed.has(repository.repoAddress) &&
-      repositoryBelongsOnProjectHome(project, repository),
-  );
+  return project.repositories.filter((repository) => {
+    if (signed.has(repository.repoAddress)) return false;
+    if (!repositoryBelongsOnProjectHome(project, repository)) return false;
+    // Absorbed view already includes the repo. Compare the signed a-tag set:
+    // a non-empty set that omits the owner's own announcement is a removal,
+    // not a repo the owner cannot bind themselves.
+    if (
+      repository.owner.toLowerCase() === project.owner.toLowerCase() &&
+      signed.size > 0
+    ) {
+      return false;
+    }
+    return true;
+  });
 }
 
 /**
