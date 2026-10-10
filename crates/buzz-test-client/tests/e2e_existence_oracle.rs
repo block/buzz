@@ -238,6 +238,17 @@ async fn reaction_does_not_reveal_target() {
     let author = Keys::generate();
     let other = Keys::generate();
     let t = targets(&client, &author, 9).await;
+    // A live message the reactor could read, in an archived channel they belong to.
+    let archived = create_channel(&client, &author, "open").await;
+    add_member(&client, &author, &archived, &other).await;
+    let in_archive = post(&client, &author, 9, &archived).await;
+    let archive = sign(
+        &author,
+        9002,
+        "",
+        vec![tag(&["h", &archived]), tag(&["archived", "true"])],
+    );
+    submit_ok(&client, &author, &archive).await;
     let react = |target: &str| sign(&other, 7, "+", vec![tag(&["e", target])]);
     assert_uniform(
         &client,
@@ -248,6 +259,7 @@ async fn reaction_does_not_reveal_target() {
             ("soft-deleted", react(&hex(&t.deleted))),
             ("private channel", react(&hex(&t.hidden))),
             ("author-only", react(&hex(&t.reminder))),
+            ("archived channel", react(&hex(&in_archive))),
         ],
     )
     .await;
@@ -673,4 +685,73 @@ async fn workflow_read_does_not_reveal_workflow() {
     let (status, body) = read_as(&client, &owner, &paths(&live)[0]).await;
     assert_eq!(status, 200, "owner read failed: {body}");
     assert!(body["runs"].is_array());
+}
+
+/// POST the public webhook endpoint for `id` with an optional secret header and
+/// return the HTTP status and parsed body.
+async fn call_webhook(client: &Client, id: &str, secret: Option<&str>) -> (u16, Value) {
+    let mut request = client.post(format!("{}/hooks/{id}", relay_http_url()));
+    if let Some(secret) = secret {
+        request = request.header("x-webhook-secret", secret);
+    }
+    let resp = request.send().await.expect("call webhook");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.expect("parse response"))
+}
+
+/// Until a caller proves the webhook secret, the unauthenticated webhook
+/// endpoint answers every workflow exactly like a missing one, so it never
+/// reveals that a workflow exists or what its trigger is.
+#[tokio::test]
+#[ignore]
+async fn webhook_does_not_reveal_workflow() {
+    let client = http_client();
+    let owner = Keys::generate();
+    let channel = create_channel(&client, &owner, "open").await;
+    let define = |id: &str, trigger: &str| {
+        sign(
+            &owner,
+            30620,
+            &format!("name: existence-oracle\ntrigger:\n  on: {trigger}\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n"),
+            vec![tag(&["d", id]), tag(&["h", &channel])],
+        )
+    };
+    let webhook = uuid::Uuid::new_v4().to_string();
+    let (accepted, message) = submit(&client, &owner, &define(&webhook, "webhook")).await;
+    assert!(accepted, "webhook workflow rejected: {message}");
+    let response: Value = serde_json::from_str(
+        message
+            .strip_prefix("response:")
+            .expect("workflow save response"),
+    )
+    .expect("parse workflow save response");
+    let secret = response["webhook_secret"]
+        .as_str()
+        .expect("webhook secret")
+        .to_string();
+    let other_trigger = uuid::Uuid::new_v4().to_string();
+    submit_ok(&client, &owner, &define(&other_trigger, "message_posted")).await;
+
+    let missing = uuid::Uuid::new_v4().to_string();
+    let expected = call_webhook(&client, &missing, Some(&secret)).await;
+    assert_eq!(expected.0, 404, "missing workflow: {:?}", expected.1);
+    for (case, id, provided) in [
+        (
+            "non-webhook workflow",
+            &other_trigger,
+            Some(secret.as_str()),
+        ),
+        ("absent secret", &webhook, None),
+        ("wrong secret", &webhook, Some("wrong-secret")),
+    ] {
+        assert_eq!(
+            call_webhook(&client, id, provided).await,
+            expected,
+            "{case} must answer like a missing workflow"
+        );
+    }
+
+    // Positive control: the right secret starts a run.
+    let (status, body) = call_webhook(&client, &webhook, Some(&secret)).await;
+    assert!(status < 300, "valid webhook call failed: {status} {body}");
 }
