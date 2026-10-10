@@ -1,6 +1,9 @@
 //! Read progress follows relay arrival (`received_at`), never author time.
 //! Each case sets every arrival explicitly: back-to-back inserts share a clock.
-use super::{postgres_tests::fixture, *};
+use super::{
+    postgres_tests::{fixture, insert_reply},
+    *,
+};
 use crate::Db;
 use buzz_core::CommunityId;
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -45,7 +48,8 @@ async fn post(
     event
 }
 
-/// A reply to `root` that mentions the actor, so it counts without membership.
+/// A reply to `root` that mentions the actor, so the actor follows the thread
+/// from just before the earliest such reply to arrive.
 #[allow(clippy::too_many_arguments)]
 async fn reply(
     db: &Db,
@@ -57,12 +61,29 @@ async fn reply(
     authored: u64,
     arrived: u64,
 ) -> nostr::Event {
-    let event = post(db, pool, community, channel, actor, authored, arrived).await;
-    sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
-        VALUES ($1,$2,to_timestamp($3),$4,$5,$5,1)")
-        .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice())
-        .bind(event.created_at.as_secs() as f64)
-        .bind(channel).bind(root.id.as_bytes().as_slice()).execute(pool).await.unwrap();
+    let event = EventBuilder::new(Kind::Custom(9), format!("authored {authored}"))
+        .tags([Tag::public_key(actor.public_key())])
+        .custom_created_at(nostr::Timestamp::from(authored))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    insert_reply(db, community, channel, root, &event).await;
+    arrive(pool, community, &event, arrived).await;
+    // Ingest started the follow just before the real arrival; move it to
+    // just before the rewritten one.
+    let moved = sqlx::query(
+        "UPDATE personal_read_frontiers
+         SET through_timestamp=LEAST(through_timestamp, to_timestamp($4)-interval '1 microsecond')
+         WHERE community_id=$1 AND actor=$2 AND root_id=$3",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.public_key().to_bytes().as_slice())
+    .bind(root.id.as_bytes().as_slice())
+    .bind(arrived as f64)
+    .execute(pool)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(moved, 1, "the mention follows the thread");
     event
 }
 
@@ -233,11 +254,39 @@ async fn mark_thread_read_with_the_sidebar_anchor_clears_a_late_reply() {
     assert!(row.threads.is_empty());
 }
 
-/// The shallow latest probe reads the newest `MAX_CHANNEL_SCAN + 1` events by
-/// author time, of any kind. A late arrival with an older author time than
-/// that many events is counted unread, so the unread scan must supply the
-/// anchor or Mark as read with the sidebar anchor leaves it.
-async fn mark_as_read_behind_fillers(fillers: u64) -> (bool, u32) {
+/// The latest probe reads the newest `MAX_TIMELINE_SCAN` events by author
+/// time, of any kind. A late arrival with an older author time than the
+/// uncounted events after it must still be the sidebar anchor, or Mark as read
+/// with that anchor leaves it unread.
+async fn reactions(
+    pool: &PgPool,
+    db: &Db,
+    community: CommunityId,
+    channel: Uuid,
+    count: u64,
+    now: u64,
+) {
+    for i in 0..count {
+        // Reactions are not counted, but the probe's LIMIT sees them.
+        let filler = EventBuilder::new(Kind::Custom(7), "+")
+            .custom_created_at(nostr::Timestamp::from(now - 500 + i % 400))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        db.insert_event(community, &filler, Some(channel))
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE events SET received_at=to_timestamp($2) WHERE community_id=$1 AND kind=7")
+        .bind(community.as_uuid())
+        .bind((now - 50) as f64)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn mark_as_read_clears_a_late_arrival_behind_reactions() {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     arrive(&pool, community, &first, now - 60).await;
@@ -248,17 +297,8 @@ async fn mark_as_read_behind_fillers(fillers: u64) -> (bool, u32) {
         mark_through(channel, None, &first.id.to_hex()),
     )
     .await;
-    for i in 0..fillers {
-        // Reactions are not counted, but the probe's LIMIT sees them.
-        let filler = EventBuilder::new(Kind::Custom(7), "+")
-            .custom_created_at(nostr::Timestamp::from(now - 500 + i))
-            .sign_with_keys(&Keys::generate())
-            .unwrap();
-        db.insert_event(community, &filler, Some(channel))
-            .await
-            .unwrap();
-        arrive(&pool, community, &filler, now - 50).await;
-    }
+    // More than main's old 256-event probe.
+    reactions(&pool, &db, community, channel, 300, now).await;
     post(&db, &pool, community, channel, &actor, now - 600, now - 10).await;
     assert_eq!(counts(&db, community, &actor).await, (true, 1));
 
@@ -267,29 +307,14 @@ async fn mark_as_read_behind_fillers(fillers: u64) -> (bool, u32) {
         .latest_id
         .expect("a channel with messages has a latest message");
     apply(&db, community, &actor, mark_through(channel, None, &anchor)).await;
-    counts(&db, community, &actor).await
+    assert_eq!(counts(&db, community, &actor).await, (false, 0));
 }
 
-/// Control: with one slot to spare the late arrival is inside the probe.
+/// Past the budget the probe finds no anchor, and nothing counts: a badge
+/// with no latest to mark could never be cleared.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn mark_as_read_clears_a_late_arrival_inside_the_latest_probe() {
-    let fillers = MAX_CHANNEL_SCAN as u64 - 1;
-    assert_eq!(mark_as_read_behind_fillers(fillers).await, (false, 0));
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn mark_as_read_clears_a_late_arrival_outside_the_latest_probe() {
-    let fillers = MAX_CHANNEL_SCAN as u64;
-    assert_eq!(mark_as_read_behind_fillers(fillers).await, (false, 0));
-}
-
-/// When the newest 257 events are all uncounted, the only message is still in
-/// the unread scan: the summary reports it as latest and unread.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn latest_message_behind_a_full_probe_of_reactions_is_found() {
+async fn a_message_behind_a_full_budget_of_reactions_is_not_a_badge_without_an_anchor() {
     let (db, pool, community, channel, actor, first) = fixture().await;
     let now = first.created_at.as_secs();
     let demoted = sqlx::query("UPDATE events SET kind=7 WHERE community_id=$1 AND id=$2")
@@ -300,21 +325,20 @@ async fn latest_message_behind_a_full_probe_of_reactions_is_found() {
         .unwrap()
         .rows_affected();
     assert_eq!(demoted, 1);
-    let only = post(&db, &pool, community, channel, &actor, now - 600, now - 10).await;
-    for i in 0..MAX_CHANNEL_SCAN as u64 {
-        let filler = EventBuilder::new(Kind::Custom(7), "+")
-            .custom_created_at(nostr::Timestamp::from(now - 500 + i))
-            .sign_with_keys(&Keys::generate())
-            .unwrap();
-        db.insert_event(community, &filler, Some(channel))
-            .await
-            .unwrap();
-        arrive(&pool, community, &filler, now - 50).await;
-    }
+    post(&db, &pool, community, channel, &actor, now - 600, now - 10).await;
+    reactions(
+        &pool,
+        &db,
+        community,
+        channel,
+        MAX_TIMELINE_SCAN as u64,
+        now,
+    )
+    .await;
 
     let row = sidebar(&db, community, &actor).await;
-    assert_eq!(row.latest_id, Some(only.id.to_hex()));
-    assert_eq!((row.unread, row.mentions), (true, 1));
+    assert_eq!(row.latest_id, None);
+    assert_eq!((row.unread, row.mentions), (false, 0));
 }
 
 /// Store `event` as having arrived at exactly `seconds` plus `micros`. Built

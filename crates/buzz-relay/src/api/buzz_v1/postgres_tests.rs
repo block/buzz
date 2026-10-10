@@ -437,12 +437,15 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
     // Exercise the same per-item function the batch handler uses after admission.
     let result = super::handlers::write_intent(&state, &headers, &principal, &intent).await;
     assert_eq!(result, json!({"status":"blocked"}));
-    let persisted: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM personal_read_accounts WHERE community_id=$1")
-            .bind(community.as_uuid())
-            .fetch_one(state.db.pool())
-            .await
-            .unwrap();
+    // Ingest gave the message's author an account; the actor has none.
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM personal_read_accounts WHERE community_id=$1 AND actor=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.public_key().to_bytes().as_slice())
+    .fetch_one(state.db.pool())
+    .await
+    .unwrap();
     assert_eq!(persisted, 0, "denied intent must not persist");
 }
 

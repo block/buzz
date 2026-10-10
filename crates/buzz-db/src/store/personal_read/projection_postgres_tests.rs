@@ -1,4 +1,6 @@
 use super::{postgres_tests::fixture, *};
+use crate::Db;
+use nostr::{EventBuilder, Keys, Kind, Tag};
 use serde_json::json;
 
 #[tokio::test]
@@ -9,6 +11,16 @@ async fn sidebar_sql_eligibility_follows_kind_author_deletion_and_horizon() {
     let horizon = i64::from(DEFAULT_RETENTION_SECONDS) * 1000;
     // Addressed to the actor, so a counted message is also exactly one mention.
     let tags = json!([["p", actor.public_key().to_hex()]]);
+    sqlx::query(
+        "INSERT INTO event_mentions
+            (community_id,pubkey_hex,event_id,event_created_at,channel_id,event_kind)
+         SELECT community_id,$2,id,created_at,channel_id,kind FROM events WHERE community_id=$1",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.public_key().to_hex())
+    .execute(&pool)
+    .await
+    .unwrap();
     for (kind, eligible_kind) in [
         (9, true),
         (40002, true),
@@ -32,6 +44,8 @@ async fn sidebar_sql_eligibility_follows_kind_author_deletion_and_horizon() {
                         .bind(community.as_uuid()).bind(kind)
                         .bind(if own { actor.public_key().to_bytes() } else { event.pubkey.to_bytes() }.as_slice())
                         .bind(deleted).bind(created as f64).bind(&tags).execute(&pool).await.unwrap();
+                    sqlx::query("UPDATE event_mentions SET event_created_at=to_timestamp($2::double precision/1000) WHERE community_id=$1")
+                        .bind(community.as_uuid()).bind(created as f64).execute(&pool).await.unwrap();
                     let page = db
                         .personal_read_sidebar(
                             community,
@@ -52,56 +66,6 @@ async fn sidebar_sql_eligibility_follows_kind_author_deletion_and_horizon() {
                 }
             }
         }
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn sidebar_compacted_tags_preserve_directed_and_corruption_rules() {
-    let (db, pool, community, _, actor, _) = fixture().await;
-    let actor_hex = actor.public_key().to_hex().to_uppercase();
-    // Unusable tags prove nothing: that message is left out, neither unread
-    // nor a mention.
-    for (tags, unread, mentions) in [
-        (json!([]), true, 0),
-        (json!(["p"]), false, 0),
-        (json!(["e"]), false, 0),
-        (json!(["broadcast"]), false, 0),
-        (json!([["p", actor_hex, "relay", "petname"]]), true, 1),
-        (json!([["p", "00".repeat(32)]]), true, 0),
-        (json!([["broadcast", "1", "extra"]]), true, 1),
-        (json!([["broadcast", "0"]]), true, 0),
-        (json!([["p", "00".repeat(32), 42]]), false, 0),
-        (json!([["broadcast", "0", 42]]), false, 0),
-        (json!([["e", "00".repeat(32), "", "root", 42]]), false, 0),
-        (json!([["p", actor_hex], ["p", "other", 42]]), false, 0),
-        (json!([["e", "00".repeat(32), "", "reply"]]), false, 0),
-        (json!([["x", 42]]), true, 0),
-        (json!({"p":actor_hex}), false, 0),
-        (json!([["p", "x".repeat(8193)]]), false, 0),
-    ] {
-        sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
-            .bind(community.as_uuid())
-            .bind(&tags)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let page = db
-            .personal_read_sidebar(
-                community,
-                &actor.public_key(),
-                DEFAULT_RETENTION_SECONDS,
-                20,
-                None,
-            )
-            .await
-            .unwrap();
-        let row = &page.channels[0];
-        assert_eq!(
-            (row.unread, row.mentions),
-            (unread, mentions),
-            "tags={tags}"
-        );
     }
 }
 
@@ -169,7 +133,7 @@ async fn sidebar_ancestry_fact_matches_shared_nip10_parser() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn sidebar_directed_fact_follows_dm_mention_and_broadcast_rules() {
+async fn sidebar_mentions_are_p_tags_in_a_stream_and_everything_in_a_dm() {
     let (db, pool, community, channel, actor, _) = fixture().await;
     let actor_hex = actor.public_key().to_hex();
     let fullwidth: String = actor_hex
@@ -177,54 +141,60 @@ async fn sidebar_directed_fact_follows_dm_mention_and_broadcast_rules() {
         .map(|c| if c.is_ascii_alphabetic() { 'Ａ' } else { c })
         .collect();
     assert_ne!(fullwidth, actor_hex);
-    // Whether each tag set is directed in a stream; in a DM every one is.
+    let tag = |parts: &[&str]| Tag::parse(parts.iter().copied()).unwrap();
+    // Whether each message mentions the actor in a stream. A top-level
+    // broadcast is not a mention.
     let cases = [
-        (json!([]), false),
-        (json!([["p", actor_hex]]), true),
-        (json!([["p", actor_hex.to_uppercase()]]), true),
-        (json!([["p", fullwidth]]), false),
-        (json!([["p"]]), false),
-        (json!([["broadcast", "1"]]), true),
-        (json!([["broadcast", "true"]]), false),
-        (json!([["p", "00".repeat(32)]]), false),
+        (vec![], false),
+        (vec![tag(&["p", &actor_hex])], true),
+        (vec![tag(&["p", &actor_hex.to_uppercase()])], true),
+        (vec![tag(&["p", &fullwidth])], false),
+        (vec![tag(&["broadcast", "1"])], false),
+        (vec![tag(&["p", &"00".repeat(32)])], false),
         (
-            json!([["broadcast", "0"], ["p", actor_hex.to_uppercase()]]),
+            vec![tag(&["broadcast", "0"]), tag(&["p", &actor_hex])],
             true,
         ),
     ];
-    for channel_type in ["stream", "dm"] {
-        sqlx::query(
-            "UPDATE channels SET channel_type=$3::channel_type WHERE community_id=$1 AND id=$2",
-        )
+    let mut expected = 0;
+    for (tags, mentioned) in &cases {
+        let event = EventBuilder::new(Kind::Custom(9), "case")
+            .tags(tags.clone())
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        db.insert_event(community, &event, Some(channel))
+            .await
+            .unwrap();
+        expected += u32::from(*mentioned);
+        assert_eq!(
+            mentions(&db, community, &actor).await,
+            expected,
+            "tags={tags:?}"
+        );
+    }
+    sqlx::query("UPDATE channels SET channel_type='dm' WHERE community_id=$1 AND id=$2")
         .bind(community.as_uuid())
         .bind(channel)
-        .bind(channel_type)
         .execute(&pool)
         .await
         .unwrap();
-        for (tags, in_stream) in &cases {
-            let expected = u32::from(channel_type == "dm" || *in_stream);
-            sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
-                .bind(community.as_uuid())
-                .bind(tags)
-                .execute(&pool)
-                .await
-                .unwrap();
-            let page = db
-                .personal_read_sidebar(
-                    community,
-                    &actor.public_key(),
-                    DEFAULT_RETENTION_SECONDS,
-                    20,
-                    None,
-                )
-                .await
-                .unwrap();
-            assert!(page.channels[0].unread);
-            assert_eq!(
-                page.channels[0].mentions, expected,
-                "channel_type={channel_type} tags={tags}"
-            );
-        }
-    }
+    // Every message by someone else, the fixture's included.
+    assert_eq!(
+        mentions(&db, community, &actor).await,
+        cases.len() as u32 + 1
+    );
+}
+
+async fn mentions(db: &Db, community: buzz_core::CommunityId, actor: &Keys) -> u32 {
+    db.personal_read_sidebar(
+        community,
+        &actor.public_key(),
+        DEFAULT_RETENTION_SECONDS,
+        20,
+        None,
+    )
+    .await
+    .unwrap()
+    .channels[0]
+        .mentions
 }
