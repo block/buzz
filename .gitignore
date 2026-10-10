@@ -11,7 +11,6 @@ __pycache__/
 .hooks/
 
 # Environment files (may contain secrets)
-.env
 .env.local
 .env.*.local
 
