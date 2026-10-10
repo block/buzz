@@ -120,7 +120,7 @@ import {
 import { AgentSnapshotCard } from "./markdown/AgentSnapshotCard";
 import { resolveFileCard, resolveSnapshotCard } from "./markdownFileCard";
 import type { MarkdownProps, MarkdownRuntime } from "./markdown/types";
-import { SpoilerInline } from "./markdown/SpoilerInline";
+import { createDisclosureComponents } from "./markdown/disclosureComponents";
 import {
   imageReserveStyle,
   isInsideHiddenSpoiler,
@@ -1378,20 +1378,7 @@ export function createMarkdownComponents(
   }
 
   return {
-    spoiler: ({
-      children,
-      ...props
-    }: {
-      "data-block-spoiler"?: string;
-      children?: React.ReactNode;
-    }) => (
-      <SpoilerInline
-        block={props["data-block-spoiler"] != null}
-        interactive={interactive}
-      >
-        {children}
-      </SpoilerInline>
-    ),
+    ...createDisclosureComponents(interactive),
     span: function MarkdownSpan({ children, node: _node, ...props }) {
       const { leadingInlineContent } = useMarkdownRuntime();
       if ("data-leading-inline-content" in props) {
@@ -1643,7 +1630,7 @@ export function createMarkdownComponents(
  * sixteen instances ever exist. Module-stable maps mean cached markdown
  * element trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const MARKDOWN_COMPONENT_SCHEMA_VERSION = "8";
+const MARKDOWN_COMPONENT_SCHEMA_VERSION = "9";
 const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
 type MarkdownComponentSet = { components: Components; variant: string };
@@ -1737,6 +1724,7 @@ function MarkdownInner({
       imetaByUrl,
       leadingInlineContent,
       mentionPubkeysByName,
+      messageId,
       onOpenChannel,
       onOpenEntityLink,
       onOpenMessageLink,
@@ -1758,6 +1746,7 @@ function MarkdownInner({
       imetaByUrl,
       leadingInlineContent,
       mentionPubkeysByName,
+      messageId,
       onOpenChannel,
       onOpenEntityLink,
       onOpenMessageLink,
