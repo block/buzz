@@ -239,7 +239,8 @@ run_unit_tests() {
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
       handlers::req::tests::claims_after_connection_cleanup_are_refused \
       handlers::req::tests::dropped_terminal_frame_cancels_connection \
-      handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection
+      handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection \
+      handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions
 
   run_test_step "buzz-relay readiness tests" \
     cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture

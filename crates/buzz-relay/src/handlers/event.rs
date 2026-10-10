@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
+    event_kind_u32, is_ephemeral, is_unshared_gated_event, KIND_AGENT_OBSERVER_FRAME,
+    KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -136,7 +136,7 @@ pub async fn filter_fanout_by_access(
     // only paths that route author-only kinds — so no such delivery can bypass
     // it. It runs before (and independent of) the channel-membership filter
     // below because author-only kinds are stored globally (channel_id = None).
-    let matches = if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&stored_event.event)) {
+    let matches = if buzz_core::kind::is_author_only_event_kind(&stored_event.event) {
         let author = stored_event.event.pubkey.to_bytes();
         matches
             .into_iter()

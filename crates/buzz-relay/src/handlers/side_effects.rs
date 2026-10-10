@@ -7,11 +7,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    event_kind_u32, is_parameterized_replaceable, AUTHOR_ONLY_KINDS, KIND_AGENT_PROFILE,
+    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -358,6 +358,70 @@ pub async fn handle_side_effects(
     }
 }
 
+/// Rejection for a deletion whose sender may not delete the target. A missing
+/// target gets the same text, so the error never reveals whether, or where,
+/// the target exists.
+pub(crate) const DELETION_TARGET_DENIED: &str = "deletion target not found or not deletable by you";
+
+/// The kind 5 target `target_id`, including a soft-deleted one, when `actor`
+/// is its effective author or that author's owning human; `None` when the
+/// target is missing or `actor` has no authority over it.
+pub(crate) async fn authorized_standard_deletion_target(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    actor: &[u8],
+    target_id: &[u8],
+) -> anyhow::Result<Option<StoredEvent>> {
+    let Some(target) = state
+        .db
+        .get_event_by_id_including_deleted_for_event_write(tenant.community(), target_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let author = effective_message_author(&target.event, &state.relay_keypair.public_key());
+    let authorized = author == actor
+        || state
+            .db
+            .is_agent_owner(tenant.community(), &author, actor)
+            .await?;
+    Ok(authorized.then_some(target))
+}
+
+/// Whether `actor` may delete `author`'s event in `channel_id` with kind 9005:
+/// the author while still a member or the channel is open (a removed member
+/// of a private channel loses this), a channel owner/admin, or the owning
+/// human of the author agent, even when that human is not a channel member.
+async fn may_delete_channel_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    channel_id: Uuid,
+    author: &[u8],
+    actor: &[u8],
+) -> anyhow::Result<bool> {
+    if author_delete_can_use_self_delete_path(author, actor, event)
+        && (state
+            .is_member_cached(tenant.community(), channel_id, actor)
+            .await?
+            || state
+                .db
+                .get_channel_for_event_write(tenant.community(), channel_id)
+                .await
+                .map(|ch| ch.visibility == "open")
+                .unwrap_or(false))
+    {
+        return Ok(true);
+    }
+    Ok(actor_is_channel_owner_or_admin(
+        &state.db.get_members(tenant.community(), channel_id).await?,
+        actor,
+    ) || state
+        .db
+        .is_agent_owner(tenant.community(), author, actor)
+        .await?)
+}
+
 /// Validate a standard NIP-09 deletion event before it is stored.
 ///
 /// Buzz accepts standard deletions for self-authored events, plus the owning
@@ -383,6 +447,9 @@ pub async fn validate_standard_deletion_event(
         if parts.len() < 2 {
             return Err(anyhow::anyhow!("invalid a-tag format"));
         }
+        if let Ok(target_kind) = parts[0].parse() {
+            check_deletion_privacy_k_tag(event, target_kind)?;
+        }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
         if target_pubkey_bytes != actor_bytes
@@ -391,35 +458,54 @@ pub async fn validate_standard_deletion_event(
                 .is_agent_owner(tenant.community(), &target_pubkey_bytes, &actor_bytes)
                 .await?
         {
-            return Err(anyhow::anyhow!("must be event author"));
+            return Err(anyhow::anyhow!(DELETION_TARGET_DENIED));
         }
         return Ok(());
     }
 
     for target_id in target_ids {
-        let target_event = state
-            .db
-            .get_event_by_id_including_deleted_for_event_write(tenant.community(), &target_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
-
+        // Authority first: every later error depends on the target's kind,
+        // which a sender without authority must not learn.
+        let target_event =
+            authorized_standard_deletion_target(tenant, state, &actor_bytes, &target_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!(DELETION_TARGET_DENIED))?;
         if matches!(target_event.event.kind.as_u16(), 45010 | 45011) {
             anyhow::bail!(
                 "artifacts cannot be deleted with kind 5; use op=delete or kind 9005 redaction"
             );
         }
-        let target_author =
-            effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-        if target_author != actor_bytes
-            && !state
-                .db
-                .is_agent_owner(tenant.community(), &target_author, &actor_bytes)
-                .await?
+        // A deletion of a private deletion would be stored publicly and reveal
+        // the private one's id and timing; NIP-09 gives it no effect anyway.
+        if target_event.event.kind.as_u16() == 5
+            && buzz_core::kind::is_author_only_event_kind(&target_event.event)
         {
-            return Err(anyhow::anyhow!("must be event author"));
+            anyhow::bail!("cannot delete a private deletion request");
         }
+        check_deletion_privacy_k_tag(event, event_kind_u32(&target_event.event))?;
     }
 
+    Ok(())
+}
+
+/// A deletion's read privacy follows its `k` tag (see
+/// `buzz_core::kind::is_author_only_event_kind`), so the tag must agree with
+/// the target: required when the target is author-only, so the deletion cannot
+/// leak its existence, and otherwise forbidden, so a public deletion cannot be
+/// hidden from the readers who need it.
+fn check_deletion_privacy_k_tag(event: &Event, target_kind: u32) -> anyhow::Result<()> {
+    let target_is_author_only = AUTHOR_ONLY_KINDS.contains(&target_kind);
+    let mut names_target = false;
+    for k in buzz_core::kind::k_tag_kinds(event) {
+        if k == target_kind {
+            names_target = true;
+        } else if AUTHOR_ONLY_KINDS.contains(&k) {
+            anyhow::bail!("k tag {k} does not match the deletion target's kind {target_kind}");
+        }
+    }
+    if target_is_author_only && !names_target {
+        anyhow::bail!("deletion of an author-only kind {target_kind} event requires [\"k\",\"{target_kind}\"]");
+    }
     Ok(())
 }
 
@@ -724,77 +810,42 @@ pub async fn validate_admin_event(
                 })
                 .ok_or_else(|| anyhow::anyhow!("missing e tag for target event"))?;
 
-            // Verify the target event exists and belongs to the h-tag channel
-            // BEFORE storage. Fail closed: missing target → reject.
+            // Decide authority before any error that depends on the target:
+            // a missing target and one the actor may not delete share one
+            // rejection. Tombstoned targets read as missing.
+            let denied = || anyhow::anyhow!(DELETION_TARGET_DENIED);
             let target_event = state
                 .db
                 .get_event_by_id_for_event_write(tenant.community(), &target_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("db error looking up target: {e}"))?
-                .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
+                .ok_or_else(denied)?;
+            // For relay-signed REST messages, the real author is in the p tag.
+            let author =
+                effective_message_author(&target_event.event, &state.relay_keypair.public_key());
 
-            match target_event.channel_id {
-                Some(target_ch) if target_ch != channel_id => {
-                    return Err(anyhow::anyhow!(
-                        "target event belongs to a different channel"
-                    ));
-                }
-                None => {
-                    return Err(anyhow::anyhow!("target event has no channel"));
-                }
-                _ => {} // Same channel — OK
+            // A target outside the `h` channel is denied like a missing one:
+            // telling where it lives would need every access gate of a second
+            // channel. The `h` channel's token and archive gates already ran.
+            if target_event.channel_id != Some(channel_id)
+                || !may_delete_channel_event(
+                    tenant,
+                    state,
+                    event,
+                    channel_id,
+                    &author,
+                    &actor_bytes,
+                )
+                .await?
+            {
+                return Err(denied());
             }
             if target_event.event.kind.as_u16() == 45011 {
                 return Err(anyhow::anyhow!(
                     "artifact removal markers cannot be deleted"
                 ));
             }
-
-            // Check if actor is the event author.
-            // For relay-signed REST messages, the real author is in the p tag.
-            let author =
-                effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-            if author_delete_can_use_self_delete_path(&author, &actor_bytes, event) {
-                // Author deleting their own message: re-gate on membership/open visibility so that
-                // a removed private-channel member cannot mutate old messages after access is revoked.
-                let is_member = state
-                    .is_member_cached(tenant.community(), channel_id, &actor_bytes)
-                    .await?;
-                if is_member {
-                    return Ok(());
-                }
-                let is_open = state
-                    .db
-                    .get_channel_for_event_write(tenant.community(), channel_id)
-                    .await
-                    .map(|ch| ch.visibility == "open")
-                    .unwrap_or(false);
-                if is_open {
-                    return Ok(());
-                }
-                // Not a member and channel is private — fall through to owner/admin/owner-of-agent check.
-            }
-
-            // Not the author, or author who is no longer a member of a private channel —
-            // must be owner/admin or the owning human of the message's agent-author.
-            let members = state.db.get_members(tenant.community(), channel_id).await?;
-            if actor_is_channel_owner_or_admin(&members, &actor_bytes) {
-                Ok(())
-            } else {
-                // Allow the owning human of the agent that authored the target message,
-                // even when the human is not a channel member.
-                if state
-                    .db
-                    .is_agent_owner(tenant.community(), &author, &actor_bytes)
-                    .await?
-                {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "must be event author or channel owner/admin"
-                    ))
-                }
-            }
+            Ok(())
         }
         9008 => {
             // DELETE_GROUP: owner only, or the owning human of the channel's agent-owner.
@@ -2563,7 +2614,7 @@ fn has_e_tag(event: &Event) -> bool {
     event.tags.iter().any(|t| t.kind().to_string() == "e")
 }
 
-fn extract_target_event_ids(event: &Event) -> Vec<Vec<u8>> {
+pub(crate) fn extract_target_event_ids(event: &Event) -> Vec<Vec<u8>> {
     event
         .tags
         .iter()
