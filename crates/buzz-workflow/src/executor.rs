@@ -63,6 +63,54 @@ impl TriggerContext {
     }
 }
 
+/// Flatten a JSON object into dotted-key webhook_fields entries.
+///
+/// Called by every webhook-population site (HTTP bridge, internal executor).
+/// Top-level keys seed `HashMap`; nested objects/arrays are recursively
+/// flattened to dot notation. Scalar values are stored as strings; objects
+/// and arrays are re-serialized to JSON.
+///
+/// Example input:
+/// ```json
+/// {"type":"workflow.failed","data":{"title":"Deploy","meta":{"attempt":3}}}
+/// ```
+/// Produces `webhook_fields` keys `type`, `data`, `data.title`,
+/// `data.meta`, `data.meta.attempt`.
+pub fn flatten_webhook_fields(map: &serde_json::Map<String, serde_json::Value>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (k, v) in map {
+        flatten_into(&mut out, k.clone(), v);
+    }
+    out
+}
+
+fn flatten_into(out: &mut HashMap<String, String>, prefix: String, value: &serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            // Store the serialized JSON at the prefix as well so
+            // `{{trigger.data}}` still resolves to the raw JSON for
+            // nested objects (existing behavior for top-level values).
+            out.insert(prefix.clone(), Value::Object(map.clone()).to_string());
+            for (k, v) in map {
+                flatten_into(out, format!("{prefix}.{k}"), v);
+            }
+        }
+        Value::Array(items) => {
+            out.insert(prefix.clone(), Value::Array(items.clone()).to_string());
+            for (i, v) in items.iter().enumerate() {
+                flatten_into(out, format!("{prefix}.{i}"), v);
+            }
+        }
+        Value::String(s) => {
+            out.insert(prefix, s.clone());
+        }
+        v @ (Value::Number(_) | Value::Bool(_) | Value::Null) => {
+            out.insert(prefix, v.to_string());
+        }
+    }
+}
+
 /// Resolve `{{trigger.X}}` and `{{steps.ID.output.X}}` placeholders in a string.
 ///
 /// Supports filters:
@@ -1419,6 +1467,95 @@ mod tests {
             .insert("service".to_owned(), "api-gateway".to_owned());
         let out = resolve_template("Service: {{trigger.service}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "Service: api-gateway");
+    }
+
+    #[test]
+    fn flatten_nested_object_produces_dotted_keys() {
+        // #4235: nested webhook payload like CloudEvents'
+        // `{"type":"workflow.failed","data":{"title":"Deploy","reason":"Timeout"}}`
+        // must resolve `{{trigger.data.title}}` and `{{trigger.data.reason}}`.
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::json!({
+            "type": "workflow.failed",
+            "data": {
+                "title": "Deploy",
+                "reason": "Timeout"
+            }
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+
+        let fields = flatten_webhook_fields(&map);
+
+        // Top-level keys preserved.
+        assert_eq!(
+            fields.get("type").map(|s| s.as_str()),
+            Some("workflow.failed")
+        );
+        // Nested dotted keys resolve.
+        assert_eq!(fields.get("data.title").map(|s| s.as_str()), Some("Deploy"));
+        assert_eq!(fields.get("data.reason").map(|s| s.as_str()), Some("Timeout"));
+        // Raw object retained under its prefix so existing `{{trigger.data}}`
+        // templates still resolve to JSON.
+        let raw = fields.get("data").expect("data key");
+        assert!(raw.contains("\"title\":\"Deploy\"") || raw.contains("\"title\": \"Deploy\""));
+    }
+
+    #[test]
+    fn flatten_scalar_types_convert_to_strings() {
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::json!({
+            "count": 42,
+            "enabled": true,
+            "missing": null
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+
+        let fields = flatten_webhook_fields(&map);
+
+        assert_eq!(fields.get("count").map(|s| s.as_str()), Some("42"));
+        assert_eq!(fields.get("enabled").map(|s| s.as_str()), Some("true"));
+        assert_eq!(fields.get("missing").map(|s| s.as_str()), Some("null"));
+    }
+
+    #[test]
+    fn flatten_array_produces_indexed_dotted_keys() {
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::json!({
+            "items": ["a", "b", {"nested": 3}]
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+
+        let fields = flatten_webhook_fields(&map);
+
+        assert_eq!(fields.get("items.0").map(|s| s.as_str()), Some("a"));
+        assert_eq!(fields.get("items.1").map(|s| s.as_str()), Some("b"));
+        assert_eq!(fields.get("items.2.nested").map(|s| s.as_str()), Some("3"));
+    }
+
+    #[test]
+    fn resolve_template_uses_nested_webhook_field() {
+        // End-to-end: flattened dot-notation fields resolve in templates.
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::json!({
+            "type": "incident.created",
+            "data": {"service": "api", "severity": "high"}
+        })
+        .as_object()
+        .expect("object")
+        .clone();
+
+        let mut ctx = make_trigger();
+        ctx.webhook_fields = flatten_webhook_fields(&map);
+
+        let out = resolve_template(
+            "Workflow: {{trigger.type}} | service={{trigger.data.service}} svc={{trigger.data.severity}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "Workflow: incident.created | service=api svc=high");
     }
 
     #[tokio::test]
