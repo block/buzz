@@ -2941,7 +2941,10 @@ async fn ingest_event_inner(
         if !is_unarchive {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
-                    return Err(IngestError::Rejected("invalid: channel is archived".into()));
+                    return Err(match target_denial {
+                        Some(reason) => target_denied(reason),
+                        None => IngestError::Rejected("invalid: channel is archived".into()),
+                    });
                 }
             }
         }
