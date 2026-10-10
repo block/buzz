@@ -844,6 +844,13 @@ class _MentionMd extends InlineMd {
     this.onMentionTap,
   });
 
+  /// Excluded from link labels: this component renders a [WidgetSpan], and a
+  /// placeholder nested inside the link's own placeholder does not paint on
+  /// iOS — an authored `[@mention](url)` renders as nothing. Link resolution
+  /// wins over token detection inside a label.
+  @override
+  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
+
   @override
   RegExp get exp => _exp;
 
