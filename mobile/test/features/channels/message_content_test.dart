@@ -499,6 +499,74 @@ void main() {
       expect(openedHeaders?['Authorization'], startsWith('Nostr '));
     });
 
+    for (final attachment in [
+      (
+        name: 'opens local files with the imeta filename',
+        metadataUrl: 'https://relay.example/media/report.pdf',
+        filename: 'q3-report.pdf',
+        expected: 'q3-report.pdf',
+      ),
+      (
+        name: 'uses the link label when imeta has no filename',
+        metadataUrl: 'https://relay.example/media/report.pdf',
+        filename: null,
+        expected: 'Quarterly report',
+      ),
+      (
+        name: 'does not use another attachment\'s filename',
+        metadataUrl: 'https://relay.example/media/other.pdf',
+        filename: 'other.pdf',
+        expected: 'Quarterly report',
+      ),
+    ]) {
+      testWidgets(attachment.name, (tester) async {
+        const url = 'https://relay.example/media/report.pdf';
+        String? openedUrl;
+        Map<String, String>? openedHeaders;
+        String? openedFilename;
+        final auth = MediaGetAuthService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+        );
+
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '[Quarterly report]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url ${attachment.metadataUrl}',
+                  'm application/pdf',
+                  if (attachment.filename != null)
+                    'filename ${attachment.filename}',
+                ],
+              ],
+            ),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue((
+                url,
+                headers,
+                filename,
+              ) async {
+                openedUrl = url;
+                openedHeaders = headers;
+                openedFilename = filename;
+              }),
+            ],
+          ),
+        );
+
+        await tester.tap(find.text('Quarterly report'));
+        await tester.pump();
+
+        expect(openedUrl, url);
+        expect(openedFilename, attachment.expected);
+        expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+      });
+    }
+
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(
         imageUrl: 'https://example.com/media/image.png',
