@@ -37,14 +37,22 @@ jobs:
 
       - name: Start Slack thread
         id: slack
-        uses: meQuilibrium/github-actions/slack-deploy-notify@main
+        uses: slackapi/slack-github-action@v2.1.1
         with:
-          deployment-name: buzz dev
-          branch: ${{ steps.vars.outputs.branch }}
-          channel-id: ${{ env.SLACK_CHANNEL_ID }}
-          button-link: ${{ steps.vars.outputs.job-url }}
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          method: chat.postMessage
+          token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          payload: |
+          channel: ${{ env.SLACK_CHANNEL_ID }}
+          text: "buzz dev build & deploy"
+          blocks:
+            - type: "section"
+              text:
+                type: "mrkdwn"
+                text: ":shipitparrot: *buzz dev* ⇐ `${{ steps.vars.outputs.branch }}`"
+              accessory:
+                type: "button"
+                text: { type: "plain_text", text: "Open Job" }
+                url: "${{ steps.vars.outputs.job-url }}"
 
   build:
     name: Build and Push
@@ -116,28 +124,62 @@ jobs:
 
       - name: "Notify Slack: Build failed"
         if: ${{ failure() }}
-        uses: meQuilibrium/github-actions/slack-deploy-notify@main
+        uses: slackapi/slack-github-action@v2.1.1
         with:
-          prefix: ':failure:'
-          deployment-name: buzz dev
-          branch: ${{ needs.setup.outputs.branch }}
-          channel-id: ${{ env.SLACK_CHANNEL_ID }}
-          button-link: ${{ needs.setup.outputs.job-url }}
-          thread-id: ${{ needs.setup.outputs.slack-thread }}
-          thread-message: "Build failed. <${{ needs.setup.outputs.job-url }}|Open Job> for details."
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          method: chat.update
+          token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          payload: |
+          channel: ${{ env.SLACK_CHANNEL_ID }}
+          ts: "${{ needs.setup.outputs.slack-thread }}"
+          text: "buzz dev build & deploy"
+          blocks:
+            - type: "section"
+              text:
+                type: "mrkdwn"
+                text: ":failure: *buzz dev* ⇐ `${{ needs.setup.outputs.branch }}`"
+              accessory:
+                type: "button"
+                text: { type: "plain_text", text: "Open Job" }
+                url: "${{ needs.setup.outputs.job-url }}"
+
+      - name: "Notify Slack: Build failed (thread reply)"
+        if: ${{ failure() }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ env.SLACK_CHANNEL_ID }}
+            text: "Build failed. <${{ needs.setup.outputs.job-url }}|Open Job> for details."
+            thread_ts: "${{ needs.setup.outputs.slack-thread }}"
 
       - name: "Notify Slack: Build cancelled"
         if: ${{ cancelled() }}
-        uses: meQuilibrium/github-actions/slack-deploy-notify@main
+        uses: slackapi/slack-github-action@v2.1.1
         with:
-          prefix: ':failure:'
-          deployment-name: buzz dev
-          branch: ${{ needs.setup.outputs.branch }}
-          channel-id: ${{ env.SLACK_CHANNEL_ID }}
-          button-link: ${{ needs.setup.outputs.job-url }}
-          thread-id: ${{ needs.setup.outputs.slack-thread }}
-          thread-message: "Build cancelled"
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          method: chat.update
+          token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          payload: |
+          channel: ${{ env.SLACK_CHANNEL_ID }}
+          ts: "${{ needs.setup.outputs.slack-thread }}"
+          text: "buzz dev build & deploy"
+          blocks:
+            - type: "section"
+              text:
+                type: "mrkdwn"
+                text: ":failure: *buzz dev* ⇐ `${{ needs.setup.outputs.branch }}`"
+              accessory:
+                type: "button"
+                text: { type: "plain_text", text: "Open Job" }
+                url: "${{ needs.setup.outputs.job-url }}"
+
+      - name: "Notify Slack: Build cancelled (thread reply)"
+        if: ${{ cancelled() }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ env.SLACK_CHANNEL_ID }}
+            text: "Build cancelled"
+            thread_ts: "${{ needs.setup.outputs.slack-thread }}"
