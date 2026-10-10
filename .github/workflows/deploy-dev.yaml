@@ -1,9 +1,11 @@
 name: Deploy Dev
 run-name: buzz dev ⇐ ${{ github.ref_name }}
 
-# Builds the relay image, pushes it to ECR, and bumps the imageTag in
-# meq-eks-workloads (ArgoCD rolls it out to https://buzz.meqdev.com).
-# Single environment, manual trigger: pick the branch in the "Use workflow from" box.
+# DO-4081: builds the relay image and pushes it to the dev ECR repo (buzz-dev).
+# The ArgoCD Application (DO-4082, dev-infrastructure) consumes the image URI
+# from the Slack thread / job log; this workflow does not touch meq-eks-workloads.
+# Manual trigger from a non-main branch (main would target a buzz-prod repo that
+# config/aws/ecr.yaml does not create).
 
 on:
   workflow_dispatch:
@@ -15,7 +17,6 @@ concurrency:
 env:
   MEQ_ENV: dev
   AWS_REGION: us-east-1
-  SECRET_ID: dev/buzz/secrets
   SLACK_CHANNEL_ID: C01879LTTJQ
 
 jobs:
@@ -54,19 +55,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Fail before building if the runtime secret is incomplete.
-      - name: Verify Secrets Manager secret
-        uses: ./.github/actions/verify-aws-secret
-        with:
-          aws-access-key-id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-          secret-id: ${{ env.SECRET_ID }}
-          required-keys: >-
-            BUZZ_RELAY_PRIVATE_KEY BUZZ_GIT_HOOK_HMAC_SECRET DATABASE_URL
-            REDIS_URL BUZZ_S3_ACCESS_KEY BUZZ_S3_SECRET_KEY
-
-      - name: Build and Deploy to K8s
+      - name: Build and push image
         uses: meQuilibrium/github-actions/build-and-deploy-k8s@main
         with:
           project-name: buzz
@@ -79,7 +68,9 @@ jobs:
           chatops-slack-bot-token: ${{ secrets.CHATOPS_SLACK_BOT_TOKEN }}
           aws-access-key-id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
-          kubernetes-manifest-editor-github-token: ${{ secrets.KUBERNETES_MANIFEST_EDITOR_GITHUB_TOKEN }}
+          # Empty skips the meq-eks-workloads imageTag bump.
+          kubernetes-manifest-editor-github-token: ''
+
 
       - name: "Notify Slack: Build failed"
         if: ${{ failure() }}
