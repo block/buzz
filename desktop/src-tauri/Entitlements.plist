@@ -9,5 +9,22 @@
     <!-- MeshLLM installs versioned native runtimes outside the app bundle. -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
+    <!--
+      Sidecars (buzz-acp, buzz-agent, buzz-dev-mcp, buzz, git-credential-nostr)
+      ship as loose executables in Contents/MacOS/ and are signed with their own
+      code-signing identifiers (e.g. `Identifier=buzz-acp`), not the app's
+      `xyz.block.buzz.app`. Without inheritance, a TCC request raised by a
+      sidecar — e.g. buzz-acp spawning `op`, which reads 1Password's group
+      container — is attributed to a subject that does not match the app the
+      user is granting permission to. The user's "Allow" is recorded against
+      xyz.block.buzz.app, the next request arrives under a different identity,
+      and macOS prompts again: an unkillable consent loop, with Buzz never
+      appearing in Privacy & Security › Files and Folders.
+
+      `inherit` makes child processes adopt the parent app's sandbox/TCC
+      identity so one grant covers the sidecars too.
+    -->
+    <key>com.apple.security.inherit</key>
+    <true/>
 </dict>
 </plist>
