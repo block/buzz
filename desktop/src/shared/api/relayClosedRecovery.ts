@@ -11,12 +11,29 @@ import {
   type RelaySubscriptionFilter,
   type SubscriptionEventBufferItem,
 } from "@/shared/api/relayClientShared";
+import {
+  beginReconnectRepair,
+  buildReconnectReplayFilter,
+  reconnectReplaySince,
+  repairChannelSubscription,
+  shouldPageReconnectReplay,
+} from "@/shared/api/relayReconnectReplay";
+import type { ChannelReconnectRepairRequest } from "@/shared/api/channelReconnectRepair";
 import type { RelayEvent } from "@/shared/api/types";
 
 const RETRY_BASE_DELAY_MS = 1_000;
 const RETRY_MAX_DELAY_MS = 30_000;
 
 type LiveSubscription = Extract<RelaySubscription, { mode: "live" }>;
+
+type ClosedRepairOptions = {
+  /** Paged channel repair; without it a CLOSED retry resends the cursor filter only. */
+  requestRepair?: (
+    request: ChannelReconnectRepairRequest,
+  ) => Promise<RelayEvent[]>;
+  /** Current connection generation; a repair stops once it changes. */
+  connectionGeneration?: () => number;
+};
 
 export function clearClosedRetry(subscription: LiveSubscription) {
   if (subscription.closedRetryTimeout === undefined) return;
@@ -30,13 +47,15 @@ export function handleRelayClosed({
   message,
   sendReq,
   closeSubscription,
+  requestRepair,
+  connectionGeneration = () => 0,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
   closeSubscription?: (subId: string) => Promise<void>;
-}) {
+} & ClosedRepairOptions) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode !== "live") {
@@ -114,6 +133,8 @@ export function handleRelayClosed({
     subscription,
     message,
     sendReq,
+    requestRepair,
+    connectionGeneration,
   });
 }
 
@@ -123,13 +144,15 @@ function recoverLiveSubscriptionFromClosed({
   subscription,
   message,
   sendReq,
+  requestRepair,
+  connectionGeneration = () => 0,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   subscription: LiveSubscription;
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
-}) {
+} & ClosedRepairOptions) {
   subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
 
@@ -187,7 +210,43 @@ function recoverLiveSubscriptionFromClosed({
       );
       return;
     }
-    void sendReq(subId, subscription.filter).catch((error) => {
+    // The live channel filter has no reader-clock `since` and replays only
+    // its newest `limit` rows, so resume from the accepted-event cursor.
+    const channelId = subscription.filter["#h"]?.[0];
+    const shouldPageReplay =
+      channelId !== undefined &&
+      requestRepair !== undefined &&
+      shouldPageReconnectReplay(subscription.filter);
+    const replaySince = reconnectReplaySince(subscription, shouldPageReplay);
+    const willRepair = shouldPageReplay && replaySince !== undefined;
+    const generation = connectionGeneration();
+    if (willRepair) beginReconnectRepair(subscription, generation);
+
+    void (async () => {
+      await sendReq(
+        subId,
+        willRepair
+          ? subscription.filter
+          : buildReconnectReplayFilter(subscription.filter, replaySince),
+      );
+      if (
+        !willRepair ||
+        !requestRepair ||
+        channelId === undefined ||
+        replaySince === undefined
+      )
+        return;
+      await repairChannelSubscription({
+        subId,
+        subscription,
+        subscriptions,
+        channelId,
+        replaySince,
+        generation,
+        isActive: () => connectionGeneration() === generation,
+        requestRepair,
+      });
+    })().catch((error) => {
       if (subscriptions.get(subId) !== subscription) return;
       console.error("Failed to restore closed relay subscription", error);
       recoverLiveSubscriptionFromClosed({
@@ -196,6 +255,8 @@ function recoverLiveSubscriptionFromClosed({
         subscription,
         message,
         sendReq,
+        requestRepair,
+        connectionGeneration,
       });
     });
   };
@@ -240,6 +301,7 @@ export function flushEvents(
   subscriptions: Map<string, RelaySubscription>,
   generation: number,
 ) {
+  const flushCallbacks = new Set<() => void>();
   for (const item of buffer) {
     const subscription = subscriptions.get(item.subId);
     if (
@@ -248,8 +310,10 @@ export function flushEvents(
       shouldDispatchSubscriptionEvent(subscription, item.event)
     ) {
       subscription.onEvent(item.event);
+      if (subscription.onFlush) flushCallbacks.add(subscription.onFlush);
     }
   }
+  for (const callback of flushCallbacks) callback();
 }
 
 export function markReconnectLiveEose(

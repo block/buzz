@@ -76,6 +76,8 @@ type LiveSubscription = {
   /** Client-side admission only; interactive consumers still obey cooldown/pacing. */
   priority?: "interactive";
   onEvent: (event: RelayEvent) => void;
+  /** Called once after each batch of dispatched events (buffered or repaired). */
+  onFlush?: () => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
   /** Release readiness/cancellation listeners when this entry is retired. */
   onRemoved?: () => void;
