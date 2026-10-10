@@ -3,10 +3,18 @@ import { Loader2 } from "lucide-react";
 
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import {
-  getActivityHeadline,
-  isMeaningfulItem,
-  isSpineItem,
-} from "@/features/agents/ui/agentSessionTranscriptPresentation";
+  getActiveTurnCountForChannel,
+  subscribeActiveAgentTurns,
+} from "@/features/agents/activeAgentTurnsStore";
+import {
+  getAgentWorkingState,
+  subscribeAgentWorkingSignal,
+} from "@/features/agents/agentWorkingSignal";
+import {
+  buildStableActivityStatus,
+  formatElapsed,
+  formatStatusSegments,
+} from "@/features/channels/ui/botActivityStatus";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -24,6 +32,9 @@ export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
   channelId?: string | null;
+  /** Thread root id when this bar lives in a thread composer — locks the
+   *  status detail onto that thread's turn instead of the channel's newest. */
+  threadRootId?: string | null;
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   openAgentSessionPubkey: string | null;
   profiles?: UserProfileLookup;
@@ -32,11 +43,12 @@ type BotActivityBarProps = {
 };
 
 const HOVER_CLOSE_DELAY_MS = 180;
-const HEADLINE_ROTATION_MS = 2200;
+const ELAPSED_TICK_MS = 1000;
 
 export function BotActivityComposerAction({
   agents,
   channelId = null,
+  threadRootId = null,
   onOpenAgentSession,
   openAgentSessionPubkey,
   profiles,
@@ -61,43 +73,62 @@ export function BotActivityComposerAction({
     Boolean(singleWorkingAgent),
     singleWorkingAgent?.pubkey,
   );
-  const activityHeadlines = React.useMemo(() => {
-    if (!singleWorkingAgent) {
-      return [];
+  const activityStatus = React.useMemo(
+    () =>
+      singleWorkingAgent
+        ? buildStableActivityStatus(transcript, channelId, threadRootId)
+        : null,
+    [channelId, singleWorkingAgent, threadRootId, transcript],
+  );
+
+  // Turn-start anchor for the elapsed segment, observer-primary with a
+  // typing fallback — the same signal every other working affordance reads.
+  const singleWorkingPubkey = singleWorkingAgent?.pubkey ?? null;
+  const workingState = React.useSyncExternalStore(
+    subscribeAgentWorkingSignal,
+    React.useCallback(
+      () => getAgentWorkingState(singleWorkingPubkey, channelId),
+      [channelId, singleWorkingPubkey],
+    ),
+  );
+  const anchorAt = React.useMemo(() => {
+    if (!singleWorkingAgent || workingState.channels.length === 0) {
+      return null;
     }
-
-    const seen = new Set<string>();
-    const headlines: string[] = [];
-    const scopedTranscript = channelId
-      ? transcript.filter((item) => item.channelId === channelId)
-      : transcript;
-
-    // Two-tier scan: spine items first (reads recede when real work is present).
-    // If no spine headlines are found (session start / idle), fall back to all
-    // meaningful items so the bar isn't left empty.
-    const passFilter: (item: (typeof scopedTranscript)[number]) => boolean =
-      scopedTranscript.some(isSpineItem) ? isSpineItem : isMeaningfulItem;
-
-    for (let i = scopedTranscript.length - 1; i >= 0; i--) {
-      const item = scopedTranscript[i];
-      if (!passFilter(item)) {
-        continue;
-      }
-      const headline = getActivityHeadline(item);
-      if (!headline || seen.has(headline)) {
-        continue;
-      }
-
-      seen.add(headline);
-      headlines.unshift(headline);
-      if (headlines.length >= 5) {
-        break;
+    if (channelId) {
+      const scoped = workingState.channels.find(
+        (channel) => channel.channelId === channelId,
+      );
+      if (scoped) {
+        return scoped.anchorAt;
       }
     }
+    return workingState.channels.reduce(
+      (earliest, channel) => Math.min(earliest, channel.anchorAt),
+      Number.POSITIVE_INFINITY,
+    );
+  }, [channelId, singleWorkingAgent, workingState]);
 
-    return headlines;
-  }, [channelId, singleWorkingAgent, transcript]);
-  const [headlineIndex, setHeadlineIndex] = React.useState(0);
+  const channelTurnCount = React.useSyncExternalStore(
+    subscribeActiveAgentTurns,
+    React.useCallback(
+      () => getActiveTurnCountForChannel(singleWorkingPubkey, channelId),
+      [channelId, singleWorkingPubkey],
+    ),
+  );
+
+  // Re-render once a second while a turn is running so the elapsed segment
+  // ticks in place — the only part of the line that changes on its own.
+  const [, tick] = React.useReducer((count: number) => count + 1, 0);
+  React.useEffect(() => {
+    if (anchorAt === null) {
+      return;
+    }
+
+    const interval = window.setInterval(tick, ELAPSED_TICK_MS);
+
+    return () => window.clearInterval(interval);
+  }, [anchorAt]);
 
   const clearHoverTimer = React.useCallback(() => {
     if (hoverTimerRef.current !== null) {
@@ -128,18 +159,6 @@ export function BotActivityComposerAction({
     return () => clearHoverTimer();
   }, [clearHoverTimer]);
 
-  React.useEffect(() => {
-    if (activityHeadlines.length <= 1) {
-      return;
-    }
-
-    const interval = window.setInterval(() => {
-      setHeadlineIndex((current) => (current + 1) % activityHeadlines.length);
-    }, HEADLINE_ROTATION_MS);
-
-    return () => window.clearInterval(interval);
-  }, [activityHeadlines.length]);
-
   if (workingAgents.length === 0) {
     return null;
   }
@@ -152,12 +171,31 @@ export function BotActivityComposerAction({
       ? `${workingAgents[0]?.name ?? "Agent"} is working`
       : `${workingAgents.length} agents working`;
   const isInline = variant === "inline";
+  const elapsed =
+    anchorAt !== null && Number.isFinite(anchorAt)
+      ? formatElapsed(Date.now() - anchorAt)
+      : null;
   const visibleStatusLabel =
     workingAgents.length === 1
-      ? `${workingAgents[0]?.name ?? "Agent"}: ${
-          activityHeadlines[headlineIndex % activityHeadlines.length] ??
-          "Working"
-        }`
+      ? [
+          workingAgents[0]?.name ?? "Agent",
+          // Parallel turns in one channel would interleave in a single
+          // detailed line, so past one turn the channel bar aggregates;
+          // each thread's own bar still carries that thread's detail.
+          channelTurnCount > 1 && !threadRootId
+            ? [
+                `${channelTurnCount} threads`,
+                ...(elapsed ? [elapsed] : []),
+              ].join(" · ")
+            : formatStatusSegments(
+                activityStatus ?? {
+                  activity: "Working",
+                  toolCount: 0,
+                  context: null,
+                },
+                elapsed,
+              ),
+        ].join(" · ")
       : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 
   return (
