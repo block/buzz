@@ -13,7 +13,7 @@ use tracing::{error, warn};
 ///
 /// Must comfortably exceed accepted event content sizes after Nostr JSON and
 /// NIP-44 encryption overhead.
-pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
+pub use buzz_core::relay::DEFAULT_MAX_FRAME_BYTES;
 
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
@@ -745,11 +745,7 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1_000);
 
-        let max_frame_bytes = std::env::var("BUZZ_MAX_FRAME_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(DEFAULT_MAX_FRAME_BYTES);
+        let max_frame_bytes = buzz_core::relay::max_frame_bytes_from_env();
 
         let slow_client_grace_limit = std::env::var("BUZZ_SLOW_CLIENT_GRACE_LIMIT")
             .ok()

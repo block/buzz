@@ -739,8 +739,6 @@ async fn reconcile_channels(
     channel_arg: Option<String>,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
-    use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
-
     let db = connect_db().await?;
 
     // Repair is authoritative publication. An ephemeral signer would create
@@ -759,81 +757,18 @@ async fn reconcile_channels(
         .map(uuid::Uuid::parse_str)
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid --channel UUID: {e}"))?;
-    let mut cursor = uuid::Uuid::nil();
-    let mut reconciled = 0u64;
-    let mut skipped = 0u64;
-    loop {
-        let channels = if let Some(target) = target_channel {
-            // Targeted reconciliation remains roster-only, with the existing
-            // live-channel admission check.
-            db.get_channel(tenant.community(), target).await?;
-            vec![target]
-        } else {
-            db.channel_metadata_repair_page(tenant.community(), cursor)
-                .await?
-        };
-        if channels.is_empty() {
-            break;
-        }
-        for channel in channels {
-            cursor = channel;
-            let channel_id_str = channel.to_string();
-
-            if target_channel.is_none()
-                && !channel_metadata::repair(&db, &tenant, channel, &relay_keys).await?
-            {
-                skipped += 1;
-                continue;
-            }
-            let members = db.get_members(tenant.community(), channel).await?;
-
-            // Targeted repair remains roster-only. Full repair compares the complete
-            // projection through the same database boundary as the relay publisher.
-            if target_channel.is_none() {
-                // kind:39001 — admins
-                {
-                    let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                    for m in members
-                        .iter()
-                        .filter(|m| m.role == "owner" || m.role == "admin")
-                    {
-                        let pk = hex::encode(&m.pubkey);
-                        tags.push(Tag::parse(["p", &pk, &m.role])?);
-                    }
-                    let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
-                        .tags(tags)
-                        .sign_with_keys(&relay_keys)
-                        .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-                    db.replace_addressable_event(tenant.community(), &event, Some(channel))
-                        .await?;
-                }
-            }
-
-            // kind:39002 — members
-            {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                for m in &members {
-                    let pk = hex::encode(&m.pubkey);
-                    tags.push(Tag::parse(["p", &pk, "", &m.role])?);
-                }
-                let event = EventBuilder::new(Kind::Custom(39002), "")
-                    .tags(tags)
-                    .sign_with_keys(&relay_keys)
-                    .map_err(|e| anyhow::anyhow!("sign kind:39002: {e}"))?;
-                db.replace_addressable_event(tenant.community(), &event, Some(channel))
-                    .await?;
-            }
-
-            reconciled += 1;
-        }
-        if target_channel.is_some() {
-            break;
-        }
-    }
-
+    let summary = channel_metadata::reconcile(&db, &tenant, target_channel, &relay_keys).await?;
     println!(
-        "Reconciled {reconciled} channels ({skipped} already current, {} total).",
-        reconciled + skipped
+        "Reconciled {} channels ({} already current, {} failed, {} total).",
+        summary.repaired,
+        summary.skipped,
+        summary.failed,
+        summary.repaired + summary.skipped + summary.failed
+    );
+    anyhow::ensure!(
+        summary.failed == 0,
+        "channel reconciliation incomplete: {} failed",
+        summary.failed
     );
     Ok(())
 }

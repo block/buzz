@@ -79,12 +79,7 @@ impl ChannelMetadataWrite {
         let Some(previous) = self.previous.as_ref() else {
             return Ok(true);
         };
-        if verify_snapshot_async(&previous.event, self.relay, self.channel_id)
-            .await?
-            .ok()
-            .as_ref()
-            != Some(&self.labels)
-        {
+        if !self.has_current_label_snapshot().await? {
             return Ok(true);
         }
         // The existing TTL protocol refreshes deadlines on event commits. It is
@@ -101,6 +96,21 @@ impl ChannelMetadataWrite {
         };
         Ok(!previous.event.content.is_empty()
             || comparable(tags) != comparable(previous.event.tags.iter().cloned().collect()))
+    }
+
+    /// Check only the atomic label projection, not commit-then-publish metadata.
+    pub(super) async fn has_current_label_snapshot(&self) -> Result<bool> {
+        self.channel()?;
+        let Some(previous) = self.previous.as_ref() else {
+            return Ok(false);
+        };
+        Ok(
+            verify_snapshot_async(&previous.event, self.relay, self.channel_id)
+                .await?
+                .ok()
+                .as_ref()
+                == Some(&self.labels),
+        )
     }
 
     /// Store a freshly signed snapshot on this transaction after validating its projection.

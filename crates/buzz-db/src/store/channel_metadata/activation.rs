@@ -31,7 +31,13 @@ impl Db {
         .await?)
     }
 
-    /// Verify that every live channel has the canonical current relay projection.
+    /// Verify label integrity without requiring freshness of ordinary metadata.
+    ///
+    /// Existing heads must contain the trusted canonical current label set. A
+    /// missing head is allowed only for an unlabeled channel: ordinary creation
+    /// can commit before its separate publisher, even with label commands off.
+    /// Topic/archive changes also commit before publication and cannot be a
+    /// routine restart prerequisite. Full operator repair still checks all tags.
     ///
     /// Operator-only, cross-community startup audit. Call before serving when
     /// enabling NIP-CL, after old writers have been externally fenced and repair
@@ -57,10 +63,16 @@ impl Db {
             }
             for (community, channel) in channels {
                 cursor = (community, channel);
-                let mut write = self
+                let write = self
                     .begin_channel_metadata_write(CommunityId::from_uuid(community), channel, relay)
                     .await?;
-                let stale = write.needs_snapshot().await?;
+                let stale = if write.previous.is_none() && write.labels().values().is_empty() {
+                    // Still reject a channel deleted after enumeration.
+                    write.channel()?;
+                    false
+                } else {
+                    !write.has_current_label_snapshot().await?
+                };
                 write.rollback().await?;
                 if stale {
                     return Err(DbError::InvalidData(format!(

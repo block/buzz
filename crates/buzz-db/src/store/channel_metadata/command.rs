@@ -38,8 +38,9 @@ pub enum CommandApplication {
 
 impl ChannelMetadataWrite {
     async fn has_label_authority(&mut self, actor: &[u8]) -> Result<bool> {
-        // Membership writers use the lock held by this guard. Ownership is
-        // write-once in user::set_agent_owner; this query checks every owner.
+        // Ordinary membership writers share this guard's lock. Administrative
+        // kicks need not: an overlapping command may serialize before the kick.
+        // Ownership is write-once in user::set_agent_owner; check every owner.
         Ok(sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM channel_members cm \
              LEFT JOIN users u ON u.community_id = cm.community_id AND u.pubkey = cm.pubkey \

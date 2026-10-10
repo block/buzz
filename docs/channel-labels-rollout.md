@@ -10,11 +10,15 @@ unless the procedure below is enforced by the deployment/database operator.
 - `BUZZ_NIP_CL_ENABLED=true` enables labeled creation and label mutation and
   advertises `nip-cl` on mapped community hosts. A configured
   `BUZZ_RELAY_PRIVATE_KEY` and the exact cutover declaration are required.
-- Startup checks every undeleted channel, in bounded pages across communities,
-  against the configured signer's complete canonical metadata projection. It
-  fails before listeners/background publishers if repair is needed. It neither
-  repairs nor establishes fleet exclusion. A community undergoing deletion can
-  fail admission during this audit; finish its lifecycle before activation.
+- Startup checks label integrity in bounded pages across all communities before
+  listeners/background publishers. Existing heads must be trusted, canonical
+  and match stored labels; missing heads fail only for labeled channels.
+  Unpublished ordinary topic/archive updates and missing unlabeled heads do not
+  block routine restarts: those legacy writes commit before publication.
+  This audit neither repairs ordinary metadata nor establishes fleet exclusion.
+  A community undergoing deletion can fail admission during this audit; finish
+  its lifecycle before activation. Full operator repair below still compares
+  every canonical metadata field (except the independently refreshed TTL deadline).
 - Ordinary publishers and full operator reconciliation preserve labels even
   with the feature disabled. Unlabeled creation retains its legacy admission
   when disabled; clients must not assume NIP-CL receipts without capability.
@@ -38,7 +42,10 @@ unless the procedure below is enforced by the deployment/database operator.
    fence the entire shared population. Record the observed exclusion, not just
    a configuration change. Never resume an old binary with the new credential.
 4. Apply migrations with the new operator binary (`buzz-admin migrate`) while
-   routing remains closed. Inventory community hosts from the operator control
+   routing remains closed. Migration 0061 adds a CHECK to the partitioned event
+   table and may scan existing partitions while holding access-blocking locks;
+   budget and measure this step on a representative restored database, not while
+   serving traffic. Inventory community hosts from the operator control
    plane. For **each** host run the new binary with the existing stable key:
 
    ```bash
@@ -49,7 +56,10 @@ unless the procedure below is enforced by the deployment/database operator.
    Full repair pages through all undeleted channels, including archived ones.
    `--channel` is intentionally roster-only and does **not** repair metadata.
    A successful run for one host is not evidence for another host. Resolve any
-   invalid stored label or oversized snapshot instead of clearing labels.
+   invalid stored label or oversized snapshot instead of clearing labels. Full
+   repair checks missing 39001/39002 independently, continues after individual
+   channel failures, and exits unsuccessfully if any failed. Rerun after fixing
+   those failures; a partial run is not activation evidence.
 5. Start only compatible replicas, still behind closed routing, with:
 
    ```text
@@ -58,7 +68,7 @@ unless the procedure below is enforced by the deployment/database operator.
    BUZZ_RELAY_PRIVATE_KEY=<unchanged stable secret>
    ```
 
-   Require the canonical metadata activation audit and readiness to pass on
+   Require the label-integrity startup audit and readiness to pass on
    each replica. A config parse pass is not readiness. Verify mapped-host
    NIP-11 `self` equals the intended relay identity and `supported_extensions`
    includes `nip-cl`; an unknown host must not advertise it.

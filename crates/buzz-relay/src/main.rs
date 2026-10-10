@@ -487,7 +487,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         let checked = db
             .verify_channel_metadata_activation(relay_keypair.public_key())
             .await?;
-        info!(checked, "NIP-CL canonical metadata activation audit passed");
+        info!(checked, "NIP-CL label-integrity startup audit passed");
     }
 
     let partition_policy = buzz_db::partition::PartitionMaintenancePolicy {

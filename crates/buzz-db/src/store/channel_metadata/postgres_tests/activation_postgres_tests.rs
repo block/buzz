@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn activation_checks_current_content_and_all_communities_without_mutation() {
+async fn activation_checks_labels_but_tolerates_unpublished_ordinary_metadata() {
     let (db, community) = database(false).await;
     let relay = Keys::generate();
     let owner = Keys::generate();
@@ -27,14 +27,19 @@ async fn activation_checks_current_content_and_all_communities_without_mutation(
     )
     .await
     .unwrap();
-    assert!(db
-        .verify_channel_metadata_activation(relay.public_key())
-        .await
-        .is_err());
+    db.archive_channel(community, channel).await.unwrap();
+    assert_eq!(
+        db.verify_channel_metadata_activation(relay.public_key())
+            .await
+            .unwrap(),
+        129,
+        "unpublished topic/archive changes must not prevent routine restart"
+    );
     let mut write = db
         .begin_channel_metadata_write(community, channel, relay.public_key())
         .await
         .unwrap();
+    assert!(write.needs_snapshot().await.unwrap());
     snapshot(&mut write, &relay).await;
     write.commit().await.unwrap();
     assert_eq!(
@@ -72,9 +77,10 @@ async fn activation_checks_current_content_and_all_communities_without_mutation(
         .await
         .unwrap()
         .id;
+    let missing = Uuid::new_v4();
     db.create_channel_with_id(
         other,
-        Uuid::new_v4(),
+        missing,
         "missing",
         ChannelType::Stream,
         ChannelVisibility::Open,
@@ -84,6 +90,15 @@ async fn activation_checks_current_content_and_all_communities_without_mutation(
     )
     .await
     .unwrap();
+    assert_eq!(
+        db.verify_channel_metadata_activation(relay.public_key())
+            .await
+            .unwrap(),
+        130
+    );
+    // Missing unlabeled publication is recoverable; missing labeled state is not.
+    sqlx::query("UPDATE channels SET labels = ARRAY['retained']::text[] WHERE community_id = $1 AND id = $2")
+        .bind(other.as_uuid()).bind(missing).execute(db.pool()).await.unwrap();
     assert!(db
         .verify_channel_metadata_activation(relay.public_key())
         .await

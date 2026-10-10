@@ -2109,6 +2109,13 @@ pub(crate) async fn handle_active_audio_connection(
                 room_emptied = false;
             }
             Ok(()) => {
+                if let Err(error) =
+                    crate::handlers::channel_metadata::publish_metadata(&tenant, &state, channel_id)
+                        .await
+                {
+                    warn!(channel_id = %channel_id, %error,
+                        "auto-archive metadata publication failed; operator repair required");
+                }
                 room_emptied = state
                     .audio_rooms
                     .cleanup_if_empty(tenant.community(), channel_id);
@@ -9728,6 +9735,8 @@ mod tests {
             );
 
             let audio_rooms = Arc::clone(&state.audio_rooms);
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+            let done_tx = Arc::new(std::sync::Mutex::new(Some(done_tx)));
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
             let conn_cancel = CancellationToken::new();
             let state_c = Arc::clone(&state);
@@ -9754,6 +9763,7 @@ mod tests {
                         let assertion_i = assertion_c.clone();
                         let cancel_i = conn_cancel_c.clone();
                         move |ws: axum::extract::ws::WebSocketUpgrade| {
+                            let done_tx = done_tx.lock().unwrap().take().unwrap();
                             let state_i = Arc::clone(&state_i);
                             let tenant_i = tenant_i.clone();
                             let assertion_i = assertion_i.clone();
@@ -9772,7 +9782,8 @@ mod tests {
                                         conn_time,
                                         None,
                                     )
-                                    .await
+                                    .await;
+                                    let _ = done_tx.send(());
                                 })
                             }
                         }
@@ -9866,8 +9877,25 @@ mod tests {
             // Handler returns after teardown. Wait for the WS connection to close.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), client.next()).await;
 
-            // Wait a moment for the handler to finish emitting 48102.
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
+                .await
+                .expect("audio teardown completes")
+                .unwrap();
+            let mut metadata = state
+                .db
+                .begin_channel_metadata_write(
+                    community,
+                    channel_id,
+                    state.relay_keypair.public_key(),
+                )
+                .await
+                .unwrap();
+            assert!(metadata.channel().unwrap().archived_at.is_some());
+            assert!(
+                !metadata.needs_snapshot().await.unwrap(),
+                "auto-archive must publish current metadata"
+            );
+            metadata.rollback().await.unwrap();
 
             // Exactly one 48102 row must exist — the "committed join ⇒ exactly one leave" invariant.
             let row_48102: i64 = sqlx::query_scalar(
