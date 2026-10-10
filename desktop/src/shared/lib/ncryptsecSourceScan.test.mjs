@@ -37,6 +37,8 @@ const ALLOWLIST = [
   "features/settings/ui/BackupTestFlow.tsx",
   "features/settings/ui/EncryptedBackupCreator.tsx",
   "features/settings/ui/ProfileSettingsCard.tsx",
+  // web (PWA) capability map names native-only backup commands as unsupported:
+  "platform/web/capabilities.ts",
   // e2e-only mock bridge (never in the production bundle):
   "testing/e2eBridge.ts",
   // this scan:
