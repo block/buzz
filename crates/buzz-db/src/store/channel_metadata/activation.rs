@@ -1,4 +1,4 @@
-//! Bounded startup audit for an offline NIP-CL cutover.
+//! Bounded label-integrity audit for NIP-CL startup.
 
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -44,15 +44,19 @@ impl Db {
     /// has completed. This is not a fleet fence: an old binary can still corrupt
     /// projections if its database access has not been revoked. Each comparison
     /// uses the same scoped admitted transaction as publication; no captured
-    /// snapshot or read-replica state establishes readiness.
+    /// snapshot or read-replica state establishes readiness. Retiring communities
+    /// and channels are outside the serving set, including retirement between
+    /// page enumeration and lock acquisition; they do not block healthy tenants.
     pub async fn verify_channel_metadata_activation(&self, relay: PublicKey) -> Result<u64> {
         let mut cursor = (Uuid::nil(), Uuid::nil());
         let mut checked = 0;
         loop {
             let channels: Vec<(Uuid, Uuid)> = sqlx::query_as(
-                "SELECT community_id, id FROM channels WHERE deleted_at IS NULL \
-                 AND (community_id, id) > ($1, $2) \
-                 ORDER BY community_id, id LIMIT 128",
+                "SELECT ch.community_id, ch.id FROM channels ch \
+                 JOIN communities c ON c.id = ch.community_id \
+                 WHERE ch.deleted_at IS NULL AND c.deleted_at IS NULL \
+                 AND c.deletion_state = 'active' AND (ch.community_id, ch.id) > ($1, $2) \
+                 ORDER BY ch.community_id, ch.id LIMIT 128",
             )
             .bind(cursor.0)
             .bind(cursor.1)
@@ -63,12 +67,24 @@ impl Db {
             }
             for (community, channel) in channels {
                 cursor = (community, channel);
-                let write = self
+                let write = match self
                     .begin_channel_metadata_write(CommunityId::from_uuid(community), channel, relay)
-                    .await?;
+                    .await
+                {
+                    Ok(write) => write,
+                    // This constructor performs no actor authorization: AccessDenied
+                    // comes only from community lifecycle admission under its lock.
+                    Err(DbError::AccessDenied(_)) => continue,
+                    Err(error) => return Err(error),
+                };
+                if let Err(error) = write.channel() {
+                    write.rollback().await?;
+                    match error {
+                        DbError::ChannelNotFound(_) => continue,
+                        error => return Err(error),
+                    }
+                }
                 let stale = if write.previous.is_none() && write.labels().values().is_empty() {
-                    // Still reject a channel deleted after enumeration.
-                    write.channel()?;
                     false
                 } else {
                     !write.has_current_label_snapshot().await?

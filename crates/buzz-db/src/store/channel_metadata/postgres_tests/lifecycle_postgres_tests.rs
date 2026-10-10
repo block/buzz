@@ -58,7 +58,7 @@ async fn admin(db: &Db, community: CommunityId, channel: Uuid, owner: &Keys) -> 
     admin
 }
 
-async fn blocked_pid(db: &Db, blocker: i32) -> i32 {
+pub(super) async fn blocked_pid(db: &Db, blocker: i32) -> i32 {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let pid: Option<i32> = sqlx::query_scalar(

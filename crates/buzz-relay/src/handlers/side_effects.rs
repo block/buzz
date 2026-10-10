@@ -1060,87 +1060,13 @@ pub async fn emit_membership_notification(
     Ok(())
 }
 
-/// Sign, store (replacing previous), and fan-out a single addressable discovery event.
-async fn emit_addressable_discovery_event(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-    channel_id: Uuid,
-    kind: u32,
-    tags: Vec<Tag>,
-    relay_pubkey_hex: &str,
-) -> anyhow::Result<()> {
-    // Ensure the new event's created_at is strictly greater than any existing event
-    // of the same (kind, pubkey, channel_id). Without this, rapid successive updates
-    // (e.g. set topic then set purpose in the same second) can produce events with
-    // identical created_at, causing the second to be rejected by stale-write protection
-    // (NIP-16 tiebreaker: lower event ID wins, which is random).
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let min_ts = {
-        let existing = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![kind as i32]),
-                channel_id: Some(channel_id),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| e.event.created_at.as_secs() + 1)
-            .unwrap_or(now)
-    };
-    let ts = now.max(min_ts);
-
-    let event = EventBuilder::new(Kind::Custom(kind as u16), "")
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
-
-    let (stored, was_inserted) = state
-        .db
-        .replace_addressable_event(tenant.community(), &event, Some(channel_id))
-        .await?;
-    if was_inserted {
-        let kind_u32 = event_kind_u32(&stored.event);
-        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
-    }
-    Ok(())
-}
-
-fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Result<Vec<Tag>> {
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
-    tags.push(Tag::parse(["d", group_id])?);
-    for member in members {
-        let pubkey_hex = hex::encode(&member.pubkey);
-        // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
-        // because the canonical relay is implicit (this event is signed by it).
-        tags.push(Tag::parse(["p", &pubkey_hex, "", &member.role])?);
-    }
-    Ok(tags)
-}
-
-async fn store_group_members_event(
+async fn store_group_discovery_event(
     state: &Arc<AppState>,
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
+    kind: u32,
 ) -> anyhow::Result<Option<buzz_core::StoredEvent>> {
-    let group_id = member_snapshot.channel_id().to_string();
-    let tags = group_members_tags(&group_id, &member_snapshot.members)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let ts = member_snapshot
-        .latest_member_event_timestamp()
-        .await?
-        .map(|timestamp| timestamp + 1)
-        .unwrap_or(now)
-        .max(now);
+    let tags = member_snapshot.snapshot_tags()?;
+    let timestamp = member_snapshot.snapshot_timestamp().await?;
     // A relay-signed roster of a channel the relay is itself a member of (the
     // relay's moderation-DM key participates in the {relay, recipient} DM used
     // for moderation notices) MUST retain the relay's own `p` tag. nostr's
@@ -1148,13 +1074,13 @@ async fn store_group_members_event(
     // would drop the relay from the snapshot and fail migration 0032's roster
     // fence against the canonical two-member DM. `allow_self_tagging` keeps the
     // snapshot faithful to `channel_members`.
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
+    let event = EventBuilder::new(Kind::Custom(kind as u16), "")
         .tags(tags)
         .allow_self_tagging()
-        .custom_created_at(nostr::Timestamp::from(ts))
+        .custom_created_at(timestamp)
         .sign_with_keys(&state.relay_keypair)
-        .map_err(|error| anyhow::anyhow!("failed to sign member snapshot: {error}"))?;
-    let (stored, inserted) = member_snapshot.replace_member_event(&event).await?;
+        .map_err(|error| anyhow::anyhow!("failed to sign discovery snapshot: {error}"))?;
+    let (stored, inserted) = member_snapshot.replace_discovery_event(&event).await?;
     Ok(inserted.then_some(stored))
 }
 
@@ -1193,42 +1119,33 @@ pub async fn emit_group_discovery_events(
     // Metadata must be captured only after acquiring the shared application-owned
     // transaction boundary. Never give captured stale tags a newer timestamp.
     super::channel_metadata::publish_metadata(tenant, state, channel_id).await?;
-    let members = state
-        .db
-        .get_members_for_event_write(tenant.community(), channel_id)
-        .await?;
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
-    let group_id = channel_id.to_string();
-
-    {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        for m in members
-            .iter()
-            .filter(|m| m.role == "owner" || m.role == "admin")
-        {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
-        }
-        emit_addressable_discovery_event(
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    let mut admins = state
+        .db
+        .lock_admin_snapshot(tenant.community(), channel_id, &relay_pubkey)
+        .await?;
+    let stored = store_group_discovery_event(state, &mut admins, KIND_NIP29_GROUP_ADMINS).await?;
+    admins.release().await?;
+    if let Some(stored) = stored {
+        dispatch_persistent_event(
             tenant,
             state,
-            channel_id,
+            &stored,
             KIND_NIP29_GROUP_ADMINS,
-            tags,
             &relay_pubkey_hex,
+            None,
         )
-        .await?;
+        .await;
     }
 
-    // Re-capture membership behind the writer lock immediately before the
-    // authoritative 39002 replacement. Metadata has its own fresh projection
-    // boundary above; admin-list publication retains its existing behavior.
-    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    // Capture membership only after locking its replacement coordinate.
     let mut member_snapshot = state
         .db
         .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
         .await?;
-    let stored_members = store_group_members_event(state, &mut member_snapshot).await?;
+    let stored_members =
+        store_group_discovery_event(state, &mut member_snapshot, KIND_NIP29_GROUP_MEMBERS).await?;
     member_snapshot.release().await?;
     dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
@@ -3310,7 +3227,9 @@ pub async fn reconcile_large_channel_member_snapshots(
                 .lock_member_snapshot(candidate.community_id, channel_id, &relay_pubkey.to_bytes())
                 .await?;
             let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
-            let stored_members = store_group_members_event(state, &mut member_snapshot).await?;
+            let stored_members =
+                store_group_discovery_event(state, &mut member_snapshot, KIND_NIP29_GROUP_MEMBERS)
+                    .await?;
             member_snapshot.release().await?;
             dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
             Ok::<bool, anyhow::Error>(true)
@@ -3592,7 +3511,7 @@ pub async fn publish_dm_visibility_snapshot(
     // Force created_at strictly past any prior snapshot for this viewer: a same-second
     // replacement whose random event id sorts higher is rejected by stale-write
     // protection, so a hide→re-open within one second could otherwise strand the stale
-    // snapshot. Same guard as emit_addressable_discovery_event.
+    // snapshot. Use the same monotonic timestamp rule as discovery snapshots.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -3853,33 +3772,6 @@ mod tests {
         }
 
         let _ = call;
-    }
-
-    #[test]
-    fn group_members_snapshot_keeps_members_past_one_thousand() {
-        let channel_id = Uuid::new_v4();
-        let members: Vec<MemberRecord> = (0_u16..1_501)
-            .map(|index| MemberRecord {
-                channel_id,
-                pubkey: vec![(index >> 8) as u8, index as u8],
-                role: if index == 1_500 { "owner" } else { "member" }.to_string(),
-                joined_at: chrono::Utc::now(),
-                invited_by: None,
-                removed_at: None,
-            })
-            .collect();
-
-        let tags = group_members_tags(&channel_id.to_string(), &members).expect("build tags");
-        assert_eq!(tags.len(), 1_502, "d tag plus every member p tag");
-
-        let late_pubkey = hex::encode(&members[1_500].pubkey);
-        assert!(tags.iter().any(|tag| {
-            let fields = tag.as_slice();
-            fields.len() == 4
-                && fields[0] == "p"
-                && fields[1] == late_pubkey
-                && fields[3] == "owner"
-        }));
     }
 
     #[test]

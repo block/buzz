@@ -16,9 +16,11 @@ unless the procedure below is enforced by the deployment/database operator.
   Unpublished ordinary topic/archive updates and missing unlabeled heads do not
   block routine restarts: those legacy writes commit before publication.
   This audit neither repairs ordinary metadata nor establishes fleet exclusion.
-  A community undergoing deletion can fail admission during this audit; finish
-  its lifecycle before activation. Full operator repair below still compares
-  every canonical metadata field (except the independently refreshed TTL deadline).
+  Retiring communities and deleted/purged channels are outside the serving set
+  and are skipped, including retirement between page loading and admission.
+  Admission/database errors other than lifecycle denial still fail startup.
+  Full operator repair below still compares every canonical metadata field
+  (except the independently refreshed TTL deadline).
 - Ordinary publishers and full operator reconciliation preserve labels even
   with the feature disabled. Unlabeled creation retains its legacy admission
   when disabled; clients must not assume NIP-CL receipts without capability.
@@ -59,7 +61,9 @@ unless the procedure below is enforced by the deployment/database operator.
    invalid stored label or oversized snapshot instead of clearing labels. Full
    repair checks missing 39001/39002 independently, continues after individual
    channel failures, and exits unsuccessfully if any failed. Rerun after fixing
-   those failures; a partial run is not activation evidence.
+   those failures; a partial run is not activation evidence. Auxiliary repair
+   captures and publishes each admin/member roster under the same transaction
+   locks as relay publishers; it cannot give an unlocked old roster a newer head.
 5. Start only compatible replicas, still behind closed routing, with:
 
    ```text

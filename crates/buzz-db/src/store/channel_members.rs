@@ -301,189 +301,8 @@ pub async fn insert_auto_membership_in_transaction(
 
 // ── End transaction-level helpers ─────────────────────────────────────────────
 
-/// An active member roster captured while holding the channel's membership
-/// serialization lock on one writer connection.
-pub struct LockedMemberSnapshot {
-    /// Canonical active members captured behind the lock.
-    pub members: Vec<MemberRecord>,
-    channel_id: Uuid,
-    relay_pubkey: Vec<u8>,
-    tx: AdmittedTx,
-}
-
-impl LockedMemberSnapshot {
-    /// The channel whose membership lock this guard holds.
-    pub fn channel_id(&self) -> Uuid {
-        self.channel_id
-    }
-
-    /// Return the newest relay-authored member snapshot timestamp for the
-    /// locked coordinate, using this guard's existing connection.
-    pub async fn latest_member_event_timestamp(&mut self) -> Result<Option<u64>> {
-        let value: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT created_at FROM events WHERE community_id = $1 AND kind = 39002 AND pubkey = $2 AND channel_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(self.tx.community().as_uuid())
-        .bind(self.relay_pubkey.as_slice())
-        .bind(self.channel_id)
-        .fetch_optional(self.tx.conn())
-        .await?;
-        Ok(value.map(|timestamp| timestamp.timestamp() as u64))
-    }
-
-    /// Replace the relay-authored member snapshot on this guard's existing
-    /// connection. The membership lock therefore spans capture and replacement
-    /// without a nested pool checkout.
-    pub async fn replace_member_event(
-        &mut self,
-        event: &nostr::Event,
-    ) -> Result<(buzz_core::StoredEvent, bool)> {
-        let community_id = self.tx.community();
-        let channel_id = self.channel_id;
-        if event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
-            || crate::event::extract_d_tag(event) != Some(channel_id.to_string())
-        {
-            return Err(DbError::InvalidData(
-                "member snapshot replacement does not match its locked coordinate".into(),
-            ));
-        }
-        let kind = buzz_core::kind::event_kind_i32(event);
-        if kind != 39002 {
-            return Err(DbError::InvalidData(
-                "member snapshot replacement requires kind 39002".into(),
-            ));
-        }
-        let pubkey = event.pubkey.to_bytes();
-        let created_at_secs = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
-            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
-        let existing: Option<(chrono::DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind)
-        .bind(pubkey.as_slice())
-        .bind(channel_id)
-        .fetch_optional(self.tx.conn())
-        .await?;
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            if created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice())
-            {
-                return Ok((
-                    buzz_core::StoredEvent::with_received_at(
-                        event.clone(),
-                        Utc::now(),
-                        Some(channel_id),
-                        false,
-                    ),
-                    false,
-                ));
-            }
-        }
-        sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL")
-            .bind(community_id.as_uuid()).bind(kind).bind(pubkey.as_slice()).bind(channel_id)
-            .execute(self.tx.conn()).await?;
-        let received_at = Utc::now();
-        let tags = serde_json::to_value(&event.tags)?;
-        let sig = event.sig.serialize();
-        let inserted = sqlx::query("INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING")
-            .bind(community_id.as_uuid()).bind(event.id.as_bytes().as_slice())
-            .bind(pubkey.as_slice()).bind(created_at).bind(kind).bind(tags)
-            .bind(&event.content).bind(sig.as_slice()).bind(received_at).bind(channel_id)
-            .bind(crate::event::extract_d_tag(event)).execute(self.tx.conn()).await?;
-        if inserted.rows_affected() == 0 {
-            return Err(DbError::InvalidData(
-                "member snapshot event id already exists".into(),
-            ));
-        }
-        crate::store::event_follow_up::after_admitted_insert(
-            &mut self.tx,
-            event.id.as_bytes().as_slice(),
-            kind,
-            Some(channel_id),
-        )
-        .await?;
-        crate::insert_mentions_in_transaction(&mut self.tx, event, Some(channel_id)).await?;
-        Ok((
-            buzz_core::StoredEvent::with_received_at(
-                event.clone(),
-                received_at,
-                Some(channel_id),
-                true,
-            ),
-            true,
-        ))
-    }
-
-    /// Commit the replacement and release the membership lock.
-    pub async fn release(self) -> Result<()> {
-        self.tx.commit().await?;
-        Ok(())
-    }
-}
-
-/// Capture all active members while holding the same per-channel lock used by
-/// membership writers.
-///
-/// The returned guard must remain alive through publication. This prevents a
-/// rolling relay from publishing an older roster after a concurrent add or
-/// remove has committed and published newer membership state.
-pub async fn lock_member_snapshot(
-    pool: &PgPool,
-    community_id: CommunityId,
-    channel_id: Uuid,
-    relay_pubkey: &[u8],
-) -> Result<LockedMemberSnapshot> {
-    let mut tx = crate::begin_community_event_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    // Match the canonical replacement writer's lock order. Old binaries take
-    // this key before INSERT; migration 0032 then takes the membership key in
-    // the INSERT trigger. Taking both in that order avoids mixed-version
-    // duplicate heads without introducing a lock-order inversion.
-    let replacement_lock = crate::replaceable::event_replacement_lock_key(
-        community_id,
-        39002,
-        relay_pubkey,
-        Some(channel_id.as_bytes()),
-    );
-    crate::observability::observe_advisory_lock(
-        crate::observability::LockType::Replacement,
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(replacement_lock)
-            .execute(tx.conn()),
-    )
-    .await?;
-    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
-        FROM channel_members cm
-        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
-        WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
-        ORDER BY cm.joined_at ASC
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_all(tx.conn())
-    .await?;
-    let members = rows
-        .into_iter()
-        .map(row_to_member_record)
-        .collect::<Result<Vec<_>>>()?;
-    Ok(LockedMemberSnapshot {
-        members,
-        channel_id,
-        relay_pubkey: relay_pubkey.to_vec(),
-        tx,
-    })
-}
+mod snapshot;
+pub use snapshot::{lock_member_snapshot, LockedMemberSnapshot};
 
 /// Add a member to a channel.
 ///
@@ -3005,13 +2824,13 @@ mod postgres_tests {
             .expect("sign roster for another channel");
         assert!(
             matches!(
-                snapshot.replace_member_event(&other_channel).await,
+                snapshot.replace_discovery_event(&other_channel).await,
                 Err(DbError::InvalidData(_))
             ),
             "a roster whose d tag names another channel must not replace the locked one"
         );
         let (_, inserted) = snapshot
-            .replace_member_event(&event)
+            .replace_discovery_event(&event)
             .await
             .expect("replace roster on held connection");
         assert!(inserted);

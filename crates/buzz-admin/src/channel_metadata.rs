@@ -6,7 +6,7 @@ use buzz_core::{
     TenantContext,
 };
 use buzz_db::Db;
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{EventBuilder, Keys, Kind};
 use uuid::Uuid;
 
 pub(crate) async fn repair(
@@ -122,35 +122,22 @@ async fn reconcile_one(
     if !admins && !members {
         return Ok(repaired);
     }
-    let roster = db.get_members(tenant.community(), channel).await?;
     for kind in [KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS] {
         if (kind == KIND_NIP29_GROUP_ADMINS && !admins)
             || (kind == KIND_NIP29_GROUP_MEMBERS && !members)
         {
             continue;
         }
-        let mut tags = vec![Tag::parse(["d", &channel.to_string()])?];
-        for member in &roster {
-            let pk = hex::encode(&member.pubkey);
-            if kind == KIND_NIP29_GROUP_ADMINS {
-                if member.role == "owner" || member.role == "admin" {
-                    tags.push(Tag::parse(["p", &pk, &member.role])?);
-                }
-            } else {
-                tags.push(Tag::parse(["p", &pk, "", &member.role])?);
-            }
-        }
-        // Include retired rows: signing the same tags in the same second as a
-        // deleted head would reproduce its ID and silently lose ON CONFLICT.
-        let previous: Option<i64> = sqlx::query_scalar(
-            "SELECT EXTRACT(EPOCH FROM max(created_at))::bigint FROM events WHERE community_id=$1 AND channel_id=$2 AND kind=$3 AND pubkey=$4",
-        ).bind(tenant.community().as_uuid()).bind(channel).bind(kind as i32)
-            .bind(keys.public_key().as_bytes().as_slice()).fetch_one(db.pool()).await?;
-        let next = previous
-            .map(|ts| u64::try_from(ts).ok().and_then(|ts| ts.checked_add(1)))
-            .unwrap_or(Some(0))
-            .ok_or_else(|| anyhow::anyhow!("discovery timestamp overflow"))?;
-        let timestamp = nostr::Timestamp::from(next.max(nostr::Timestamp::now().as_secs()));
+        let relay = keys.public_key().to_bytes();
+        let mut snapshot = if kind == KIND_NIP29_GROUP_ADMINS {
+            db.lock_admin_snapshot(tenant.community(), channel, &relay)
+                .await?
+        } else {
+            db.lock_member_snapshot(tenant.community(), channel, &relay)
+                .await?
+        };
+        let tags = snapshot.snapshot_tags()?;
+        let timestamp = snapshot.snapshot_timestamp().await?;
         let keys = keys.clone();
         let event = tokio::task::spawn_blocking(move || {
             EventBuilder::new(Kind::Custom(kind as u16), "")
@@ -160,13 +147,12 @@ async fn reconcile_one(
                 .sign_with_keys(&keys)
         })
         .await??;
-        let (_, inserted) = db
-            .replace_addressable_event(tenant.community(), &event, Some(channel))
-            .await?;
+        let (_, inserted) = snapshot.replace_discovery_event(&event).await?;
         anyhow::ensure!(
             inserted,
             "discovery publication superseded; rerun reconciliation"
         );
+        snapshot.release().await?;
     }
     Ok(true)
 }

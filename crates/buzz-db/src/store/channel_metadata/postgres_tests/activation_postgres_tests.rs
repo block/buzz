@@ -162,3 +162,199 @@ async fn repair_pages_cover_the_catalog_without_crossing_tenants_or_tombstones()
     }
     assert_eq!(all, (1..=1001).map(Uuid::from_u128).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activation_skips_retiring_communities_but_checks_healthy_tenants() {
+    let (db, healthy) = database(false).await;
+    let relay = Keys::generate();
+    let owner = Keys::generate();
+    let channel = Uuid::new_v4();
+    apply(
+        &db,
+        healthy,
+        &relay,
+        &command(&owner, channel, 9007, &[("label", "retained")]),
+    )
+    .await;
+    for state in ["quiescing", "fenced", "tombstone"] {
+        let community = db
+            .ensure_configured_community(&format!("{state}.example"))
+            .await
+            .unwrap()
+            .id;
+        db.create_channel_with_id(
+            community,
+            channel,
+            "retiring",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            owner.public_key().as_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        // A non-serving tenant is not an activation prerequisite, even if its
+        // retained rows would fail canonical label validation.
+        sqlx::query("UPDATE channels SET labels = ARRAY['INVALID']::text[] WHERE community_id=$1")
+            .bind(community.as_uuid())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let mut lifecycle = db.pool().begin().await.unwrap();
+        retire_community(&mut lifecycle, community, state).await;
+        lifecycle.commit().await.unwrap();
+    }
+    assert_eq!(
+        db.verify_channel_metadata_activation(relay.public_key())
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("UPDATE channels SET labels=ARRAY['drift']::text[] WHERE community_id=$1")
+        .bind(healthy.as_uuid())
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        db.verify_channel_metadata_activation(relay.public_key())
+            .await,
+        Err(crate::DbError::InvalidData(_))
+    ));
+    sqlx::query("UPDATE channels SET labels=ARRAY['INVALID']::text[] WHERE community_id=$1")
+        .bind(healthy.as_uuid())
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        db.verify_channel_metadata_activation(relay.public_key())
+            .await,
+        Err(crate::DbError::InvalidData(_))
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activation_skips_channels_retired_after_page_load_before_lock() {
+    let (db, community) = database(false).await;
+    let relay = Keys::generate();
+    let owner = Keys::generate();
+    let first = Uuid::from_u128(1);
+    let labeled = Uuid::from_u128(2);
+    let headless = Uuid::from_u128(3);
+    let purged = Uuid::from_u128(4);
+    for channel in [first, labeled] {
+        apply(
+            &db,
+            community,
+            &relay,
+            &command(&owner, channel, 9007, &[("label", "retained")]),
+        )
+        .await;
+    }
+    for channel in [headless, purged] {
+        db.create_channel_with_id(
+            community,
+            channel,
+            "headless",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            owner.public_key().as_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let mut blocker = db
+        .begin_channel_metadata_write(community, first, relay.public_key())
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.tx.conn())
+        .await
+        .unwrap();
+    let retire = async {
+        // The audit cannot request the first channel lock until its entire page
+        // (including the three later channels) has been read.
+        super::lifecycle_postgres_tests::blocked_pid(&db, pid).await;
+        for channel in [labeled, headless] {
+            assert!(db.soft_delete_channel(community, channel).await.unwrap());
+        }
+        sqlx::query("DELETE FROM channels WHERE community_id=$1 AND id=$2")
+            .bind(community.as_uuid())
+            .bind(purged)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        blocker.rollback().await.unwrap();
+    };
+    let (result, ()) = tokio::join!(
+        db.verify_channel_metadata_activation(relay.public_key()),
+        retire
+    );
+    assert_eq!(
+        result.unwrap(),
+        1,
+        "retired channels are skipped, not counted as verified"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activation_skips_community_retirement_between_enumeration_and_admission() {
+    let (db, healthy) = database(false).await;
+    let relay = Keys::generate();
+    let owner = Keys::generate();
+    let channel = Uuid::new_v4();
+    apply(
+        &db,
+        healthy,
+        &relay,
+        &command(&owner, channel, 9007, &[("label", "retained")]),
+    )
+    .await;
+    for state in ["quiescing", "fenced", "tombstone"] {
+        let community = db
+            .ensure_configured_community(&format!("race-{state}.example"))
+            .await
+            .unwrap()
+            .id;
+        apply(
+            &db,
+            community,
+            &relay,
+            &command(&owner, channel, 9007, &[("label", "retained")]),
+        )
+        .await;
+        let mut blocker = db.pool().begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+            .bind(community.as_uuid())
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        let retire = async {
+            super::lifecycle_postgres_tests::blocked_pid(&db, pid).await;
+            // Match lifecycle's exclusive-lock/update/commit boundary.
+            retire_community(&mut blocker, community, state).await;
+            blocker.commit().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            db.verify_channel_metadata_activation(relay.public_key()),
+            retire
+        );
+        assert_eq!(result.unwrap(), 1, "healthy tenant survives {state} race");
+    }
+}
+
+async fn retire_community(tx: &mut sqlx::PgConnection, community: CommunityId, state: &str) {
+    sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true), set_config('buzz.deletion_fence_generation', '0', true)")
+        .bind(community.to_string()).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE communities SET deletion_state=$2, deleted_at=CASE WHEN $2='tombstone' THEN now() END WHERE id=$1")
+        .bind(community.as_uuid()).bind(state).execute(tx).await.unwrap();
+}

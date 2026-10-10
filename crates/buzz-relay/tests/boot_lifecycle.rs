@@ -870,7 +870,7 @@ mod postgres_tests {
     }
     #[test]
     #[ignore = "requires PostgreSQL"]
-    fn label_integrity_boot_allows_unpublished_topic_and_archive_but_rejects_label_drift() {
+    fn label_integrity_boot_tolerates_ordinary_updates_and_retiring_tenants_but_rejects_drift() {
         let database_url = std::env::var("DATABASE_URL").unwrap();
         let redis_url = std::env::var("REDIS_URL").unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -895,6 +895,19 @@ mod postgres_tests {
             // Ordinary writers commit first. Simulate interruption before publication.
             db.set_topic(community, channel, "unpublished", keys.public_key().as_bytes()).await.unwrap();
             db.archive_channel(community, channel).await.unwrap();
+            // Routine restarts must not depend on another tenant finishing its
+            // deletion drain. Retained channel rows are not serving state.
+            for state in ["quiescing", "fenced", "tombstone"] {
+                let retiring = db.ensure_configured_community(&format!("{state}.example")).await.unwrap().id;
+                db.create_channel_with_id(retiring, channel, "retiring", ChannelType::Stream,
+                    ChannelVisibility::Open, None, keys.public_key().as_bytes(), None).await.unwrap();
+                let mut lifecycle = db.pool().begin().await.unwrap();
+                sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true), set_config('buzz.deletion_fence_generation', '0', true)")
+                    .bind(retiring.to_string()).execute(&mut *lifecycle).await.unwrap();
+                sqlx::query("UPDATE communities SET deletion_state=$2, deleted_at=CASE WHEN $2='tombstone' THEN now() END WHERE id=$1")
+                    .bind(retiring.as_uuid()).bind(state).execute(&mut *lifecycle).await.unwrap();
+                lifecycle.commit().await.unwrap();
+            }
             (db, community, channel)
         });
         let metrics_port = reserve_closed_port();

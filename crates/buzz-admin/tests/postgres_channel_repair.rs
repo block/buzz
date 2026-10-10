@@ -143,3 +143,84 @@ async fn repair_finishes_scan_but_exits_unsuccessfully_after_a_channel_error() {
     );
     assert!(discovery(&db, &tenant, broken).await.is_empty());
 }
+
+// Same public-coordinate encoding as the production replacement protocol. The
+// test takes its lock externally to stop the real binary before roster capture.
+fn replacement_key(tenant: &TenantContext, channel: Uuid, keys: &Keys, kind: i32) -> i64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in tenant
+        .community()
+        .as_uuid()
+        .as_bytes()
+        .iter()
+        .chain(kind.to_le_bytes().iter())
+        .chain(keys.public_key().as_bytes().iter())
+        .chain(channel.as_bytes().iter())
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash as i64
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn repair_captures_rosters_after_waiting_for_the_replacement_lock() {
+    let (db, tenant, keys) = fixture().await;
+    for kind in [39001, 39002] {
+        let channel = Uuid::new_v4();
+        create(&db, &tenant, channel, &keys).await;
+        assert!(run(&tenant, &keys, None).await.status.success());
+        // Full repair must refill 39001; targeted repair always replaces 39002.
+        if kind == 39001 {
+            sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND channel_id=$2 AND kind=$3")
+                .bind(tenant.community().as_uuid()).bind(channel).bind(kind)
+                .execute(db.pool()).await.unwrap();
+        }
+        let mut holder = db.pool().begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(replacement_key(&tenant, channel, &keys, kind))
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        let newcomer = Keys::generate();
+        let change = async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))")
+                        .bind(pid).fetch_one(db.pool()).await.unwrap();
+                    if blocked { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("actual operator must wait behind replacement lock");
+            db.add_member(
+                tenant.community(),
+                channel,
+                newcomer.public_key().as_bytes(),
+                buzz_core::channel::MemberRole::Admin,
+                Some(keys.public_key().as_bytes()),
+            )
+            .await
+            .unwrap();
+            holder.rollback().await.unwrap();
+        };
+        let target = (kind == 39002).then_some(channel);
+        let (output, ()) = tokio::join!(run(&tenant, &keys, target), change);
+        assert!(output.status.success(), "{output:?}");
+        let tags: serde_json::Value = sqlx::query_scalar("SELECT tags FROM events WHERE community_id=$1 AND channel_id=$2 AND kind=$3 AND deleted_at IS NULL")
+            .bind(tenant.community().as_uuid()).bind(channel).bind(kind).fetch_one(db.pool()).await.unwrap();
+        for member in [keys.public_key(), newcomer.public_key()] {
+            assert!(
+                tags.as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tag| tag[0] == "p" && tag[1] == member.to_hex()),
+                "kind {kind} must include fresh roster and signer self-membership: {tags}"
+            );
+        }
+    }
+}
