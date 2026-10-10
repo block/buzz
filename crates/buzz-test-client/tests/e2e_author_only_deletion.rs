@@ -942,8 +942,9 @@ async fn deletion_of_private_deletion_rejected() {
 
 /// A soft-deleted target keeps its channel: re-deleting it faces the same
 /// membership and archive gates as a live one, and an accepted re-deletion is
-/// readable by that channel's members only. (The ingest Postgres test pins
-/// the stored channel itself; reads derive it from the target either way.)
+/// readable by that channel's members only. Re-deletions now retain the
+/// target's stored channel, so historical access, `#h` filtering and live
+/// routing use that channel rather than treating a new re-deletion as global.
 #[tokio::test]
 #[ignore]
 async fn soft_deleted_target_keeps_its_channel() {
@@ -976,8 +977,73 @@ async fn soft_deleted_target_keeps_its_channel() {
 
     submit_ok(&client, &owner, &membership(9000)).await;
     let redeletable = soft_deleted(private.clone()).await;
-    let redeletion = delete(&redeletable);
-    submit_ok(&client, &author, &redeletion).await;
+    let redeletion = build_deletion_with_reason(
+        &author,
+        vec![tag(&["e", &redeletable.id.to_hex()])],
+        "re-deletion",
+    );
+    assert_ne!(redeletion.id, delete(&redeletable).id);
+
+    // Subscribe before the re-deletion: the member by channel, the outsider
+    // by author. A global control deletion proves the outsider's is alive.
+    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let mut watchers = Vec::new();
+    for (reader, filter) in [
+        (
+            &owner,
+            Filter::new()
+                .kind(Kind::EventDeletion)
+                .custom_tag(h, private.clone()),
+        ),
+        (
+            &outsider,
+            Filter::new()
+                .kind(Kind::EventDeletion)
+                .author(author.public_key()),
+        ),
+    ] {
+        let mut ws = BuzzTestClient::connect(&relay_url(), reader)
+            .await
+            .expect("connect");
+        let sid = sub_id("redeletion");
+        ws.subscribe(&sid, vec![filter]).await.expect("REQ");
+        ws.collect_until_eose(&sid, Duration::from_secs(5))
+            .await
+            .expect("EOSE");
+        watchers.push((ws, sid));
+    }
+    let (accepted, msg) = submit(&client, &author, &redeletion).await;
+    assert!(
+        accepted && !msg.starts_with("duplicate:"),
+        "re-deletion: {msg}"
+    );
+    let note = EventBuilder::text_note("control")
+        .sign_with_keys(&author)
+        .unwrap();
+    submit_ok(&client, &author, &note).await;
+    let control = delete(&note);
+    submit_ok(&client, &author, &control).await;
+    let [member_ids, outsider_ids] = {
+        let mut out = [Vec::new(), Vec::new()];
+        for (slot, (mut ws, sid)) in out.iter_mut().zip(watchers) {
+            while let Ok(msg) = ws.recv_event(Duration::from_secs(2)).await {
+                if let RelayMessage::Event {
+                    subscription_id,
+                    event,
+                } = msg
+                {
+                    if subscription_id == sid {
+                        slot.push(event.id);
+                    }
+                }
+            }
+            ws.disconnect().await.expect("disconnect");
+        }
+        out
+    };
+    assert_eq!(member_ids, vec![redeletion.id], "member live delivery");
+    assert_eq!(outsider_ids, vec![control.id], "outsider live delivery");
+
     let removed = soft_deleted(private.clone()).await;
     submit_ok(&client, &owner, &membership(9001)).await;
     let in_archive = soft_deleted(archived.clone()).await;
@@ -998,7 +1064,6 @@ async fn soft_deleted_target_keeps_its_channel() {
         );
     }
 
-    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
     for (reader, name, visible) in [(&owner, "member", true), (&outsider, "outsider", false)] {
         for filter in [
             Filter::new().id(redeletion.id),
