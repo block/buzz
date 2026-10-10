@@ -4,7 +4,8 @@
 //! ┌──────────────────────────────────────────────────────────┐
 //! │  metrics-rs facade (metrics::counter!, histogram!, etc.) │
 //! │         ↓                                                │
-//! │  PrometheusBuilder → HTTP listener on :9102              │
+//! │  PrometheusBuilder → HTTP listener on metrics_bind_addr  │
+//! │  (0.0.0.0:9102 by default)                                │
 //! │         ↓                                                │
 //! │  GET /metrics → Prometheus text format                   │
 //! └──────────────────────────────────────────────────────────┘
@@ -14,6 +15,7 @@
 //! recorded by [`track_metrics`] middleware on the app router. Buzz-specific
 //! metrics are recorded inline at their call sites.
 
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -281,13 +283,21 @@ impl MetricsInstallError {
 /// `build()` returns the recorder + exporter future and internally spawns
 /// the upkeep task, so no separate upkeep call is needed.
 ///
+/// `addr` is the full listener address. The interface is configurable
+/// (`BUZZ_METRICS_BIND_ADDR`) because the exporter publishes per-community
+/// figures and auth failure counts, which an operator running the relay on a
+/// bare-metal or VPS host would not expect on the public interface.
+///
 /// Must be called from within a Tokio runtime.
 /// Listener and global-recorder failures are returned rather than panicking.
 /// A later exporter exit remains detached from relay service; external scrape
 /// coverage is authoritative for exporter availability.
-pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), MetricsInstallError> {
+pub fn try_install(
+    addr: SocketAddr,
+    gauge_idle_timeout_secs: u64,
+) -> Result<(), MetricsInstallError> {
     let (recorder, exporter) = configured_prometheus_builder(gauge_idle_timeout_secs)
-        .with_http_listener(([0, 0, 0, 0], port))
+        .with_http_listener(addr)
         .build()
         .map_err(MetricsInstallError::Build)?;
 
@@ -307,8 +317,8 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
 ///
 /// This compatibility entry point preserves the original panic-on-failure API.
 /// New startup code should use [`try_install`] to report typed failures.
-pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
-    try_install(port, gauge_idle_timeout_secs)
+pub fn install(addr: SocketAddr, gauge_idle_timeout_secs: u64) {
+    try_install(addr, gauge_idle_timeout_secs)
         .unwrap_or_else(|error| panic!("metrics exporter must install exactly once: {error}"));
 }
 
@@ -1139,8 +1149,8 @@ mod tests {
     #[tokio::test]
     async fn occupied_listener_is_classified_as_bind() {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind occupied port");
-        let port = listener.local_addr().expect("occupied address").port();
-        let error = try_install(port, 300).expect_err("occupied listener must fail");
+        let addr = listener.local_addr().expect("occupied address");
+        let error = try_install(addr, 300).expect_err("occupied listener must fail");
         assert_eq!(error.failure(), MetricsInstallFailure::Bind);
     }
 
@@ -1150,13 +1160,58 @@ mod tests {
         if std::env::var_os(CHILD_ENV).is_some() {
             let recorder = configured_prometheus_builder(300).build_recorder();
             metrics::set_global_recorder(recorder).expect("install first recorder");
-            let error = try_install(0, 300).expect_err("second recorder must fail");
+            let error = try_install("127.0.0.1:0".parse().expect("valid loopback address"), 300)
+                .expect_err("second recorder must fail");
             assert_eq!(error.failure(), MetricsInstallFailure::RecorderConflict);
             return;
         }
 
         crate::test_support::run_exact_test_child(
             "metrics::tests::recorder_conflict_is_typed_in_an_isolated_process",
+            CHILD_ENV,
+        );
+    }
+
+    /// The exporter must honour the configured interface, not a hardcoded
+    /// `[0, 0, 0, 0]`. Binding loopback-only is the whole point of
+    /// `BUZZ_METRICS_BIND_ADDR`: an operator who restricted the exporter must
+    /// not end up with it on the public interface anyway.
+    ///
+    /// Runs in an isolated child because the Prometheus recorder is a
+    /// process-global: a second `set_global_recorder` in this binary would
+    /// report `RecorderConflict` and mask the bind behaviour under test.
+    #[tokio::test]
+    async fn exporter_binds_the_configured_interface_not_wildcard() {
+        const CHILD_ENV: &str = "BUZZ_TEST_METRICS_BIND_INTERFACE";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            try_install("127.0.0.1:0".parse().expect("valid loopback address"), 300)
+                .expect("loopback-only exporter must install");
+
+            // 203.0.113.0/24 is TEST-NET-3 (RFC 5737) and is never a local
+            // interface, so this only ever reaches the bind if the address is
+            // really being used. A hardcoded wildcard would bind here and
+            // succeed — the regression this test exists to catch.
+            let unreachable = "203.0.113.7:0".parse().expect("valid unassignable address");
+            match try_install(unreachable, 300) {
+                Err(error) => assert_eq!(
+                    error.failure(),
+                    MetricsInstallFailure::Bind,
+                    "a non-local interface must fail at the bind"
+                ),
+                // Unreachable: the first call already registered the
+                // process-global recorder, so a second call can never return
+                // Ok. A wildcard regression binds fine (port 0 gives a fresh
+                // ephemeral port) and is rejected by the recorder instead,
+                // which is why the `Err` arm above asserts `Bind`.
+                Ok(()) => panic!(
+                    "the second try_install returned Ok; the recorder is no longer process-global"
+                ),
+            }
+            return;
+        }
+
+        crate::test_support::run_exact_test_child(
+            "metrics::tests::exporter_binds_the_configured_interface_not_wildcard",
             CHILD_ENV,
         );
     }

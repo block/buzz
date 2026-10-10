@@ -601,6 +601,9 @@ test-unit:
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
+        # Real-process startup and listener tests need no external services;
+        # ignored postgres_tests cases run in the isolated PostgreSQL lane.
+        cargo nextest run -p buzz-relay --test boot_lifecycle
     else
         ./scripts/run-tests.sh unit
     fi

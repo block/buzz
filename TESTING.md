@@ -329,7 +329,9 @@ out of the box with `just setup` or `just relay`. Common overrides:
 |-----------------------------------|-----------------------------|-------|
 | `BUZZ_BIND_ADDR`                | `0.0.0.0:3000`              | Main app port |
 | `BUZZ_HEALTH_PORT`              | `8080`                      | `/_liveness`, `/_readiness` |
+| `BUZZ_HEALTH_BIND_ADDR`         | `0.0.0.0`                   | Interface for the health listener. Set to `127.0.0.1` on a bare-metal or VPS host to keep the probe off the public interface. Takes an IP only — the port comes from `BUZZ_HEALTH_PORT`. An unparseable value fails startup rather than falling back to the wildcard. |
 | `BUZZ_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
+| `BUZZ_METRICS_BIND_ADDR`        | `0.0.0.0`                   | Interface for the Prometheus exporter. The exporter publishes per-community figures and auth failure counts, so a host without a firewall should set this to `127.0.0.1`. Takes an IP only — the port comes from `BUZZ_METRICS_PORT`. An unparseable value fails startup rather than falling back to the wildcard. |
 | `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
 | `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
