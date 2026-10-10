@@ -1,4 +1,5 @@
 name: Windows Canary
+run-name: Manual Windows test @ ${{ inputs.source_sha || github.sha }}
 
 # Produces an unsigned Windows NSIS installer from main without creating
 # a tag, GitHub Release, or auto-updater artifact. The installer is available
@@ -9,34 +10,80 @@ name: Windows Canary
 #   - pnpm store restore/save pattern mirrors ci.yml:149-196.
 on:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact canonical Windows commit (required for Jari81/buzz)
+        required: false
+        type: string
+
+# Shares the build slot with the BW lane, never cancels another build.
+concurrency:
+  group: windows-client
+  cancel-in-progress: false
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
     name: Build Windows canary
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'block/buzz' || github.repository == 'Jari81/buzz'
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
+      actions: read
     env:
       TARGET: x86_64-pc-windows-msvc
     steps:
-      - name: Require main
+      - name: Validate manual source
         shell: bash
         env:
           SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
-          if [[ "$SOURCE_REF" != "refs/heads/main" ]]; then
-            echo "::error::Canary builds must run from main; got $SOURCE_REF"
-            exit 1
-          fi
+          set -euo pipefail
+          case "$GITHUB_REPOSITORY:$SOURCE_REF" in
+            block/buzz:refs/heads/main) ;;
+            Jari81/buzz:refs/heads/windows)
+              [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_SHA" == "$GITHUB_SHA" ]] || {
+                echo "::error::Manual fork build requires the exact dispatched Windows SHA"
+                exit 1
+              }
+              ;;
+            *) echo "::error::Unsupported repository or source ref"; exit 1 ;;
+          esac
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Validate cumulative fork source
+        if: github.repository == 'Jari81/buzz'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Both explicit lanes must remain cumulative. No feature-branch baseline.
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/windows-fork-integration.yml/runs?branch=windows&status=success&per_page=1" > bw-runs.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/windows-canary.yml/runs?branch=windows&status=success&per_page=1" > manual-runs.json
+          python - <<'PY' > previous-windows-shas.txt
+          import json
+          shas = {"83afea0a1549410a8f7effa12ceed0f7b13234e6"}
+          for path in ("bw-runs.json", "manual-runs.json"):
+              for run in json.load(open(path, encoding="utf-8"))["workflow_runs"]:
+                  shas.add(run["head_sha"])
+          print("\n".join(sorted(shas)))
+          PY
+          while IFS= read -r previous_sha; do
+            previous_sha="${previous_sha%$'\r'}"
+            scripts/verify-windows-client-lineage.sh "$previous_sha" "$GITHUB_SHA" "$GITHUB_REF_NAME"
+          done < previous-windows-shas.txt
+          scripts/check-windows-client-contract.sh "$GITHUB_SHA"
+          python -m unittest -q scripts.test_windows_manual_canary scripts.test_windows_build_manifest scripts.test_windows_workflow_contract
 
       # The Windows runner ships with rustup preinstalled; rust-toolchain.toml
       # in the repo root pins the channel (1.95.0) automatically. We only need
@@ -150,24 +197,35 @@ jobs:
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
-      - name: Locate NSIS installer
-        id: artifact
+      - name: Stage exactly one installer and manual test receipt
         shell: bash
         run: |
-          set -euo pipefail
-          BUNDLE_DIR="desktop/src-tauri/target/${TARGET}/release/bundle"
-          EXE=$(find "$BUNDLE_DIR/nsis" -name '*.exe' -type f | head -1)
-          if [[ -z "$EXE" ]]; then
-            echo "::error::No NSIS installer found in $BUNDLE_DIR/nsis"
-            exit 1
-          fi
-          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          source = Path('desktop/src-tauri/target') / os.environ['TARGET'] / 'release/bundle/nsis'
+          installers = list(source.glob('*.exe'))
+          if len(installers) != 1 or not installers[0].is_file():
+              raise SystemExit('Exactly one NSIS installer required')
+          target = Path('manual-windows-artifact')
+          target.mkdir(exist_ok=False)
+          installer = Path(shutil.copy2(installers[0], target))
+          receipt = {
+              'kind': 'manual-test-only', 'unsigned': True, 'product_accepted': False,
+              'commit': os.environ['GITHUB_SHA'], 'ref': os.environ['GITHUB_REF'],
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'filename': installer.name, 'bytes': installer.stat().st_size,
+              'sha256': hashlib.sha256(installer.read_bytes()).hexdigest(),
+          }
+          (target / 'manual-test-build.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+          PY
 
       - name: Upload Windows canary installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: buzz-windows-canary-${{ github.sha }}
-          path: ${{ steps.artifact.outputs.exe }}
+          path: manual-windows-artifact
           if-no-files-found: error
           retention-days: 7
 
