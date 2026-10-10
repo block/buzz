@@ -31,7 +31,6 @@ import { MessageRowItem, SystemRow } from "./TimelineMessageRow";
 import { TimelineRowShell } from "./TimelineRowShell";
 import { UnreadDivider } from "./UnreadDivider";
 import { useTimelineRetention } from "./useTimelineRetention";
-import { useUpwardPaginationWheel } from "./useUpwardPaginationWheel";
 import { useVirtualizedBottomSettle } from "./useVirtualizedBottomSettle";
 
 export type TimelineVirtualizerApi = {
@@ -495,10 +494,6 @@ function VirtualizedTimelineRows({
   );
   const { cancel: cancelBottomSettle, settle: settleAtBottom } =
     useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
-  const { arm: armUpwardMomentum } = useUpwardPaginationWheel(
-    hostRef,
-    cancelBottomSettle,
-  );
 
   const updatePinnedDayLabel = React.useCallback(
     (offset: number) => {
@@ -661,7 +656,6 @@ function VirtualizedTimelineRows({
     const scroller = hostRef.current?.firstElementChild;
     const element = scroller instanceof HTMLDivElement ? scroller : null;
     if (element) {
-      element.dataset.buzzConversationScroll = "true";
       element.dataset.testid = "message-timeline";
       element.dataset.virtuaEstimateCallCount = String(
         estimateCallCountRef.current,
@@ -731,13 +725,9 @@ function VirtualizedTimelineRows({
       // touch, and key listeners are the authoritative user-interaction gate.
       onAtBottomStateChange?.(distanceFromBottom <= 32);
       updatePinnedDayLabel(offset);
-      if (offset <= 200) {
-        // Layout scrolls near the top must not poison the reader's next input.
-        armUpwardMomentum(onStartReached?.() ?? false);
-      }
+      if (offset <= 200) onStartReached?.();
     },
     [
-      armUpwardMomentum,
       onAtBottomStateChange,
       onStartReached,
       onVirtualizerRangeChanged,

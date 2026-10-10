@@ -145,7 +145,7 @@ test.describe("composer overlays mask scrolled content", () => {
     // Scroll the conversation up so trailing rows sit behind the overlay.
     await page.evaluate(() => {
       const scroller = document.querySelector<HTMLElement>(
-        '[data-buzz-conversation-scroll="true"]',
+        '[data-testid="message-timeline"]',
       );
       if (!scroller) throw new Error("Missing conversation scroll container");
       scroller.scrollTop = Math.max(
@@ -228,7 +228,7 @@ test.describe("composer overlays mask scrolled content", () => {
     await page.waitForTimeout(300);
     await page.evaluate(() => {
       const scroller = document.querySelector<HTMLElement>(
-        '[data-buzz-conversation-scroll="true"]',
+        '[data-testid="message-timeline"]',
       );
       if (!scroller) throw new Error("Missing conversation scroll container");
       scroller.scrollTop = scroller.scrollHeight;

@@ -130,10 +130,12 @@
   /*
    * The app is a fixed-height shell — the document itself must never scroll
    * or rubber-band. `overscroll-behavior: none` stops scroll chaining from
-   * inner containers reaching the viewport on both axes (the Magic Mouse
-   * horizontal pan escaped through here), and `overflow: hidden` removes any
-   * document-level scrollability. useWebviewScrollBoundaryLock handles the
-   * wheel-event side; this is the CSS backstop.
+   * inner containers reaching the viewport on both axes, and `overflow:
+   * hidden` removes any document-level scrollability. This is the whole
+   * lock: a JS wheel listener calling preventDefault would have to be
+   * non-passive, and a non-passive wheel listener anywhere above the timeline
+   * makes WebKit wait for the main thread on every wheel tick before it can
+   * scroll, which is what the timeline must never pay for.
    */
   html,
   body {
