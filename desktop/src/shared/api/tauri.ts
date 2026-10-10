@@ -180,6 +180,7 @@ export type RawAcpRuntimeCatalogEntry = {
   mcp_command: string | null;
   model_env_var?: string | null;
   provider_env_var?: string | null;
+  provider_inventory?: boolean;
   thinking_env_var?: string | null;
   max_tokens_env_var?: string | null;
   context_limit_env_var?: string | null;
@@ -661,6 +662,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     mcpCommand: entry.mcp_command,
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
+    providerInventory: entry.provider_inventory ?? false,
     thinkingEnvVar: entry.thinking_env_var ?? null,
     maxTokensEnvVar: entry.max_tokens_env_var ?? null,
     contextLimitEnvVar: entry.context_limit_env_var ?? null,
