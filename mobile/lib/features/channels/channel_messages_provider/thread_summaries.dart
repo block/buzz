@@ -315,10 +315,12 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
         generation == _initVersion &&
         _threadQueryVersions[root] == version;
     try {
+      final auxiliaryEvents = <NostrEvent>[];
       final replies = await fetchCompleteThreadReplies(
         _summarySession,
         ThreadRepliesArgs(channelId: channelId, rootId: root),
         isCurrent: current,
+        auxiliaryEvents: auxiliaryEvents,
       );
       if (current()) {
         cacheCompleteThreadQuery(
@@ -327,6 +329,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
           replies,
           provisionalReplyIds: provisional,
           queryVersion: version,
+          auxiliaryEvents: auxiliaryEvents,
         );
         if (_summaryRefreshes.isDirty(root)) _queueOverflowSummary(root);
       }

@@ -11,6 +11,229 @@ import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test(
+    'opening a thread hydrates reaction and edit overlays separately',
+    () async {
+      final reply = _event(
+        id: 'reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final reaction = NostrEvent(
+        id: 'reaction',
+        pubkey: 'bob',
+        createdAt: 30,
+        kind: EventKind.reaction,
+        tags: const [
+          ['h', _channelId],
+          ['e', 'reply'],
+        ],
+        content: '+',
+        sig: '',
+      );
+      final edit = NostrEvent(
+        id: 'edit',
+        pubkey: 'alice',
+        createdAt: 40,
+        kind: EventKind.streamMessageEdit,
+        tags: const [
+          ['h', _channelId],
+          ['e', 'reply'],
+        ],
+        content: 'edited',
+        sig: '',
+      );
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+          [reply, reaction, edit],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await session.subscribed;
+      await _pumpEventQueue();
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
+      container.listen(threadRepliesProvider(args), (_, _) {});
+      expect(
+        (await container.read(
+          threadRepliesProvider(args).future,
+        )).map((event) => event.id),
+        ['reply'],
+      );
+      final cached = container.read(channelMessagesProvider(_channelId)).value!;
+      expect(
+        cached.map((event) => event.id),
+        containsAll(['reply', 'reaction', 'edit']),
+      );
+      final renderedReply = formatTimeline(
+        cached,
+      ).singleWhere((message) => message.id == 'reply');
+      expect(renderedReply.content, 'edited');
+      expect(renderedReply.reactions.single.count, 1);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId).notifier)
+            .threadSummaries['root']!
+            .descendantCount,
+        1,
+      );
+      expect(session.queryFilters.last.extensions['include_aux'], isTrue);
+      await _pumpEventQueue();
+      expect(session.queryFilters, hasLength(2));
+    },
+  );
+
+  test(
+    'reconnect retains known reply reactions when the top-level window omits them',
+    () async {
+      final root = _event(id: 'root', createdAt: 10);
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [root, _bounds()],
+          [root, _bounds()],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await session.subscribed;
+      await _pumpEventQueue();
+      session.emit(
+        _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      session.emit(
+        NostrEvent(
+          id: 'reaction',
+          pubkey: 'bob',
+          createdAt: 30,
+          kind: EventKind.reaction,
+          tags: const [
+            ['h', _channelId],
+            ['e', 'reply'],
+          ],
+          content: '+',
+          sig: '',
+        ),
+      );
+      session.setConnected(false);
+      await _pumpEventQueue();
+      session.setConnected(true);
+      await _pumpEventQueue();
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value!
+            .map((event) => event.id),
+        containsAll(['reply', 'reaction']),
+      );
+      session.emit(_event(id: 'later', createdAt: 50));
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value!
+            .map((event) => event.id),
+        contains('reaction'),
+      );
+      final renderedReply = formatTimeline(
+        container.read(channelMessagesProvider(_channelId)).value!,
+      ).singleWhere((message) => message.id == 'reply');
+      expect(renderedReply.reactions.single.count, 1);
+    },
+  );
+
+  test(
+    'thread auxiliary deletion hides a removed reaction without counting it as a reply',
+    () async {
+      final session = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(session);
+      addTearDown(container.dispose);
+      container.listen(channelMessagesProvider(_channelId), (_, _) {});
+      await session.subscribed;
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final reply = _event(
+        id: 'reply',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final reaction = NostrEvent(
+        id: 'reaction',
+        pubkey: 'bob',
+        createdAt: 30,
+        kind: EventKind.reaction,
+        tags: const [
+          ['h', _channelId],
+          ['e', 'reply'],
+        ],
+        content: '+',
+        sig: '',
+      );
+      final deletion = NostrEvent(
+        id: 'deleted-reaction',
+        pubkey: 'bob',
+        createdAt: 40,
+        kind: EventKind.deletion,
+        tags: const [
+          ['e', 'reaction'],
+        ],
+        content: '',
+        sig: '',
+      );
+      final staleVersion = notifier.beginThreadQuery('root');
+      final version = notifier.beginThreadQuery('root');
+      expect(
+        notifier.cacheCompleteThreadQuery(
+          'root',
+          {},
+          [reply],
+          queryVersion: staleVersion,
+          auxiliaryEvents: [reaction],
+        ),
+        isFalse,
+      );
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value!
+            .map((event) => event.id),
+        isNot(contains('reaction')),
+      );
+      expect(
+        notifier.cacheCompleteThreadQuery(
+          'root',
+          {},
+          [reply],
+          queryVersion: version,
+          auxiliaryEvents: [reaction, deletion],
+        ),
+        isTrue,
+      );
+      final renderedReply = formatTimeline(
+        container.read(channelMessagesProvider(_channelId)).value!,
+      ).singleWhere((message) => message.id == 'reply');
+      expect(renderedReply.reactions, isEmpty);
+      expect(notifier.threadSummaries['root']!.descendantCount, 1);
+    },
+  );
+
   test('live window without deep links does not rescan flattened ids', () async {
     var historyIdReads = 0;
     final history = _IdReadTrackingEvent(
