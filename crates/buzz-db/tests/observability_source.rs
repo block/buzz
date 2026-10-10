@@ -185,7 +185,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .split_once("pub async fn channel_metadata_repair_page(")
         .expect("metadata repair must expose a paged bootstrap read")
         .1
-        .split_once("/// Verify that every live channel")
+        .split_once("pub async fn verify_channel_metadata_activation(")
         .expect("repair paging must precede activation verification")
         .0;
     assert!(repair_page.contains("WriterOperation::Bootstrap"));
