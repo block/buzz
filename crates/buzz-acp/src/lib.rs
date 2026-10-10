@@ -5306,6 +5306,15 @@ fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+            } else if matches!(result.outcome, PromptOutcome::SessionEvicted) {
+                // The agent dropped the idle session; nothing failed. Retry at
+                // once on a fresh session without spending a retry attempt.
+                tracing::info!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "provider session evicted while idle — requeueing on a fresh session"
+                );
+                queue.requeue_preserve_timestamps(batch);
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -5418,6 +5427,7 @@ fn handle_prompt_result(
     let outcome_label = match &result.outcome {
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
+        PromptOutcome::SessionEvicted => "session_evicted",
         PromptOutcome::ProjectContextIndeterminate(_) => "project_context_indeterminate",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
         PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
@@ -5585,6 +5595,14 @@ fn handle_prompt_result(
                 "agent_returned (local project context indeterminate — pipe intact)"
             );
             emit_turn_error(&reason, None);
+            pool.return_agent(result.agent);
+        }
+        PromptOutcome::SessionEvicted => {
+            tracing::info!(
+                agent = agent_index,
+                outcome = outcome_label,
+                "agent_returned (idle session evicted — fresh session on retry)"
+            );
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {

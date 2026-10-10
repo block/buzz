@@ -2632,6 +2632,7 @@ mod tests {
             mcp_restart_base_ms: 1,
             mcp_restart_max_ms: 1,
             max_sessions: 1,
+            session_idle_timeout: Duration::ZERO,
             max_line_bytes: 1024 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
             max_tool_result_text_bytes: 50 * 1024,
