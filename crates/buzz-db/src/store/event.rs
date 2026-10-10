@@ -447,6 +447,16 @@ pub async fn insert_event_in_transaction(
 ) -> Result<(StoredEvent, bool)> {
     let result = insert_event_on(tx, event, channel_id).await?;
     if result.1 {
+        if let Some(channel) = channel_id {
+            crate::personal_read::record_message(
+                tx,
+                event,
+                channel,
+                crate::personal_read::Place::TopLevel,
+                result.0.received_at,
+            )
+            .await?;
+        }
         crate::operator_listener::enqueue_mentions_in_transaction(tx, event).await?;
     }
     Ok(result)
@@ -1872,6 +1882,22 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             }
         }
 
+        let place = match &thread_meta {
+            Some(meta) => Some((
+                meta.channel_id,
+                match meta.parent_event_id {
+                    Some(parent) => crate::personal_read::Place::Reply {
+                        root: meta.root_event_id.unwrap_or(parent),
+                    },
+                    // Workflow messages store a depth-0 metadata row.
+                    None => crate::personal_read::Place::TopLevel,
+                },
+            )),
+            None => channel_id.map(|channel| (channel, crate::personal_read::Place::TopLevel)),
+        };
+        if let Some((channel, place)) = place {
+            crate::personal_read::record_message(tx, event, channel, place, received_at).await?;
+        }
         crate::operator_listener::enqueue_mentions_in_transaction(tx, event).await?;
     }
 

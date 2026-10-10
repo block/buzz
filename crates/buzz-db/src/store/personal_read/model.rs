@@ -57,10 +57,17 @@ pub const MAX_CHANNELS: usize = 20;
 /// Maximum thread rows per channel row. A POST can return rows for
 /// `MAX_INTENTS` channels, and they must fit the 1 MiB response limit.
 pub const MAX_THREAD_SUMMARIES: usize = 25;
-/// Latest-probe event budget per channel, before eligibility filtering.
-pub const MAX_CHANNEL_SCAN: usize = 256;
-/// Unread-window work budget per channel, before eligibility/ancestry joins.
-pub const MAX_UNREAD_SCAN: usize = 4096;
+/// Events each walk examines before eligibility: newest-first for the
+/// newest timeline message, then for the last arrival among those authored up
+/// to twice the skew before it (in a thread too), and forward from the read
+/// position for DM counts. What lies past the budget goes unseen.
+pub const MAX_TIMELINE_SCAN: usize = 4096;
+/// Counts stop here: a count of 100 means at least 100.
+pub const MAX_UNREAD_COUNT: usize = 100;
+/// The relay accepts author times up to this far from arrival either way.
+/// Read positions are arrival times and the indexes are by author time, so
+/// every forward walk starts this much before the position.
+pub const MAX_ARRIVAL_SKEW_SECONDS: u32 = 15 * 60;
 /// Conversation kinds eligible for ordinary unread state (not edits/reactions).
 pub const ELIGIBLE_KINDS: [i32; 4] = [9, 40002, 45001, 45003];
 
@@ -74,32 +81,31 @@ pub struct ChannelReadSummary {
     /// only on their thread row.
     pub unread: bool,
     /// Unread top-level messages directed at the actor: every one in a DM,
-    /// otherwise those that tag the actor with `p` or carry `broadcast=1`.
+    /// otherwise those that tag the actor with `p`.
     pub mentions: u32,
-    /// The anchor of the timeline's frontier: the marked message that arrived
-    /// last. None until the timeline is marked.
+    /// The anchor of the timeline's frontier: the marked or own top-level
+    /// message that arrived last. None until either exists.
     pub read_through_id: Option<String>,
     /// Last eligible top-level message to arrive, whatever its author or read
     /// progress: marking the timeline through it reads the timeline.
     pub latest_id: Option<String>,
-    /// Threads with unread replies, newest unread reply first.
+    /// Followed threads with unread replies, newest unread reply first.
     pub threads: Vec<ThreadReadSummary>,
 }
 
 /// One thread's read state within a channel row. No conversation bytes.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ThreadReadSummary {
     /// Canonical thread-root event ID.
     pub root_id: String,
     /// Whether an unread reply that counts was found.
     pub unread: bool,
-    /// Unread replies that count: directed at the actor, or in one of the
-    /// actor's conversations.
+    /// Unread replies by others in this followed thread.
     pub mentions: u32,
-    /// The anchor of the thread's frontier: the marked message that arrived
-    /// last. None until the thread is marked.
+    /// The anchor of the thread's frontier: the marked or own reply that
+    /// arrived last. None for a follower who has read nothing yet.
     pub read_through_id: Option<String>,
-    /// Last counted reply to arrive: marking through it reads the thread.
+    /// Last reply to arrive: marking through it reads the thread.
     pub latest_id: String,
 }
 

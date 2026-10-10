@@ -24,7 +24,8 @@ pub(super) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
 }
 
 /// Start the account if this is the actor's first read intent, then serialize
-/// private frontier writes, never shared conversation rows.
+/// private frontier writes, never shared conversation rows. NO KEY UPDATE
+/// leaves ingest's foreign-key checks (which create thread rows) unblocked.
 pub(super) async fn lock_account(
     conn: &mut PgConnection,
     community: CommunityId,
@@ -40,7 +41,8 @@ pub(super) async fn lock_account(
     .execute(&mut *conn)
     .await?;
     sqlx::query(
-        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2 FOR UPDATE",
+        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2
+         FOR NO KEY UPDATE",
     )
     .bind(community.as_uuid())
     .bind(actor)
@@ -159,7 +161,8 @@ pub(super) async fn valid_target(
 }
 
 /// Advance a monotone frontier. The anchor ID follows the greatest arrival;
-/// an equal arrival keeps the existing anchor.
+/// an equal arrival keeps the existing anchor. Reading a thread never follows
+/// it: only a followed thread has a row to advance.
 async fn frontier(
     conn: &mut PgConnection,
     community: CommunityId,
@@ -168,7 +171,7 @@ async fn frontier(
     root: &[u8],
     msg: &Message,
 ) -> Result<()> {
-    sqlx::query(
+    let sql = if root.is_empty() {
         "INSERT INTO personal_read_frontiers
          (community_id, actor, channel_id, root_id, through_timestamp, through_message_id)
          VALUES ($1,$2,$3,$4,$5,$6)
@@ -176,10 +179,23 @@ async fn frontier(
          SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp, EXCLUDED.through_timestamp),
             through_message_id=CASE
                 WHEN EXCLUDED.through_timestamp > personal_read_frontiers.through_timestamp
-                THEN EXCLUDED.through_message_id ELSE personal_read_frontiers.through_message_id END",
-    ).bind(community.as_uuid()).bind(actor).bind(target.channel_id).bind(root)
-        .bind(msg.received_at).bind(&msg.id)
-        .execute(&mut *conn).await?;
+                THEN EXCLUDED.through_message_id ELSE personal_read_frontiers.through_message_id END"
+    } else {
+        "UPDATE personal_read_frontiers
+         SET through_timestamp=GREATEST(through_timestamp, $5),
+            through_message_id=CASE WHEN $5 > through_timestamp
+                THEN $6 ELSE through_message_id END
+         WHERE community_id=$1 AND actor=$2 AND channel_id=$3 AND root_id=$4"
+    };
+    sqlx::query(sql)
+        .bind(community.as_uuid())
+        .bind(actor)
+        .bind(target.channel_id)
+        .bind(root)
+        .bind(msg.received_at)
+        .bind(&msg.id)
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 

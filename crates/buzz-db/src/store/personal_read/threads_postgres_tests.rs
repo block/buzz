@@ -1,12 +1,14 @@
 //! Thread summaries, anchor validation and targeted refresh.
-use super::{postgres_tests::fixture, *};
+use super::{
+    postgres_tests::{fixture, insert_reply},
+    *,
+};
 use crate::{
     channel::{ChannelType, ChannelVisibility},
     Db,
 };
 use buzz_core::CommunityId;
 use nostr::{EventBuilder, Keys, Kind, Tag};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn post(
@@ -38,48 +40,41 @@ async fn post_as(
     event
 }
 
-/// A canonical reply to the root: stored event plus its thread metadata.
+/// A canonical reply to the root, through ingest.
 async fn reply(
     db: &Db,
-    pool: &PgPool,
     community: CommunityId,
     channel: Uuid,
     root: &nostr::Event,
     at: u64,
     tags: Vec<Tag>,
 ) -> nostr::Event {
-    let event = post(db, community, channel, at, tags).await;
-    link(pool, community, channel, root, &event).await;
+    reply_as(db, community, channel, root, &Keys::generate(), at, tags).await
+}
+
+async fn reply_as(
+    db: &Db,
+    community: CommunityId,
+    channel: Uuid,
+    root: &nostr::Event,
+    author: &Keys,
+    at: u64,
+    tags: Vec<Tag>,
+) -> nostr::Event {
+    let event = EventBuilder::new(Kind::Custom(9), format!("reply at {at}"))
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(at))
+        .sign_with_keys(author)
+        .unwrap();
+    insert_reply(db, community, channel, root, &event).await;
     event
 }
 
-async fn link(
-    pool: &PgPool,
-    community: CommunityId,
-    channel: Uuid,
-    root: &nostr::Event,
-    event: &nostr::Event,
-) {
-    sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
-        VALUES ($1,$2,to_timestamp($3),$4,$5,$5,1)")
-        .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice())
-        .bind(event.created_at.as_secs() as f64)
-        .bind(channel).bind(root.id.as_bytes().as_slice()).execute(pool).await.unwrap();
-}
-
-/// Put the actor in the root's conversation, so that plain replies to it
-/// count. The actor's own reply is never unread.
-async fn join(
-    db: &Db,
-    pool: &PgPool,
-    community: CommunityId,
-    channel: Uuid,
-    actor: &Keys,
-    root: &nostr::Event,
-) {
+/// The actor replies to the root, and so follows its thread. The actor's own
+/// reply is never unread.
+async fn join(db: &Db, community: CommunityId, channel: Uuid, actor: &Keys, root: &nostr::Event) {
     let at = root.created_at.as_secs();
-    let own = post_as(db, community, channel, actor, at, vec![]).await;
-    link(pool, community, channel, root, &own).await;
+    reply_as(db, community, channel, root, actor, at, vec![]).await;
 }
 
 async fn sidebar(db: &Db, community: CommunityId, actor: &Keys) -> ChannelReadSummary {
@@ -164,35 +159,6 @@ async fn mark_through_rejects_unresolved_missing_auxiliary_and_malformed_anchors
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn channel_frontier_never_covers_an_epoch_zero_reply() {
-    let (db, pool, community, channel, actor, root) = fixture().await;
-    join(&db, &pool, community, channel, &actor, &root).await;
-    let ancient = reply(&db, &pool, community, channel, &root, 0, vec![]).await;
-    // A channel frontier exists, with no thread frontier: absent must not
-    // read as epoch zero or as the channel's.
-    apply(
-        &db,
-        community,
-        &actor,
-        channel_mark(channel, root.id.to_hex()),
-    )
-    .await;
-    // Widen the horizon to reach the epoch, so that only a misread absent
-    // frontier could hide this reply.
-    let row = db
-        .personal_read_sidebar(community, &actor.public_key(), u32::MAX, 20, None)
-        .await
-        .unwrap()
-        .channels
-        .remove(0);
-    assert!(!row.unread);
-    assert_eq!(row.threads.len(), 1, "epoch-zero reply stays unread");
-    assert_eq!(row.threads[0].mentions, 1);
-    assert_eq!(row.threads[0].latest_id, ancient.id.to_hex());
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn thread_summaries_order_cap_and_anchor() {
     let (db, pool, community, channel, actor, fixture_root) = fixture().await;
     // After the fixture root, so marking the newest root covers every root.
@@ -202,7 +168,7 @@ async fn thread_summaries_order_cap_and_anchor() {
     let mut roots = Vec::new();
     for i in 0..n {
         let root = post(&db, community, channel, base + i, vec![]).await;
-        join(&db, &pool, community, channel, &actor, &root).await;
+        join(&db, community, channel, &actor, &root).await;
         roots.push(root);
     }
     let newest_root = roots.last().unwrap().clone();
@@ -220,11 +186,10 @@ async fn thread_summaries_order_cap_and_anchor() {
     let mut anchors = Vec::new();
     for (i, root) in (0..).zip(&roots) {
         let at = base + 100 + offset(i);
-        anchors.push(reply(&db, &pool, community, channel, root, at, vec![]).await);
+        anchors.push(reply(&db, community, channel, root, at, vec![]).await);
     }
     reply(
         &db,
-        &pool,
         community,
         channel,
         &roots[2],
@@ -234,7 +199,6 @@ async fn thread_summaries_order_cap_and_anchor() {
     .await;
     let twin = reply(
         &db,
-        &pool,
         community,
         channel,
         &roots[2],
@@ -305,7 +269,7 @@ impl ThreadReadSummary {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn thread_on_a_never_unread_root_is_selectable_and_readable_by_itself() {
-    let (db, pool, community, channel, actor, root) = fixture().await;
+    let (db, _pool, community, channel, actor, root) = fixture().await;
     let base = root.created_at.as_secs();
     let mention = || vec![Tag::parse(["p", &actor.public_key().to_hex()]).unwrap()];
     // A diff is never unread, not even one addressed to the actor.
@@ -317,8 +281,8 @@ async fn thread_on_a_never_unread_root_is_selectable_and_readable_by_itself() {
     db.insert_event(community, &diff, Some(channel))
         .await
         .unwrap();
-    let on_diff = reply(&db, &pool, community, channel, &diff, base + 10, mention()).await;
-    let elsewhere = reply(&db, &pool, community, channel, &root, base + 20, mention()).await;
+    let on_diff = reply(&db, community, channel, &diff, base + 10, mention()).await;
+    let elsewhere = reply(&db, community, channel, &root, base + 20, mention()).await;
 
     let row = sidebar(&db, community, &actor).await;
     // The undirected fixture root is unread; the directed diff is not counted.
