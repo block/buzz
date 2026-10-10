@@ -395,8 +395,11 @@ fn sha256_hex(s: &str) -> String {
 ///
 /// Line-number convention: unified-diff `@@ -N,M @@` uses 1-based line
 /// numbers. A pure-insertion hunk against an empty file is encoded as
-/// `@@ -0,0 +1,M @@` (`start == 0`, `len == 0`), which we treat as
-/// "apply at index 0 of an empty preimage."
+/// `@@ -0,0 +1,M @@` (`start == 0`, `len == 0`), which we accept — but only
+/// against a value that is actually empty. A hunk with no preimage carries
+/// nothing that ties it to this value, so against a non-empty value it would
+/// land unverified (diffy prepends it and keeps the existing content below);
+/// see `tests::strict_position_rejects_zero_start_insertion_into_nonempty`.
 fn verify_hunks_at_declared_position(
     current: &str,
     patch: &diffy::Patch<'_, str>,
@@ -417,17 +420,24 @@ fn verify_hunks_at_declared_position(
             })
             .collect();
 
-        // Pure insertion at start of empty file: `@@ -0,0 +1,M @@`.
+        // Pure insertion at start of an empty file: `@@ -0,0 +1,M @@`. This is
+        // the shape `diff -u` emits when the "before" side is empty, and it is
+        // the *only* no-preimage shape we accept — and only when the value
+        // really is empty.
         //
-        // Known limitation: a pure-insertion hunk into a non-empty value
-        // (`@@ -N,0 +N,M @@` with `N > 0`) is currently rejected. With no
-        // preimage lines there's nothing to position-check against, and the
-        // safe-default for a strict mode is "refuse" rather than "land at an
-        // unverified position." `diff -u` includes context lines by default,
-        // so users hit this only if they hand-author a no-context insertion.
-        // Failure mode is rejection, not corruption — see PR #627 review.
+        // Known limitation: a pure-insertion hunk into a non-empty value is
+        // rejected, whatever line it declares. With no preimage lines there's
+        // nothing to position-check against, and the safe default for a strict
+        // mode is "refuse" rather than "land at an unverified position."
+        // `diff -u` includes context lines by default, so users hit this only
+        // if they hand-author a no-context insertion, or diff against an
+        // *empty* "before" file — which happens when an upstream `mem get`
+        // failed and left a zero-byte snapshot. `start == 0` alone must not
+        // license that patch: diffy would prepend the foreign text and keep
+        // the whole existing value below it. Failure mode is rejection, not
+        // corruption — see PR #627 review.
         if preimage.is_empty() {
-            if hunk.old_range().start() == 0 {
+            if hunk.old_range().start() == 0 && current.is_empty() {
                 continue;
             }
             return Err(format!(
@@ -1028,6 +1038,92 @@ mod tests {
         verify_hunks_at_declared_position(current, &patch).unwrap();
     }
 
+    // A no-context insertion declaring line 0 (`@@ -0,0 +1,M @@`) is the shape
+    // `diff -u` emits when the "before" side is an *empty file*. Applied to a
+    // non-empty value it has no preimage to match, so nothing ties it to this
+    // slug: diffy prepends it and keeps the entire existing value below.
+    // Position integrity is exactly what this function exists to enforce, so
+    // the declared line number alone must not license the insertion — only a
+    // genuinely empty value can.
+    #[test]
+    fn strict_position_rejects_zero_start_insertion_into_nonempty() {
+        let current = "REAL LINE 1\nREAL LINE 2\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -0,0 +1,2 @@
++FOREIGN LINE A
++FOREIGN LINE B
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        // Sanity: diffy's own apply *would* land this, silently prepending
+        // foreign content and displacing the whole value downwards.
+        assert_eq!(
+            diffy::apply(current, &patch).unwrap(),
+            "FOREIGN LINE A\nFOREIGN LINE B\nREAL LINE 1\nREAL LINE 2\n"
+        );
+        // Our positional check refuses.
+        let err = verify_hunks_at_declared_position(current, &patch).unwrap_err();
+        assert!(err.contains("empty preimage"), "got: {err}");
+    }
+
+    // The guard keys on the value being *byte*-empty, not on it looking blank.
+    // A value that is a single newline still has a line the insertion would
+    // displace, so it is not the empty case.
+    #[test]
+    fn strict_position_rejects_zero_start_insertion_into_newline_only_value() {
+        let current = "\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -0,0 +1,1 @@
++FOREIGN LINE
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let err = verify_hunks_at_declared_position(current, &patch).unwrap_err();
+        assert!(err.contains("empty preimage"), "got: {err}");
+    }
+
+    // The zero-start allowance is about *position*, not just about the value
+    // being empty: a no-context hunk that declares some other line has still
+    // named a position nothing can be checked against, so it is refused even
+    // when the value is empty. Keeps the accepted shape exactly the one
+    // `diff -u` emits for an empty "before" side.
+    #[test]
+    fn strict_position_rejects_nonzero_start_insertion_into_empty_value() {
+        let current = "";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -5,0 +6,1 @@
++FOREIGN LINE
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let err = verify_hunks_at_declared_position(current, &patch).unwrap_err();
+        assert!(err.contains("empty preimage"), "got: {err}");
+    }
+
+    // Appending with context is the ordinary `diff -u` shape for growing a
+    // value, and it carries a real preimage. It must keep working.
+    #[test]
+    fn strict_position_accepts_context_bearing_append() {
+        let current = "alpha\nbeta\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,2 +1,3 @@
+ alpha
+ beta
++gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        verify_hunks_at_declared_position(current, &patch).unwrap();
+        assert_eq!(
+            diffy::apply(current, &patch).unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
+    }
+
     // Lock the multi-file detection. The check is a simple count of lines
     // starting with `--- ` because diffy's `parse()` will only consume the
     // first patch and silently treat everything after the last hunk as
@@ -1041,5 +1137,280 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+}
+
+/// Command-boundary tests for `buzz mem patch`.
+///
+/// The unit tests above pin `verify_hunks_at_declared_position` in isolation.
+/// These drive the production `cmd_patch` against a relay stand-in, so each
+/// verdict is read where an operator would feel it: a refusal must publish
+/// **no** event, and an accepted patch must publish exactly the bytes the
+/// operator intended.
+#[cfg(test)]
+mod patch_command_tests {
+    use std::io::Write;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body as HttpBody;
+    use axum::extract::State;
+    use axum::http::{Response, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    use buzz_core::engram::{self, Body};
+
+    use super::{cmd_patch, sha256_hex};
+    use crate::client::BuzzClient;
+    use crate::error::{exit_code, CliError};
+
+    /// Events the stand-in relay received on `POST /events`.
+    type Submissions = Arc<Mutex<Vec<nostr::Event>>>;
+    type ServerState = (String, Submissions);
+
+    /// Relay stand-in: `POST /query` always returns the seeded engram head,
+    /// `POST /events` records the submitted event and accepts it. Recording
+    /// rather than just counting lets a test decrypt what was written.
+    async fn relay_serving(head: nostr::Event) -> (String, Submissions) {
+        let query_body = serde_json::to_string(&[head]).expect("serialize head");
+        let submissions: Submissions = Arc::new(Mutex::new(Vec::new()));
+        let state: ServerState = (query_body, submissions.clone());
+
+        let app = Router::new()
+            .route(
+                "/query",
+                post(
+                    |State((query_body, _)): State<ServerState>, _body: String| async move {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(HttpBody::from(query_body))
+                            .unwrap()
+                    },
+                ),
+            )
+            .route(
+                "/events",
+                post(
+                    |State((_, subs)): State<ServerState>, body: String| async move {
+                        let event: nostr::Event =
+                            serde_json::from_str(&body).expect("submitted body must be an event");
+                        subs.lock().unwrap().push(event);
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/json")
+                            .body(HttpBody::from(r#"{"accepted":true,"message":"ok"}"#))
+                            .unwrap()
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submissions)
+    }
+
+    struct Fixture {
+        client: BuzzClient,
+        agent: nostr::Keys,
+        owner: nostr::Keys,
+        owner_hex: String,
+        submissions: Submissions,
+    }
+
+    const SLUG: &str = "mem/zero-start-fixture";
+
+    /// Seed `SLUG` with `value` and return a client wired to the stand-in.
+    async fn fixture(value: &str) -> Fixture {
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let body = Body::Memory {
+            slug: SLUG.to_string(),
+            value: Some(value.to_string()),
+        };
+        let head = engram::build_event(&agent, &owner.public_key(), &body, 1_700_000_000)
+            .expect("build seeded head");
+        let (url, submissions) = relay_serving(head).await;
+        let client = BuzzClient::new(url, agent.clone(), None, None).expect("client");
+        let owner_hex = owner.public_key().to_hex();
+        Fixture {
+            client,
+            agent,
+            owner,
+            owner_hex,
+            submissions,
+        }
+    }
+
+    fn patch_file(text: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(text.as_bytes()).expect("write patch");
+        f.flush().expect("flush patch");
+        f
+    }
+
+    async fn run_patch(
+        f: &Fixture,
+        patch: &tempfile::NamedTempFile,
+        base_hash: Option<&str>,
+        no_base_hash: bool,
+    ) -> Result<(), CliError> {
+        cmd_patch(
+            &f.client,
+            SLUG,
+            Some(patch.path().to_str().expect("utf-8 temp path")),
+            base_hash,
+            no_base_hash,
+            false, // dry_run
+            false, // allow_empty
+            Some(&f.owner_hex),
+        )
+        .await
+    }
+
+    /// Decrypt the single event the command published.
+    fn published_value(f: &Fixture) -> String {
+        let subs = f.submissions.lock().unwrap();
+        assert_eq!(subs.len(), 1, "expected exactly one published event");
+        let body = engram::validate_and_decrypt(
+            &subs[0],
+            &f.agent.public_key(),
+            &f.owner.public_key(),
+            f.agent.secret_key(),
+            &f.owner.public_key(),
+        )
+        .expect("published event must validate and decrypt");
+        match body {
+            Body::Memory { value: Some(v), .. } => v,
+            other => panic!("unexpected published body: {other:?}"),
+        }
+    }
+
+    const ZERO_START_PATCH: &str = "\
+--- a/x
++++ b/x
+@@ -0,0 +1,2 @@
++FOREIGN A
++FOREIGN B
+";
+
+    /// `--no-base-hash` is the flag an operator reaches for after a conflict,
+    /// so it is the reachable path: the refusal must hold here, and nothing
+    /// may be published.
+    #[tokio::test]
+    async fn patch_refuses_zero_start_insertion_into_nonempty_no_base_hash() {
+        let f = fixture("REAL LINE 1\nREAL LINE 2\n").await;
+        let p = patch_file(ZERO_START_PATCH);
+
+        let err = run_patch(&f, &p, None, true)
+            .await
+            .expect_err("zero-start insertion into a non-empty value must be refused");
+
+        assert!(matches!(err, CliError::Usage(_)), "got: {err:?}");
+        assert!(err.to_string().contains("empty preimage"), "got: {err}");
+        assert_eq!(exit_code(&err), 1, "must fail closed as a user error");
+        assert!(
+            f.submissions.lock().unwrap().is_empty(),
+            "a refused patch must publish no event"
+        );
+    }
+
+    /// A base-hash that genuinely matches the target satisfies the
+    /// concurrent-edit gate, so it must not launder the positional refusal:
+    /// the two checks answer different questions.
+    #[tokio::test]
+    async fn patch_refuses_zero_start_insertion_into_nonempty_with_matching_base_hash() {
+        let current = "REAL LINE 1\nREAL LINE 2\n";
+        let f = fixture(current).await;
+        let p = patch_file(ZERO_START_PATCH);
+
+        let err = run_patch(&f, &p, Some(&sha256_hex(current)), false)
+            .await
+            .expect_err("a matching base-hash must not license an unpositioned insertion");
+
+        assert!(err.to_string().contains("empty preimage"), "got: {err}");
+        assert!(
+            f.submissions.lock().unwrap().is_empty(),
+            "a refused patch must publish no event"
+        );
+    }
+
+    /// The case the zero-start branch exists to serve: filling a slug that
+    /// really is empty. `diff -u` emits `@@ -0,0 +1,M @@` on its own there.
+    #[tokio::test]
+    async fn patch_accepts_zero_start_insertion_into_empty_value() {
+        let f = fixture("").await;
+        let p = patch_file(
+            "\
+--- a/x
++++ b/x
+@@ -0,0 +1,2 @@
++first
++second
+",
+        );
+
+        run_patch(&f, &p, Some(&sha256_hex("")), false)
+            .await
+            .expect("pure insertion into a genuinely empty value must succeed");
+
+        assert_eq!(published_value(&f), "first\nsecond\n");
+    }
+
+    /// Ordinary growth: a context-bearing append still lands, byte-exact.
+    #[tokio::test]
+    async fn patch_accepts_context_bearing_append() {
+        let current = "alpha\nbeta\n";
+        let f = fixture(current).await;
+        let p = patch_file(
+            "\
+--- a/x
++++ b/x
+@@ -1,2 +1,3 @@
+ alpha
+ beta
++gamma
+",
+        );
+
+        run_patch(&f, &p, Some(&sha256_hex(current)), false)
+            .await
+            .expect("context-bearing append must succeed");
+
+        assert_eq!(published_value(&f), "alpha\nbeta\ngamma\n");
+    }
+
+    /// Multi-hunk patches still land, and both hunks apply at their declared
+    /// positions.
+    #[tokio::test]
+    async fn patch_accepts_multi_hunk() {
+        let current = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+        let f = fixture(current).await;
+        let p = patch_file(
+            "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+@@ -10,3 +10,3 @@
+ j
+-k
++K
+ l
+",
+        );
+
+        run_patch(&f, &p, Some(&sha256_hex(current)), false)
+            .await
+            .expect("multi-hunk patch must succeed");
+
+        assert_eq!(published_value(&f), "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nK\nl\n");
     }
 }
