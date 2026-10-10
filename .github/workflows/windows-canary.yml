@@ -83,6 +83,8 @@ jobs:
             scripts/verify-windows-client-lineage.sh "$previous_sha" "$GITHUB_SHA" "$GITHUB_REF_NAME"
           done < previous-windows-shas.txt
           scripts/check-windows-client-contract.sh "$GITHUB_SHA"
+          # Native Python must not resolve System32/bash.exe (WSL) via PATH.
+          export BUZZ_TEST_BASH="$(cygpath -w "$BASH")"
           python -m unittest -q scripts.test_windows_manual_canary scripts.test_windows_build_manifest scripts.test_windows_workflow_contract
 
       # The Windows runner ships with rustup preinstalled; rust-toolchain.toml
