@@ -80,10 +80,10 @@ async function postOnce(path: string, body: unknown): Promise<unknown> {
   const prio: SignPriority = path === "/events" ? 0 : isPresenceRead(body) ? 3 : 1;
   const auth = await nip98Header("POST", url, bytes, prio);
   let res: Response;
-  // DEV only: a cross-origin relay (e.g. prod from http://127.0.0.1:5199) fails CORS on /query and /events, so go through the
-  // Vite dev proxy (same-origin). The NIP-98 `u` tag above is still signed for the real relay URL.
+  // A cross-origin relay fails CORS on /query and /events, so go through the same-origin /__relay proxy (Vite dev proxy in
+  // dev, server.mjs in built apps). The NIP-98 `u` tag above is still signed for the real relay URL.
   const fetchUrl =
-    import.meta.env.DEV && new URL(url).origin !== location.origin
+    new URL(url).origin !== location.origin
       ? `/__relay/${encodeURIComponent(relayHttpBase())}${path}`
       : url;
   try {
