@@ -32,6 +32,8 @@ CREATE TABLE channels (
     participant_hash BYTEA,
     ttl_seconds     INT,
     ttl_deadline    TIMESTAMPTZ,
+    posting         TEXT NOT NULL DEFAULT 'everyone'
+        CHECK (posting IN ('everyone', 'members')),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

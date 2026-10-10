@@ -813,10 +813,16 @@ pub fn build_update_channel(
     about: Option<&str>,
     visibility: Option<&str>,
     ttl: Option<Option<i32>>,
+    posting: Option<buzz_core::channel::ChannelPosting>,
 ) -> Result<EventBuilder, SdkError> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
+    if name.is_none()
+        && about.is_none()
+        && visibility.is_none()
+        && ttl.is_none()
+        && posting.is_none()
+    {
         return Err(SdkError::InvalidTag(
-            "at least one of name, about, visibility, or ttl must be provided".into(),
+            "at least one of name, about, visibility, ttl, or posting must be provided".into(),
         ));
     }
     if let Some(v) = visibility {
@@ -850,6 +856,11 @@ pub fn build_update_channel(
             Some(secs) => tags.push(tag(&["ttl", &secs.to_string()])?),
             None => tags.push(tag(&["ttl", ""])?),
         }
+    }
+    // Always explicit: kind:9002 is a partial update, so an absent tag
+    // leaves the rule unchanged and turning it off needs `everyone`.
+    if let Some(posting) = posting {
+        tags.push(tag(&["posting", posting.as_str()])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
@@ -3480,7 +3491,8 @@ mod tests {
     fn update_channel_name_and_about() {
         let cid = uuid();
         let ev = sign(
-            build_update_channel(cid, Some("new-name"), Some("new about"), None, None).unwrap(),
+            build_update_channel(cid, Some("new-name"), Some("new about"), None, None, None)
+                .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "name", "new-name"));
@@ -3489,15 +3501,16 @@ mod tests {
 
     #[test]
     fn update_channel_strips_all_leading_hashes_from_name() {
-        let ev =
-            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
+        let ev = sign(
+            build_update_channel(uuid(), Some("  ###new-name  "), None, None, None, None).unwrap(),
+        );
         assert!(has_tag(&ev, "name", "new-name"));
     }
 
     #[test]
     fn update_channel_rejects_hash_only_name() {
         assert!(matches!(
-            build_update_channel(uuid(), Some("  ###  "), None, None, None),
+            build_update_channel(uuid(), Some("  ###  "), None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3505,8 +3518,9 @@ mod tests {
     #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
-        let ev =
-            sign(build_update_channel(cid, None, None, Some("private"), Some(Some(3600))).unwrap());
+        let ev = sign(
+            build_update_channel(cid, None, None, Some("private"), Some(Some(3600)), None).unwrap(),
+        );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "visibility", "private"));
         assert!(has_tag(&ev, "ttl", "3600"));
@@ -3515,7 +3529,7 @@ mod tests {
     #[test]
     fn update_channel_clears_ttl() {
         let cid = uuid();
-        let ev = sign(build_update_channel(cid, None, None, None, Some(None)).unwrap());
+        let ev = sign(build_update_channel(cid, None, None, None, Some(None), None).unwrap());
         assert!(has_tag(&ev, "ttl", ""));
     }
 
@@ -3523,16 +3537,34 @@ mod tests {
     fn update_channel_invalid_visibility_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, Some("secret"), None),
+            build_update_channel(cid, None, None, Some("secret"), None, None),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn update_channel_posting_is_always_explicit() {
+        use buzz_core::channel::ChannelPosting;
+        let cid = uuid();
+        let on = sign(
+            build_update_channel(cid, None, None, None, None, Some(ChannelPosting::Members))
+                .unwrap(),
+        );
+        assert!(has_tag(&on, "posting", "members"));
+        let off = sign(
+            build_update_channel(cid, None, None, None, None, Some(ChannelPosting::Everyone))
+                .unwrap(),
+        );
+        assert!(has_tag(&off, "posting", "everyone"));
+        let other = sign(build_update_channel(cid, Some("n"), None, None, None, None).unwrap());
+        assert!(!other.tags.iter().any(|t| t.kind().to_string() == "posting"));
     }
 
     #[test]
     fn update_channel_no_fields_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, None, None),
+            build_update_channel(cid, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }

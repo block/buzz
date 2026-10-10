@@ -51,13 +51,13 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Deletions (kind:5)** | ✅ | Standard NIP-09; self-authored only. `#h` optional, `#e` required |
 | **User profiles (kind:0)** | ✅ | NIP-01 metadata; synced to users table (display_name, avatar, about, NIP-05). NIP-05 handles must canonicalize to this relay's domain — off-domain or invalid handles are silently cleared. If a NIP-05 handle collides with another user's (UNIQUE constraint), the handle is skipped but other profile fields (display_name, avatar, about) are still synced. |
 | **Group creation (kind:9007)** | ✅ | NIP-29; include `name` tag, optional `visibility` and `channel_type` |
-| **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. |
+| **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A non-member adding themselves gets `guest` only; no role tag means `guest`. |
 | **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about` tags: owner/admin. `topic`/`purpose` tags: any member. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/`visibility`/`ttl`/`archived`/`posting` tags: owner/admin. `topic`/`purpose` tags: any member who may post. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
-| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `closed` tags; `about` only if description non-empty; `private` if applicable; `hidden` for DM channels |
+| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `posting`; `public` or `private`; `restricted` and `closed` per the access flags below; `about` only if description non-empty; `hidden` for DM channels |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d` tag + `p` tags with roles (`owner`, `admin`) |
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d` tag + `p` tags for all members |
 | **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
@@ -70,7 +70,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. |
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
-| **Join request (kind:9021)** | ✅ | Open channels only. Adds member, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
+| **Join request (kind:9021)** | ✅ | Open channels only. Adds a guest, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 
@@ -99,6 +99,47 @@ relay to specific external Nostr identities without granting full access.
   SELECT encode(pubkey, 'hex'), added_at, note FROM pubkey_allowlist;
   ```
 
+### Announce channels
+
+A channel has two separate access settings:
+
+- `visibility` (`open` | `private`) decides who can find, join and read.
+- `posting` (`everyone` | `members`) decides who can write. The default,
+  `everyone`, keeps the older rule: members and guests can write, and in an
+  open channel anyone can write. `members` makes an **announce channel**.
+
+Joining always gives the **guest** role, whatever `posting` is: kind:9021
+join adds a guest, and a non-member adding themselves with kind:9000 may ask
+only for `guest` (no role tag means `guest`). `posting` decides only who can
+write. In a normal channel a guest can post like a member, but cannot push to
+the channel's git repositories. A member, admin or owner can make a guest a
+member.
+
+In an announce channel, only owners, admins, members and bots can write.
+Guests and non-members can read, join and leave, but every other channel
+write is refused with `restricted: only members can post in this channel`.
+This covers messages, edits, deletes of their own messages, reactions,
+artifacts, canvas, forum posts, pins, topic and purpose, typing indicators,
+workflow messages and huddles. In an announce channel:
+
+- a guest or non-member can use kind:9000 only to add themselves (as a
+  guest); members and above keep the normal rules for adding people;
+- owners and admins change `posting` with kind:9002
+  `["posting", "members"]` or `["posting", "everyone"]`. A missing tag means
+  "no change". A stored value the relay does not know is treated as `members`.
+
+kind:39000 publishes the NIP-29 access flags from these settings:
+
+| Setting | `private` | `public` | `restricted` | `closed` |
+|---------|-----------|----------|--------------|----------|
+| open, `posting=everyone` | | ✓ | | |
+| open, `posting=members` | | ✓ | ✓ | |
+| private (either posting) | ✓ | | ✓ | ✓ |
+
+The explicit `["posting", ...]` tag is also published, because `restricted`
+alone cannot tell an announce channel (guests read only) from an ordinary
+private channel (guests may write).
+
 ### Group Discovery
 
 The relay emits NIP-29 group state events when channels are created, updated, or membership changes.
@@ -106,7 +147,7 @@ All discovery events include a `d` tag set to the channel UUID (NIP-29 addressab
 
 | Kind | Tags | Content |
 |------|------|---------|
-| **39000** | `d=<uuid>`, `name`, `closed` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels only) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Buzz channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
+| **39000** | `d=<uuid>`, `name`, `t`, `posting` (always); `public` or `private`; `restricted` (private channels, and `posting=members`); `closed` (private channels only); `about` (if description non-empty); `hidden` (DM channels only) | Group metadata. The access flags follow the channel settings (see [Announce channels](#announce-channels)). |
 | **39001** | `d=<uuid>`, `p` tags with role label (`owner`, `admin`) | Admin list |
 | **39002** | `d=<uuid>`, `p` tags for all members | Member list |
 

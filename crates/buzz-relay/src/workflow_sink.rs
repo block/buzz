@@ -286,6 +286,21 @@ impl ActionSink for RelayActionSink {
                     "workflow owner does not have access to destination channel".into(),
                 ));
             }
+            if !crate::handlers::ingest::may_post(
+                &state,
+                tenant.community(),
+                channel_uuid,
+                &author_pubkey_bytes,
+                &channel,
+                is_member,
+            )
+            .await
+            .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            {
+                return Err(ActionSinkError::InvalidInput(
+                    "workflow owner cannot post in destination channel".into(),
+                ));
+            }
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)

@@ -823,24 +823,10 @@ async fn reconcile_channels(
         if target_channel.is_none() {
             // kind:39000 — channel metadata
             {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                tags.push(Tag::parse(["name", &channel.name])?);
-                if let Some(ref desc) = channel.description {
-                    if !desc.is_empty() {
-                        tags.push(Tag::parse(["about", desc])?);
-                    }
-                }
-                if channel.visibility == "private" {
-                    tags.push(Tag::parse(["private"])?);
-                } else {
-                    tags.push(Tag::parse(["public"])?);
-                }
-                if channel.channel_type == "dm" {
-                    tags.push(Tag::parse(["hidden"])?);
-                }
-                tags.push(Tag::parse(["closed"])?);
-                tags.push(Tag::parse(["t", &channel.channel_type])?);
-
+                let tags = buzz_db::channel::group_metadata_tags(channel, &members)
+                    .into_iter()
+                    .map(Tag::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
                 let event = EventBuilder::new(Kind::Custom(39000), "")
                     .tags(tags)
                     .sign_with_keys(&relay_keys)

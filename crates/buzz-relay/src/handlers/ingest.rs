@@ -799,43 +799,116 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
     )
 }
 
-/// Check channel membership: member OR open-visibility channel.
+/// Which channel-write rule an event must pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChannelWrite {
+    /// Content or channel state (messages, reactions, artifacts, canvas,
+    /// forum, pins, huddles, topic, edits, deletes). Members, or anyone in an
+    /// open channel; and in a `posting = members` channel, only roles that may
+    /// post ([`buzz_db::channel::MemberRole::can_post`]).
+    Post,
+    /// Membership changes (kind:9000 put-user, 9001 remove-user, 9022 leave).
+    /// Members, or anyone in an open channel. The posting rule does not apply:
+    /// a guest must still be able to leave, and `decide_put_user` owns who may
+    /// add whom in an announce channel.
+    Membership,
+}
+
+impl ChannelWrite {
+    /// The rule for an event kind that passes the generic channel gate.
+    pub(crate) fn for_kind(kind: u32) -> Self {
+        match kind {
+            KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_LEAVE_REQUEST => {
+                Self::Membership
+            }
+            _ => Self::Post,
+        }
+    }
+}
+
+const NOT_A_CHANNEL_MEMBER: &str = "restricted: not a channel member";
+const MEMBERS_ONLY_POSTING: &str = "restricted: only members can post in this channel";
+
+/// The channel write gate: member OR open-visibility channel, plus, for
+/// [`ChannelWrite::Post`], the announce-channel posting rule.
 ///
 /// `channel` is the request's already-fetched channel row, when the caller has
 /// one (E1 within-request threading; correctness ruling §4.8). Callers without
-/// a row pass `None` and the open-visibility fallback reads the DB directly.
+/// a row pass `None` and the gate reads the DB directly when it needs the row.
 ///
 /// Returns `Ok(())` if allowed, `Err(reason)` if denied.
 pub(crate) async fn check_channel_membership(
-    tenant: &TenantContext,
+    community_id: CommunityId,
     state: &AppState,
     ch_id: Uuid,
     pubkey_bytes: &[u8],
     channel: Option<&buzz_db::channel::ChannelRecord>,
+    write: ChannelWrite,
 ) -> Result<(), String> {
-    match state
-        .is_member_cached(tenant.community(), ch_id, pubkey_bytes)
+    let is_member = state
+        .is_member_cached(community_id, ch_id, pubkey_bytes)
         .await
-    {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(e) => return Err(format!("error: database error: {e}")),
+        .map_err(|e| format!("error: database error: {e}"))?;
+    if is_member && write == ChannelWrite::Membership {
+        return Ok(());
     }
-    // Not a member — check if channel is open.
-    let is_open = match channel {
-        Some(ch) => ch.visibility == "open",
-        None => state
+    let fetched;
+    let channel = match channel {
+        Some(ch) => ch,
+        None => match state
             .db
-            .get_channel_for_event_write(tenant.community(), ch_id)
+            .get_channel_for_event_write(community_id, ch_id)
             .await
-            .map(|ch| ch.visibility == "open")
-            .unwrap_or(false),
+        {
+            Ok(ch) => {
+                fetched = ch;
+                &fetched
+            }
+            Err(_) if !is_member => return Err(NOT_A_CHANNEL_MEMBER.to_string()),
+            Err(e) => return Err(format!("error: database error: {e}")),
+        },
     };
-    if is_open {
-        Ok(())
-    } else {
-        Err("restricted: not a channel member".to_string())
+    if !is_member && channel.visibility != "open" {
+        return Err(NOT_A_CHANNEL_MEMBER.to_string());
     }
+    if write == ChannelWrite::Post
+        && !may_post(state, community_id, ch_id, pubkey_bytes, channel, is_member)
+            .await
+            .map_err(|e| format!("error: database error: {e}"))?
+    {
+        return Err(MEMBERS_ONLY_POSTING.to_string());
+    }
+    Ok(())
+}
+
+/// The announce-channel posting rule, for an actor that already passed the
+/// read/membership gate of `channel`.
+///
+/// With `posting = everyone` this is always true. With `posting = members`
+/// (or an unknown value, which fails closed) only an active member whose role
+/// may post is allowed: guests and non-members may not write.
+pub(crate) async fn may_post(
+    state: &AppState,
+    community_id: CommunityId,
+    ch_id: Uuid,
+    pubkey_bytes: &[u8],
+    channel: &buzz_db::channel::ChannelRecord,
+    is_member: bool,
+) -> Result<bool, buzz_db::DbError> {
+    use buzz_db::channel::{ChannelPosting, MemberRole};
+    if ChannelPosting::parse_fail_closed(&channel.posting) == ChannelPosting::Everyone {
+        return Ok(true);
+    }
+    if !is_member {
+        return Ok(false);
+    }
+    let role = state
+        .db
+        .get_member_role(community_id, ch_id, pubkey_bytes)
+        .await?;
+    Ok(role
+        .and_then(|r| r.parse::<MemberRole>().ok())
+        .is_some_and(|r| r.can_post()))
 }
 
 /// The kind-9 channel write gates (token scope, membership or open channel,
@@ -849,11 +922,12 @@ pub(crate) async fn check_channel_write(
     check_token_channel_access(auth, ch_id).map_err(IngestError::Rejected)?;
     let channel = load_channel_for_write(tenant, state, ch_id).await?;
     check_channel_membership(
-        tenant,
+        tenant.community(),
         state,
         ch_id,
         &auth.pubkey().to_bytes(),
         channel.as_ref(),
+        ChannelWrite::Post,
     )
     .await
     .map_err(IngestError::Rejected)?;
@@ -1302,24 +1376,13 @@ async fn validate_edit_ownership(
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
     let actor = event.pubkey.to_bytes().to_vec();
     if author == actor {
-        // Author editing their own message: re-gate on membership/open visibility so that
+        // Author editing their own message: re-gate on the channel write gate so that
         // a removed private-channel member cannot mutate old messages after access is revoked.
+        // In an announce channel, a guest may not edit what they wrote
+        // before they became a guest.
         if let Some(ch_id) = target_event.channel_id {
-            let is_member = state
-                .is_member_cached(community_id, ch_id, &actor)
-                .await
-                .map_err(|e| format!("db error checking membership: {e}"))?;
-            if !is_member {
-                let is_open = state
-                    .db
-                    .get_channel_for_event_write(community_id, ch_id)
-                    .await
-                    .map(|ch| ch.visibility == "open")
-                    .unwrap_or(false);
-                if !is_open {
-                    return Err("restricted: not a channel member".to_string());
-                }
-            }
+            check_channel_membership(community_id, state, ch_id, &actor, None, ChannelWrite::Post)
+                .await?;
         }
     } else {
         // Allow the owning human to edit messages authored by their agent.
@@ -2734,9 +2797,15 @@ async fn ingest_event_inner(
             // at `check_channel_membership`'s `is_member_cached(tenant
             // .community(), …)` call (see crates/buzz-relay/src/handlers
             // /ingest.rs:424).
-            let auth_result =
-                check_channel_membership(tenant, state, ch_id, &pubkey_bytes, channel_row.as_ref())
-                    .await;
+            let auth_result = check_channel_membership(
+                tenant.community(),
+                state,
+                ch_id,
+                &pubkey_bytes,
+                channel_row.as_ref(),
+                ChannelWrite::for_kind(kind_u32),
+            )
+            .await;
             let claimed = claimed_community_from_event(&event);
             let verdict = if auth_result.is_ok() {
                 Verdict::Allow

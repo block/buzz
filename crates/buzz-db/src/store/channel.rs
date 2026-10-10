@@ -16,7 +16,7 @@ use buzz_datastore_tracing::datastore_span;
 // Re-export the canonical enum definitions from buzz-core.
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
-pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+pub use buzz_core::channel::{ChannelPosting, ChannelType, ChannelVisibility, MemberRole};
 
 // Keep the established channel module paths compatible while membership SQL
 // and invariants live in their dedicated store module.
@@ -97,6 +97,9 @@ pub struct ChannelRecord {
     pub ttl_seconds: Option<i32>,
     /// Deadline by which a new message must arrive or the channel is auto-archived.
     pub ttl_deadline: Option<DateTime<Utc>>,
+    /// Who may write (`"everyone"` or `"members"`). Parse with
+    /// [`buzz_core::channel::ChannelPosting::parse_fail_closed`].
+    pub posting: String,
 }
 
 /// Creates a new channel, bootstraps the creator as owner, and returns the record.
@@ -170,7 +173,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, posting
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -270,7 +273,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, posting
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -314,7 +317,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, posting
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -396,7 +399,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, posting
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -416,7 +419,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, posting
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -480,7 +483,86 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         purpose_set_at,
         ttl_seconds,
         ttl_deadline,
+        // Selected by every channel-record query. A missing column is an
+        // error, never a silent `everyone`: the write gate depends on it.
+        posting: row.try_get("posting")?,
     })
+}
+
+/// The tags of a channel's relay-signed NIP-29 kind:39000 metadata event.
+///
+/// This is the single builder for kind:39000: the relay's discovery emitter
+/// and the `buzz-admin` backfill both call it, so the published flags cannot
+/// drift apart. `members` is used only for DM participant `p` tags.
+///
+/// The NIP-29 access flags follow the channel's settings:
+/// - `private` (members-only read), or Buzz's explicit `public`;
+/// - `restricted` (members-only write) for private channels and for
+///   `posting = members`; an unknown posting value fails closed to
+///   `restricted`;
+/// - `closed` (join requests ignored) only when kind:9021 cannot self-join,
+///   which is every non-open channel.
+///
+/// Buzz also publishes the explicit `["posting", ...]` value, because
+/// `restricted` alone cannot tell an announce channel (guests read only)
+/// from an ordinary private channel (guests may write).
+pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) -> Vec<Vec<String>> {
+    let tag = |parts: &[&str]| parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+    let mut tags = vec![
+        tag(&["d", &channel.id.to_string()]),
+        tag(&["name", &channel.name]),
+    ];
+    if let Some(desc) = channel.description.as_deref().filter(|d| !d.is_empty()) {
+        tags.push(tag(&["about", desc]));
+    }
+    let open = channel.visibility == ChannelVisibility::Open.as_str();
+    if open {
+        // Explicit "public" tag complements NIP-29's absence-of-"private"
+        // convention, making channel visibility self-describing for clients.
+        tags.push(tag(&["public"]));
+    } else {
+        tags.push(tag(&["private"]));
+    }
+    let members_only_posting =
+        ChannelPosting::parse_fail_closed(&channel.posting) == ChannelPosting::Members;
+    if !open || members_only_posting {
+        tags.push(tag(&["restricted"]));
+    }
+    // NIP-29 hidden tag: hint to clients not to show DMs in public group lists.
+    // Not a security boundary — access control is handled by channel-scoped storage.
+    if channel.channel_type == ChannelType::Dm.as_str() {
+        tags.push(tag(&["hidden"]));
+        // Include participant pubkeys in kind:39000 for DMs so clients can
+        // resolve display names without a separate kind:39002 fetch.
+        for m in members {
+            tags.push(tag(&["p", &hex::encode(&m.pubkey)]));
+        }
+    }
+    if !open {
+        tags.push(tag(&["closed"]));
+    }
+    // Channel type tag so clients can distinguish stream/forum/dm without inference
+    tags.push(tag(&["t", &channel.channel_type]));
+    tags.push(tag(&["posting", &channel.posting]));
+    // Optional topic / purpose for richer client UX
+    if let Some(topic) = channel.topic.as_deref().filter(|t| !t.is_empty()) {
+        tags.push(tag(&["topic", topic]));
+    }
+    if let Some(purpose) = channel.purpose.as_deref().filter(|p| !p.is_empty()) {
+        tags.push(tag(&["purpose", purpose]));
+    }
+    // Archived state — clients use this to hide channels from the sidebar.
+    if channel.archived_at.is_some() {
+        tags.push(tag(&["archived", "true"]));
+    }
+    // Ephemeral channel TTL — clients use this to show countdown timers.
+    if let Some(ttl) = channel.ttl_seconds {
+        tags.push(tag(&["ttl", &ttl.to_string()]));
+    }
+    if let Some(deadline) = channel.ttl_deadline {
+        tags.push(tag(&["ttl_deadline", &deadline.to_rfc3339()]));
+    }
+    tags
 }
 
 /// Partial update for channel metadata. Every field is `None` to leave the
@@ -497,6 +579,8 @@ pub struct ChannelUpdate {
     /// ephemeral TTL (channel becomes permanent), `Some(Some(secs))` sets it.
     /// On any change the `ttl_deadline` is reset to `NOW() + ttl_seconds`.
     pub ttl_seconds: Option<Option<i32>>,
+    /// New posting rule (`"everyone"`/`"members"`), or `None` to leave unchanged.
+    pub posting: Option<String>,
 }
 
 /// Updates channel metadata dynamically.
@@ -513,6 +597,7 @@ pub async fn update_channel(
         && updates.description.is_none()
         && updates.visibility.is_none()
         && updates.ttl_seconds.is_none()
+        && updates.posting.is_none()
     {
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
@@ -542,6 +627,10 @@ pub async fn update_channel(
         set_parts.push(format!("visibility = ${param_idx}::channel_visibility"));
         param_idx += 1;
     }
+    if updates.posting.is_some() {
+        set_parts.push(format!("posting = ${param_idx}"));
+        param_idx += 1;
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         // Set ttl_seconds, then reset the deadline from now (or clear both).
         set_parts.push(format!("ttl_seconds = ${param_idx}"));
@@ -569,6 +658,9 @@ pub async fn update_channel(
     }
     if let Some(ref vis) = updates.visibility {
         q = q.bind(vis);
+    }
+    if let Some(ref posting) = updates.posting {
+        q = q.bind(posting);
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
@@ -1017,6 +1109,77 @@ pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> Str
 }
 
 #[cfg(test)]
+mod group_metadata_tag_tests {
+    use super::*;
+
+    fn channel(visibility: &str, posting: &str) -> ChannelRecord {
+        let now = Utc::now();
+        ChannelRecord {
+            id: Uuid::nil(),
+            name: "news".into(),
+            channel_type: "stream".into(),
+            visibility: visibility.into(),
+            description: None,
+            canvas: None,
+            created_by: vec![1; 32],
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+            deleted_at: None,
+            nip29_group_id: None,
+            topic_required: false,
+            max_members: None,
+            topic: None,
+            topic_set_by: None,
+            topic_set_at: None,
+            purpose: None,
+            purpose_set_by: None,
+            purpose_set_at: None,
+            ttl_seconds: None,
+            ttl_deadline: None,
+            posting: posting.into(),
+        }
+    }
+
+    fn flags(channel: &ChannelRecord) -> Vec<&'static str> {
+        let tags = group_metadata_tags(channel, &[]);
+        ["private", "public", "restricted", "closed"]
+            .into_iter()
+            .filter(|flag| tags.iter().any(|t| t == &vec![flag.to_string()]))
+            .collect()
+    }
+
+    /// The NIP-29 access flags follow visibility and posting. Open channels
+    /// never publish `closed`: kind:9021 self-join works there.
+    #[test]
+    fn access_flags_follow_settings() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("open", "everyone", &["public"]),
+            ("open", "members", &["public", "restricted"]),
+            ("private", "everyone", &["private", "restricted", "closed"]),
+            ("private", "members", &["private", "restricted", "closed"]),
+            // An unknown posting value fails closed to `restricted`.
+            ("open", "bogus", &["public", "restricted"]),
+        ];
+        for (visibility, posting, expected) in cases {
+            assert_eq!(
+                flags(&channel(visibility, posting)),
+                *expected,
+                "{visibility}/{posting}"
+            );
+        }
+    }
+
+    #[test]
+    fn publishes_the_explicit_posting_value() {
+        let tags = group_metadata_tags(&channel("open", "members"), &[]);
+        assert!(tags.contains(&vec!["posting".to_string(), "members".to_string()]));
+        let tags = group_metadata_tags(&channel("open", "everyone"), &[]);
+        assert!(tags.contains(&vec!["posting".to_string(), "everyone".to_string()]));
+    }
+}
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use crate::user::ensure_user;
@@ -1164,6 +1327,64 @@ mod postgres_tests {
         assert!(!listed_a
             .iter()
             .any(|row| row.id == channel_id && row.name == "community-b-channel"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn posting_defaults_to_everyone_and_updates_round_trip() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner_pk = random_pubkey();
+        ensure_user(&pool, community, &owner_pk)
+            .await
+            .expect("ensure owner");
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "test-posting-round-trip",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner_pk,
+            None,
+        )
+        .await
+        .expect("create channel");
+        assert_eq!(channel.posting, "everyone");
+
+        let updated = update_channel(
+            &pool,
+            community,
+            channel.id,
+            ChannelUpdate {
+                posting: Some("members".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("set posting");
+        assert_eq!(updated.posting, "members");
+        assert_eq!(
+            get_channel(&pool, community, channel.id)
+                .await
+                .expect("reload")
+                .posting,
+            "members"
+        );
+
+        // The column CHECK rejects values the relay does not know.
+        assert!(update_channel(
+            &pool,
+            community,
+            channel.id,
+            ChannelUpdate {
+                posting: Some("anyone".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
