@@ -599,17 +599,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "audiopus_sys"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62314a1546a2064e033665d658e88c620a62904be945f8147e6b16c3db9f8651"
-dependencies = [
- "cmake",
- "log",
- "pkg-config",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1096,6 +1085,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-audio-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "neteq",
+ "opus",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+]
+
+[[package]]
 name = "buzz-core"
 version = "0.1.0"
 dependencies = [
@@ -1128,6 +1129,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "buzz-agent",
+ "buzz-audio-client",
  "buzz-core",
  "buzz-media",
  "buzz-persona",
@@ -1157,14 +1159,12 @@ dependencies = [
  "mesh-llm-node",
  "mesh-llm-sdk",
  "mesh-llm-system",
- "neteq",
  "nostr 0.44.7",
  "notify-rust",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-user-notifications",
- "opus",
  "percent-encoding",
  "plist",
  "png 0.18.1",
@@ -2387,7 +2387,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -7174,11 +7174,20 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "opus"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d3809943dff6fbad5f0484449ea26bdb9cb7d8efdf26ed50d3c7f227f69eb5c"
+checksum = "33718946cc77d4032911d4efe03a66dbcbfbd2bb16c3da06aaeadcc637c32216"
 dependencies = [
- "audiopus_sys",
+ "opusic-sys",
+]
+
+[[package]]
+name = "opusic-sys"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9d1ecdf206421bc74343ab3bb2f30ad2abbfee41fa341f7181fecbaf957769a"
+dependencies = [
+ "cmake",
 ]
 
 [[package]]
@@ -11114,7 +11123,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

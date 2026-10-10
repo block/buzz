@@ -15,6 +15,12 @@ ignore = [
     # remove these when upstream catches up.
     { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
     { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # NetEQ =0.8.3 declares ringbuf but its published Rust sources never use it,
+    # so Consumer::skip/clear and their panic-unsafe Drop path are unreachable.
+    # NetEQ 0.9.1 still declares ringbuf 0.3; ringbuf itself is fixed in 0.5.2.
+    # Keep the exact NetEQ pin and the wrapper ban below together. Re-audit or
+    # remove this exception when NetEQ removes/updates the unused dependency.
+    { id = "RUSTSEC-2026-0293", reason = "unused dependency of audited, exactly pinned neteq 0.8.3; no Rust references to ringbuf; other consumers forbidden by bans.deny" },
 ]
 
 [licenses]
@@ -90,3 +96,6 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
+deny = [
+    { name = "ringbuf", version = "<0.5.2", wrappers = ["neteq"], reason = "only audited NetEQ may declare this unused vulnerable dependency; all other consumers must use a patched release" },
+]

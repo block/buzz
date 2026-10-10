@@ -1041,6 +1041,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-audio-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "neteq",
+ "opus",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+]
+
+[[package]]
 name = "buzz-audit"
 version = "0.1.0"
 dependencies = [
@@ -6245,6 +6257,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "neteq"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57fbe9601485d95750187c92344fa056e75055027b00e375c53d9f4b8b883112"
+dependencies = [
+ "log",
+ "ringbuf",
+ "serde",
+ "thiserror 1.0.69",
+ "web-time",
+]
+
+[[package]]
 name = "netlink-packet-core"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6999,6 +7024,24 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "opus"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33718946cc77d4032911d4efe03a66dbcbfbd2bb16c3da06aaeadcc637c32216"
+dependencies = [
+ "opusic-sys",
+]
+
+[[package]]
+name = "opusic-sys"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9d1ecdf206421bc74343ab3bb2f30ad2abbfee41fa341f7181fecbaf957769a"
+dependencies = [
+ "cmake",
+]
 
 [[package]]
 name = "ordered-float"
@@ -8575,6 +8618,15 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "ringbuf"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79abed428d1fd2a128201cec72c5f6938e2da607c6f3745f769fabea399d950a"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -10708,6 +10760,7 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
