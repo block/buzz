@@ -436,3 +436,104 @@ async fn quiescing_community_rejects_artifact_at_admission_before_coordinate_loc
         "a rejected artifact must persist nothing"
     );
 }
+
+/// A non-create revision whose head lives outside the channel the caller
+/// authorized answers exactly like a missing artifact, before the revision,
+/// type, deleted and root checks could describe the head.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn head_outside_authorized_channel_matches_missing_head() {
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", f.a, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let gone = Uuid::new_v4();
+    let deleted_d = Uuid::new_v4();
+    let deleted_create = f.revision(deleted_d, "create", f.a, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&deleted_create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let deleted = f.revision(
+        deleted_d,
+        "delete",
+        f.a,
+        Some(&deleted_create),
+        &f.owner,
+        vec![],
+    );
+    assert!(matches!(
+        f.accept(&deleted, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let retyped = {
+        let mut tags: Vec<Vec<String>> = vec![
+            vec!["ar".into(), "1".into()],
+            vec!["d".into(), d.to_string()],
+            vec!["h".into(), f.b.to_string()],
+            vec!["type".into(), "buzz.note".into()],
+            vec!["op".into(), "update".into()],
+            vec!["title".into(), "Test".into()],
+        ];
+        tags.push(vec!["prev".into(), create.id.to_hex()]);
+        EventBuilder::new(Kind::Custom(45010), "secret")
+            .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+            .sign_with_keys(&f.peer)
+            .unwrap()
+    };
+    let cases = [
+        (
+            "missing",
+            f.revision(gone, "update", f.b, Some(&create), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "current prev",
+            f.revision(d, "update", f.b, Some(&create), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "stale prev",
+            f.revision(d, "update", f.b, Some(&deleted), &f.peer, vec![]),
+            None,
+        ),
+        ("other type", retyped, None),
+        (
+            "delete",
+            f.revision(d, "delete", f.b, Some(&create), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "restore deleted",
+            f.revision(deleted_d, "restore", f.b, Some(&deleted), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "update deleted",
+            f.revision(deleted_d, "update", f.b, Some(&deleted), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "move from unauthorized source",
+            f.revision(d, "move", f.b, Some(&create), &f.peer, vec![]),
+            Some(f.b),
+        ),
+    ];
+    for (case, event, source) in cases {
+        match f.accept(&event, source).await {
+            ArtifactOutcome::Conflict(reason) => {
+                assert_eq!(reason, super::artifact::HEAD_UNAVAILABLE, "{case}")
+            }
+            other => panic!("{case}: {other:?}"),
+        }
+    }
+    // Positive control: the same revision homed where the head lives.
+    let update = f.revision(d, "update", f.a, Some(&create), &f.peer, vec![]);
+    assert!(matches!(
+        f.accept(&update, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+}

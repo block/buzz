@@ -809,6 +809,9 @@ async fn handle_workflow_def(
     })
 }
 
+/// Trigger rejection for a missing workflow and for one the sender does not own.
+const WORKFLOW_NOT_FOUND: &str = "invalid: workflow not found";
+
 async fn handle_workflow_trigger(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -835,15 +838,15 @@ async fn handle_workflow_trigger(
         .db
         .get_workflow(community_id, workflow_id)
         .await
-        .map_err(|_| IngestError::Rejected("invalid: workflow not found".into()))?;
+        .map_err(|_| IngestError::Rejected(WORKFLOW_NOT_FOUND.into()))?;
 
     // 3. Manual triggers execute with the workflow owner's authority, so only
     // the owner may start them. Channel membership alone is insufficient: a
     // member could otherwise invoke another user's webhook or message actions.
+    // Anyone else is told the workflow is not found, so the response never
+    // reveals whether a workflow ID exists.
     if workflow.owner_pubkey != self_bytes {
-        return Err(IngestError::Rejected(
-            "forbidden: not authorized to trigger this workflow".into(),
-        ));
+        return Err(IngestError::Rejected(WORKFLOW_NOT_FOUND.into()));
     }
 
     // SEC-006: manual triggers must honor the workflow's lifecycle state and
