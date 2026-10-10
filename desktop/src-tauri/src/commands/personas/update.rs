@@ -150,6 +150,23 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
     app: AppHandle,
     retain: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<R, String> + Send + 'static,
 ) -> Result<(AgentDefinition, R), String> {
+    update_persona_guarded(input, app, |_, _, _| Ok(()), retain).await
+}
+
+/// [`update_persona_with`] plus an `authorize` step that runs under the store
+/// lock, after the persona is located and before any byte changes. It sees the
+/// stored definition as it is at write time, so a caller that decided
+/// elsewhere (an agent's self-update, `self_update::apply_agent_self_update`)
+/// can re-check its decision inside the same boundary as the write. An `Err`
+/// leaves the store untouched.
+pub(super) async fn update_persona_guarded<R: Send + 'static>(
+    input: UpdatePersonaRequest,
+    app: AppHandle,
+    authorize: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<(), String>
+        + Send
+        + 'static,
+    retain: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<R, String> + Send + 'static,
+) -> Result<(AgentDefinition, R), String> {
     use tauri::Manager;
 
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
@@ -177,6 +194,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .iter_mut()
                 .find(|record| record.id == input.id)
                 .ok_or_else(|| format!("agent {} not found", input.id))?;
+            authorize(&app, &state, persona)?;
 
             // Track what changed so we can propagate to linked agent records.
             let avatar_changed = persona.avatar_url != avatar_url;

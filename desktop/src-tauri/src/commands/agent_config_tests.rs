@@ -91,6 +91,7 @@ fn agent_record() -> ManagedAgentRecord {
         env_vars: Default::default(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
+        self_update_fields: Vec::new(),
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,

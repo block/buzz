@@ -368,6 +368,7 @@ pub fn build_managed_agent_summary<R: tauri::Runtime>(
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
+        self_update_fields: record.self_update_fields.clone(),
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
