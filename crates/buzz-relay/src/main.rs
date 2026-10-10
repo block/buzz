@@ -1470,6 +1470,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         ));
     }
 
+    // Durable member-access backstop: unlike lossy Redis disconnect fan-out,
+    // this fixed cadence rechecks only admitted local sockets against the
+    // authoritative writer. Its bounded scan and DB-error grace establish the
+    // live authorization staleness budget independently of archive maintenance.
+    {
+        let access_state = Arc::clone(&state);
+        let cancel = access_state.community_revalidator_cancel.clone();
+        tokio::spawn(run_live_authorization_revalidator(access_state, cancel));
+    }
+
     // Per-pod dependency diagnostics runtime: one seam starts the dependency
     // sampler and its independent completion-epoch republisher together.
     {
@@ -1959,6 +1969,17 @@ async fn run_community_revalidator(
             );
         }
     })
+    .await;
+}
+
+async fn run_live_authorization_revalidator(state: Arc<AppState>, cancel: CancellationToken) {
+    run_periodic_until_cancelled(
+        buzz_relay::state::LIVE_AUTHORIZATION_REVALIDATION_INTERVAL,
+        cancel,
+        || async {
+            state.revalidate_live_authorizations().await;
+        },
+    )
     .await;
 }
 
