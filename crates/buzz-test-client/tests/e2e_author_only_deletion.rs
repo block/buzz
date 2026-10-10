@@ -25,7 +25,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use buzz_test_client::{BuzzTestClient, RelayMessage};
+use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
 use nostr::{EventBuilder, EventId, Filter, Keys, Kind, Tag};
 use reqwest::Client;
 use serde_json::Value;
@@ -1026,15 +1026,19 @@ async fn soft_deleted_target_keeps_its_channel() {
     let [member_ids, outsider_ids] = {
         let mut out = [Vec::new(), Vec::new()];
         for (slot, (mut ws, sid)) in out.iter_mut().zip(watchers) {
-            while let Ok(msg) = ws.recv_event(Duration::from_secs(2)).await {
-                if let RelayMessage::Event {
-                    subscription_id,
-                    event,
-                } = msg
-                {
-                    if subscription_id == sid {
-                        slot.push(event.id);
-                    }
+            loop {
+                match ws.recv_event(Duration::from_secs(2)).await {
+                    Ok(RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    }) if subscription_id == sid => slot.push(event.id),
+                    Ok(RelayMessage::Closed {
+                        subscription_id,
+                        message,
+                    }) if subscription_id == sid => panic!("{sid} closed: {message}"),
+                    Ok(_) => {}
+                    Err(TestClientError::Timeout) => break,
+                    Err(e) => panic!("{sid} receive failed: {e}"),
                 }
             }
             ws.disconnect().await.expect("disconnect");
