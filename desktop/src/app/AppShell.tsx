@@ -97,6 +97,7 @@ import { requestFocusedThreadClose } from "@/features/channels/focusedThreadClos
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
+import { useBridgePublisher } from "@/features/bridge/useBridgePublisher";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   consumePendingCommunityRestore,
@@ -284,6 +285,12 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
+  // PWA bridge (slice A): desktop publishes agent status for the member's own browser. No-op outside Tauri.
+  useBridgePublisher(
+    identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
+    (id) => channels.find((c) => c.id === id)?.name,
+  );
   const dmChannelIds = React.useMemo(() => {
     const ids = new Set<string>();
     for (const channel of channelsQuery.data ?? []) {

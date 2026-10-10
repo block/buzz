@@ -35,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
+import { MyAgentsPanel } from "@/features/bridge/ui/MyAgentsPanel";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
@@ -164,6 +165,7 @@ export function AgentsView() {
           className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]"
           data-testid="agents-page-content"
         >
+          <MyAgentsPanel />
           <PageHeader
             action={
               <>
