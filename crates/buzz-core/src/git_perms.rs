@@ -1,8 +1,10 @@
 //! Git permission types — ref patterns, protection rules, and policy evaluation inputs.
 //!
 //! This module defines the core data types for the Buzz git permission system.
-//! The permission model: channel role = repo role; `buzz-protect` tags on
-//! kind:30617 add constraints that apply to everyone (including the owner).
+//! The legacy permission model maps channel role to repository role, while
+//! `buzz-protect` tags on kind:30617 add constraints that apply to everyone
+//! (including the owner). Repositories may opt in to explicit, expiring actor
+//! grants; those grants are checked before the existing protection rules.
 //!
 //! # Architecture
 //!
@@ -45,6 +47,10 @@ pub const MAX_PROTECTION_RULES: usize = 50;
 pub const MAX_PATTERN_LENGTH: usize = 256;
 /// Maximum number of wildcard segments per pattern.
 pub const MAX_WILDCARDS_PER_PATTERN: usize = 3;
+/// Maximum number of explicit Git push grants on one repository announcement.
+pub const MAX_GIT_PUSH_GRANTS: usize = 50;
+/// Maximum lifetime of an explicit Git push grant: 24 hours.
+pub const MAX_GIT_PUSH_GRANT_TTL_SECS: u64 = 24 * 60 * 60;
 
 /// A validated ref pattern for matching git refs.
 ///
@@ -421,6 +427,253 @@ pub fn parse_protection_tags(tags: &[Vec<String>]) -> Result<ParsedProtection, R
         rules,
         unknown_rules,
     })
+}
+
+/// A single explicit push grant from a signed kind:30617 announcement.
+///
+/// The containing announcement supplies the repository scope. The grant binds
+/// one lowercase Nostr public key to one validated ref pattern until the
+/// absolute Unix timestamp in [`Self::expires_at`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitPushGrant {
+    /// Lowercase hex-encoded 32-byte Nostr public key.
+    pub actor_pubkey: String,
+    /// Git refs this actor may update.
+    pub pattern: RefPattern,
+    /// Exclusive Unix timestamp after which the grant is invalid.
+    pub expires_at: u64,
+}
+
+/// Repository-level Git capability mode parsed from kind:30617 tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitCapabilityPolicy {
+    /// No capability opt-in; preserve the existing channel-role behavior.
+    Legacy,
+    /// Every pusher and every updated ref requires an explicit current grant.
+    ExplicitGrantsV1 {
+        /// Grants signed into the repository announcement.
+        grants: Vec<GitPushGrant>,
+    },
+}
+
+/// Result of evaluating the capability layer for one atomic push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitCapabilityDecision {
+    /// Continue with the pusher's existing channel-derived role.
+    Legacy,
+    /// Every ref is covered by an explicit grant; role-only protection may be
+    /// evaluated as Owner while non-role protection remains in force.
+    ExplicitGrant,
+}
+
+/// Errors from parsing versioned Git capability tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitCapabilityParseError {
+    /// A grant was present without an explicit policy version.
+    GrantWithoutPolicy,
+    /// More than one policy selector was present.
+    DuplicatePolicy,
+    /// The policy tag did not have exactly a name and version.
+    MalformedPolicy,
+    /// The policy version is not supported by this relay.
+    UnsupportedPolicy(String),
+    /// Explicit mode omitted the legacy-safe owner-only protection baseline.
+    MissingLegacyProtection,
+    /// The repository contains more grants than the hard limit.
+    TooManyGrants,
+    /// A grant did not have exactly actor, pattern, capability, and expiry.
+    MalformedGrant,
+    /// The actor was not a lowercase hex-encoded 32-byte public key.
+    InvalidActorPubkey,
+    /// The grant ref pattern was invalid.
+    InvalidGrantPattern(PatternError),
+    /// The grant requested a capability other than `push`.
+    UnsupportedCapability(String),
+    /// The expiry was not an unsigned Unix timestamp.
+    InvalidExpiry(String),
+}
+
+impl fmt::Display for GitCapabilityParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GrantWithoutPolicy => write!(f, "buzz-git-grant requires buzz-git-policy"),
+            Self::DuplicatePolicy => write!(f, "multiple buzz-git-policy tags"),
+            Self::MalformedPolicy => write!(f, "malformed buzz-git-policy tag"),
+            Self::UnsupportedPolicy(version) => {
+                write!(f, "unsupported buzz-git-policy version: {version:?}")
+            }
+            Self::MissingLegacyProtection => {
+                write!(f, "explicit grants require buzz-protect refs/** push:owner")
+            }
+            Self::TooManyGrants => {
+                write!(f, "exceeds max {MAX_GIT_PUSH_GRANTS} Git push grants")
+            }
+            Self::MalformedGrant => write!(f, "malformed buzz-git-grant tag"),
+            Self::InvalidActorPubkey => write!(f, "invalid Git grant actor pubkey"),
+            Self::InvalidGrantPattern(error) => {
+                write!(f, "invalid Git grant pattern: {error}")
+            }
+            Self::UnsupportedCapability(capability) => {
+                write!(f, "unsupported Git grant capability: {capability:?}")
+            }
+            Self::InvalidExpiry(expiry) => {
+                write!(f, "invalid Git grant expiry: {expiry:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GitCapabilityParseError {}
+
+/// Parse the versioned, explicit Git capability policy from kind:30617 tags.
+///
+/// Tag grammar:
+///
+/// ```text
+/// ["buzz-git-policy", "explicit-grants-v1"]
+/// ["buzz-git-grant", "<pubkey-hex>", "<ref-pattern>", "push", "<expires-at>"]
+/// ```
+///
+/// Explicit mode also requires a `buzz-protect` tag whose pattern is exactly
+/// `refs/**` and whose rules contain `push:owner`. Older relays ignore the new
+/// tags but understand that baseline, so ordinary channel members fail closed.
+pub fn parse_git_capability_policy(
+    tags: &[Vec<String>],
+) -> Result<GitCapabilityPolicy, GitCapabilityParseError> {
+    let policy_tags: Vec<&Vec<String>> = tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("buzz-git-policy"))
+        .collect();
+    let grant_tags: Vec<&Vec<String>> = tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("buzz-git-grant"))
+        .collect();
+
+    if policy_tags.is_empty() {
+        return if grant_tags.is_empty() {
+            Ok(GitCapabilityPolicy::Legacy)
+        } else {
+            Err(GitCapabilityParseError::GrantWithoutPolicy)
+        };
+    }
+    if policy_tags.len() > 1 {
+        return Err(GitCapabilityParseError::DuplicatePolicy);
+    }
+
+    let policy_tag = policy_tags[0];
+    if policy_tag.len() != 2 {
+        return Err(GitCapabilityParseError::MalformedPolicy);
+    }
+    if policy_tag[1] != "explicit-grants-v1" {
+        return Err(GitCapabilityParseError::UnsupportedPolicy(
+            policy_tag[1].clone(),
+        ));
+    }
+
+    let has_legacy_protection = tags.iter().any(|tag| {
+        tag.first().map(String::as_str) == Some("buzz-protect")
+            && tag.get(1).map(String::as_str) == Some("refs/**")
+            && tag[2..].iter().any(|rule| rule == "push:owner")
+    });
+    if !has_legacy_protection {
+        return Err(GitCapabilityParseError::MissingLegacyProtection);
+    }
+    if grant_tags.len() > MAX_GIT_PUSH_GRANTS {
+        return Err(GitCapabilityParseError::TooManyGrants);
+    }
+
+    let mut grants = Vec::with_capacity(grant_tags.len());
+    for tag in grant_tags {
+        if tag.len() != 5 {
+            return Err(GitCapabilityParseError::MalformedGrant);
+        }
+        let actor_pubkey = &tag[1];
+        if actor_pubkey.len() != 64
+            || !actor_pubkey
+                .chars()
+                .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
+        {
+            return Err(GitCapabilityParseError::InvalidActorPubkey);
+        }
+        let pattern =
+            RefPattern::parse(&tag[2]).map_err(GitCapabilityParseError::InvalidGrantPattern)?;
+        if tag[3] != "push" {
+            return Err(GitCapabilityParseError::UnsupportedCapability(
+                tag[3].clone(),
+            ));
+        }
+        let expires_at = tag[4]
+            .parse::<u64>()
+            .map_err(|_| GitCapabilityParseError::InvalidExpiry(tag[4].clone()))?;
+        grants.push(GitPushGrant {
+            actor_pubkey: actor_pubkey.clone(),
+            pattern,
+            expires_at,
+        });
+    }
+
+    Ok(GitCapabilityPolicy::ExplicitGrantsV1 { grants })
+}
+
+/// Evaluate one atomic push against a parsed Git capability policy.
+///
+/// `issued_at` is the signed repository announcement timestamp and `now` is
+/// the relay hook time. In explicit mode every grant must have a positive
+/// lifetime of at most 24 hours, and every ref update must match a current
+/// grant for the authenticated actor. One uncovered ref denies the whole push.
+pub fn evaluate_git_push_capabilities(
+    policy: &GitCapabilityPolicy,
+    actor_pubkey: &str,
+    updates: &[RefUpdate],
+    issued_at: u64,
+    now: u64,
+) -> Result<GitCapabilityDecision, Vec<Denial>> {
+    let GitCapabilityPolicy::ExplicitGrantsV1 { grants } = policy else {
+        return Ok(GitCapabilityDecision::Legacy);
+    };
+
+    let deny_every_ref = |reason: &str| {
+        updates
+            .iter()
+            .map(|update| Denial {
+                ref_name: update.ref_name.clone(),
+                reason: reason.to_string(),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if issued_at > now {
+        return Err(deny_every_ref(
+            "Git capability policy timestamp is in the future",
+        ));
+    }
+    if grants.iter().any(|grant| {
+        grant.expires_at <= issued_at
+            || grant.expires_at.saturating_sub(issued_at) > MAX_GIT_PUSH_GRANT_TTL_SECS
+    }) {
+        return Err(deny_every_ref("invalid Git capability grant lifetime"));
+    }
+
+    let denials: Vec<Denial> = updates
+        .iter()
+        .filter(|update| {
+            !grants.iter().any(|grant| {
+                grant.actor_pubkey == actor_pubkey
+                    && grant.expires_at > now
+                    && grant.pattern.matches(&update.ref_name)
+            })
+        })
+        .map(|update| Denial {
+            ref_name: update.ref_name.clone(),
+            reason: "no current Git capability grant for actor and ref".to_string(),
+        })
+        .collect();
+
+    if denials.is_empty() {
+        Ok(GitCapabilityDecision::ExplicitGrant)
+    } else {
+        Err(denials)
+    }
 }
 
 /// Built-in default minimum role for an operation when no `buzz-protect` tag matches.
@@ -1023,5 +1276,306 @@ mod tests {
         let denials = result.unwrap_err();
         assert_eq!(denials.len(), 1);
         assert_eq!(denials[0].ref_name, "refs/heads/main");
+    }
+
+    fn capability_tags(actor_a: &str, actor_b: &str, expires_at: u64) -> Vec<Vec<String>> {
+        vec![
+            vec!["buzz-protect".into(), "refs/**".into(), "push:owner".into()],
+            vec!["buzz-git-policy".into(), "explicit-grants-v1".into()],
+            vec![
+                "buzz-git-grant".into(),
+                actor_a.into(),
+                "refs/heads/agent/a/**".into(),
+                "push".into(),
+                expires_at.to_string(),
+            ],
+            vec![
+                "buzz-git-grant".into(),
+                actor_b.into(),
+                "refs/heads/agent/b/**".into(),
+                "push".into(),
+                expires_at.to_string(),
+            ],
+        ]
+    }
+
+    fn create_update(ref_name: &str) -> RefUpdate {
+        RefUpdate {
+            ref_name: ref_name.to_string(),
+            kind: UpdateKind::Create,
+            old_oid: "0".repeat(40),
+            new_oid: "a".repeat(40),
+        }
+    }
+
+    #[test]
+    fn git_capability_policy_preserves_legacy_without_opt_in() {
+        assert_eq!(
+            parse_git_capability_policy(&[]).unwrap(),
+            GitCapabilityPolicy::Legacy
+        );
+    }
+
+    #[test]
+    fn git_capability_policy_rejects_orphan_duplicate_and_unknown_policy() {
+        let actor = "a".repeat(64);
+        let orphan = vec![vec![
+            "buzz-git-grant".into(),
+            actor,
+            "refs/heads/agent/a/**".into(),
+            "push".into(),
+            "100".into(),
+        ]];
+        assert_eq!(
+            parse_git_capability_policy(&orphan),
+            Err(GitCapabilityParseError::GrantWithoutPolicy)
+        );
+
+        let duplicate = vec![
+            vec!["buzz-git-policy".into(), "explicit-grants-v1".into()],
+            vec!["buzz-git-policy".into(), "explicit-grants-v1".into()],
+        ];
+        assert_eq!(
+            parse_git_capability_policy(&duplicate),
+            Err(GitCapabilityParseError::DuplicatePolicy)
+        );
+
+        let unknown = vec![vec!["buzz-git-policy".into(), "future-v2".into()]];
+        assert_eq!(
+            parse_git_capability_policy(&unknown),
+            Err(GitCapabilityParseError::UnsupportedPolicy(
+                "future-v2".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn git_capability_policy_requires_legacy_owner_protection() {
+        let tags = vec![vec!["buzz-git-policy".into(), "explicit-grants-v1".into()]];
+        assert_eq!(
+            parse_git_capability_policy(&tags),
+            Err(GitCapabilityParseError::MissingLegacyProtection)
+        );
+    }
+
+    #[test]
+    fn git_capability_policy_parses_two_actor_grants() {
+        let actor_a = "a".repeat(64);
+        let actor_b = "b".repeat(64);
+        let policy = parse_git_capability_policy(&capability_tags(&actor_a, &actor_b, 86_500))
+            .expect("valid capability policy");
+        let GitCapabilityPolicy::ExplicitGrantsV1 { grants } = policy else {
+            panic!("expected explicit grants");
+        };
+        assert_eq!(grants.len(), 2);
+        assert_eq!(grants[0].actor_pubkey, actor_a);
+        assert_eq!(grants[0].pattern.as_str(), "refs/heads/agent/a/**");
+        assert_eq!(grants[0].expires_at, 86_500);
+    }
+
+    #[test]
+    fn git_capability_policy_rejects_malformed_grants() {
+        let base = vec![
+            vec!["buzz-protect".into(), "refs/**".into(), "push:owner".into()],
+            vec!["buzz-git-policy".into(), "explicit-grants-v1".into()],
+        ];
+        let lowercase_actor = "a".repeat(64);
+        let uppercase_actor = "A".repeat(64);
+        let cases = [
+            vec![
+                "buzz-git-grant".into(),
+                "abc".into(),
+                "refs/heads/a/**".into(),
+                "push".into(),
+                "10".into(),
+            ],
+            vec![
+                "buzz-git-grant".into(),
+                uppercase_actor,
+                "refs/heads/a/**".into(),
+                "push".into(),
+                "10".into(),
+            ],
+            vec![
+                "buzz-git-grant".into(),
+                lowercase_actor.clone(),
+                "heads/a/**".into(),
+                "push".into(),
+                "10".into(),
+            ],
+            vec![
+                "buzz-git-grant".into(),
+                lowercase_actor.clone(),
+                "refs/heads/a/**".into(),
+                "merge".into(),
+                "10".into(),
+            ],
+            vec![
+                "buzz-git-grant".into(),
+                lowercase_actor,
+                "refs/heads/a/**".into(),
+                "push".into(),
+                "later".into(),
+            ],
+        ];
+        for case in cases {
+            let mut tags = base.clone();
+            tags.push(case);
+            assert!(
+                parse_git_capability_policy(&tags).is_err(),
+                "case: {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_capability_policy_enforces_grant_limit() {
+        let mut tags = vec![
+            vec!["buzz-protect".into(), "refs/**".into(), "push:owner".into()],
+            vec!["buzz-git-policy".into(), "explicit-grants-v1".into()],
+        ];
+        for index in 0..=MAX_GIT_PUSH_GRANTS {
+            tags.push(vec![
+                "buzz-git-grant".into(),
+                format!("{index:064x}"),
+                format!("refs/heads/agent/{index}/**"),
+                "push".into(),
+                "100".into(),
+            ]);
+        }
+        assert_eq!(
+            parse_git_capability_policy(&tags),
+            Err(GitCapabilityParseError::TooManyGrants)
+        );
+    }
+
+    #[test]
+    fn git_capability_policy_isolates_actor_prefixes_and_main() {
+        let actor_a = "a".repeat(64);
+        let actor_b = "b".repeat(64);
+        let policy =
+            parse_git_capability_policy(&capability_tags(&actor_a, &actor_b, 86_500)).unwrap();
+
+        assert_eq!(
+            evaluate_git_push_capabilities(
+                &policy,
+                &actor_a,
+                &[create_update("refs/heads/agent/a/task-1")],
+                100,
+                200,
+            ),
+            Ok(GitCapabilityDecision::ExplicitGrant)
+        );
+        assert!(evaluate_git_push_capabilities(
+            &policy,
+            &actor_a,
+            &[create_update("refs/heads/main")],
+            100,
+            200,
+        )
+        .is_err());
+        assert!(evaluate_git_push_capabilities(
+            &policy,
+            &actor_a,
+            &[create_update("refs/heads/agent/b/task-1")],
+            100,
+            200,
+        )
+        .is_err());
+        assert_eq!(
+            evaluate_git_push_capabilities(
+                &policy,
+                &actor_b,
+                &[create_update("refs/heads/agent/b/task-1")],
+                100,
+                200,
+            ),
+            Ok(GitCapabilityDecision::ExplicitGrant)
+        );
+    }
+
+    #[test]
+    fn git_capability_policy_denies_expired_overlong_and_future_issued_grants() {
+        let actor = "a".repeat(64);
+        let update = create_update("refs/heads/agent/a/task-1");
+
+        let expired =
+            parse_git_capability_policy(&capability_tags(&actor, &"b".repeat(64), 200)).unwrap();
+        assert!(evaluate_git_push_capabilities(
+            &expired,
+            &actor,
+            std::slice::from_ref(&update),
+            100,
+            200
+        )
+        .is_err());
+
+        let overlong = parse_git_capability_policy(&capability_tags(
+            &actor,
+            &"b".repeat(64),
+            100 + MAX_GIT_PUSH_GRANT_TTL_SECS + 1,
+        ))
+        .unwrap();
+        assert!(evaluate_git_push_capabilities(
+            &overlong,
+            &actor,
+            std::slice::from_ref(&update),
+            100,
+            200,
+        )
+        .is_err());
+
+        let current =
+            parse_git_capability_policy(&capability_tags(&actor, &"b".repeat(64), 500)).unwrap();
+        assert!(evaluate_git_push_capabilities(&current, &actor, &[update], 300, 200).is_err());
+    }
+
+    #[test]
+    fn git_capability_policy_denies_atomic_push_with_uncovered_ref() {
+        let actor = "a".repeat(64);
+        let policy =
+            parse_git_capability_policy(&capability_tags(&actor, &"b".repeat(64), 500)).unwrap();
+        let result = evaluate_git_push_capabilities(
+            &policy,
+            &actor,
+            &[
+                create_update("refs/heads/agent/a/task-1"),
+                create_update("refs/heads/main"),
+            ],
+            100,
+            200,
+        );
+        let denials = result.expect_err("one uncovered ref denies the push");
+        assert_eq!(denials.len(), 1);
+        assert_eq!(denials[0].ref_name, "refs/heads/main");
+    }
+
+    #[test]
+    fn explicit_grant_does_not_bypass_non_role_protection() {
+        let actor = "a".repeat(64);
+        let policy =
+            parse_git_capability_policy(&capability_tags(&actor, &"b".repeat(64), 500)).unwrap();
+        let update = RefUpdate {
+            ref_name: "refs/heads/agent/a/task-1".into(),
+            kind: UpdateKind::NonFastForward,
+            old_oid: "a".repeat(40),
+            new_oid: "b".repeat(40),
+        };
+        assert_eq!(
+            evaluate_git_push_capabilities(
+                &policy,
+                &actor,
+                std::slice::from_ref(&update),
+                100,
+                200,
+            ),
+            Ok(GitCapabilityDecision::ExplicitGrant)
+        );
+        let rules =
+            vec![
+                parse_protection_tag(&["refs/heads/agent/a/**", "push:owner", "no-force-push"])
+                    .unwrap(),
+            ];
+        assert!(evaluate_push(&[update], MemberRole::Owner, &rules).is_err());
     }
 }
