@@ -835,3 +835,231 @@ async fn archived_target_deletion_does_not_reveal_target() {
         "{http_msg}"
     );
 }
+
+/// Whether `reader`'s open subscription `sid` receives any event within 2s.
+async fn receives_any(ws: &mut BuzzTestClient, sid: &str) -> bool {
+    let mut delivered = false;
+    while let Ok(msg) = ws.recv_event(Duration::from_secs(2)).await {
+        delivered |=
+            matches!(msg, RelayMessage::Event { subscription_id, .. } if subscription_id == sid);
+    }
+    delivered
+}
+
+/// Deleting a private deletion would store a public event naming it, so the
+/// author is refused (NIP-09 gives such a deletion no effect), everyone else
+/// gets the shared denial, and no reader but the author ever sees either.
+#[tokio::test]
+#[ignore]
+async fn deletion_of_private_deletion_rejected() {
+    let client = http_client();
+    let author = Keys::generate();
+    let other = Keys::generate();
+    let (_, private) = store_deleted_reminder(&client, &author).await;
+    let own = create_channel(&client, &author, "open").await;
+
+    let live = Filter::new()
+        .kind(Kind::EventDeletion)
+        .author(author.public_key());
+    let mut watcher = BuzzTestClient::connect(&relay_url(), &other)
+        .await
+        .expect("connect");
+    let sid = sub_id("chain");
+    watcher.subscribe(&sid, vec![live]).await.expect("REQ");
+    assert!(watcher
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE")
+        .is_empty());
+
+    let target = private.id.to_hex();
+    for k in [None, Some("5")] {
+        let mut tags = vec![tag(&["e", &target])];
+        tags.extend(k.map(|k| tag(&["k", k])));
+        let (status, http_msg, ws_msg) =
+            rejection(&client, &author, build_deletion(&author, tags)).await;
+        assert!(status >= 400, "k={k:?}: HTTP must reject");
+        for msg in [http_msg, ws_msg] {
+            assert_eq!(
+                msg, "invalid: cannot delete a private deletion request",
+                "k={k:?}"
+            );
+        }
+    }
+    // A 9005 cannot reach the global private deletion from any channel.
+    let redact = EventBuilder::new(Kind::Custom(9005), "")
+        .tags(vec![tag(&["e", &target]), tag(&["h", &own])])
+        .sign_with_keys(&author)
+        .unwrap();
+    let (_, http_msg, ws_msg) = rejection(&client, &author, redact).await;
+    assert_eq!((http_msg.as_str(), ws_msg.as_str()), (DENIED, DENIED));
+
+    let missing = "a".repeat(64);
+    assert_eq!(
+        rejection(
+            &client,
+            &other,
+            build_deletion(&other, vec![tag(&["e", &target])])
+        )
+        .await,
+        rejection(
+            &client,
+            &other,
+            build_deletion(&other, vec![tag(&["e", &missing])])
+        )
+        .await,
+    );
+    assert_rejected_as_non_author(
+        &client,
+        &other,
+        build_deletion(&other, vec![tag(&["e", &target])]),
+    )
+    .await;
+
+    // Only the private deletion exists: the author alone reads it.
+    assert_deletion_visibility(&author, &author, private.id, true).await;
+    assert_deletion_visibility(&other, &author, private.id, false).await;
+    assert!(
+        !receives_any(&mut watcher, &sid).await,
+        "no deletion may reach another reader live"
+    );
+    watcher.disconnect().await.expect("disconnect");
+
+    // Deleting a public deletion is unchanged.
+    let note = EventBuilder::text_note("public note")
+        .sign_with_keys(&author)
+        .unwrap();
+    submit_ok(&client, &author, &note).await;
+    let public = build_deletion(&author, vec![tag(&["e", &note.id.to_hex()])]);
+    submit_ok(&client, &author, &public).await;
+    submit_ok(
+        &client,
+        &author,
+        &build_deletion(&author, vec![tag(&["e", &public.id.to_hex()])]),
+    )
+    .await;
+}
+
+/// A soft-deleted target keeps its channel: re-deleting it faces the same
+/// membership and archive gates as a live one, and an accepted re-deletion is
+/// readable by that channel's members only. (The ingest Postgres test pins
+/// the stored channel itself; reads derive it from the target either way.)
+#[tokio::test]
+#[ignore]
+async fn soft_deleted_target_keeps_its_channel() {
+    let client = http_client();
+    let owner = Keys::generate();
+    let author = Keys::generate();
+    let outsider = Keys::generate();
+    let private = create_channel(&client, &owner, "private").await;
+    let archived = create_channel(&client, &author, "open").await;
+    let membership = |kind: u16| {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags(vec![
+                tag(&["h", &private]),
+                tag(&["p", &author.public_key().to_hex()]),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap()
+    };
+    let delete =
+        |target: &nostr::Event| build_deletion(&author, vec![tag(&["e", &target.id.to_hex()])]);
+    let soft_deleted = |channel: String| {
+        let client = client.clone();
+        let author = author.clone();
+        async move {
+            let message = post_message(&client, &author, &channel).await;
+            submit_ok(&client, &author, &delete(&message)).await;
+            message
+        }
+    };
+
+    submit_ok(&client, &owner, &membership(9000)).await;
+    let redeletable = soft_deleted(private.clone()).await;
+    let redeletion = delete(&redeletable);
+    submit_ok(&client, &author, &redeletion).await;
+    let removed = soft_deleted(private.clone()).await;
+    submit_ok(&client, &owner, &membership(9001)).await;
+    let in_archive = soft_deleted(archived.clone()).await;
+    let archive = EventBuilder::new(Kind::Custom(9002), "")
+        .tags(vec![tag(&["h", &archived]), tag(&["archived", "true"])])
+        .sign_with_keys(&author)
+        .unwrap();
+    submit_ok(&client, &author, &archive).await;
+
+    let missing = build_deletion(&author, vec![tag(&["e", &"a".repeat(64)])]);
+    let expected = rejection(&client, &author, missing).await;
+    assert_eq!(expected.1, DENIED);
+    for (case, target) in [("removed", &removed), ("archived", &in_archive)] {
+        assert_eq!(
+            rejection(&client, &author, delete(target)).await,
+            expected,
+            "{case}"
+        );
+    }
+
+    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    for (reader, name, visible) in [(&owner, "member", true), (&outsider, "outsider", false)] {
+        for filter in [
+            Filter::new().id(redeletion.id),
+            Filter::new()
+                .kind(Kind::EventDeletion)
+                .custom_tag(h, private.clone()),
+        ] {
+            let ids = http_query_ids(&client, reader, &filter).await;
+            assert_eq!(
+                ids.contains(&redeletion.id.to_hex()),
+                visible,
+                "{name} {filter:?}: {ids:?}"
+            );
+        }
+    }
+}
+
+/// The single-target rule depends only on the request, so a deletion naming
+/// two targets gets the same error whatever those targets are.
+#[tokio::test]
+#[ignore]
+async fn multi_target_deletion_error_ignores_targets() {
+    let client = http_client();
+    let author = Keys::generate();
+    let owner = Keys::generate();
+    let open = create_channel(&client, &author, "open").await;
+    let elsewhere = create_channel(&client, &owner, "private").await;
+    let foreign = post_message(&client, &owner, &elsewhere).await;
+    let live = post_message(&client, &author, &open).await;
+    let reminder = build_reminder(&author);
+    submit_ok(&client, &author, &reminder).await;
+    let artifact = post_artifact(&client, &author, &open).await;
+    let coordinate = format!(
+        "{KIND_EVENT_REMINDER}:{}:{}",
+        author.public_key().to_hex(),
+        reminder.tags.identifier().expect("d tag")
+    );
+    let missing = "a".repeat(64);
+    let targets = [
+        ("missing", missing.clone()),
+        ("live", live.id.to_hex()),
+        ("other channel", foreign.id.to_hex()),
+        ("private kind", reminder.id.to_hex()),
+        ("artifact", artifact.id.to_hex()),
+    ];
+    let shapes = [
+        ("two e", "(got e=2, a=0)", "e", missing.as_str()),
+        ("e plus a", "(got e=1, a=1)", "a", coordinate.as_str()),
+    ];
+    for (shape, counts, second, value) in shapes {
+        let expected = format!(
+            "invalid: deletion events must reference exactly one target via e or a tag {counts}"
+        );
+        let mut status = None;
+        for (case, target) in &targets {
+            let deletion =
+                build_deletion(&author, vec![tag(&["e", target]), tag(&[second, value])]);
+            let (code, http_msg, ws_msg) = rejection(&client, &author, deletion).await;
+            assert_eq!(http_msg, expected, "{shape}, {case}: HTTP");
+            assert_eq!(ws_msg, expected, "{shape}, {case}: WS");
+            assert_eq!(*status.get_or_insert(code), code, "{shape}, {case}: status");
+        }
+    }
+}

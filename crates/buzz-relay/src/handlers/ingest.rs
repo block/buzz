@@ -6899,6 +6899,18 @@ mod postgres_tests {
         )
         .await
         .expect("in-scope token deletes the author's message");
+        // Re-deleting a soft-deleted message stores the deletion in its channel.
+        let redeletion = delete(&deleted.id.to_hex(), &author);
+        ingest_event_inner(&state, &tracer, &tenant, redeletion.clone(), author_auth())
+            .await
+            .expect("author re-deletes a soft-deleted message");
+        let stored = state
+            .db
+            .get_event_by_id(community, redeletion.id.as_bytes())
+            .await
+            .expect("read re-deletion")
+            .expect("re-deletion stored");
+        assert_eq!(stored.channel_id, Some(channels[0]));
     }
 
     // ── Owner-aware ban/timeout coverage ─────────────────────────────────────
