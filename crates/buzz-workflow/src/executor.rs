@@ -735,9 +735,6 @@ pub async fn dispatch_action(
 
                     let token = generate_approval_token(run_id, step_id);
 
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
-
                     Ok(StepResult::Suspended {
                         approval_token: token,
                     })
@@ -1053,7 +1050,7 @@ pub struct ExecutionResult {
 /// 4. Stores the step output for use by later steps.
 ///
 /// On `RequestApproval`: returns `ExecutionResult` with `approval_token = Some(token)`.
-/// Caller must persist the approval record and update the run status.
+/// The approval and waiting status are committed together before returning.
 ///
 /// Returns `ExecutionResult` with `approval_token = None` on normal completion.
 ///
@@ -1277,12 +1274,59 @@ async fn execute_steps(
                 step_outputs.insert(step.id.clone(), output);
             }
             StepResult::Suspended { approval_token } => {
+                let persist = async {
+                    let ActionDef::RequestApproval { from, timeout, .. } = &resolved_action else {
+                        return Err(WorkflowError::InvalidDefinition(
+                            "invalid approval action".into(),
+                        ));
+                    };
+                    let seconds = parse_duration_secs(timeout.as_deref().unwrap_or("24h"))?;
+                    let duration = i64::try_from(seconds)
+                        .ok()
+                        .and_then(chrono::Duration::try_seconds)
+                        .filter(|duration| *duration > chrono::Duration::zero())
+                        .ok_or_else(|| {
+                            WorkflowError::InvalidDefinition("invalid approval timeout".into())
+                        })?;
+                    let expires_at =
+                        chrono::Utc::now()
+                            .checked_add_signed(duration)
+                            .ok_or_else(|| {
+                                WorkflowError::InvalidDefinition("approval expiry overflow".into())
+                            })?;
+                    let run = engine.db.get_workflow_run(community_id, run_id).await?;
+                    buzz_db::workflow::suspend_for_approval(
+                        engine.db.pool(),
+                        buzz_db::workflow::CreateApprovalParams {
+                            community_id,
+                            token: &approval_token,
+                            workflow_id: run.workflow_id,
+                            run_id,
+                            step_id: &step.id,
+                            step_index: i as i32,
+                            approver_spec: from,
+                            expires_at,
+                        },
+                        &serde_json::Value::Array(trace.clone()),
+                    )
+                    .await?;
+                    Ok::<_, WorkflowError>(())
+                }
+                .await;
+                if let Err(error) = persist {
+                    return Err((
+                        error,
+                        crate::error::PartialProgress {
+                            step_index: i,
+                            trace,
+                        },
+                    ));
+                }
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
-                // Return the token and current state so the caller can persist the
-                // approval record and update the run's execution trace.
+                // No later step executes before a durable approval decision.
                 return Ok(ExecutionResult {
                     approval_token: Some(approval_token),
                     step_index: i,

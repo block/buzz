@@ -1022,6 +1022,45 @@ pub struct CreateApprovalParams<'a> {
 /// The `token` parameter is the raw (plaintext) token. It is hashed with
 /// SHA-256 before storage so the DB never holds the raw value.
 pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) -> Result<()> {
+    let mut connection = pool.acquire().await?;
+    insert_approval(&mut connection, params).await
+}
+
+/// Atomically persist a hashed approval and suspend its running workflow.
+/// A rejected transition rolls back the approval, including on cancellation.
+pub async fn suspend_for_approval(
+    pool: &PgPool,
+    params: CreateApprovalParams<'_>,
+    trace: &serde_json::Value,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE workflow_runs SET status='waiting_approval', current_step=$4,
+         execution_trace=execution_trace || $5::jsonb
+         WHERE community_id=$1 AND id=$2 AND workflow_id=$3 AND status='running'",
+    )
+    .bind(params.community_id.as_uuid())
+    .bind(params.run_id)
+    .bind(params.workflow_id)
+    .bind(params.step_index)
+    .bind(trace)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(DbError::InvalidData(
+            "approval requires a running run".into(),
+        ));
+    }
+    insert_approval(&mut tx, params).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn insert_approval(
+    connection: &mut PgConnection,
+    params: CreateApprovalParams<'_>,
+) -> Result<()> {
     let CreateApprovalParams {
         community_id,
         token,
@@ -1049,7 +1088,7 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     .bind(step_index)
     .bind(approver_spec)
     .bind(expires_at)
-    .execute(pool)
+    .execute(connection)
     .await?;
 
     Ok(())
@@ -1301,6 +1340,25 @@ pub async fn find_by_owner_and_name(
 }
 
 // -- Run and approval Db API --------------------------------------------------
+
+/// Consume a pending approval once and leave a durable recovery marker.
+/// Only the winning caller may dispatch the continuation. The marker must not
+/// be retried automatically: a crash can happen after an external side effect.
+pub async fn claim_approval_resume(
+    connection: &mut PgConnection,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    signer: &[u8],
+) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT platform_claim_approval($1,$2,$3)")
+            .bind(community_id.as_uuid())
+            .bind(token_hash)
+            .bind(signer)
+            .fetch_one(connection)
+            .await?,
+    )
+}
 
 impl Db {
     /// Create a new workflow run.
