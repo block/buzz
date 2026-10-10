@@ -259,6 +259,9 @@ pub enum CancelReason {
     /// and incorporate the message if relevant
     /// (`MultipleEventHandling::Steer`, the default mid-turn path).
     Steer,
+    /// The session died with background work outstanding; this re-delivers
+    /// the request it was answering to a fresh session (`crate::resume`).
+    Resume,
 }
 
 /// A batch of events to prompt the agent with.
@@ -363,6 +366,12 @@ pub struct EventQueue {
     /// Must be strictly greater than `max_turn_duration` so a turn running to
     /// the hard cap returns via `mark_complete` before the backstop fires.
     in_flight_deadline: Duration,
+    /// Durable record of scopes with outstanding background work
+    /// (`crate::resume`). `Default` is disabled.
+    resume: crate::resume::ResumeJournal,
+    /// Startup resume batches held back by per-agent jitter, with their
+    /// release time. Moved to the cancelled carryover once due.
+    pending_resumes: Vec<(Instant, FlushBatch)>,
 }
 
 impl EventQueue {
@@ -385,7 +394,91 @@ impl EventQueue {
             cancel_reasons: HashMap::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
+            resume: Default::default(),
+            pending_resumes: Vec::new(),
         }
+    }
+
+    /// Load the resume journal and take every entry a previous process left.
+    ///
+    /// The batches come from a file on disk and are untrusted: they reach the
+    /// queue only through [`stage_resumes`](Self::stage_resumes), which takes
+    /// the output of [`crate::resume_admission`]. See [`crate::resume`].
+    pub(crate) fn load_resume(
+        &mut self,
+        path: Option<std::path::PathBuf>,
+        now: u64,
+    ) -> Vec<FlushBatch> {
+        self.resume = crate::resume::ResumeJournal::load(path);
+        self.resume.take_startup(now)
+    }
+
+    /// Stage admitted startup resume batches, each held back by `delay`
+    /// (fleet jitter).
+    pub(crate) fn stage_resumes(
+        &mut self,
+        admitted: crate::resume_admission::AdmittedResumes,
+        delay: Duration,
+    ) {
+        let release = Instant::now() + delay;
+        for batch in admitted.into_batches() {
+            if delay.is_zero() {
+                self.requeue_as_cancelled(batch, CancelReason::Resume);
+            } else {
+                self.pending_resumes.push((release, batch));
+            }
+        }
+    }
+
+    /// Handle shared with prompt tasks and agent clients.
+    pub(crate) fn resume_journal(&self) -> crate::resume::ResumeJournal {
+        self.resume.clone()
+    }
+
+    /// Queue resume turns for scopes whose session died with a respawned
+    /// slot. A scope whose request is already back in the queue or in flight
+    /// (the in-process requeue) is left to that path.
+    pub(crate) fn deliver_lost_resumes(&mut self) {
+        let journal = self.resume.clone();
+        let batches = journal.take_lost(crate::resume::now_secs(), |scope, ids| {
+            self.in_flight_scopes.contains(scope)
+                || self
+                    .queues
+                    .get(scope)
+                    .is_some_and(|q| q.iter().any(|e| ids.contains(&e.event.id)))
+                || self
+                    .cancelled_batches
+                    .get(scope)
+                    .is_some_and(|c| c.iter().any(|e| ids.contains(&e.event.id)))
+        });
+        for batch in batches {
+            self.requeue_as_cancelled(batch, CancelReason::Resume);
+        }
+    }
+
+    /// Release jittered startup resumes that are due. A resume batch rides the
+    /// cancelled carryover, so a live message for the scope folds it in as the
+    /// prior section; with none it is flushed alone (both framed by
+    /// [`CancelReason::Resume`]).
+    fn release_due_resumes(&mut self, now: Instant) {
+        if self.pending_resumes.is_empty() {
+            return;
+        }
+        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_resumes)
+            .into_iter()
+            .partition(|(release, _)| *release <= now);
+        self.pending_resumes = waiting;
+        for (_, batch) in due {
+            self.requeue_as_cancelled(batch, CancelReason::Resume);
+        }
+    }
+
+    /// Release time of the earliest jittered startup resume still held back.
+    pub(crate) fn next_resume_release(&self) -> Option<Instant> {
+        self.pending_resumes
+            .iter()
+            .map(|(release, _)| *release)
+            .min()
     }
 
     /// Set the in-flight backstop deadline from the configured max turn
@@ -505,6 +598,7 @@ impl EventQueue {
     /// inserts into `in_flight_channels`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
         let now = Instant::now();
+        self.release_due_resumes(now);
 
         // Auto-expire any stuck in-flight entries that missed mark_complete.
         let expired: Vec<SessionScope> = self
@@ -642,6 +736,7 @@ impl EventQueue {
                     && self.queues.get(*scope).is_some_and(|q| !q.is_empty())
             })
             .map(|(_, &deadline)| deadline)
+            .chain(self.next_resume_release())
             .min()
     }
 
@@ -788,6 +883,13 @@ impl EventQueue {
     /// Does NOT set `retry_after`. Does NOT remove from `in_flight_scopes` —
     /// caller must call `mark_complete` separately.
     pub fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
+        // A resume batch flushed alone carries its request in `events`; put it
+        // back in the cancelled carryover so the next flush keeps the
+        // `Resume` framing (and the journal's note).
+        if batch.cancel_reason == Some(CancelReason::Resume) && batch.cancelled_events.is_empty() {
+            self.requeue_as_cancelled(batch, CancelReason::Resume);
+            return;
+        }
         let channel_id = batch.channel_id;
         let scope = batch.scope.clone();
 
@@ -859,6 +961,7 @@ impl EventQueue {
     /// full `flush_next` call.
     pub fn has_flushable_work(&mut self) -> bool {
         let now = Instant::now();
+        self.release_due_resumes(now);
 
         // Auto-expire stuck in-flight entries (same logic as flush_next).
         let expired: Vec<SessionScope> = self
@@ -926,7 +1029,7 @@ impl EventQueue {
             .withheld_native_steer
             .iter()
             .any(|(scope, v)| !v.is_empty() && !self.in_flight_scopes.contains(scope));
-        has_queued || has_cancelled || has_withheld
+        has_queued || has_cancelled || has_withheld || !self.pending_resumes.is_empty()
     }
 
     /// Number of pending partitions (session scopes) with queued events.
@@ -1013,6 +1116,13 @@ impl EventQueue {
                 return true;
             }
             events.iter().for_each(|e| collect(&e.event));
+            false
+        });
+        self.pending_resumes.retain(|(_, batch)| {
+            if batch.channel_id != channel_id {
+                return true;
+            }
+            batch.events.iter().for_each(|e| collect(&e.event));
             false
         });
         // Also purge side-tables for every scope of this channel.
@@ -2431,13 +2541,22 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //    - `Interrupt`: the new request *supersedes* the interrupted work.
     //    - `Steer` (default): a message arrived while the agent was working; it
     //      should *continue* its work and weave the message in if relevant.
-    let has_cancelled = !batch.cancelled_events.is_empty();
+    //    - `Resume`: the session died with background work outstanding. With
+    //      no new message the re-delivered request IS the prior section.
+    let resume_only =
+        batch.cancel_reason == Some(CancelReason::Resume) && batch.cancelled_events.is_empty();
+    let has_cancelled = !batch.cancelled_events.is_empty() || resume_only;
     let framing = MergeFraming::for_reason(batch.cancel_reason);
+    let prior_events = if resume_only {
+        &batch.events
+    } else {
+        &batch.cancelled_events
+    };
 
     // 4a. Cancelled events section.
     if has_cancelled {
         let mut body = String::new();
-        for (i, be) in batch.cancelled_events.iter().enumerate() {
+        for (i, be) in prior_events.iter().enumerate() {
             if !body.is_empty() {
                 body.push_str("\n\n");
             }
@@ -2455,7 +2574,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     }
 
     // 4b. Event block(s).
-    let event_section = if batch.events.len() == 1 {
+    let event_section = if resume_only {
+        String::new()
+    } else if batch.events.len() == 1 {
         let be = &batch.events[0];
         if has_cancelled {
             crate::prompt_framing::semantic_section(
@@ -2502,7 +2623,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             &body,
         )
     };
-    sections.push(event_section);
+    if !event_section.is_empty() {
+        sections.push(event_section);
+    }
 
     // 4c. Closing note for cancel + re-prompt.
     if has_cancelled {
@@ -2541,6 +2664,18 @@ impl MergeFraming {
                 closing_note: "Note: A new message arrived while you were working. Continue your \
                      in-progress work and incorporate the new message if it's relevant; if it's \
                      unrelated, you may briefly acknowledge it and carry on.",
+            },
+            // A resume turn must not announce itself: post only a real result
+            // or a real question, and nothing if the work was already delivered.
+            Some(CancelReason::Resume) => MergeFraming {
+                prior_tag: "what-you-were-working-on-before-your-session-ended",
+                new_tag: "new-message-arrived-after-your-session-ended",
+                closing_note: "Note: Your session was restarted and lost its context. Background \
+                     work still running at that point was stopped with it (listed below, if \
+                     recorded). Check the thread, your workspace and those outputs, then pick up \
+                     the outstanding work. Do not post a \"resumed\" or \"back online\" \
+                     message; post only a real result or a real question. If the result is \
+                     already delivered, do nothing and post nothing.",
             },
             Some(CancelReason::Interrupt) => MergeFraming {
                 prior_tag: "previous-request-interrupted-before-completion",
@@ -7412,6 +7547,227 @@ mod tests {
         assert!(
             !prompt.contains("Description:"),
             "unresolved metadata must not render a Description field; got: {prompt}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resume_queue_tests {
+    use super::*;
+    use crate::resume::{BackgroundTask, ResumeJournal, ResumeTracker, TurnEnd};
+    use crate::resume_admission::AdmittedResumes;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    fn conv(channel_id: Uuid) -> SessionScope {
+        SessionScope::Conversation { channel_id }
+    }
+
+    fn temp_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("buzz-resume-{label}-{}.json", Uuid::new_v4()))
+    }
+
+    fn request_batch(scope: &SessionScope, text: &str) -> FlushBatch {
+        FlushBatch {
+            channel_id: scope.channel_id(),
+            scope: scope.clone(),
+            events: vec![BatchEvent {
+                event: EventBuilder::new(Kind::Custom(9), text)
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap(),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+                edit: None,
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    fn shell(id: &str, title: &str, output: Option<&str>) -> BackgroundTask {
+        BackgroundTask {
+            id: id.into(),
+            title: title.into(),
+            output_file: output.map(str::to_string),
+            tool_call_id: None,
+        }
+    }
+
+    // A journal left by a dead process (one turn held open by a background
+    // subagent, one idle scope with a live background shell) yields one
+    // `CancelReason::Resume` batch each at startup, framed as a resume and
+    // naming the stopped work; once those turns complete, a further restart
+    // yields nothing.
+    #[test]
+    fn startup_resume_replays_lost_background_turns_once() {
+        let path = temp_path("startup");
+        let now = crate::resume::now_secs();
+        let (held, background) = (conv(Uuid::new_v4()), conv(Uuid::new_v4()));
+        {
+            let previous = ResumeJournal::load(Some(path.clone()));
+            previous.begin_turn(&request_batch(&held, "request"), now);
+            previous.subagent_started(
+                &held,
+                BackgroundTask {
+                    id: "toolu_agent".into(),
+                    title: "icon concepts".into(),
+                    output_file: None,
+                    tool_call_id: Some("toolu_agent".into()),
+                },
+                now,
+            );
+            // `held` dies mid-turn; `background` finished its turn, but the
+            // shell it started is still running.
+            previous.begin_turn(&request_batch(&background, "request"), now);
+            previous.task_started(
+                &background,
+                shell("bash-1", "cargo build", Some("/tmp/bash-1.output")),
+                now,
+            );
+            previous.turn_ended(&background, TurnEnd::Natural);
+        }
+
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let startup = queue.load_resume(Some(path.clone()), now);
+        queue.stage_resumes(AdmittedResumes::assume_admitted(startup), Duration::ZERO);
+        let journal = queue.resume_journal();
+        let mut prompts = HashMap::new();
+        while let Some(batch) = queue.flush_next() {
+            assert_eq!(batch.cancel_reason, Some(CancelReason::Resume));
+            let sections = crate::resume::with_resume_note(
+                format_prompt(&batch, &FormatPromptArgs::default()),
+                Some(&batch),
+                &journal,
+            );
+            prompts.insert(batch.scope.clone(), sections.join("\n"));
+            queue.mark_complete(&batch.scope);
+        }
+        assert_eq!(prompts.len(), 2, "one resume batch per lost scope");
+        for prompt in prompts.values() {
+            assert!(prompt.contains("<what-you-were-working-on-before-your-session-ended>"));
+            assert!(prompt.contains("request"), "original request re-delivered");
+            assert!(prompt.contains("do nothing and post nothing"));
+        }
+        assert!(prompts[&held].contains("background subagent: icon concepts"));
+        assert!(prompts[&background].contains("cargo build (output: /tmp/bash-1.output)"));
+
+        // The resumed turns complete without leaving new work behind.
+        journal.turn_ended(&held, TurnEnd::Natural);
+        journal.turn_ended(&background, TurnEnd::Natural);
+        let mut restarted = EventQueue::new(DedupMode::Queue);
+        let startup = restarted.load_resume(Some(path.clone()), now);
+        restarted.stage_resumes(AdmittedResumes::assume_admitted(startup), Duration::ZERO);
+        assert!(
+            restarted.flush_next().is_none(),
+            "second startup yields nothing"
+        );
+        assert!(!path.exists());
+    }
+
+    // Respawn path: a dropped agent client marks its scopes lost; the main
+    // loop's `deliver_lost_resumes` queues a resume that folds a live message
+    // in, and never duplicates a request the in-process requeue already holds.
+    #[test]
+    fn lost_session_resume_merges_live_message_and_skips_requeued() {
+        let path = temp_path("lost");
+        let (lost, requeued) = (conv(Uuid::new_v4()), conv(Uuid::new_v4()));
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let startup = queue.load_resume(Some(path.clone()), crate::resume::now_secs());
+        assert!(startup.is_empty());
+        let journal = queue.resume_journal();
+        let requeued_batch = request_batch(&requeued, "request");
+        {
+            let mut tracker = ResumeTracker::default();
+            tracker.begin_turn(&journal, "s-lost", &request_batch(&lost, "request"));
+            tracker.begin_turn(&journal, "s-requeued", &requeued_batch);
+            for scope in [&lost, &requeued] {
+                journal.task_started(
+                    scope,
+                    shell("bash-1", "long build", None),
+                    crate::resume::now_secs(),
+                );
+            }
+            // The timed-out turn's batch went back to the queue in-process.
+            queue.requeue_preserve_timestamps(requeued_batch.clone());
+        } // tracker dropped = the agent process is gone
+        let live = request_batch(&lost, "live message");
+        queue.requeue_preserve_timestamps(live.clone());
+        queue.deliver_lost_resumes();
+
+        let mut seen = HashMap::new();
+        while let Some(batch) = queue.flush_next() {
+            seen.insert(batch.scope.clone(), batch.clone());
+            queue.mark_complete(&batch.scope);
+        }
+        let merged = &seen[&lost];
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Resume));
+        assert_eq!(merged.events[0].event.id, live.events[0].event.id);
+        assert_eq!(merged.cancelled_events.len(), 1);
+        let prompt = format_prompt(merged, &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains("<new-message-arrived-after-your-session-ended"));
+        let other = &seen[&requeued];
+        assert_eq!(
+            other.cancel_reason, None,
+            "requeued batch is not doubled as a resume"
+        );
+        assert!(other.cancelled_events.is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn startup_resume_jitter_holds_batch_back_until_release() {
+        let path = temp_path("jitter");
+        let now = crate::resume::now_secs();
+        let scope = conv(Uuid::new_v4());
+        {
+            let previous = ResumeJournal::load(Some(path.clone()));
+            previous.begin_turn(&request_batch(&scope, "request"), now);
+            previous.task_started(&scope, shell("t", "t", None), now);
+        }
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let startup = queue.load_resume(Some(path.clone()), now);
+        queue.stage_resumes(
+            AdmittedResumes::assume_admitted(startup),
+            Duration::from_secs(60),
+        );
+        assert!(queue.flush_next().is_none(), "jittered resume waits");
+        assert!(!queue.has_flushable_work());
+        assert!(queue.has_undispatched_work());
+        let release = queue.next_resume_release().expect("release time");
+        assert_eq!(
+            queue.next_retry_deadline(),
+            Some(release),
+            "the event loop wakes for the release"
+        );
+        // Once due, it flushes as a resume.
+        queue.pending_resumes[0].0 = Instant::now();
+        assert!(queue.has_flushable_work());
+        let batch = queue.flush_next().expect("released resume batch");
+        assert_eq!(batch.cancel_reason, Some(CancelReason::Resume));
+        assert!(queue.next_resume_release().is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    // A resume batch flushed alone and put back (pool exhausted) keeps its
+    // resume framing on the next flush instead of becoming a plain prompt.
+    #[test]
+    fn requeued_resume_only_batch_keeps_resume_framing() {
+        let scope = conv(Uuid::new_v4());
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let mut resume = request_batch(&scope, "request");
+        resume.cancel_reason = Some(CancelReason::Resume);
+        queue.requeue_as_cancelled(resume, CancelReason::Resume);
+        let flushed = queue.flush_next().expect("resume batch");
+        assert_eq!(flushed.cancel_reason, Some(CancelReason::Resume));
+        queue.requeue_preserve_timestamps(flushed.clone());
+        queue.mark_complete(&scope);
+        let again = queue.flush_next().expect("requeued resume batch");
+        assert_eq!(again.cancel_reason, Some(CancelReason::Resume));
+        assert_eq!(again.events[0].event.id, flushed.events[0].event.id);
+        let prompt = format_prompt(&again, &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains("<what-you-were-working-on-before-your-session-ended>"));
+        assert!(
+            !prompt.contains("<buzz-event "),
+            "the request is not repeated as a new event"
         );
     }
 }

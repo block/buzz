@@ -18,6 +18,8 @@ mod prompt_project;
 mod queue;
 mod recovery_wake;
 mod relay;
+mod resume;
+mod resume_admission;
 mod run_task;
 mod runtime;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
@@ -3059,11 +3061,41 @@ async fn run_harness(
         );
     }
 
-    let ctx = Arc::new(runtime.prompt_context(
+    let mut prompt_context = runtime.prompt_context(
         relay.rest_client(),
         channel_info_map,
         SessionMode::Conversation,
-    )?);
+    )?;
+    // Turns whose session died with background work outstanding (previous
+    // process): one resume batch each, spread by per-agent jitter. The journal
+    // is a file on disk, so every entry is re-admitted through the live
+    // ingress boundary before it can become a prompt.
+    let startup_resumes = queue.load_resume(
+        resume::path_for_agent(
+            config.resume_enabled,
+            config.resume_file.as_deref(),
+            &pubkey_hex,
+        ),
+        resume::now_secs(),
+    );
+    let admitted_resumes = resume_admission::ResumeAdmission {
+        author_gate: &mut author_gate_ctx,
+        respond_to: &config.respond_to,
+        allowlist: &config.respond_to_allowlist,
+        ignore_self: config.ignore_self,
+        session_policy: config.session_policy,
+        rules: &rules,
+        subscribed_channels: &subscribed_channel_ids,
+        owner_cache: &owner_cache,
+        channel_info: &prompt_context.channel_info,
+        rest_client: &prompt_context.rest_client,
+        agent_pubkey_hex: &pubkey_hex,
+    }
+    .admit(startup_resumes, &queue.resume_journal())
+    .await;
+    queue.stage_resumes(admitted_resumes, resume::startup_jitter(&pubkey_hex));
+    prompt_context.resume = queue.resume_journal();
+    let ctx = Arc::new(prompt_context);
 
     if !config.memory_enabled {
         tracing::info!(
@@ -3146,6 +3178,9 @@ async fn run_harness(
     // spawn_and_init never blocks the main loop.
     let maintenance_interval = Duration::from_secs(30);
     let mut last_maintenance = std::time::Instant::now();
+    // Idle-slot drain (resume journal): same starve-proof top-of-loop
+    // Instant check as maintenance, woken through the maintenance deadline.
+    let mut last_idle_drain = std::time::Instant::now();
 
     // Channel for background respawn tasks to return completed agents.
     // Bounded to agent count — at most one respawn per slot in flight.
@@ -3229,6 +3264,10 @@ async fn run_harness(
     }
 
     loop {
+        // Sessions lost with a respawned slot (the old agent client's drop
+        // marks them): queue one resume turn per scope with background work.
+        queue.deliver_lost_resumes();
+
         // Whether buffered work is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
@@ -3311,6 +3350,11 @@ async fn run_harness(
             }
         }
 
+        if pool_ready && last_idle_drain.elapsed() >= IDLE_DRAIN_INTERVAL {
+            last_idle_drain = std::time::Instant::now();
+            drain_idle_agent_slots(&mut pool).await;
+        }
+
         // Reap completed respawn handles from the JoinSet. Payloads are
         // delivered out-of-band through `respawn_rx` (selected below), so the
         // JoinSet is never joined by the normal flow — Tokio retains finished
@@ -3326,10 +3370,18 @@ async fn run_harness(
         // wakes on its result/respawn instead of spinning on an expired retry.
         let retry_at = if pool_ready && pool.any_idle() {
             queue.next_retry_deadline()
+        } else if !pool_ready {
+            // A sleeping lazy pool must still wake for a jittered startup
+            // resume; the top of the loop then sees it as flushable work.
+            queue.next_resume_release()
         } else {
             None
         };
-        let maintenance_at = pool_ready.then_some(last_maintenance + maintenance_interval);
+        // The idle drain shares the maintenance wake: either deadline returns
+        // to the top of the loop, where each runs when due.
+        let maintenance_at = pool_ready.then_some(
+            (last_maintenance + maintenance_interval).min(last_idle_drain + IDLE_DRAIN_INTERVAL),
+        );
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
@@ -6025,15 +6077,61 @@ async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
     }
 }
 
+/// How often the main loop reads idle slots' stdout (see [`drain_idle_agent_slots`]).
+const IDLE_DRAIN_INTERVAL: Duration = Duration::from_secs(3);
+/// Per-slot quiet window: buffered lines arrive back-to-back, so 25 ms of
+/// silence means the backlog is consumed.
+const IDLE_DRAIN_QUIET: Duration = Duration::from_millis(25);
+/// Per-tick ceiling, so a slot streaming a self-woken turn cannot hold the loop.
+const IDLE_DRAIN_MAX: Duration = Duration::from_millis(250);
+
+/// Read every IDLE slot's buffered agent output, concurrently, so the resume
+/// journal sees updates from turns the agent started on its own (a background
+/// shell finishing after `end_turn` self-wakes Claude Code) before any
+/// shutdown. Only slots resting in `pool.agents_mut()` are touched: a slot
+/// taken for a turn has been moved into the join set, so ownership rules out
+/// racing a prompt read. Fail-open: errors are logged, never propagated; a
+/// dead slot is found by the ordinary turn/respawn paths.
+pub(crate) async fn drain_idle_agent_slots(pool: &mut AgentPool) {
+    let drains = pool
+        .agents_mut()
+        .iter_mut()
+        .flatten()
+        .map(|agent| async move {
+            let index = agent.index;
+            match agent
+                .acp
+                .drain_idle_updates(IDLE_DRAIN_QUIET, IDLE_DRAIN_MAX)
+                .await
+            {
+                Ok(0) => {}
+                Ok(lines) => tracing::debug!(agent = index, lines, "idle drain read agent output"),
+                Err(e) => tracing::debug!(agent = index, "idle drain stopped: {e}"),
+            }
+        });
+    futures_util::future::join_all(drains).await;
+}
+
 async fn shutdown_agent_pool(pool: &mut AgentPool) {
     pool.join_set.shutdown().await;
     while let Ok(mut result) = pool.result_rx_try_recv() {
         result.agent.acp.shutdown().await;
     }
-    for slot in pool.agents_mut() {
-        if let Some(mut agent) = slot.take() {
-            agent.acp.shutdown().await;
-        }
+    let mut idle: Vec<OwnedAgent> = pool
+        .agents_mut()
+        .iter_mut()
+        .filter_map(Option::take)
+        .collect();
+    // Read buffered between-turn updates first (all slots at once, 250 ms
+    // total), so a background task that finished while its slot was idle
+    // clears its resume entry instead of being resumed after the restart.
+    futures_util::future::join_all(
+        idle.iter_mut()
+            .map(|agent| agent.acp.drain_stale_responses(Duration::from_millis(250))),
+    )
+    .await;
+    for mut agent in idle {
+        agent.acp.shutdown().await;
     }
 }
 
@@ -10098,6 +10196,7 @@ mod build_mcp_servers_tests {
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
+            background_idle_timeout_secs: config::DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
@@ -10137,6 +10236,8 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            resume_enabled: true,
+            resume_file: None,
         }
     }
 
@@ -11195,6 +11296,7 @@ mod error_outcome_emission_tests {
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
+            background_idle_timeout_secs: config::DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
@@ -11234,6 +11336,8 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            resume_enabled: true,
+            resume_file: None,
         }
     }
 

@@ -225,6 +225,27 @@ pub struct AcpClient {
     /// readable thinking unless asked; set only when the CLI the adapter runs
     /// is new enough to accept `--thinking-display`.
     claude_thinking_summaries: bool,
+    /// Configured idle limit for a turn held open by an outstanding
+    /// background subagent (see [`set_background_idle_timeout`]). `None`
+    /// (the default) keeps the plain per-call idle timeout for every turn.
+    ///
+    /// [`set_background_idle_timeout`]: Self::set_background_idle_timeout
+    background_idle_timeout: Option<std::time::Duration>,
+    /// The background idle limit armed for the prompt read currently in
+    /// flight. Set only by `session_prompt_blocks_with_idle_timeout` for the
+    /// duration of its read, so `cancel_with_cleanup`'s drain keeps its own
+    /// short idle budget.
+    turn_background_idle: Option<std::time::Duration>,
+    /// Whether the current turn has launched a background subagent
+    /// (`rawInput.run_in_background == true` on a non-shell tool call).
+    /// claude-agent-acp holds `session/prompt` open until such a subagent
+    /// finishes, so the outer channel can go quiet for a long time without
+    /// the turn being hung. Reset at the start of every prompt.
+    turn_has_background_subagent: bool,
+    /// Background-work bookkeeping for the resume journal (`crate::resume`):
+    /// maps this process's sessions to scopes and records every
+    /// `async_task_*` / background-subagent update read on the pipe.
+    pub(crate) resume: crate::resume::ResumeTracker,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -419,7 +440,17 @@ fn build_client_capabilities() -> serde_json::Value {
             // Non-standard extension used by claude-agent-acp to advertise the
             // exact terminal login argv for subscription auth. Unknown `_meta`
             // keys are ignored by other adapters.
-            "terminal-auth": true
+            "terminal-auth": true,
+            // AIR extension (claude-agent-acp `air-extension.js`): with
+            // `asyncTasks` advertised the adapter publishes
+            // `async_task_spawned` / `async_task_state_update` for background
+            // shells and workflows, which the resume journal records.
+            "jetbrains": {
+                "air": {
+                    "version": 1,
+                    "capabilities": ["asyncTasks"]
+                }
+            }
         }
     })
 }
@@ -634,6 +665,10 @@ impl AcpClient {
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
             claude_thinking_summaries,
+            background_idle_timeout: None,
+            turn_background_idle: None,
+            turn_has_background_subagent: false,
+            resume: Default::default(),
         })
     }
 
@@ -873,6 +908,10 @@ impl AcpClient {
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
 
+        // A new turn starts un-held; the read loop flips this when the
+        // agent launches a background subagent.
+        self.turn_has_background_subagent = false;
+
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
         self.next_id += 1;
@@ -891,6 +930,7 @@ impl AcpClient {
             return Err(e);
         }
 
+        self.turn_background_idle = self.background_idle_timeout;
         let result = self
             .read_until_response_with_idle_timeout(
                 session_id,
@@ -900,6 +940,7 @@ impl AcpClient {
                 max_duration,
             )
             .await;
+        self.turn_background_idle = None;
 
         // On timeout errors, leave current_hard_deadline set so cancel_with_cleanup
         // can inherit the remaining budget. Clear it on all other outcomes.
@@ -1015,6 +1056,23 @@ impl AcpClient {
         self.steer_rx = None;
     }
 
+    /// Configure the idle limit used once a turn has launched a background
+    /// subagent. A value no longer than the turn's plain idle timeout has no
+    /// effect (the extension only lengthens). Applies from the next prompt.
+    pub fn set_background_idle_timeout(&mut self, timeout: std::time::Duration) {
+        self.background_idle_timeout = Some(timeout);
+    }
+
+    /// The idle limit currently in force for the read loop: the background
+    /// limit when this prompt's turn is held for a background subagent,
+    /// otherwise `idle_timeout`.
+    fn effective_idle_timeout(&self, idle_timeout: std::time::Duration) -> std::time::Duration {
+        match self.turn_background_idle {
+            Some(background) if self.turn_has_background_subagent => background.max(idle_timeout),
+            _ => idle_timeout,
+        }
+    }
+
     /// Returns `true` if no steer receiver is currently installed.
     ///
     /// Test-only: used by `pool` tests to assert the post-return invariant
@@ -1128,6 +1186,9 @@ impl AcpClient {
         // The separate hard_deadline bounds agents that keep producing output
         // but ignore cancellation.
         let cleanup_idle = std::time::Duration::from_secs(30);
+        // A prompt future dropped mid-read (control signal) never disarmed
+        // its background idle limit; the drain must keep its own budget.
+        self.turn_background_idle = None;
         let remaining = hard_deadline
             .checked_duration_since(tokio::time::Instant::now())
             .unwrap_or_default();
@@ -1216,7 +1277,10 @@ impl AcpClient {
     ///
     /// This is a best-effort drain: it reads until the buffer is empty or
     /// `drain_timeout` elapses, whichever comes first. Errors are ignored.
-    #[allow(dead_code)] // Scaffolding for future model-switch timeout cleanup; not yet wired.
+    ///
+    /// Buffered `session/update` notifications are still handled (logged, and
+    /// fed to the resume journal), so an idle slot's terminal
+    /// `async_task_state_update` is not lost at shutdown.
     pub async fn drain_stale_responses(&mut self, drain_timeout: std::time::Duration) {
         let deadline = tokio::time::Instant::now() + drain_timeout;
         loop {
@@ -1228,11 +1292,113 @@ impl AcpClient {
             match read_result {
                 // Timeout or stream ended — buffer is empty or agent exited.
                 Err(_) | Ok(None) => break,
-                Ok(Some(Ok(_))) => {
+                Ok(Some(Ok(line))) => {
                     // Consumed one buffered line; loop to drain more.
                     tracing::debug!(target: "acp::wire", "drained stale buffered line");
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if msg["method"] == "session/update" {
+                            self.handle_session_update(&msg);
+                        }
+                    }
                 }
                 Ok(Some(Err(_))) => break,
+            }
+        }
+    }
+
+    /// Read what an IDLE agent wrote between turns, so the resume journal
+    /// stays current while no prompt is in flight.
+    ///
+    /// claude-agent-acp self-wakes an idle session when a background shell
+    /// finishes after `end_turn`: Claude Code runs an unprompted turn and
+    /// streams `session/update`s (`async_task_state_update`,
+    /// `async_task_spawned`, …) that nobody reads until the next prompt. The
+    /// main loop calls this on every idle slot on a short tick.
+    ///
+    /// Reads until the agent has been quiet for `quiet` (already-buffered
+    /// lines arrive back-to-back, so they are all consumed), capped at
+    /// `max_total` so a slot that streams continuously cannot hold the main
+    /// loop; the rest is read on the next tick. Dispatch follows the prompt
+    /// read loop: `session/update` feeds the journal,
+    /// `session/request_permission` is answered with `allow_once` (else
+    /// `reject_once`, else `cancelled`), and any other request gets -32601 so
+    /// the agent never hangs on a reply. Messages with an `id` and no
+    /// `method` are late responses and are ignored.
+    ///
+    /// Returns the number of lines consumed, or the error that ended the read
+    /// (agent exited, oversized line, failed reply write). Callers log it;
+    /// the dead slot is found by the ordinary turn/respawn paths.
+    pub async fn drain_idle_updates(
+        &mut self,
+        quiet: std::time::Duration,
+        max_total: std::time::Duration,
+    ) -> Result<usize, AcpError> {
+        let hard = tokio::time::Instant::now() + max_total;
+        let mut consumed = 0usize;
+        loop {
+            let remaining = hard.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(consumed);
+            }
+            let line = match tokio::time::timeout(quiet.min(remaining), self.reader.next()).await {
+                Err(_) => return Ok(consumed),
+                Ok(None) => return Err(AcpError::AgentExited),
+                Ok(Some(Err(LinesCodecError::MaxLineLengthExceeded))) => {
+                    return Err(AcpError::Protocol(
+                        "agent stdout line exceeded 10MB limit".into(),
+                    ));
+                }
+                Ok(Some(Err(e))) => return Err(AcpError::Io(std::io::Error::other(e))),
+                Ok(Some(Ok(line))) => line,
+            };
+            consumed += 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            tracing::debug!(target: "acp::wire", "← (idle) {trimmed}");
+            let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                tracing::warn!(target: "acp::wire", "idle drain: unparseable line skipped");
+                continue;
+            };
+            self.observe("acp_read", msg.clone());
+            let Some(method) = msg.get("method").and_then(|v| v.as_str()) else {
+                // A late response to a timed-out request: nothing waits on it.
+                continue;
+            };
+            match method {
+                "session/update" => {
+                    let _ = self.handle_session_update(&msg);
+                }
+                "_goose/unstable/session/update" => self.handle_goose_usage_update(&msg),
+                "session/request_permission" => {
+                    if let Err(e) = self.handle_permission_request(&msg).await {
+                        // A turn would fail here and `cancel_with_cleanup`
+                        // would answer `cancelled`; between turns there is no
+                        // cleanup, so answer it now or the agent hangs.
+                        let Some(id) = msg.get("id").cloned() else {
+                            return Err(e);
+                        };
+                        tracing::warn!(
+                            target: "acp::permission",
+                            "idle permission request id={id} unanswerable ({e}) — cancelling it"
+                        );
+                        self.write_ndjson(&permission_response_cancelled(&id))
+                            .await?;
+                        self.pending_permission_id = None;
+                    }
+                }
+                other => {
+                    if msg.get("id").is_some() {
+                        let err_resp = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": msg["id"],
+                            "error": {"code": -32601, "message": format!("Method not found: {other}")}
+                        });
+                        self.write_ndjson(&err_resp).await?;
+                    }
+                    tracing::debug!(target: "acp::wire", "idle drain: ignoring method {other}");
+                }
             }
         }
     }
@@ -1422,7 +1588,10 @@ impl AcpClient {
         )> = None;
 
         let now = Instant::now();
-        let mut idle_deadline = now + idle_timeout;
+        // The idle limit in force: `idle_timeout`, or the longer background
+        // limit once this turn is held for a background subagent.
+        let mut current_idle = self.effective_idle_timeout(idle_timeout);
+        let mut idle_deadline = now + current_idle;
         let mut hard_deadline = hard_deadline;
         let mut last_activity_at = now;
 
@@ -1452,8 +1621,8 @@ impl AcpClient {
                     let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                 }
                 if idle_fires_first {
-                    tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
-                    return Err(AcpError::IdleTimeout(idle_timeout));
+                    tracing::warn!("idle timeout ({current_idle:?}) — no agent activity");
+                    return Err(AcpError::IdleTimeout(current_idle));
                 } else {
                     let silence = Instant::now().saturating_duration_since(last_activity_at);
                     tracing::warn!("hard turn timeout exceeded (silence {silence:?})");
@@ -1573,8 +1742,8 @@ impl AcpClient {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     if idle_fires_first {
-                        tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
-                        return Err(AcpError::IdleTimeout(idle_timeout));
+                        tracing::warn!("idle timeout ({current_idle:?}) — no agent activity");
+                        return Err(AcpError::IdleTimeout(current_idle));
                     } else {
                         let silence = Instant::now().saturating_duration_since(last_activity_at);
                         tracing::warn!("hard turn timeout exceeded (silence {silence:?})");
@@ -1640,7 +1809,7 @@ impl AcpClient {
                     self.observe("acp_read", msg.clone());
 
                     let activity_now = Instant::now();
-                    idle_deadline = activity_now + idle_timeout;
+                    idle_deadline = activity_now + current_idle;
                     last_activity_at = activity_now;
 
                     // Steer response routing must come BEFORE the prompt
@@ -1775,9 +1944,20 @@ impl AcpClient {
                     if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
                         match method {
                             "session/update" => {
-                                if self.handle_session_update(&msg) {
+                                let was_held = self.turn_has_background_subagent;
+                                let tool_started = self.handle_session_update(&msg);
+                                if !was_held && self.turn_has_background_subagent {
+                                    current_idle = self.effective_idle_timeout(idle_timeout);
+                                    if current_idle > idle_timeout {
+                                        tracing::info!(
+                                            "turn held for a background subagent — idle limit \
+                                             {idle_timeout:?} -> {current_idle:?}"
+                                        );
+                                    }
+                                }
+                                if tool_started || was_held != self.turn_has_background_subagent {
                                     let activity_now = Instant::now();
-                                    idle_deadline = activity_now + idle_timeout;
+                                    idle_deadline = activity_now + current_idle;
                                     last_activity_at = activity_now;
                                     tracing::debug!("idle clock reset: tool call started");
                                 }
@@ -1826,11 +2006,18 @@ impl AcpClient {
     /// leave it `None` and are steered via `_session/steering` instead, which
     /// needs no run id.
     fn handle_session_update(&mut self, msg: &serde_json::Value) -> bool {
+        self.resume.observe(msg);
         let update = &msg["params"]["update"];
         let update_type = update
             .get("sessionUpdate")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+
+        if matches!(update_type, "tool_call" | "tool_call_update")
+            && launches_background_subagent(update)
+        {
+            self.turn_has_background_subagent = true;
+        }
 
         match update_type {
             "agent_message_chunk" => {
@@ -2118,6 +2305,29 @@ impl AcpClient {
         StopReason::from_str(raw)
             .ok_or_else(|| AcpError::Protocol(format!("unknown stopReason: {raw:?}")))
     }
+}
+
+/// Whether a `tool_call` / `tool_call_update` launches a background subagent.
+///
+/// claude-agent-acp surfaces the tool input as `rawInput` on the first
+/// `tool_call` (possibly still empty while streaming) and again on refining
+/// `tool_call_update`s, so both shapes are checked. Only subagents hold the
+/// prompt open (background shells never defer the turn), so a shell tool
+/// (`_meta.claudeCode.toolName` of `Bash` / `PowerShell`) with
+/// `run_in_background` does not count.
+fn launches_background_subagent(update: &serde_json::Value) -> bool {
+    let backgrounded = update
+        .pointer("/rawInput/run_in_background")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !backgrounded {
+        return false;
+    }
+    let tool_name = update
+        .pointer("/_meta/claudeCode/toolName")
+        .or_else(|| update.get("name"))
+        .and_then(serde_json::Value::as_str);
+    !matches!(tool_name, Some("Bash" | "PowerShell"))
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
@@ -3298,6 +3508,187 @@ mod tests {
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
         );
+    }
+
+    /// Scripted claude-agent-acp turn: launch an `Agent` tool call with the
+    /// given `rawInput`, go silent for 3 s, then end the turn.
+    fn background_hold_script(raw_input: &str) -> String {
+        format!(
+            r#"
+        read -r REQ
+        ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
+        echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"bg","update":{{"sessionUpdate":"tool_call","toolCallId":"a1","name":"Agent","_meta":{{"claudeCode":{{"toolName":"Agent","subagent":true}}}},"title":"Agent","kind":"think","rawInput":{raw_input}}}}}}}'
+        sleep 3
+        echo '{{"jsonrpc":"2.0","id":'"$ID"',"result":{{"stopReason":"end_turn"}}}}'
+        sleep 1
+    "#
+        )
+    }
+
+    /// Once a turn launches a background subagent, the quiet hold that
+    /// follows is governed by the background idle limit, not the plain 1 s
+    /// idle timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_subagent_turn_survives_plain_idle_timeout() {
+        let mut client = spawn_script(&background_hold_script(
+            r#"{"description":"long job","prompt":"go","run_in_background":true}"#,
+        ))
+        .await;
+        client.set_background_idle_timeout(std::time::Duration::from_secs(30));
+        let result = client
+            .session_prompt_with_idle_timeout(
+                "bg",
+                "hello",
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+        assert!(
+            matches!(result, Ok(StopReason::EndTurn)),
+            "held background turn must survive the 1s idle limit, got {result:?}"
+        );
+        client.shutdown().await;
+    }
+
+    /// The same silence WITHOUT a background launch still idle-times out —
+    /// guards against simply disabling the idle timer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_turn_still_idle_times_out_with_background_limit_set() {
+        let mut client = spawn_script(&background_hold_script(
+            r#"{"description":"x","prompt":"go"}"#,
+        ))
+        .await;
+        client.set_background_idle_timeout(std::time::Duration::from_secs(30));
+        let result = client
+            .session_prompt_with_idle_timeout(
+                "bg",
+                "hello",
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AcpError::IdleTimeout(d)) if d == std::time::Duration::from_secs(1)),
+            "un-held turn must keep the 1s idle limit, got {result:?}"
+        );
+        let _ = client
+            .cancel_with_cleanup("bg", std::time::Duration::from_secs(1))
+            .await;
+        client.shutdown().await;
+    }
+
+    /// Disabled knob (`BUZZ_ACP_BACKGROUND_IDLE_TIMEOUT=0` resolves the
+    /// background limit to the plain idle timeout): a held turn idle-times
+    /// out exactly as before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_limit_equal_to_idle_restores_old_behaviour() {
+        let mut client = spawn_script(&background_hold_script(
+            r#"{"description":"long job","prompt":"go","run_in_background":true}"#,
+        ))
+        .await;
+        client.set_background_idle_timeout(std::time::Duration::from_secs(1));
+        let result = client
+            .session_prompt_with_idle_timeout(
+                "bg",
+                "hello",
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AcpError::IdleTimeout(_))),
+            "background limit == idle must not extend the turn, got {result:?}"
+        );
+        let _ = client
+            .cancel_with_cleanup("bg", std::time::Duration::from_secs(1))
+            .await;
+        client.shutdown().await;
+    }
+
+    #[test]
+    fn launches_background_subagent_detects_agent_but_not_shells() {
+        let agent = serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "_meta": {"claudeCode": {"toolName": "Agent", "subagent": true}},
+            "rawInput": {"prompt": "go", "run_in_background": true},
+        });
+        assert!(launches_background_subagent(&agent));
+        let shell = serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "name": "Bash",
+            "_meta": {"claudeCode": {"toolName": "Bash"}},
+            "rawInput": {"command": "sleep 300", "run_in_background": true},
+        });
+        assert!(
+            !launches_background_subagent(&shell),
+            "background shells never hold the prompt open"
+        );
+        let foreground = serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "name": "Agent",
+            "rawInput": {"prompt": "go", "run_in_background": false},
+        });
+        assert!(!launches_background_subagent(&foreground));
+        let streaming = serde_json::json!({"sessionUpdate": "tool_call", "rawInput": {}});
+        assert!(!launches_background_subagent(&streaming));
+    }
+
+    // Without the AIR `asyncTasks` capability claude-agent-acp never emits
+    // `async_task_*` updates, so the resume journal could not see background
+    // work.
+    #[test]
+    fn client_capabilities_advertise_air_async_tasks() {
+        let caps = build_client_capabilities();
+        let air = &caps["_meta"]["jetbrains"]["air"];
+        assert_eq!(air["version"], 1);
+        assert!(
+            air["capabilities"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|v| v == "asyncTasks")),
+            "asyncTasks must be advertised: {air}"
+        );
+        // Existing extensions are untouched.
+        assert_eq!(caps["_meta"]["terminal-auth"], true);
+        assert_eq!(caps["_meta"]["goose"]["customNotifications"], true);
+    }
+
+    // Between turns an agent may still send a request; the idle drain must
+    // answer one it does not handle with -32601 so the agent never hangs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_drain_answers_unknown_requests_with_method_not_found() {
+        let capture =
+            std::env::temp_dir().join(format!("buzz-idle-unknown-{}.ndjson", uuid::Uuid::new_v4()));
+        let quoted = capture.to_string_lossy().replace('\'', "'\\''");
+        let mut client = spawn_script(&format!(
+            r#"printf '%s\n' '{{"jsonrpc":"2.0","id":"q1","method":"fs/read_text_file","params":{{}}}}'
+read -r reply
+printf '%s\n' "$reply" > '{quoted}'
+while read -r _; do :; done"#
+        ))
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !capture.exists() {
+            assert!(std::time::Instant::now() < deadline, "no reply written");
+            let _ = client
+                .drain_idle_updates(
+                    std::time::Duration::from_millis(25),
+                    std::time::Duration::from_millis(250),
+                )
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // The script writes the file before it is fully flushed; re-read.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let reply: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(&capture).unwrap().trim()).unwrap();
+        let _ = std::fs::remove_file(&capture);
+        assert_eq!(reply["id"], "q1");
+        assert_eq!(reply["error"]["code"], -32601);
+        client.shutdown().await;
     }
 
     #[tokio::test]

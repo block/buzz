@@ -30,6 +30,20 @@ use crate::filter::SubscriptionRule;
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1_500;
 
+/// Default idle limit (2 hours) for a turn that is held open by an
+/// outstanding background subagent.
+///
+/// claude-agent-acp keeps `session/prompt` open while a background subagent
+/// it spawned is still live, and the outer ACP channel can stay silent for
+/// the whole of that wait. Under the normal [`DEFAULT_IDLE_TIMEOUT_SECS`]
+/// that silence reads as a hang: the turn is cancelled, the process is
+/// respawned, and the subagent dies with it. Once a turn has launched a
+/// background subagent, the idle deadline uses this value instead. It is
+/// clamped below `max_turn_duration`, whose absolute cap still applies.
+/// Override via `--background-idle-timeout` / `BUZZ_ACP_BACKGROUND_IDLE_TIMEOUT`;
+/// `0` restores the plain idle timeout for held turns.
+pub(crate) const DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS: u64 = 7_200;
+
 /// Default absolute wall-clock cap per agent turn (2 hours).
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
@@ -276,6 +290,13 @@ pub struct CliArgs {
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
     pub idle_timeout: Option<u64>,
+
+    /// Idle timeout for a turn held open by an outstanding background
+    /// subagent (`run_in_background`). `0` disables the extension: held
+    /// turns use `--idle-timeout` like every other turn. Never shorter than
+    /// `--idle-timeout`; clamped below `--max-turn-duration`.
+    #[arg(long, env = "BUZZ_ACP_BACKGROUND_IDLE_TIMEOUT", default_value_t = DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS)]
+    pub background_idle_timeout: u64,
 
     /// Absolute wall-clock cap per turn (safety valve).
     #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
@@ -530,6 +551,16 @@ pub struct CliArgs {
     /// ignored (the watermark stays at startup time).
     #[arg(long, env = "BUZZ_ACP_REPLAY_FLOOR")]
     pub replay_floor: Option<u64>,
+
+    /// Disable the resume journal: turns whose session dies with background
+    /// work outstanding are not re-delivered after a respawn or restart.
+    #[arg(long, env = "BUZZ_ACP_NO_RESUME")]
+    pub no_resume: bool,
+
+    /// Path of this agent's resume journal. Defaults to
+    /// `~/.config/buzz-acp/resume/<pubkey>.json`.
+    #[arg(long, env = "BUZZ_ACP_RESUME_FILE")]
+    pub resume_file: Option<PathBuf>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -549,6 +580,10 @@ pub struct Config {
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
+    /// Effective idle limit for turns held open by a background subagent
+    /// (see [`resolve_background_idle_timeout`]). Equals `idle_timeout_secs`
+    /// when the extension is disabled.
+    pub background_idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
@@ -634,6 +669,12 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Whether the resume journal is on (`--no-resume` /
+    /// `BUZZ_ACP_NO_RESUME` turns it off).
+    pub resume_enabled: bool,
+    /// Explicit resume journal path (`--resume-file` /
+    /// `BUZZ_ACP_RESUME_FILE`); `None` = the default under the home dir.
+    pub resume_file: Option<PathBuf>,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -728,6 +769,27 @@ fn compose_session_title_with_limit(
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
+/// Resolve the effective idle limit for a turn held open by a background
+/// subagent.
+///
+/// - `raw == 0` disables the extension: held turns use `idle_timeout_secs`.
+/// - Never shorter than `idle_timeout_secs` — the extension only lengthens.
+/// - Clamped strictly below `max_turn_duration_secs`, preserving the same
+///   invariant `Config::from_args` enforces for the plain idle timeout.
+pub(crate) fn resolve_background_idle_timeout(
+    raw: u64,
+    idle_timeout_secs: u64,
+    max_turn_duration_secs: u64,
+) -> u64 {
+    if raw == 0 {
+        return idle_timeout_secs;
+    }
+    let ceiling = max_turn_duration_secs
+        .saturating_sub(1)
+        .max(idle_timeout_secs);
+    raw.max(idle_timeout_secs).min(ceiling)
+}
+
 fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError> {
     let mut validated = HashSet::new();
     for entry in entries {
@@ -1095,6 +1157,12 @@ impl Config {
             )));
         }
 
+        let background_idle_timeout_secs = resolve_background_idle_timeout(
+            args.background_idle_timeout,
+            idle_timeout_secs,
+            max_turn_duration_secs,
+        );
+
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
             if raw.is_empty() {
@@ -1162,6 +1230,7 @@ impl Config {
             agent_args,
             mcp_command: args.mcp_command,
             idle_timeout_secs,
+            background_idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
@@ -1209,6 +1278,8 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            resume_enabled: !args.no_resume,
+            resume_file: args.resume_file,
         };
 
         Ok(config)
@@ -1230,13 +1301,14 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s background_idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
             self.idle_timeout_secs,
+            self.background_idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
             self.heartbeat_interval_secs,
@@ -1548,6 +1620,7 @@ mod tests {
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            background_idle_timeout_secs: DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
@@ -1587,6 +1660,8 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            resume_enabled: true,
+            resume_file: None,
         }
     }
 
@@ -2801,6 +2876,79 @@ channels = "ALL"
     fn default_idle_timeout_is_1500_seconds() {
         // Lock the constant value so accidental changes are caught.
         assert_eq!(DEFAULT_IDLE_TIMEOUT_SECS, 1_500);
+    }
+
+    #[test]
+    fn background_idle_timeout_resolution() {
+        assert_eq!(DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS, 7_200);
+        // Default config: the 2 h background limit sits under the 2 h hard
+        // cap, so held turns are bounded by the cap.
+        assert_eq!(
+            resolve_background_idle_timeout(
+                DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS,
+                DEFAULT_IDLE_TIMEOUT_SECS,
+                DEFAULT_MAX_TURN_DURATION_SECS,
+            ),
+            7_199
+        );
+        // A raised hard cap leaves the 2 h limit as configured.
+        assert_eq!(resolve_background_idle_timeout(7_200, 1_500, 43_200), 7_200);
+        // 0 disables the extension: the plain idle timeout.
+        assert_eq!(resolve_background_idle_timeout(0, 1_500, 7_200), 1_500);
+        // Never shorter than the plain idle timeout.
+        assert_eq!(resolve_background_idle_timeout(60, 1_500, 7_200), 1_500);
+        // Clamped strictly below the hard cap.
+        assert_eq!(
+            resolve_background_idle_timeout(100_000, 1_500, 43_200),
+            43_199
+        );
+    }
+
+    #[test]
+    fn background_idle_timeout_reaches_config() {
+        let parsed = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--background-idle-timeout",
+            "3600",
+        ]);
+        assert_eq!(parsed.background_idle_timeout, 3_600);
+        let config = Config::from_args(parsed).expect("valid config");
+        assert_eq!(config.background_idle_timeout_secs, 3_600);
+        if std::env::var_os("BUZZ_ACP_BACKGROUND_IDLE_TIMEOUT").is_none() {
+            let defaulted = CliArgs::parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY]);
+            assert_eq!(
+                defaulted.background_idle_timeout,
+                DEFAULT_BACKGROUND_IDLE_TIMEOUT_SECS
+            );
+        }
+    }
+
+    #[test]
+    fn resume_options_reach_config() {
+        let parsed = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--resume-file",
+            "/tmp/resume.json",
+        ]);
+        let config = Config::from_args(parsed).expect("valid config");
+        assert_eq!(
+            config.resume_file.as_deref(),
+            Some(std::path::Path::new("/tmp/resume.json"))
+        );
+        if std::env::var_os("BUZZ_ACP_NO_RESUME").is_none() {
+            assert!(config.resume_enabled, "the journal is on by default");
+        }
+        let disabled =
+            CliArgs::parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY, "--no-resume"]);
+        assert!(
+            !Config::from_args(disabled)
+                .expect("valid config")
+                .resume_enabled
+        );
     }
 
     #[test]
