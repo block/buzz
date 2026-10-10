@@ -69,6 +69,7 @@
     "jdenticon": "^3.3.0",
     "linkifyjs": "^4.3.2",
     "lucide-react": "^1.0.0",
+    "mapbox-gl": "^3.18.1",
     "mdast-util-from-markdown": "^2.0.3",
     "motion": "^12.38.0",
     "qrcode": "^1.5.4",
