@@ -225,6 +225,9 @@ pairingRelay:
   podAnnotations: {}
   # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
   podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
   resources:
     requests:
       cpu: "50m"
