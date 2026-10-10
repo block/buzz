@@ -153,7 +153,7 @@ export function AgentSessionTranscriptList({
   );
 
   const displayBlocks = React.useMemo(
-    () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
+    () => buildTranscriptDisplayBlocks(items, latestLiveSessionId).reverse(),
     [items, latestLiveSessionId],
   );
   // Derive the same block keys the DOM renders as `data-message-id` so
