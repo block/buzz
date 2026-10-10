@@ -71,7 +71,10 @@ export function classifyKeyImportInput(input: string): KeyImportKind {
   // valid backup routes to the encrypted path (and decodes there); mixed
   // case routes there too and fails in Rust with the accurate error.
   if (trimmed.slice(0, 10).toLowerCase() === "ncryptsec1") return "ncryptsec";
-  if (trimmed.startsWith("nsec1")) return "nsec";
+  // Bech32 permits all-uppercase encodings; an uppercase `NSEC1…` must
+  // classify and gate identically to lowercase so the form can derive the
+  // npub preview (which lowercases internally).
+  if (trimmed.slice(0, 5).toLowerCase() === "nsec1") return "nsec";
   return "unknown";
 }
 
