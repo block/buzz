@@ -371,6 +371,9 @@ export function TemplateFormDialog({
         model: null,
         backend: null,
       })),
+      // Preserve direct-pubkey members across edits — the UI doesn't yet
+      // expose them, so a plain edit must not silently drop them.
+      members: isEditing ? template.agents.members : [],
     };
 
     if (isEditing) {

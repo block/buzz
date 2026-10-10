@@ -13853,7 +13853,7 @@ export function maybeInstallE2eTauriMocks() {
           channelType: input.channelType ?? "stream",
           visibility: input.visibility ?? "open",
           canvasTemplate: input.canvasTemplate ?? null,
-          agents: input.agents ?? { personas: [], teams: [] },
+          agents: input.agents ?? { personas: [], teams: [], members: [] },
           isBuiltin: false,
           createdAt: timestamp,
           updatedAt: timestamp,

@@ -708,6 +708,47 @@ struct ResolvedAgent {
     pubkey: String,
 }
 
+/// A template roster member named directly by pubkey, validated and given a
+/// report label. Built from [`channel_templates::TemplateMemberEntry`] by
+/// [`validate_direct_members`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectMember {
+    pubkey: String,
+    label: String,
+}
+
+/// Validate and deduplicate a template's direct-pubkey member list, preserving
+/// first-seen order. Rejects the whole roster on a malformed pubkey (before
+/// any channel-creation side effect) so a typo can't silently drop a member.
+/// The label defaults to the pubkey prefix — it's report decoration only,
+/// never identity.
+fn validate_direct_members(
+    members: &[channel_templates::TemplateMemberEntry],
+) -> Result<Vec<DirectMember>, CliError> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for entry in members {
+        validate_hex64(&entry.pubkey).map_err(|_| {
+            CliError::Usage(format!(
+                "template member '{}' has an invalid pubkey: {:?} (must be a 64-character hex string)",
+                entry.label.as_deref().unwrap_or("?"),
+                entry.pubkey
+            ))
+        })?;
+        let pubkey = entry.pubkey.to_ascii_lowercase();
+        if !seen.insert(pubkey.clone()) {
+            continue;
+        }
+        let label = entry
+            .label
+            .clone()
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| format!("{}…", &pubkey[..8]));
+        out.push(DirectMember { pubkey, label });
+    }
+    Ok(out)
+}
+
 /// Minimal projection of a kind:30177 event's content needed for roster
 /// resolution. Other fields (system_prompt, model, ...) are irrelevant here.
 #[derive(Debug, Deserialize)]
@@ -1453,6 +1494,10 @@ pub async fn cmd_create_channel_from_template(
         .auth_tag_owner_hex()
         .unwrap_or_else(|| client.keys().public_key().to_hex());
 
+    // Direct-pubkey members are validated before any side effect, alongside
+    // persona roster resolution: a malformed pubkey aborts with zero
+    // channels created, matching the cardinality-error contract.
+    let direct_members = validate_direct_members(&template.agents.members)?;
     let resolved = build_roster_resolution(client, &owner, &template.agents).await?;
 
     let channel_uuid = Uuid::new_v4();
@@ -1503,6 +1548,7 @@ pub async fn cmd_create_channel_from_template(
     // here would race each other for no benefit.
     let mut members_added: Vec<serde_json::Value> = Vec::new();
     let mut member_failures: Vec<serde_json::Value> = Vec::new();
+    let mut added_pubkeys: HashSet<String> = HashSet::new();
     for agent in &resolved.agents {
         let outcome: Result<(), CliError> = async {
             let builder = buzz_sdk::build_add_member(
@@ -1517,13 +1563,53 @@ pub async fn cmd_create_channel_from_template(
         }
         .await;
         match outcome {
-            Ok(()) => members_added.push(serde_json::json!({
-                "persona_id": agent.persona_id,
-                "pubkey": agent.pubkey,
-            })),
+            Ok(()) => {
+                added_pubkeys.insert(agent.pubkey.to_ascii_lowercase());
+                members_added.push(serde_json::json!({
+                    "persona_id": agent.persona_id,
+                    "pubkey": agent.pubkey,
+                }))
+            }
             Err(e) => member_failures.push(serde_json::json!({
                 "persona_id": agent.persona_id,
                 "pubkey": agent.pubkey,
+                "error": e.to_string(),
+            })),
+        }
+    }
+    // Direct-pubkey members from the template roster. A pubkey already added
+    // via persona resolution is skipped (not re-published); so is the creator
+    // itself — the channel-create flow already made the signer an owner, and a
+    // self-targeted kind:9000 is rejected by the relay. A relay-side
+    // "already a member" error still lands in member_failures as-is.
+    let creator_pubkey = client.keys().public_key().to_hex().to_ascii_lowercase();
+    for member in &direct_members {
+        if member.pubkey == creator_pubkey || added_pubkeys.contains(&member.pubkey) {
+            continue;
+        }
+        let outcome: Result<(), CliError> = async {
+            let builder = buzz_sdk::build_add_member(
+                channel_uuid,
+                &member.pubkey,
+                Some(buzz_sdk::MemberRole::Bot),
+            )
+            .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
+            let event = client.sign_event(builder)?;
+            client.submit_event(event).await?;
+            Ok(())
+        }
+        .await;
+        match outcome {
+            Ok(()) => {
+                added_pubkeys.insert(member.pubkey.clone());
+                members_added.push(serde_json::json!({
+                    "label": member.label,
+                    "pubkey": member.pubkey,
+                }))
+            }
+            Err(e) => member_failures.push(serde_json::json!({
+                "label": member.label,
+                "pubkey": member.pubkey,
                 "error": e.to_string(),
             })),
         }
@@ -4647,5 +4733,81 @@ mod restore_canvas_already_current_tests {
             json.get("message").and_then(|v| v.as_str()).is_some(),
             "message field must be present: {json}"
         );
+    }
+}
+
+#[cfg(test)]
+mod direct_member_tests {
+    use super::{build_template_report, validate_direct_members, RosterResolution};
+    use crate::commands::channel_templates;
+    use crate::CliError;
+    use serde_json::json;
+
+    fn member_entry(pubkey: &str, label: Option<&str>) -> channel_templates::TemplateMemberEntry {
+        channel_templates::TemplateMemberEntry {
+            pubkey: pubkey.to_string(),
+            label: label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn validate_direct_members_accepts_valid_and_dedups_case_insensitive() {
+        let valid = "b41ea9dccb4b6ad92951955cd373138a16184a3cba9184850053f581640e9ffc";
+        let upper = valid.to_uppercase();
+        let members = vec![
+            member_entry(valid, Some("Fizz")),
+            member_entry(&upper, Some("Fizz again")),
+        ];
+        let out = validate_direct_members(&members).expect("valid");
+        assert_eq!(out.len(), 1, "duplicate (case-insensitive) collapses");
+        assert_eq!(out[0].pubkey, valid);
+        assert_eq!(out[0].label, "Fizz");
+    }
+
+    #[test]
+    fn validate_direct_members_defaults_label_to_pubkey_prefix() {
+        let valid = "b41ea9dccb4b6ad92951955cd373138a16184a3cba9184850053f581640e9ffc";
+        let out = validate_direct_members(&[member_entry(valid, None)]).expect("valid");
+        assert_eq!(out[0].label, "b41ea9dc…");
+    }
+
+    #[test]
+    fn validate_direct_members_rejects_malformed_pubkey() {
+        for bad in ["", "abc", &"z".repeat(64), &"a".repeat(63), &"a".repeat(65)] {
+            let err = validate_direct_members(&[member_entry(bad, Some("x"))]).unwrap_err();
+            assert!(
+                matches!(err, CliError::Usage(_)),
+                "expected Usage for {bad:?}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_direct_members_empty_is_ok() {
+        assert!(validate_direct_members(&[]).expect("ok").is_empty());
+    }
+
+    #[test]
+    fn build_template_report_includes_direct_members_in_added() {
+        // members_added/member_failures are passed through verbatim, so a
+        // direct member (label field) appears exactly as added.
+        let resolved = RosterResolution {
+            agents: Vec::new(),
+            skipped: Vec::new(),
+            archived_excluded: Vec::new(),
+            archive_state_warning: None,
+        };
+        let report = build_template_report(
+            "chan-1",
+            "Core",
+            "ok",
+            false,
+            vec![json!({"label": "Fizz", "pubkey": "b".repeat(64)})],
+            Vec::new(),
+            &resolved,
+        );
+        assert_eq!(report["status"], "ok");
+        assert_eq!(report["members_added"][0]["label"], "Fizz");
+        assert_eq!(report["members_added"][0]["pubkey"], "b".repeat(64));
     }
 }

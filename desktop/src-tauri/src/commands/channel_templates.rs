@@ -43,6 +43,25 @@ fn validate_visibility(value: &str) -> Result<(), String> {
     }
 }
 
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Reject template rosters whose direct-pubkey members are malformed, so an
+/// invalid pubkey fails at create/update time rather than being silently
+/// skipped when the template is applied to a channel.
+fn validate_template_members(roster: &crate::templates::TemplateAgentRoster) -> Result<(), String> {
+    for member in &roster.members {
+        if !is_hex64(member.pubkey.trim()) {
+            let label = member.label.as_deref().unwrap_or("?");
+            return Err(format!(
+                "template member {label:?} has an invalid pubkey (must be a 64-character hex string)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_channel_templates(app: AppHandle) -> Result<Vec<ChannelTemplateRecord>, String> {
     tokio::task::spawn_blocking(move || {
@@ -70,6 +89,7 @@ pub async fn create_channel_template(
         let visibility = input.visibility.unwrap_or_else(|| "open".to_string());
         validate_channel_type(&channel_type)?;
         validate_visibility(&visibility)?;
+        validate_template_members(&input.agents)?;
         let now = now_iso();
 
         let state = app.state::<AppState>();
@@ -113,6 +133,7 @@ pub async fn update_channel_template(
         let visibility = input.visibility.unwrap_or_else(|| "open".to_string());
         validate_channel_type(&channel_type)?;
         validate_visibility(&visibility)?;
+        validate_template_members(&input.agents)?;
 
         let state = app.state::<AppState>();
         let _store_guard = state

@@ -61,7 +61,7 @@ export const PROJECT_HOME_CHANNEL_TEMPLATE: ChannelTemplate = {
   channelType: "stream",
   visibility: "open",
   canvasTemplate: PROJECT_HOME_CANVAS_TEMPLATE,
-  agents: { personas: [], teams: [] },
+  agents: { personas: [], teams: [], members: [] },
   isBuiltin: true,
   createdAt: "",
   updatedAt: "",

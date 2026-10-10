@@ -39,6 +39,20 @@ pub struct TemplateAgentRoster {
     pub personas: Vec<TemplateAgentEntry>,
     #[serde(default)]
     pub teams: Vec<TemplateTeamEntry>,
+    /// Members named directly by pubkey — no persona resolution, no instance
+    /// lookup, no managed-agent creation. Use this for standing agents that
+    /// exist on the relay but have no persona-backed instance.
+    #[serde(default)]
+    pub members: Vec<TemplateMemberEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateMemberEntry {
+    pub pubkey: String,
+    /// Optional human-readable name, used only for error/report messages.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,7 +193,8 @@ mod tests {
             r##"[{
                 "id":"t1","name":"Buzz Team","channel_type":"forum","visibility":"private",
                 "canvas_template":"# {channel.name}",
-                "agents":{"personas":[{"personaId":"builtin:fizz"}],"teams":[{"teamId":"team-1"}]},
+                "agents":{"personas":[{"personaId":"builtin:fizz"}],"teams":[{"teamId":"team-1"}],
+                          "members":[{"pubkey":"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90","label":"Standing Fizz"}]},
                 "created_at":"x","updated_at":"x"
             }]"##,
         );
@@ -191,5 +206,32 @@ mod tests {
         assert_eq!(t.agents.personas[0].persona_id, "builtin:fizz");
         assert_eq!(t.agents.teams.len(), 1);
         assert_eq!(t.agents.teams[0].team_id, "team-1");
+        assert_eq!(t.agents.members.len(), 1);
+        assert_eq!(
+            t.agents.members[0].pubkey,
+            "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        );
+        assert_eq!(t.agents.members[0].label.as_deref(), Some("Standing Fizz"));
+    }
+
+    #[test]
+    fn load_templates_members_defaults_empty_and_label_optional() {
+        // Backward compat: templates without `members` load fine, and a
+        // member entry without a label deserializes with label = None.
+        let f = write_store(
+            r##"[{
+                "name":"Core",
+                "agents":{"members":[{"pubkey":"b41ea9dccb4b6ad92951955cd373138a16184a3cba9184850053f581640e9ffc"}]}
+            }]"##,
+        );
+        let t = find_template(f.path(), "Core").expect("found");
+        assert!(t.agents.personas.is_empty());
+        assert!(t.agents.teams.is_empty());
+        assert_eq!(t.agents.members.len(), 1);
+        assert!(t.agents.members[0].label.is_none());
+
+        let g = write_store(r#"[{"name":"Bare"}]"#);
+        let bare = find_template(g.path(), "Bare").expect("found");
+        assert!(bare.agents.members.is_empty());
     }
 }

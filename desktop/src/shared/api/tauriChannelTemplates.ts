@@ -26,6 +26,10 @@ type RawChannelTemplate = {
       model?: string | null;
       backend?: { type: "local" } | { type: "provider"; id: string } | null;
     }>;
+    members?: Array<{
+      pubkey: string;
+      label?: string | null;
+    }>;
   };
   is_builtin: boolean;
   created_at: string;
@@ -53,6 +57,10 @@ function fromRawChannelTemplate(raw: RawChannelTemplate): ChannelTemplate {
         runtime: t.runtime ?? null,
         model: t.model ?? null,
         backend: t.backend ?? null,
+      })),
+      members: (raw.agents?.members ?? []).map((m) => ({
+        pubkey: m.pubkey,
+        label: m.label ?? null,
       })),
     },
     isBuiltin: raw.is_builtin,

@@ -748,6 +748,11 @@ export type TemplateTeamEntry = {
   backend: TemplateBackend | null;
 };
 
+export type TemplateMemberEntry = {
+  pubkey: string;
+  label: string | null;
+};
+
 export type ChannelTemplate = {
   id: string;
   name: string;
@@ -758,6 +763,7 @@ export type ChannelTemplate = {
   agents: {
     personas: TemplateAgentEntry[];
     teams: TemplateTeamEntry[];
+    members: TemplateMemberEntry[];
   };
   isBuiltin: boolean;
   createdAt: string;
@@ -773,6 +779,7 @@ export type CreateChannelTemplateInput = {
   agents?: {
     personas: TemplateAgentEntry[];
     teams: TemplateTeamEntry[];
+    members?: TemplateMemberEntry[];
   };
 };
 
@@ -786,6 +793,7 @@ export type UpdateChannelTemplateInput = {
   agents?: {
     personas: TemplateAgentEntry[];
     teams: TemplateTeamEntry[];
+    members?: TemplateMemberEntry[];
   };
 };
 

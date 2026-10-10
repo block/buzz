@@ -159,6 +159,10 @@ mod tests {
                         id: "provider-1".to_string(),
                     }),
                 }],
+                members: vec![crate::templates::TemplateMemberEntry {
+                    pubkey: "a".repeat(64),
+                    label: Some("Standing bot".to_string()),
+                }],
             },
             is_builtin: false,
             created_at: "2026-05-11T00:00:00Z".to_string(),
@@ -176,6 +180,12 @@ mod tests {
         assert_eq!(parsed.canvas_template, original.canvas_template);
         assert_eq!(parsed.agents.personas.len(), 1);
         assert_eq!(parsed.agents.teams.len(), 1);
+        assert_eq!(parsed.agents.members.len(), 1);
+        assert_eq!(parsed.agents.members[0].pubkey, "a".repeat(64));
+        assert_eq!(
+            parsed.agents.members[0].label.as_deref(),
+            Some("Standing bot")
+        );
         assert_eq!(parsed.agents.personas[0].persona_id, "builtin:fizz");
         assert_eq!(parsed.agents.personas[0].runtime.as_deref(), Some("claude"));
         assert_eq!(parsed.agents.teams[0].team_id, "team-1");
@@ -194,6 +204,7 @@ mod tests {
         assert!(parsed.canvas_template.is_none());
         assert!(parsed.agents.personas.is_empty());
         assert!(parsed.agents.teams.is_empty());
+        assert!(parsed.agents.members.is_empty());
     }
 
     #[test]

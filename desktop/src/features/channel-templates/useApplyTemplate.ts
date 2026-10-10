@@ -13,7 +13,8 @@ import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRunti
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
-import { setCanvas } from "@/shared/api/tauri";
+import { templateMemberPubkeys } from "@/features/channel-templates/lib/templateMembers";
+import { addChannelMembers, setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
 
 /**
@@ -54,10 +55,51 @@ export function useApplyTemplate() {
     }
   }
 
+  // Add template-direct pubkey members without creating any agents. Runs
+  // independently of the persona/team path (which needs runtimes); these are
+  // standing agents already on the relay, so we addChannelMembers by pubkey.
+  async function applyMembers(
+    templateId: string | undefined,
+    channelId: string,
+  ) {
+    if (!templateId) return;
+    const template = channelTemplatesQuery.data?.find(
+      (t) => t.id === templateId,
+    );
+    if (!template) return;
+    const pubkeys = templateMemberPubkeys(template.agents.members);
+    if (pubkeys.length === 0) return;
+    try {
+      const result = await addChannelMembers({
+        channelId,
+        pubkeys,
+        role: "bot",
+      });
+      const unexpected = result.errors.filter(
+        ({ error }) => !error.toLowerCase().includes("already"),
+      );
+      if (unexpected.length > 0) {
+        const { toast } = await import("sonner");
+        toast.warning(
+          unexpected.length === 1
+            ? "1 member from the template could not be added"
+            : `${unexpected.length} members from the template could not be added`,
+        );
+      }
+      await queryClient.invalidateQueries({
+        queryKey: ["channels", channelId, "members"],
+      });
+    } catch {
+      // Member add is best-effort — don't block navigation
+    }
+  }
+
   async function applyAgents(
     templateId: string | undefined,
     channelId: string,
   ) {
+    // Direct-pubkey members are added regardless of runtime/persona state.
+    await applyMembers(templateId, channelId);
     if (!templateId) return;
     const template = channelTemplatesQuery.data?.find(
       (t) => t.id === templateId,

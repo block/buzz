@@ -27,6 +27,18 @@ pub struct TemplateAgentRoster {
     pub personas: Vec<TemplateAgentEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teams: Vec<TemplateTeamEntry>,
+    /// Members named directly by pubkey — added to created channels without
+    /// persona resolution or managed-agent creation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<TemplateMemberEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateMemberEntry {
+    pub pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
