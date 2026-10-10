@@ -628,16 +628,24 @@ pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
 pub(crate) enum ReactionChannelResult {
     Channel(Uuid),
     NoChannel,
+    /// Missing, soft-deleted, or not readable by the reactor.
     NotFound,
     NoTarget,
     DbError(String),
 }
 
-/// Derive channel_id from the target event for NIP-25 reactions.
+/// Rejection for a reaction whose target is missing or unusable by the sender.
+/// Every such target gets this text, so it never reveals whether, or where,
+/// the target exists.
+const REACTION_TARGET_NOT_FOUND: &str = "reaction target event not found";
+
+/// Derive channel_id from the target event for NIP-25 reactions. A target
+/// `reader` may not read resolves as `NotFound`.
 pub(crate) async fn derive_reaction_channel(
     community_id: CommunityId,
     db: &buzz_db::Db,
     event: &Event,
+    reader: &[u8],
 ) -> ReactionChannelResult {
     let target_hex = match event.tags.iter().rev().find_map(|tag| {
         if tag.kind().to_string() == "e" {
@@ -665,6 +673,9 @@ pub(crate) async fn derive_reaction_channel(
         .get_event_by_id_for_event_write(community_id, &id_bytes)
         .await
     {
+        Ok(Some(target)) if !super::req::event_visible_to_reader(&target.event, reader) => {
+            ReactionChannelResult::NotFound
+        }
         Ok(Some(target)) => match target.channel_id {
             Some(ch_id) => ReactionChannelResult::Channel(ch_id),
             None => ReactionChannelResult::NoChannel,
@@ -921,6 +932,18 @@ impl ThreadMetadataOwned {
     }
 }
 
+/// Whether `target` is in `channel_id` and readable by `reader`. Write paths
+/// that reference an event reject a target failing this exactly as a missing
+/// one, so the rejection never reveals whether, or where, the target exists.
+fn target_readable_in_channel(
+    target: &buzz_core::StoredEvent,
+    channel_id: Uuid,
+    reader: &[u8],
+) -> bool {
+    target.channel_id == Some(channel_id)
+        && super::req::event_visible_to_reader(&target.event, reader)
+}
+
 /// Resolve NIP-10 thread ancestry from e-tags.
 pub(crate) async fn resolve_nip10_thread_meta(
     community_id: CommunityId,
@@ -947,17 +970,11 @@ pub(crate) async fn resolve_nip10_thread_meta(
             .get_thread_metadata_by_event(community_id, &parent_bytes),
     );
 
+    let reader = effective_message_author(event, &state.relay_keypair.public_key());
     let parent_event = parent_event_result
         .map_err(|e| format!("db error looking up parent: {e}"))?
+        .filter(|parent| target_readable_in_channel(parent, channel_id, &reader))
         .ok_or_else(|| "reply parent not found".to_string())?;
-
-    match parent_event.channel_id {
-        Some(parent_ch) if parent_ch != channel_id => {
-            return Err("parent event belongs to a different channel".to_string());
-        }
-        None => return Err("parent event has no channel association".to_string()),
-        _ => {}
-    }
 
     let parent_created =
         chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
@@ -1130,6 +1147,7 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
     community_id: CommunityId,
     parent_hex: &str,
     channel_id: Uuid,
+    reader: &[u8],
     state: &AppState,
 ) -> Result<ReplyAncestry, String> {
     let parent_bytes =
@@ -1146,15 +1164,8 @@ pub(crate) async fn resolve_relay_reply_thread_meta(
 
     let parent_event = parent_event_result
         .map_err(|e| format!("db error looking up parent: {e}"))?
+        .filter(|parent| target_readable_in_channel(parent, channel_id, reader))
         .ok_or_else(|| "reply parent not found".to_string())?;
-
-    match parent_event.channel_id {
-        Some(parent_ch) if parent_ch != channel_id => {
-            return Err("parent event belongs to a different channel".to_string());
-        }
-        None => return Err("parent event has no channel association".to_string()),
-        _ => {}
-    }
 
     let parent_created =
         chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
@@ -1253,6 +1264,10 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
     event.pubkey.to_bytes().to_vec()
 }
 
+/// Rejection for an edit whose target is missing or not editable by the
+/// sender, so the error never reveals whether, or where, the target exists.
+const EDIT_TARGET_DENIED: &str = "edit target not found or not editable by you";
+
 /// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
 /// or the actor must be the owning human of the agent that authored the target message.
 async fn validate_edit_ownership(
@@ -1280,27 +1295,21 @@ async fn validate_edit_ownership(
 
     let target_bytes =
         hex::decode(&target_hex).map_err(|_| "invalid target event ID".to_string())?;
+    // Kind 40003 skips the generic membership gate, so this validator is the
+    // only authority: a target outside the edit's `h` channel, unreadable, or
+    // not the actor's to edit is denied exactly like a missing one.
+    let edit_channel_id =
+        extract_channel_id(event).ok_or_else(|| "missing h tag for edit".to_string())?;
+    let actor = event.pubkey.to_bytes().to_vec();
     let target_event = state
         .db
         .get_event_by_id_for_event_write(community_id, &target_bytes)
         .await
         .map_err(|e| format!("db error: {e}"))?
-        .ok_or_else(|| "edit target event not found".to_string())?;
-
-    // Verify target belongs to the same channel as the edit event.
-    let edit_channel_id = extract_channel_id(event);
-    match (edit_channel_id, target_event.channel_id) {
-        (Some(edit_ch), Some(target_ch)) if edit_ch != target_ch => {
-            return Err("target event belongs to a different channel".to_string());
-        }
-        (Some(_), None) => {
-            return Err("target event has no channel".to_string());
-        }
-        _ => {} // Same channel or no channel context — OK
-    }
+        .filter(|target| target_readable_in_channel(target, edit_channel_id, &actor))
+        .ok_or_else(|| EDIT_TARGET_DENIED.to_string())?;
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-    let actor = event.pubkey.to_bytes().to_vec();
     if author == actor {
         // Author editing their own message: re-gate on membership/open visibility so that
         // a removed private-channel member cannot mutate old messages after access is revoked.
@@ -1329,7 +1338,7 @@ async fn validate_edit_ownership(
             .await
             .map_err(|e| format!("db error checking agent ownership: {e}"))?;
         if !is_owner {
-            return Err("must be event author to edit".to_string());
+            return Err(EDIT_TARGET_DENIED.to_string());
         }
     }
     Ok(())
@@ -1358,6 +1367,9 @@ async fn validate_forum_vote_target(
             }
         })
         .ok_or_else(|| "missing e tag for vote target".to_string())?;
+    let vote_channel_id =
+        extract_channel_id(event).ok_or_else(|| "missing h tag for vote".to_string())?;
+    let reader = effective_message_author(event, &state.relay_keypair.public_key());
 
     let target_bytes =
         hex::decode(&target_hex).map_err(|_| "invalid target event ID".to_string())?;
@@ -1366,23 +1378,14 @@ async fn validate_forum_vote_target(
         .get_event_by_id_for_event_write(community_id, &target_bytes)
         .await
         .map_err(|e| format!("db error: {e}"))?
+        // Readability first: the kind diagnostic below would otherwise reveal
+        // an inaccessible event's existence and kind.
+        .filter(|target| target_readable_in_channel(target, vote_channel_id, &reader))
         .ok_or_else(|| "vote target event not found".to_string())?;
 
     let target_kind = event_kind_u32(&target_event.event);
     if target_kind != KIND_FORUM_POST && target_kind != KIND_FORUM_COMMENT {
         return Err("vote target must be a forum post or comment".to_string());
-    }
-
-    // Verify target belongs to the same channel as the vote event.
-    let vote_channel_id = extract_channel_id(event);
-    match (vote_channel_id, target_event.channel_id) {
-        (Some(vote_ch), Some(target_ch)) if vote_ch != target_ch => {
-            return Err("target event belongs to a different channel".to_string());
-        }
-        (Some(_), None) => {
-            return Err("target event has no channel".to_string());
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -2565,7 +2568,7 @@ async fn ingest_event_inner(
     // report; that is tolerated because reports are non-actioning signals and
     // remain visible only to moderators.
     if kind_u32 == KIND_REPORT {
-        super::report::handle_report_event(tenant, &event, state)
+        super::report::handle_report_event(tenant, &event, state, auth.channel_ids())
             .await
             .map_err(IngestError::Rejected)?;
         return Ok(IngestResult {
@@ -2610,25 +2613,27 @@ async fn ingest_event_inner(
         }
     }
 
-    // A kind 5 targeting an event derives its channel from that target, so
-    // every channel gate below would reveal the target's existence or
-    // location. Their rejections all collapse to the shared denial.
-    let deletion_targets_event = kind_u32 == KIND_DELETION
-        && !crate::handlers::side_effects::extract_target_event_ids(&event).is_empty();
-    let deletion_denied = || {
-        IngestError::Rejected(format!(
-            "invalid: {}",
-            crate::handlers::side_effects::DELETION_TARGET_DENIED
-        ))
+    // A reaction, or a kind 5 targeting an event, derives its channel from
+    // that target, so every channel gate below would reveal the target's
+    // existence or location. Their rejections all collapse to the kind's
+    // not-found denial.
+    let target_denial = if kind_u32 == KIND_REACTION {
+        Some(REACTION_TARGET_NOT_FOUND)
+    } else if kind_u32 == KIND_DELETION
+        && !crate::handlers::side_effects::extract_target_event_ids(&event).is_empty()
+    {
+        Some(crate::handlers::side_effects::DELETION_TARGET_DENIED)
+    } else {
+        None
     };
+    let target_denied = |reason: &str| IngestError::Rejected(format!("invalid: {reason}"));
     let mut channel_id = if kind_u32 == KIND_REACTION {
-        match derive_reaction_channel(tenant.community(), &state.db, &event).await {
+        let reader = effective_message_author(&event, &state.relay_keypair.public_key());
+        match derive_reaction_channel(tenant.community(), &state.db, &event, &reader).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
             ReactionChannelResult::NoChannel => None,
             ReactionChannelResult::NotFound => {
-                return Err(IngestError::Rejected(
-                    "invalid: reaction target event not found".into(),
-                ));
+                return Err(target_denied(REACTION_TARGET_NOT_FOUND));
             }
             ReactionChannelResult::NoTarget => {
                 return Err(IngestError::Rejected(
@@ -2659,7 +2664,9 @@ async fn ingest_event_inner(
                 .map_err(|e| {
                     IngestError::Internal(format!("error: looking up deletion target: {e}"))
                 })?
-                .ok_or_else(deletion_denied)?
+                .ok_or_else(|| {
+                    target_denied(crate::handlers::side_effects::DELETION_TARGET_DENIED)
+                })?
                 .channel_id
             }
             None => None,
@@ -2679,15 +2686,12 @@ async fn ingest_event_inner(
     }
 
     if let Some(ch_id) = channel_id {
-        check_token_channel_access(&auth, ch_id).map_err(|e| {
-            if deletion_targets_event {
-                deletion_denied()
-            } else {
-                IngestError::AuthFailed(e)
-            }
+        check_token_channel_access(&auth, ch_id).map_err(|e| match target_denial {
+            Some(reason) => target_denied(reason),
+            None => IngestError::AuthFailed(e),
         })?;
-    } else if deletion_targets_event && auth.channel_ids().is_some() {
-        return Err(deletion_denied());
+    } else if let (Some(reason), Some(_)) = (target_denial, auth.channel_ids()) {
+        return Err(target_denied(reason));
     } else if auth.channel_ids().is_some() {
         // Channel-scoped tokens cannot publish global events — that would bypass
         // the token's channel restriction. This covers kind:1 (global text notes),
@@ -2770,12 +2774,9 @@ async fn ingest_event_inner(
                 },
                 state_for_request(tenant, auth.pubkey()),
             );
-            auth_result.map_err(|e| {
-                if deletion_targets_event {
-                    deletion_denied()
-                } else {
-                    IngestError::Rejected(e)
-                }
+            auth_result.map_err(|e| match target_denial {
+                Some(reason) => target_denied(reason),
+                None => IngestError::Rejected(e),
             })?;
         }
     }
@@ -2916,12 +2917,13 @@ async fn ingest_event_inner(
     if kind_u32 == KIND_DELETION {
         // The target's archived channel blocks the deletion, so it must
         // reject before the validator's target-kind diagnostics.
-        if deletion_targets_event
-            && channel_row
+        if let Some(reason) = target_denial {
+            if channel_row
                 .as_ref()
                 .is_some_and(|ch| ch.archived_at.is_some())
-        {
-            return Err(deletion_denied());
+            {
+                return Err(target_denied(reason));
+            }
         }
         crate::handlers::side_effects::validate_standard_deletion_event(tenant, &event, state)
             .await
@@ -3323,9 +3325,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
         {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
-                return Err(IngestError::Rejected(
-                    "invalid: reaction target event not found".into(),
-                ));
+                return Err(IngestError::Rejected(format!(
+                    "invalid: {REACTION_TARGET_NOT_FOUND}"
+                )));
             }
             buzz_db::ReactionEventInsertOutcome::Duplicate => {
                 return Ok(IngestResult {

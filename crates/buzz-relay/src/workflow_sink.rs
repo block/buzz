@@ -320,6 +320,7 @@ impl ActionSink for RelayActionSink {
                         tenant.community(),
                         parent_hex,
                         channel_uuid,
+                        &author_pubkey_bytes,
                         &state,
                     )
                     .await
