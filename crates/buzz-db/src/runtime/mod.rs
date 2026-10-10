@@ -132,9 +132,9 @@ pub(crate) async fn insert_mentions_in_transaction(
     Ok(())
 }
 
-/// Start a tenant-local event-write transaction and take the shared community
+/// Start a tenant-local write transaction and take the shared community
 /// deletion lock before any serving mutation.
-async fn begin_community_event_write_transaction_with_metric_population(
+async fn begin_community_write_transaction_with_metric_population(
     pool: &PgPool,
     community: CommunityId,
     operation: observability::WriterOperation,
@@ -163,7 +163,7 @@ pub(crate) async fn begin_community_event_write_transaction(
     community: CommunityId,
     operation: observability::WriterOperation,
 ) -> Result<AdmittedTx> {
-    begin_community_event_write_transaction_with_metric_population(
+    begin_community_write_transaction_with_metric_population(
         pool,
         community,
         operation,
@@ -177,11 +177,27 @@ pub(crate) async fn begin_community_event_write_transaction_with_legacy_metrics(
     community: CommunityId,
     operation: observability::WriterOperation,
 ) -> Result<AdmittedTx> {
-    begin_community_event_write_transaction_with_metric_population(
+    begin_community_write_transaction_with_metric_population(
         pool,
         community,
         operation,
         CommunityEventWriteMetricPopulation::LegacyCompatibility,
+    )
+    .await
+}
+
+/// Begin a community write before any tenant mutation or row lock. The
+/// admission lock is held by the returned transaction until commit or rollback.
+pub(crate) async fn begin_community_write_transaction(
+    pool: &PgPool,
+    community: CommunityId,
+    operation: observability::WriterOperation,
+) -> Result<AdmittedTx> {
+    begin_community_write_transaction_with_metric_population(
+        pool,
+        community,
+        operation,
+        CommunityEventWriteMetricPopulation::TypedOnly,
     )
     .await
 }

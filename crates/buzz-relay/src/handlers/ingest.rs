@@ -6957,7 +6957,8 @@ mod postgres_tests {
         use tokio_util::sync::CancellationToken;
 
         // A schema with bans but no `users` table: the ban commits, and only
-        // the owned-agent lookup fails.
+        // the owned-agent lookup fails. It carries `communities` and the
+        // deletion lock key so the ban passes community write admission.
         let db_url = crate::test_support::database_url();
         let admin = sqlx::PgPool::connect(&db_url)
             .await
@@ -6965,7 +6966,10 @@ mod postgres_tests {
         let schema = format!("revoke_owner_{}", Uuid::new_v4().simple());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE SCHEMA {schema}; \
-             CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL);"
+             CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
+             CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
+             LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
         )))
         .execute(&admin)
         .await
@@ -6980,6 +6984,13 @@ mod postgres_tests {
         let state = build_canvas_ingest_state(&db_url, &pool).await;
         let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
         let tenant = TenantContext::resolved(community, "revoke-owner.test".to_string());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO {schema}.communities (id, host) VALUES ($1, 'revoke-owner.test')"
+        )))
+        .bind(community.as_uuid())
+        .execute(&admin)
+        .await
+        .expect("seed admitted community");
         let (owner, agent, bystander) = (
             nostr::Keys::generate(),
             nostr::Keys::generate(),
