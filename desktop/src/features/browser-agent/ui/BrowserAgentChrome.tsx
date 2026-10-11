@@ -420,7 +420,7 @@ export function BrowserAgentChrome({
   );
 }
 
-function ModeChip({
+export function ModeChip({
   active,
   disabled,
   icon,

@@ -31,13 +31,11 @@ export function BrowserRowPreview({
   windowLabel: string;
 }) {
   const [src, setSrc] = React.useState<string | null>(null);
-  const [faviconFailed, setFaviconFailed] = React.useState(false);
   const host = browserPreviewFaviconHost(url);
 
   React.useEffect(() => {
     let cancelled = false;
     setSrc(null);
-    setFaviconFailed(false);
 
     async function refresh() {
       const next = await captureBrowserPreview({ sid, windowLabel });
@@ -55,6 +53,32 @@ export function BrowserRowPreview({
     };
   }, [sid, windowLabel]);
 
+  return (
+    <BrowserRowThumb
+      host={host}
+      onOpen={onOpen}
+      sid={sid}
+      src={src}
+      title={title}
+    />
+  );
+}
+
+/** Presentational thumbnail shared by the desktop Browsers list and the web (bridge-backed) one. */
+export function BrowserRowThumb({
+  host,
+  onOpen,
+  sid,
+  src,
+  title,
+}: {
+  host: string | null;
+  onOpen: () => void;
+  sid: string;
+  src: string | null;
+  title: string;
+}) {
+  const [faviconFailed, setFaviconFailed] = React.useState(false);
   return (
     <button
       aria-label={`Open ${title}`}
