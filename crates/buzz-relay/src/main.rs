@@ -447,6 +447,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         replica_read_max_age_ms: config.replica_read_max_age_ms,
         usage_metrics_replica_max_age_ms: config.usage_metrics_replica_max_age_ms,
         max_connections: config.db_pool_size,
+        min_connections: config.db_pool_min_size,
         read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
     }
