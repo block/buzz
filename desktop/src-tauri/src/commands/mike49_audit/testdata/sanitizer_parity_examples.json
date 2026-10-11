@@ -1,0 +1,85 @@
+[
+  {
+    "kind": "record",
+    "scenario": "valid_full",
+    "result": "verified",
+    "verify_error_code": null,
+    "observe_outcome_code": "accepted",
+    "event_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "signer": "2222222222222222222222222222222222222222222222222222222222222222",
+    "session_id": "sess-1",
+    "turn_id": "turn-1",
+    "turn_seq": 3,
+    "harness": "claude-code",
+    "model": "claude-sonnet-5",
+    "stop_reason": "end_turn",
+    "tokens": {
+      "turn_input_tokens": 100,
+      "turn_output_tokens": 50,
+      "turn_total_tokens": 150,
+      "cumulative_input_tokens": 400,
+      "cumulative_output_tokens": 200,
+      "cumulative_total_tokens": 600,
+      "delta_reliable": true
+    },
+    "cost": {
+      "turn_cost_usd": 0.01,
+      "cumulative_cost_usd": 0.04,
+      "note": "harness estimate, never a billed charge"
+    }
+  },
+  {
+    "kind": "record",
+    "scenario": "invalid_verify_error_code",
+    "result": "verify_error",
+    "verify_error_code": "totally_made_up_code"
+  },
+  {
+    "kind": "record",
+    "scenario": "invalid_observe_outcome_code",
+    "result": "verified",
+    "observe_outcome_code": "totally_made_up_outcome"
+  },
+  {
+    "kind": "record",
+    "scenario": "invalid_nested_token_type",
+    "result": "verified",
+    "tokens": { "turn_input_tokens": "not-a-number" }
+  },
+  {
+    "kind": "record",
+    "scenario": "invalid_nested_cost_note",
+    "result": "verified",
+    "cost": { "turn_cost_usd": 0.01, "note": "a different unapproved note" }
+  },
+  {
+    "kind": "record",
+    "scenario": "credential_in_session_id",
+    "result": "verified",
+    "session_id": "token: abcdefgh12345678"
+  },
+  {
+    "kind": "record",
+    "scenario": "credential_nested_in_cost_note",
+    "result": "verified",
+    "cost": { "turn_cost_usd": 0.01, "note": "sk-abcdefghij1234567890" }
+  },
+  {
+    "kind": "record",
+    "scenario": "unrecognized_field_dropped",
+    "result": "verified",
+    "totally_unexpected_field": "x"
+  },
+  {
+    "kind": "record",
+    "scenario": "related_event_id_present",
+    "result": "verified",
+    "related_event_id": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  {
+    "kind": "record",
+    "scenario": "malformed_event_id",
+    "result": "verified",
+    "event_id": "not-64-hex-chars"
+  }
+]
