@@ -153,3 +153,50 @@ test("writeStoredReadState survives a throwing localStorage.setItem", () => {
     );
   });
 });
+
+// --- A poisoned marker must not survive a restart -------------------------
+//
+// Read markers are monotonic and persisted. A marker written before the skew
+// policy existed — or by a sibling desktop that still lacks it — is year-ahead
+// and unrecoverable from the UI, so hydration is the last place it can be
+// disarmed: the next write persists whatever readStoredReadState loaded.
+
+test("readStoredReadState drops a persisted year-ahead marker", () => {
+  installLocalStorage();
+  const pubkey = "f".repeat(64);
+  const yearAhead = NOW + 365 * 24 * 60 * 60;
+
+  localStorage.setItem(
+    localReadStateKey(pubkey),
+    JSON.stringify({
+      "channel-real": new Date((NOW - 3_600) * 1_000).toISOString(),
+      "channel-poisoned": new Date(yearAhead * 1_000).toISOString(),
+    }),
+  );
+
+  const stored = readStoredReadState(pubkey, NOW);
+
+  assert.equal(stored.contexts.get("channel-real"), NOW - 3_600);
+  assert.equal(
+    stored.contexts.has("channel-poisoned"),
+    false,
+    "an implausible marker must not be hydrated back into effect",
+  );
+});
+
+test("readStoredReadState keeps a marker inside the skew tolerance", () => {
+  installLocalStorage();
+  const pubkey = "1".repeat(64);
+  const slightlyAhead = NOW + 30;
+
+  localStorage.setItem(
+    localReadStateKey(pubkey),
+    JSON.stringify({
+      "channel-skewed": new Date(slightlyAhead * 1_000).toISOString(),
+    }),
+  );
+
+  const stored = readStoredReadState(pubkey, NOW);
+
+  assert.equal(stored.contexts.get("channel-skewed"), slightlyAhead);
+});
