@@ -16,6 +16,7 @@ import {
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
 import type { RelayEvent } from "@/shared/api/types";
+import { remoteInfoForHeartbeat, subscribeRemoteAccess } from "./remoteAccessStore";
 import { type BrowserHost, makeBrowserDeps, remoteBrowserManager } from "./browserHost";
 import { BridgeCommandHandler, makeSeenSet } from "./commandHandler";
 import { BRIDGE_KIND, BRIDGE_TAG, CMD_MAX_TTL_S, nowS } from "./protocol";
@@ -81,11 +82,21 @@ export function useBridgePublisher(
             ? ["browser.open", "browser.close", "browser.screenshot"]
             : []),
         ],
+        remote: remoteInfoForHeartbeat,
         onError: (e) => console.warn("[bridge] publish failed:", e),
       },
     );
     publisherRef.current = p;
     p.start();
+    // Tell the web right away when remote access / terminals flip (not just at the next heartbeat).
+    let lastRemote = JSON.stringify(remoteInfoForHeartbeat() ?? null);
+    const unsubRemote = subscribeRemoteAccess(() => {
+      const now = JSON.stringify(remoteInfoForHeartbeat() ?? null);
+      if (now !== lastRemote) {
+        lastRemote = now;
+        void p.sendHeartbeat();
+      }
+    });
     if (hostRef.current) void p.publishBrowserSessions(remoteBrowserManager.list());
     // Commands from the member's own browser (validated in BridgeCommandHandler; see docs/pwa-bridge-protocol.md §6).
     const SEEN_KEY = "buzz-bridge-cmd-seen";
@@ -180,6 +191,7 @@ export function useBridgePublisher(
     });
     return () => {
       cmdCancelled = true;
+      unsubRemote();
       void unsubCmd?.();
       unsubObserver();
       if (flushTimer) clearTimeout(flushTimer);

@@ -77,6 +77,7 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
+import { useRemoteAccessEvents } from "@/features/bridge/useRemoteAccessEvents";
 import { RemoteBrowserIndicator } from "@/features/bridge/ui/RemoteBrowserIndicator";
 import {
   useCommunityPinnedSitesLiveUpdates,
@@ -289,6 +290,7 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
+  useRemoteAccessEvents();
   const pinnedSites = usePinnedSites();
   // PWA bridge (slice A): desktop publishes agent status for the member's own browser. No-op outside Tauri.
   useBridgePublisher(
