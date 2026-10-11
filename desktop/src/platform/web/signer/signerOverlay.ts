@@ -1,0 +1,134 @@
+// Vanilla-DOM UI for signer health (independent of the React tree, which may not be mounted yet):
+//  * runBootGate(): before the app boots with a saved NIP-46 session, prove the signer answers; otherwise a full-screen
+//    "Your signer isn't responding" state with Retry / Reconnect signer / Sign out replaces the blank splash.
+//  * startSignerBanner(): mid-session, a non-blocking banner with the same actions once health turns unresponsive.
+import { signerHealth, type SignerHealthReason } from "./signerHealth";
+
+export type SignerActions = {
+  /** Round-trip probe; true if the signer answered. */
+  probe(): Promise<boolean>;
+  /** Re-pair (nostrconnect QR / bunker paste, the unlock UI). Resolves when a signer is connected again. */
+  reconnect(): Promise<void>;
+  signOut(): Promise<void>;
+};
+
+const BTN = "background:#fff;color:#111;border:0;border-radius:8px;padding:10px 14px;font:600 14px Inter,system-ui,sans-serif;margin:4px";
+const BTN2 = "background:transparent;color:#f5f5f5;border:1px solid #666;border-radius:8px;padding:10px 14px;font:14px Inter,system-ui,sans-serif;margin:4px";
+
+function mk<K extends keyof HTMLElementTagNameMap>(tag: K, css: string, text?: string, testid?: string) {
+  const e = document.createElement(tag);
+  e.style.cssText = css;
+  if (text) e.textContent = text;
+  if (testid) e.setAttribute("data-testid", testid);
+  return e;
+}
+
+export function describeDown(reason: SignerHealthReason): string {
+  switch (reason) {
+    case "revoked":
+      return "Your signer says this connection is no longer authorized (the session was revoked or removed). Reconnect it to continue.";
+    case "long-wait":
+      return "Your signer has been silent for a while. Open your signer app (Primal, Amber, nsec.app…) and make sure it's running, then retry.";
+    case "probe-failed":
+    case "timeout":
+      return "Your signer didn't answer. Open your signer app and make sure it's running and online, then retry — or reconnect it.";
+    default:
+      return "Your signer isn't available.";
+  }
+}
+
+function actions(a: SignerActions, status: HTMLElement, after: () => void) {
+  const row = mk("div", "margin-top:14px;display:flex;flex-wrap:wrap;justify-content:center");
+  const retry = mk("button", BTN, "Retry", "signer-retry");
+  const rec = mk("button", BTN2, "Reconnect signer", "signer-reconnect");
+  const out = mk("button", BTN2, "Sign out of this device", "signer-signout");
+  const busy = (on: boolean) => {
+    for (const b of [retry, rec, out]) (b as HTMLButtonElement).disabled = on;
+  };
+  retry.onclick = async () => {
+    busy(true);
+    status.textContent = "Checking your signer…";
+    const ok = await a.probe().catch(() => false);
+    busy(false);
+    if (ok) after();
+    else status.textContent = "Still no answer from your signer.";
+  };
+  rec.onclick = async () => {
+    busy(true);
+    try {
+      await a.reconnect();
+      after();
+    } catch {
+      status.textContent = "Couldn't reconnect.";
+    }
+    busy(false);
+  };
+  out.onclick = async () => {
+    busy(true);
+    try {
+      await a.signOut();
+    } finally {
+      location.reload();
+    }
+  };
+  row.append(retry, rec, out);
+  return row;
+}
+
+/** Resolves once the signer is proven alive (or the user reconnected). Never resolves while it's down: the user acts. */
+export async function runBootGate(a: SignerActions): Promise<void> {
+  const root = mk(
+    "div",
+    "position:fixed;inset:0;z-index:2147483647;background:#0b0b0b;color:#f5f5f5;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;font:15px/1.5 Inter,system-ui,sans-serif",
+  );
+  root.setAttribute("role", "alert");
+  document.body.appendChild(root);
+  const title = mk("h1", "font:600 20px Inter,system-ui,sans-serif;margin:0 0 8px", "Connecting to your signer…", "signer-gate-title");
+  const msg = mk("p", "max-width:420px;margin:0;opacity:.85", "Checking that your remote signer is reachable.", "signer-gate-msg");
+  const status = mk("p", "margin:10px 0 0;font-size:13px;opacity:.7", "", "signer-gate-status");
+  root.append(title, msg, status);
+  const done = () => root.remove();
+  const ok = await a.probe().catch(() => false);
+  if (ok) return done();
+  if (signerHealth.get().state !== "unresponsive") signerHealth.probeFailed(); // keep a more specific reason (revoked) if set
+  root.setAttribute("data-testid", "signer-down-screen");
+  title.textContent = "Your signer isn't responding";
+  msg.textContent = describeDown(signerHealth.get().reason === "none" ? "probe-failed" : signerHealth.get().reason);
+  return new Promise<void>((resolve) => {
+    root.appendChild(
+      actions(a, status, () => {
+        signerHealth.success();
+        done();
+        resolve();
+      }),
+    );
+  });
+}
+
+/** Non-blocking banner shown while health is unresponsive after the app has booted. */
+export function startSignerBanner(a: SignerActions) {
+  let el: HTMLDivElement | null = null;
+  const render = () => {
+    const h = signerHealth.get();
+    if (h.state !== "unresponsive") {
+      el?.remove();
+      el = null;
+      return;
+    }
+    if (el) return;
+    el = mk(
+      "div",
+      "position:fixed;left:8px;right:8px;top:calc(env(safe-area-inset-top) + 8px);z-index:2147483646;background:#3a1212;color:#fff;border:1px solid #c0392b;border-radius:12px;padding:12px 14px;font:14px/1.4 Inter,system-ui,sans-serif;text-align:center;box-shadow:0 4px 20px #0008",
+      undefined,
+      "signer-down-banner",
+    ) as HTMLDivElement;
+    el.setAttribute("role", "alert");
+    const t = mk("div", "font-weight:600", "Your signer isn't responding");
+    const m = mk("div", "font-size:13px;opacity:.9;margin-top:2px", describeDown(h.reason));
+    const status = mk("div", "font-size:12px;opacity:.8;margin-top:6px", "");
+    el.append(t, m, status, actions(a, status, () => signerHealth.success()));
+    document.body.appendChild(el);
+  };
+  signerHealth.subscribe(render);
+  render();
+}

@@ -11,6 +11,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { sendStatus } from "@/shared/lib/sendStatus";
+import { signerHealth } from "./signerHealth";
 import { signerStatus } from "./signerStatus";
 import type { SignedEvent, SignOpts, SignPriority, Signer, UnsignedEvent } from "./types";
 
@@ -493,6 +494,8 @@ const higherPriorityWork = () => [...active].some((r) => r.prio <= 2);
 
 export function instrumentSigner<S extends Signer>(inner: S): S {
   const signNormal = (ev: UnsignedEvent, prio: SignPriority): Promise<SignedEvent> => {
+    // Signer known dead: don't queue doomed relay-auth/background signs behind it (user-initiated sends still try, as a probe).
+    if (prio !== 0 && signerHealth.blocksBackground()) return dropped(ev.kind, "signer isn't responding");
     const retryable = prio === 0 && RETRYABLE_MESSAGE_KINDS.has(ev.kind);
     const key = retryable ? signKey(ev) : null;
     if (key) {
@@ -569,7 +572,9 @@ export function instrumentSigner<S extends Signer>(inner: S): S {
   const signTyping = (ev: UnsignedEvent): Promise<SignedEvent> => {
     const now = Date.now();
     const why =
-      document.hidden
+      signerHealth.blocksBackground()
+        ? "signer isn't responding"
+        : document.hidden
         ? "page hidden"
         : !bootReady
           ? "still booting"
@@ -594,7 +599,9 @@ export function instrumentSigner<S extends Signer>(inner: S): S {
   // Background NIP-98 token (e.g. the 60s presence poll over HTTP): skipped while anything more important is waiting.
   const signBackgroundRead = (ev: UnsignedEvent): Promise<SignedEvent> => {
     const now = Date.now();
-    const why = document.hidden
+    const why = signerHealth.blocksBackground()
+      ? "signer isn't responding"
+      : document.hidden
       ? "page hidden"
       : !bootReady
         ? "still booting"
@@ -699,6 +706,10 @@ export function instrumentSigner<S extends Signer>(inner: S): S {
       if (shared) {
         instantRec(method, "shared", 2);
         return shared;
+      }
+      if (signerHealth.blocksBackground()) {
+        instantRec(method, "error", 2, undefined, "skipped: signer isn't responding");
+        return Promise.reject(new Error("Your signer isn't responding (skipped)."));
       }
       if (method === "nip44_decrypt" && Date.now() < breakerUntil) {
         instantRec(method, "error", 2, undefined, "skipped: signer not answering decrypt requests");

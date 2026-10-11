@@ -402,3 +402,23 @@ export function showUnlock(): Promise<string> {
     );
   });
 }
+
+/** Reconnect UI over a running app (mid-session): same unlock flow in its own full-screen layer, app stays mounted underneath. */
+export function showUnlockOverlay(): Promise<string> {
+  const host = document.createElement("div");
+  host.setAttribute("data-testid", "signer-reconnect-overlay");
+  host.style.cssText = "position:fixed;inset:0;z-index:2147483647;overflow:auto;background:var(--background,#0b0b0b)";
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  return new Promise((resolve) => {
+    root.render(
+      <Unlock
+        onDone={(pk) => {
+          root.unmount();
+          host.remove();
+          resolve(pk);
+        }}
+      />,
+    );
+  });
+}

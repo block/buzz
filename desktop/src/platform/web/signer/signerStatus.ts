@@ -1,3 +1,4 @@
+import { ESCALATE_WAIT_MS, signerHealth } from "./signerHealth";
 // Tiny vanilla-DOM "Waiting for your signer…" indicator, independent of the React app tree.
 type St = { pending: number; authUrl: string | null; queued: number; labels: string[] };
 let st: St = { pending: 0, authUrl: null, queued: 0, labels: [] };
@@ -46,11 +47,26 @@ function update() {
     el.appendChild(a);
   }
 }
+let escalateTimer: ReturnType<typeof setTimeout> | undefined;
+// "Waiting for your signer…" that lasts too long (and isn't the user approving in the signer app) becomes the unresponsive state.
+function watchEscalation() {
+  const waiting = st.pending > 0 || st.queued > 0;
+  if (!waiting || st.authUrl) {
+    clearTimeout(escalateTimer);
+    escalateTimer = undefined;
+    return;
+  }
+  escalateTimer ??= setTimeout(() => {
+    escalateTimer = undefined;
+    if ((st.pending > 0 || st.queued > 0) && !st.authUrl) signerHealth.escalate("long-wait");
+  }, ESCALATE_WAIT_MS);
+}
 export const signerStatus = {
   get: () => st,
   set(p: Partial<St>) {
     st = { ...st, ...p };
     render();
+    watchEscalation();
     if (el) update();
     listeners.forEach((f) => f());
   },

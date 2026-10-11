@@ -1,6 +1,7 @@
 import { createNip07Signer, detectNip07 } from "./nip07";
 import { clearSignerCache, instrumentSigner } from "./instrument";
-import { forgetNip46, resumeNip46 } from "./nip46";
+import { forgetNip46, probeNip46, resumeNip46 } from "./nip46";
+import { signerHealth } from "./signerHealth";
 import { type Signer, SignerUnavailableError } from "./types";
 
 export * from "./types";
@@ -49,7 +50,10 @@ export async function resumeSession(): Promise<string | null> {
   const sess = getSession();
   if (sess?.kind === "nip46") {
     const s = await resumeNip46();
-    if (!s) return null;
+    if (!s) {
+      signerHealth.noSession(); // stored session missing/invalid → straight to sign-in
+      return null;
+    }
     const pk = await s.getPublicKey();
     if (pk !== sess.pubkey) return null;
     active = instrumentSigner(s);
@@ -57,7 +61,10 @@ export async function resumeSession(): Promise<string | null> {
     markMachineOnboardingDone(pk);
     return pk;
   }
-  if (!sess || sess.kind !== "nip07") return null;
+  if (!sess || sess.kind !== "nip07") {
+    signerHealth.noSession();
+    return null;
+  }
   if (!(await detectNip07())) return null;
   try {
     const s = createNip07Signer();
@@ -95,4 +102,12 @@ export function signOutSigner(): Promise<void> {
   activePubkey = null;
   localStorage.removeItem(SESSION_KEY);
   return done;
+}
+
+/** Liveness probe of the active NIP-46 session (no-op true for NIP-07, which is a local extension). */
+export async function probeActiveSigner(timeoutMs = 8000): Promise<boolean> {
+  if (getSession()?.kind !== "nip46" || !activePubkey) return true;
+  const r = await probeNip46(activePubkey, timeoutMs);
+  if (!r.ok) signerHealth.probeFailed(r.reason === "revoked" || r.reason === "mismatch" ? "revoked" : "probe-failed");
+  return r.ok;
 }

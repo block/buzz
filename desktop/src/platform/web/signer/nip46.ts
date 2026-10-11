@@ -22,6 +22,7 @@ import {
   savePendingConnect,
 } from "./nip46Store";
 import { nip46Debug, nlog, short } from "./nip46Debug";
+import { signerHealth } from "./signerHealth";
 import { signerStatus } from "./signerStatus";
 import {
   type SignedEvent,
@@ -377,8 +378,13 @@ export class Nip46Client {
     clearTimeout(p.timer);
     this.pending.delete(body.id as string);
     this.updateStatus();
-    if (body.error) p.reject(new Nip46Error("rejected", body.error));
-    else p.resolve(body.result ?? "");
+    if (body.error) {
+      signerHealth.error(body.error);
+      p.reject(new Nip46Error("rejected", body.error));
+    } else {
+      signerHealth.success();
+      p.resolve(body.result ?? "");
+    }
   }
   private openAuthUrl(url: string) {
     if (!/^https?:\/\//i.test(url)) return;
@@ -389,6 +395,7 @@ export class Nip46Client {
   }
   private fail(p: Pending, code: "timeout") {
     this.pending.delete(p.id);
+    signerHealth.timeout();
     this.updateStatus();
     p.reject(
       new Nip46Error(
@@ -521,10 +528,40 @@ export class Nip46Client {
   }
 }
 
+let currentClient: Nip46Client | null = null;
+
+/**
+ * Boot/mid-session liveness probe: a real round trip (get_public_key must come back as the saved pubkey) within `timeoutMs`.
+ * On a miss it rebuilds the signer relay sockets and tries once more before reporting failure.
+ */
+export async function probeNip46(userPubkey: string, timeoutMs = 8000): Promise<{ ok: true } | { ok: false; reason: "timeout" | "revoked" | "mismatch" | "no-client" }> {
+  const c = currentClient;
+  if (!c) return { ok: false, reason: "no-client" };
+  signerHealth.reconnecting(true);
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt === 1) c.reconnectAll(true);
+      try {
+        const pk = await c.request("get_public_key", [], timeoutMs);
+        if (pk !== userPubkey) return { ok: false, reason: "mismatch" };
+        signerHealth.success();
+        return { ok: true };
+      } catch (e) {
+        if (e instanceof Nip46Error && e.code === "rejected") return { ok: false, reason: "revoked" };
+        // timeout or unreachable: retry once after reconnecting sockets
+      }
+    }
+    return { ok: false, reason: "timeout" };
+  } finally {
+    signerHealth.reconnecting(false);
+  }
+}
+
 export function createNip46SignerFromClient(
   client: Nip46Client,
   userPubkey: string,
 ): Signer & { client: Nip46Client } {
+  currentClient = client;
   return {
     kind: "nip46",
     client,

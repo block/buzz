@@ -123,10 +123,12 @@ export async function startMockSigner({
     const [a, b] = req.params ?? [];
     const ok = (result) => reply(ev.pubkey, { id: req.id, result });
     const err = (error) => reply(ev.pubkey, { id: req.id, result: "", error });
+    if (state.revoked && req.method !== "connect") return err("unauthorized: session revoked");
     switch (req.method) {
       case "connect":
         if (secret && b !== secret) return err("invalid secret");
         connectedClients.add(ev.pubkey);
+        state.revoked = false; // a fresh pairing restores service
         if (state.authUrl && !state._authed) {
           state._authed = true;
           await reply(ev.pubkey, {
@@ -229,6 +231,18 @@ export async function startMockSigner({
       const sec = u.searchParams.get("secret");
       connectedClients.add(clientPk);
       await reply(clientPk, { id: crypto.randomUUID(), result: result ?? sec });
+    },
+    /** Signer app closed / offline: requests are received but never answered. */
+    setOffline(on) {
+      state.silent = !!on;
+    },
+    /** Primal connection removed: every client must pair again (answers "not connected"/"unauthorized"). */
+    revokeClients() {
+      connectedClients.clear();
+      state.revoked = true;
+    },
+    setLatency(ms) {
+      state.latencyMs = ms;
     },
     dropAllSockets() {
       for (const c of wss.clients) c.terminate();
