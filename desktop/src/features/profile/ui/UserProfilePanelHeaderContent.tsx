@@ -1,7 +1,9 @@
+import { Eraser } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { CopyButton } from "@/features/agents/ui/CopyButton";
+import { Button } from "@/shared/ui/button";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
   PROFILE_PANEL_VIEW_TITLES,
@@ -12,15 +14,16 @@ import {
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelHeaderTitleBlock,
 } from "@/shared/layout/AuxiliaryPanel";
-import { Button } from "@/shared/ui/button";
 
 export function getUserProfilePanelHeaderContent({
   agentSettingsMenu,
   effectivePubkey,
   ownerPubkey,
+  isLogClearPending,
   logCopyValue,
   logSubtitle,
   onBack,
+  onClearLog,
   onEditAgent,
   view,
   viewerIsOwner,
@@ -28,9 +31,11 @@ export function getUserProfilePanelHeaderContent({
   agentSettingsMenu: ReactNode;
   effectivePubkey: string | null;
   ownerPubkey?: string | null;
+  isLogClearPending?: boolean;
   logCopyValue?: string | null;
   logSubtitle?: string | null;
   onBack: () => void;
+  onClearLog?: () => void;
   onEditAgent?: () => void;
   view: ProfilePanelView;
   viewerIsOwner: boolean;
@@ -80,6 +85,20 @@ export function getUserProfilePanelHeaderContent({
           variant="ghost"
         >
           Edit
+        </Button>
+      ) : null}
+      {shouldShowLogDetails && onClearLog ? (
+        <Button
+          className="text-muted-foreground hover:text-foreground"
+          data-testid="user-profile-clear-log"
+          disabled={isLogClearPending}
+          onClick={onClearLog}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          <Eraser className="h-4 w-4" />
+          <span className="sr-only">Clear log</span>
         </Button>
       ) : null}
       {shouldShowLogDetails ? (
