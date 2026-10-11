@@ -441,6 +441,7 @@ const handler = new BridgeCommandHandler({
 });
 const seenEv = new Set();
 let wireCmds = 0;
+let handlerPaused = false;
 const queryCmds = async () => {
   const url = `${RELAY_HTTP}/query`;
   const bytes = Buffer.from(JSON.stringify([{ kinds: [30078], authors: [myPk], "#t": ["buzz-bridge"], since: nowS() - 120, limit: 100 }]));
@@ -449,6 +450,7 @@ const queryCmds = async () => {
   for (const ev of await r.json()) {
     if (seenEv.has(ev.id)) continue;
     seenEv.add(ev.id);
+    if (handlerPaused) continue; // simulates a desktop that never receives the command
     if (ev.tags.some((t) => t[1]?.startsWith("buzz.bridge.v1/cmd/"))) wireCmds++;
     await handler.handle(ev);
   }
@@ -480,25 +482,30 @@ check("7-0. My agents points to the Browsers page instead of hosting its own bro
 await publishDesk();
 await page.evaluate(() => { location.hash = "#/browsers"; });
 await page.locator('[data-testid="browser-panel"]').waitFor({ timeout: 40000 });
-check("7-1. Browsers page lists a browser that exists only on the desktop (synced), with Cold and its address", await page.waitForFunction(() => { const t = document.querySelector('[data-testid="browser-panel"]')?.textContent || ""; return /Desktop news/.test(t) && /Cold/.test(t) && /news\.example\.org/.test(t) && /added on desktop/.test(t); }, null, { timeout: 60000 }).then(() => true, () => false));
-await page.locator('[data-testid="br-url"]').fill("http://localhost:9999/admin");
-await page.locator('[data-testid="br-open"]').click();
-await page.locator('[data-testid="br-confirm"]').waitFor();
-await page.locator('[data-testid="br-confirm"] button:has-text("Cancel")').click();
+check("7-1. Browsers page lists a browser that exists only on the desktop (synced), with Cold and its address", await page.waitForFunction(() => { const t = document.querySelector('[data-testid="browser-panel"]')?.textContent || ""; return /Desktop news/.test(t) && /Cold/.test(t) && /news\.example\.org/.test(t) && /On desktop/.test(t); }, null, { timeout: 60000 }).then(() => true, () => false));
+const addViaDialog = async (u) => {
+  await page.locator('[data-testid="browsers-add"]').click();
+  await page.locator('[data-testid="browsers-add-url"]').fill(u);
+};
+await addViaDialog("http://localhost:9999/admin");
+await page.getByRole("button", { name: "Cancel" }).first().click();
 await sleep(3000);
-check("7a. Open on desktop asks for confirmation; Cancel sends nothing", brCalls.length === 0);
-await page.locator('[data-testid="br-open"]').click();
-await page.locator('[data-testid="br-confirm-yes"]').click();
-await page.waitForFunction(() => /failed/.test(document.querySelector('[data-testid="browser-panel"]')?.textContent || ""), null, { timeout: 60000 }).catch(() => {});
-check("7b. desktop refuses a private/local address (no session opened)", brCalls.length === 0 && brManager.list().length === 0 && /Private and local/.test(await page.locator('[data-testid="browser-panel"]').innerText()));
-await page.locator('[data-testid="br-url"]').fill("https://example.com/page");
-await page.locator('[data-testid="br-open"]').click();
-await page.locator('[data-testid="br-confirm-yes"]').click();
-await page.locator('[data-testid="br-session"]').waitFor({ timeout: 60000 }).catch(() => {});
+check("7a. Add browser dialog: Cancel sends nothing", brCalls.length === 0);
+await addViaDialog("http://localhost:9999/admin");
+await page.locator('[data-testid="browsers-add-submit"]').click();
+await page.waitForFunction(() => /failed/.test(document.querySelector('[data-testid="browser-job-text"]')?.textContent || ""), null, { timeout: 60000 }).catch(() => {});
+check("7b. desktop refuses a private/local address (no session opened); the failure reason is shown", brCalls.length === 0 && brManager.list().length === 0 && /Private and local/.test(await page.locator('[data-testid="browser-job-text"]').innerText()));
+await page.locator('[data-testid="browser-job-cancel"]').click();
+await addViaDialog("https://example.com/page");
+await page.locator('[data-testid="browsers-add-submit"]').click();
+await page.waitForFunction(() => /sending|waiting|accepted|done/.test(document.querySelector('[data-testid="browser-job"]')?.getAttribute("data-phase") || ""), null, { timeout: 30000 }).catch(() => {});
+check("7b2. a progress line is shown while the command runs", (await page.locator('[data-testid="browser-job"]').count()) === 1);
+await page.locator('[data-testid="br-session"]').nth(1).waitFor({ timeout: 60000 }).catch(() => {});
 check("7c. confirmed open -> session listed on the web next to the desktop one", (await page.waitForFunction(() => document.querySelectorAll('[data-testid="br-session"]').length === 2, null, { timeout: 30000 }).then(() => true, () => false)) && brCalls.length === 1, JSON.stringify(brCalls));
+check("7c2. job finishes as done", await page.waitForFunction(() => /done/.test(document.querySelector('[data-testid="browser-job-text"]')?.textContent || ""), null, { timeout: 30000 }).then(() => true, () => false));
 await page.locator('[data-testid="br-session"]').filter({ hasText: "example.com" }).locator('[data-testid="br-shot"]').click();
-await page.locator('[data-testid="br-shot-img"]').waitFor({ timeout: 60000 }).catch(() => {});
-const shotSrc = await page.locator('[data-testid="br-shot-img"]').getAttribute("src").catch(() => "");
+await page.locator('[data-testid="browser-row-preview-img-pin-e2e"]').waitFor({ timeout: 60000 }).catch(() => {});
+const shotSrc = await page.locator('[data-testid="browser-row-preview-img-pin-e2e"]').getAttribute("src").catch(() => "");
 check("7d. See screenshot shows one encrypted-chunk image", /^data:image\/jpeg;base64,/.test(shotSrc || ""), (shotSrc || "").slice(0, 40));
 await sleep(1500);
 check("7e. no screenshot is taken without a press (one capture only)", brManager.beginShot("pin-e2e", Date.now()) === "rate_limited");
@@ -507,7 +514,7 @@ check("7e. no screenshot is taken without a press (one capture only)", brManager
 check("7f. robot button is shown while remote agent management is on", (await page.locator('[data-testid="br-robot"]').count()) >= 1);
 await page.locator('[data-testid="br-session"]').filter({ hasText: "Desktop news" }).locator('[data-testid="br-robot"]').click();
 await page.locator('[data-testid="br-robot-agent"]').selectOption({ index: 1 });
-await page.locator('input[type=radio]').nth(2).check();
+await page.locator('[data-testid="br-robot-mode-drive"]').click();
 await page.locator('[data-testid="br-robot-apply"]').click();
 await sleep(6000);
 check("7g. Drive command reaches the desktop (agent + mode) while the switch is on", brAgentCalls.length === 1 && brAgentCalls[0].mode === "drive" && brAgentCalls[0].sessionId === "native-1", JSON.stringify(brAgentCalls));
@@ -521,6 +528,35 @@ await page.locator('[data-testid="br-session"]').filter({ hasText: "Desktop news
 await page.locator('[data-testid="br-confirm-yes"]').click();
 check("7i. Remove on web removes a desktop-added browser on the desktop and the list syncs", await page.waitForFunction(() => document.querySelectorAll('[data-testid="br-session"]').length === 1, null, { timeout: 60000 }).then(() => true, () => false) && !deskBrowsers.has("native-1"));
 
+// 7j. desktop never answers -> hard 30 s timeout with a clear message, Retry works
+handlerPaused = true;
+await addViaDialog("https://timeout.example.com/");
+await page.locator('[data-testid="browsers-add-submit"]').click();
+const tTimeout = Date.now();
+check("7j. no answer from the desktop -> 'didn't respond' error with Retry/Cancel within ~35 s", await page.waitForFunction(() => document.querySelector('[data-testid="browser-job"]')?.getAttribute("data-phase") === "timeout", null, { timeout: 50000 }).then(() => true, () => false) && Date.now() - tTimeout < 40000 && /didn't respond.*Allow remote agent management.*Reload the desktop app/.test(await page.locator('[data-testid="browser-job-text"]').innerText()) && (await page.locator('[data-testid="browser-job-retry"]').count()) === 1, `${Date.now() - tTimeout} ms`);
+handlerPaused = false;
+await page.locator('[data-testid="browser-job-retry"]').click();
+check("7k. Retry sends a fresh command that completes", await page.waitForFunction(() => document.querySelector('[data-testid="browser-job"]')?.getAttribute("data-phase") === "done", null, { timeout: 60000 }).then(() => true, () => false));
+// 7l. parity: same structure as the desktop Browsers screen at desktop and phone widths
+const structure = () => page.evaluate(() => ({
+  content: !!document.querySelector('[data-testid="browsers-page-content"]'),
+  header: /Browsers/.test(document.querySelector('[data-testid="browsers-page-content"] h1, [data-testid="browsers-page-content"] h2')?.textContent || ""),
+  add: !!document.querySelector('[data-testid="browsers-add"]'),
+  list: !!document.querySelector('ul.divide-y.rounded-lg'),
+  thumbs: document.querySelectorAll('[data-testid^="browser-row-preview-"]').length,
+  chips: document.querySelectorAll('[data-testid="br-live"], [data-testid="br-cold"]').length,
+  robots: document.querySelectorAll('[data-testid="br-robot"]').length,
+  overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+}));
+await page.screenshot({ path: "/tmp/web-browsers-desktop.png" });
+const sd = await structure();
+check("7l. desktop width: header, Add, bordered list with thumbnail + Live/Cold chips + robot, no horizontal overflow", sd.content && sd.header && sd.add && sd.list && sd.thumbs >= 2 && sd.chips >= 1 && sd.robots >= 1 && !sd.overflow, JSON.stringify(sd));
+await page.setViewportSize({ width: 390, height: 844 });
+await sleep(500);
+await page.screenshot({ path: "/tmp/web-browsers-phone.png" });
+const sp = await structure();
+check("7m. phone width: same structure, no horizontal overflow", sp.content && sp.add && sp.list && sp.thumbs >= 2 && !sp.overflow, JSON.stringify(sp));
+await page.setViewportSize({ width: 1280, height: 800 });
 await page.evaluate(() => { location.hash = "#/agents"; });
 // 8. slice B: terminal over the direct connection (member-key challenge per launch)
 await page.locator('[data-testid="remote-panel"]').waitFor({ timeout: 60000 }).catch(() => {});
