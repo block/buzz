@@ -1,4 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { WebRemoteWatcher, useWebRemoteNav } from "@/features/bridge/ui/WebRemoteSettings";
 import {
   Activity,
@@ -165,6 +166,13 @@ export function AppSidebarPrimaryMenu({
   const { pins: allPins } = usePinnedSites();
   const web = !isTauri();
   const remoteNav = useWebRemoteNav();
+  const navigate = useNavigate();
+  // The Buzz term instructions page lives at /agents?unavailable=term: it highlights Buzz term, never Agents.
+  const routeSearch = useSearch({ strict: false }) as { unavailable?: string };
+  const onBuzzTermPage = web && routeSearch.unavailable === "term";
+  // Agents is NEVER greyed out: it always opens the Agents page (the relay-bridge list + what to enable for management).
+  // Buzz term is plain greyed out while unavailable; clicking opens an instructions page.
+  const terminalLocked = web && !remoteNav.terminal;
   const pins = isTauri() ? allPins : []; // web/mobile: pinned sites are desktop-only (docs/pwa-web-differences.md #1)
   const { preferences, counts } = useSidebarMenuCounts();
   const terminalPanel = useTerminalPanel();
@@ -246,13 +254,13 @@ export function AppSidebarPrimaryMenu({
               </SidebarMenuButton>
             </SidebarMenuItem>
           </PrimaryTabRow>
-          {(!web || remoteNav.agents) && <PrimaryTabRow label="Agents" target={{ kind: "agents" }}>
+          <PrimaryTabRow label="Agents" target={{ kind: "agents" }}>
             <SidebarMenuItem>
               <SidebarMenuButton
                 className="data-[active=true]:font-normal"
                 data-testid={rowTestId("open-agents-view")}
                 isActive={isPrimaryNavRowActive(
-                  selectedView === "agents",
+                  selectedView === "agents" && !onBuzzTermPage,
                   terminalPanel,
                 )}
                 onClick={parkPlaygroundThen(
@@ -270,7 +278,7 @@ export function AppSidebarPrimaryMenu({
                 testId={rowTestId("sidebar-agents-count")}
               />
             </SidebarMenuItem>
-          </PrimaryTabRow>}
+          </PrimaryTabRow>
           <PrimaryTabRow label="Bots" target={{ kind: "bots" }}>
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -323,13 +331,18 @@ export function AppSidebarPrimaryMenu({
               />
             </SidebarMenuItem>
           </PrimaryTabRow>
-          {(!web || remoteNav.terminal) && <PrimaryTabRow label={web ? "Terminal" : "Buzz Term"} target={{ kind: "buzz-term" }}>
+          <PrimaryTabRow label={web ? "Buzz term" : "Buzz Term"} target={{ kind: "buzz-term" }}>
             <SidebarMenuItem>
               <SidebarMenuButton
-                className="data-[active=true]:font-normal"
+                className={`data-[active=true]:font-normal${terminalLocked ? " opacity-50" : ""}`}
                 data-testid={rowTestId("open-buzz-term-view")}
-                isActive={buzzTermActive}
+                data-unavailable={terminalLocked ? "true" : undefined}
+                isActive={buzzTermActive || onBuzzTermPage}
                 onClick={() => {
+                  if (terminalLocked) {
+                    void navigate({ to: "/agents", search: { unavailable: "term" } });
+                    return;
+                  }
                   // Open Term before park so pin restore sees left-nav Term
                   // active and PinnedSiteSurface does not re-show on top.
                   if (web) return onSelectAgents(); // web: the remote terminal lives in the Agents view (RemotePanel)
@@ -340,10 +353,10 @@ export function AppSidebarPrimaryMenu({
                 type="button"
               >
                 <SquareTerminal className="h-4 w-4" />
-                <SidebarMenuLabel>{web ? "Terminal" : "Buzz Term"}</SidebarMenuLabel>
+                <SidebarMenuLabel>{web ? "Buzz term" : "Buzz Term"}</SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
-          </PrimaryTabRow>}
+          </PrimaryTabRow>
           <FeatureGate feature="workflows">
             <PrimaryTabRow label="Workflows" target={{ kind: "workflows" }}>
               <SidebarMenuItem>

@@ -186,6 +186,18 @@ export function WebRemoteWatcher() {
   useRemoteHosts();
   return null;
 }
+/** Content of the page a greyed-out nav row opens on web/mobile: what is needed, and the exact settings to turn on. */
+export const BUZZ_TERM_UNAVAILABLE = {
+  title: "Buzz term isn't available",
+  summary: "Remote terminal is off, or no desktop is reachable over your tailnet.",
+  steps: [
+    "On your desktop, turn on Settings → Buzz Term → Allow remote terminal.",
+    "Connect your phone and Mac to your tailnet (Tailscale).",
+    "Here, open Settings → Buzz Term, turn on Allow remote terminal and pick that desktop.",
+  ],
+};
+// TODO(difference 4): once full gating exists (tailnet reachability per host, signature lifetime, last-seen > 1 day), derive the
+// per-row reason from it so the page can say which requirement is missing. Today: availability = switch on + a host selected.
 export function useWebRemoteNav(): { agents: boolean; terminal: boolean } {
   const prefs = React.useSyncExternalStore(subscribeWebRemotePrefs, getWebRemotePrefs);
   return { agents: prefs.agentsOn && !!prefs.agentsHost, terminal: prefs.terminalOn && !!prefs.terminalHost };

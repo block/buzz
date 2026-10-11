@@ -128,7 +128,7 @@ await putStale(
   D_AGENTS,
   "agents.snapshot",
   {
-    agents: [agent({ name: "StaleBot", status: "stopped" })],
+    agents: [agent({ name: "StaleBot", status: "running" })],
     generatedAt: stale,
   },
   k0.kid,
@@ -277,7 +277,8 @@ check(
       (r) =>
         /Opus/.test(r) && /Working in general/.test(r) && /running/.test(r),
     ) &&
-    rows.some((r) => /Sonnet/.test(r)) &&
+    !rows.some((r) => /Sonnet/.test(r)) && // relay bridge lists ONLY running agents: the stopped one is hidden
+    (await page.locator('[data-testid="my-agents-hidden-note"]').innerText().catch(() => "")).includes("1 stopped agent is hidden") &&
     !rows.some((r) => /StaleBot/.test(r)),
   rows.join(" | ").replace(/\n/g, " "),
 );
@@ -545,6 +546,41 @@ check("7n. clicking the thumbnail opens the viewer with title, address, 'Screens
 await sleep(3500); // per-session screenshot spacing
 await vis("shot-viewer-new").click();
 check("7o. New screenshot in the viewer shows progress and finishes (image updated in place)", await page.waitForFunction(() => /done/.test(document.querySelector('[data-testid="shot-viewer-status"]')?.textContent || ""), null, { timeout: 60000 }).then(() => true, () => false) && (await vis("shot-viewer-img").count()) === 1);
+// 7t. full screen: height fills the page, wheel/+/- zoom, double-click toggle, drag pan, Back/Esc
+await vis("shot-viewer-fullscreen").click();
+await vis("shot-fullscreen").waitFor({ timeout: 5000 }).catch(() => {});
+const fsGeo = await page.evaluate(() => { const st = document.querySelector('[data-testid="shot-fs-stage"]').getBoundingClientRect(); const im = document.querySelector('[data-testid="shot-fs-img"]').getBoundingClientRect(); return { sh: st.height, ih: im.height, top: st.top }; });
+check("7t. full screen: the screenshot's height fills the page area (contain by height)", Math.abs(fsGeo.sh - fsGeo.ih) < 2, JSON.stringify(fsGeo));
+const scaleOf = () => page.locator('[data-testid="shot-fs-img"]').getAttribute("data-scale");
+await vis("shot-fs-in").click();
+check("7u. + zooms in", Number(await scaleOf()) > 1.4, await scaleOf());
+await page.locator('[data-testid="shot-fs-stage"]').hover();
+await page.evaluate(() => { const st = document.querySelector('[data-testid="shot-fs-stage"]'); const r = st.getBoundingClientRect(); st.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, bubbles: true, cancelable: true })); });
+await sleep(300);
+check("7v. wheel / trackpad zoom event zooms further (real layout)", Number(await scaleOf()) > 1.6, await scaleOf());
+await vis("shot-fs-reset").click();
+const sb = await page.locator('[data-testid="shot-fs-stage"]').boundingBox();
+await page.mouse.dblclick(sb.x + sb.width / 2, sb.y + sb.height / 2);
+await sleep(200);
+check("7w. double-click zooms in", Number(await scaleOf()) > 2, await scaleOf());
+await page.mouse.dblclick(sb.x + sb.width / 2, sb.y + sb.height / 2);
+await sleep(200);
+check("7x. double-click again resets to 1x", Number(await scaleOf()) === 1, await scaleOf());
+await vis("shot-fs-in").click();
+await vis("shot-fs-in").click();
+const tr0 = await page.locator('[data-testid="shot-fs-img"]').evaluate((e) => e.style.transform);
+await page.mouse.move(sb.x + sb.width / 2, sb.y + sb.height / 2);
+await page.mouse.down();
+await page.mouse.move(sb.x + sb.width / 2 + 40, sb.y + sb.height / 2 + 30, { steps: 4 });
+await page.mouse.up();
+const tr1 = await page.locator('[data-testid="shot-fs-img"]').evaluate((e) => e.style.transform);
+check("7y. dragging pans when zoomed in", tr0 !== tr1, `${tr0} -> ${tr1}`);
+await vis("shot-fs-new").waitFor();
+await page.keyboard.press("Escape");
+check("7z. Esc goes Back to the viewer (viewer still open, zoom reset on next entry)", await page.waitForFunction(() => !document.querySelector('[data-testid="shot-fullscreen"]') && !!document.querySelector('[data-testid="shot-viewer"]'), null, { timeout: 5000 }).then(() => true, () => false));
+await vis("shot-viewer-fullscreen").click();
+check("7z2. zoom is reset when re-entering full screen", Number(await scaleOf()) === 1);
+await vis("shot-fs-back").click();
 await page.setViewportSize({ width: 390, height: 844 });
 await sleep(400);
 const box = await vis("shot-viewer-panel").boundingBox();
@@ -600,7 +636,19 @@ await page.evaluate(() => { location.hash = "#/settings"; });
 await page.getByRole("button", { name: /^Agents$/ }).first().click({ timeout: 20000 }).catch(() => {});
 await page.locator('[data-testid="web-remote-agents-toggle"]').waitFor({ timeout: 20000 }).catch(() => {});
 check("9a. web Settings → Agents has 'Allow remote agent management' (enabled: a host supports it)", await page.waitForFunction(() => { const e = document.querySelector('[data-testid="web-remote-agents-toggle"]'); return !!e && !e.hasAttribute("disabled"); }, null, { timeout: 30000 }).then(() => true, () => false));
-check("9a2. Agents nav entry is hidden while remote agent management is off", (await page.locator('[data-testid*="open-agents-view"]').count()) === 0);
+raAgentsOn = false; // management OFF on the desktop: list must still show, with instructions and no controls
+await pub.sendHeartbeat();
+await page.evaluate(() => { location.hash = "#/projects"; });
+await page.locator('[data-testid*="open-agents-view"]').first().waitFor({ timeout: 20000 }).catch(() => {});
+check("9a2. Agents nav row is never greyed out (no data-unavailable, full opacity) while management is off", await page.evaluate(() => { const el = document.querySelector('[data-testid*="open-agents-view"]'); return !!el && !el.hasAttribute("data-unavailable") && Number(getComputedStyle(el).opacity) === 1; }));
+await page.locator('[data-testid*="open-agents-view"]').first().click().catch(() => {});
+check("9a2b. clicking Agents opens the Agents page: bridge list still shown + instructions card for enabling management", await page.waitForFunction(() => !!document.querySelector('[data-testid="my-agents"]') && !!document.querySelector('[data-testid="agents-management-info"]') && /Settings → Agents → Allow remote agent management on your desktop/.test(document.body.innerText) && /Over the relay/.test(document.body.innerText) && /direct tailnet/.test(document.body.innerText), null, { timeout: 15000 }).then(() => true, () => false));
+check("9a2c. with management off, agents are listed but there are no start/stop/message controls", (await page.locator('[data-testid="my-agent-row"]').count()) >= 1 && (await page.locator('[data-testid="agent-controls"]').count()) === 0);
+raAgentsOn = true;
+await pub.sendHeartbeat();
+await page.evaluate(() => { location.hash = "#/settings"; });
+await page.getByRole("button", { name: /^Agents$/ }).first().click({ timeout: 20000 }).catch(() => {});
+await page.locator('[data-testid="web-remote-agents-toggle"]').waitFor({ timeout: 20000 }).catch(() => {});
 await page.locator('[data-testid="web-remote-agents-toggle"]').click().catch(() => {});
 await page.locator('[data-testid="remote-hosts-agents"]').waitFor({ timeout: 10000 }).catch(() => {});
 check("9b. host list shows the host with a 'Direct' label once reachable", await page.waitForFunction(() => /Direct/.test(document.querySelector('[data-testid="remote-hosts-agents"]')?.textContent || ""), null, { timeout: 20000 }).then(() => true, () => false));
@@ -609,13 +657,20 @@ await page.locator('[data-testid="web-remote-terminal-toggle"]').waitFor({ timeo
 check("9c. web Settings → Buzz Term has 'Allow remote terminal', enabled while the tailnet host is reachable", await page.waitForFunction(() => !document.querySelector('[data-testid="web-remote-terminal-toggle"]')?.hasAttribute("disabled"), null, { timeout: 20000 }).then(() => true, () => false));
 await page.locator('[data-testid="web-remote-terminal-toggle"]').click().catch(() => {});
 await page.evaluate(() => { location.hash = "#/agents"; });
-check("9a3. Agents nav entry appears once it is on with a host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-agents-view"]'), null, { timeout: 15000 }).then(() => true, () => false));
-check("9c2. Terminal nav entry appears with a reachable terminal host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-buzz-term-view"]'), null, { timeout: 15000 }).then(() => true, () => false));
+check("9a3. Agents nav entry appears once it is on with a host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-agents-view"]:not([data-unavailable])'), null, { timeout: 15000 }).then(() => true, () => false));
+check("9c2. Terminal nav entry appears with a reachable terminal host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-buzz-term-view"]:not([data-unavailable])'), null, { timeout: 15000 }).then(() => true, () => false));
 await page.evaluate(() => { location.hash = "#/settings"; });
 await page.getByRole("button", { name: /Buzz Term/ }).first().click({ timeout: 10000 }).catch(() => {});
 raProc.kill();
 await sleep(1000);
-check("9d0. Terminal nav entry disappears when the host becomes unreachable", await page.waitForFunction(() => !document.querySelector('[data-testid*="open-buzz-term-view"]'), null, { timeout: 40000 }).then(() => true, () => false));
+await page.evaluate(() => { location.hash = "#/projects"; }); // the left nav is not rendered on the Settings view
+check("9d0. Terminal nav row greys out when the host becomes unreachable", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-buzz-term-view"][data-unavailable="true"]'), null, { timeout: 40000 }).then(() => true, () => false));
+check("9d0b. web nav row is named 'Buzz term' (not 'Terminal'), plain grey, not crossed out", await page.evaluate(() => { const el = document.querySelector('[data-testid*="open-buzz-term-view"][data-unavailable="true"]'); return !!el && /Buzz term/.test(el.textContent || "") && !/Terminal/.test(el.textContent || "") && Number(getComputedStyle(el).opacity) < 1 && !/line-through/.test(getComputedStyle(el).textDecorationLine); }));
+await page.locator('[data-testid*="open-buzz-term-view"]').first().click().catch(() => {});
+check("9d0c. clicking the greyed Buzz term row opens its instructions page (not a toast) with the exact settings", await page.waitForFunction(() => !!document.querySelector('[data-testid="remote-unavailable-page"][data-feature="term"]') && /Buzz term isn't available/.test(document.body.innerText) && /Settings → Buzz Term → Allow remote terminal/.test(document.body.innerText) && /tailnet/.test(document.body.innerText) && location.hash.includes("unavailable=term"), null, { timeout: 8000 }).then(() => true, () => false));
+check("9d0d. on the Buzz term instructions page the Buzz term row is highlighted (still grey) and Agents is not", await page.evaluate(() => { const t = document.querySelector('[data-testid*="open-buzz-term-view"]'); const a = document.querySelector('[data-testid*="open-agents-view"]'); return t?.getAttribute("data-active") === "true" && t?.getAttribute("data-unavailable") === "true" && Number(getComputedStyle(t).opacity) < 1 && a?.getAttribute("data-active") !== "true"; }));
+await page.evaluate(() => { location.hash = "#/settings"; });
+await page.getByRole("button", { name: /Buzz Term/ }).first().click({ timeout: 10000 }).catch(() => {});
 check("9d. host gone: terminal switch greys out; agent management falls back to 'Via relay'", await page.waitForFunction(() => document.querySelector('[data-testid="web-remote-terminal-toggle"]')?.hasAttribute("disabled"), null, { timeout: 40000 }).then(() => true, () => false));
 await page.getByRole("button", { name: /^Agents$/ }).first().click().catch(() => {});
 check("9e. agents path label says 'Via relay' with the slower/limited note", await page.waitForFunction(() => /Via relay/.test(document.querySelector('[data-testid="remote-hosts-agents"]')?.textContent || "") && !!document.querySelector('[data-testid="remote-host-relay-note"]'), null, { timeout: 40000 }).then(() => true, () => false));

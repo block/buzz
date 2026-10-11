@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { nowS } from "../protocol";
+import { hiddenAgentCount, NO_RUNNING_AGENTS, visibleRelayAgents } from "../relayAgentView";
 import { useBridgeAgents } from "../useBridgeAgents";
 import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
@@ -27,6 +28,10 @@ export function MyAgentsPanel() {
   const age =
     b.lastHeardTs === null ? null : Math.max(0, nowS() - b.lastHeardTs);
   const offline = b.presence === "offline";
+  // "Allow remote agent management" on the desktop (advertised in the encrypted heartbeat). Listing works without it; controls need it.
+  const managementOn = b.heartbeat?.remote?.agents === true;
+  const shownAgents = b.snapshot ? visibleRelayAgents(b.snapshot.agents) : []; // relay bridge: running agents only
+  const hiddenCount = b.snapshot ? hiddenAgentCount(b.snapshot.agents) : 0;
   const selectedAgent = selected
     ? b.snapshot?.agents.find((a) => a.pubkey === selected)
     : undefined;
@@ -38,7 +43,7 @@ export function MyAgentsPanel() {
         offline={offline}
         onBack={() => setSelected(null)}
         controls={
-          b.commander ? (
+          b.commander && managementOn ? (
             <AgentControls agent={selectedAgent} commander={b.commander} bridge={b} />
           ) : null
         }
@@ -69,8 +74,29 @@ export function MyAgentsPanel() {
         {b.keyState === "failed" &&
           " · couldn't unlock the bridge key (approve the request in your signer)"}
       </p>
-      {b.snapshot && b.snapshot.agents.length === 0 && (
-        <p style={{ fontSize: 13, opacity: 0.7 }}>No agents on your desktop.</p>
+      {!managementOn && (
+        <div
+          data-testid="agents-management-info"
+          style={{ border: "1px solid rgba(128,128,128,.3)", borderRadius: 8, padding: "8px 12px", margin: "0 0 12px", fontSize: 12 }}
+        >
+          <strong style={{ fontSize: 13 }}>Agent management is off</strong>
+          <p style={{ margin: "4px 0 0", opacity: 0.85 }}>
+            You can see your desktop's agents and what they are working on, but start, stop, message and create are not available.
+            To enable them, turn on Settings → Agents → Allow remote agent management on your desktop, and make sure the desktop is online.
+          </p>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18, opacity: 0.85 }}>
+            <li>Over the relay (works from anywhere, slower): list, start, stop and message agents.</li>
+            <li>Over a direct tailnet connection (faster): everything above plus create, rename, change provider, model and persona, and delete.</li>
+          </ul>
+        </div>
+      )}
+      {b.snapshot && shownAgents.length === 0 && (
+        <p data-testid="my-agents-empty" style={{ fontSize: 13, opacity: 0.7 }}>{NO_RUNNING_AGENTS}</p>
+      )}
+      {hiddenCount > 0 && (
+        <p data-testid="my-agents-hidden-note" style={{ fontSize: 11, opacity: 0.6, margin: "0 0 8px" }}>
+          {hiddenCount} stopped {hiddenCount === 1 ? "agent is" : "agents are"} hidden here; only running agents are listed over the relay.
+        </p>
       )}
       <ul
         style={{
@@ -82,7 +108,7 @@ export function MyAgentsPanel() {
           opacity: offline ? 0.55 : 1,
         }}
       >
-        {b.snapshot?.agents.map((a) => (
+        {shownAgents.map((a) => (
           <li
             key={a.pubkey}
             data-testid="my-agent-row"
