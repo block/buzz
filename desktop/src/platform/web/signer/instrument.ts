@@ -11,7 +11,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { sendStatus } from "@/shared/lib/sendStatus";
-import { signerHealth } from "./signerHealth";
+import { NIP07_TIMEOUT_SCALE, signerHealth } from "./signerHealth";
 import { signerStatus } from "./signerStatus";
 import type { SignedEvent, SignOpts, SignPriority, Signer, UnsignedEvent } from "./types";
 
@@ -385,6 +385,7 @@ export function prioritizeDecrypt(ciphertext: string) {
   if (urgentDecrypts.size > 20) urgentDecrypts.delete(urgentDecrypts.values().next().value as string);
 }
 
+let nip07Mode = false; // set by instrumentSigner: browser-extension signer (popup approvals) vs remote NIP-46 signer
 function schedule<T>(
   rec: CallRecord,
   crypto: boolean,
@@ -409,6 +410,11 @@ function schedule<T>(
         rec.ms = Date.now() - rec.startedAt;
         rec.status = ok ? "ok" : "error";
         if (ok) recordLatency(rec.ms);
+        if (nip07Mode) {
+          // NIP-07 never goes through nip46.ts, so feed health here: any answer (even a user "no") = alive; only silence counts.
+          if (ok || !/in time/.test(String((e as Error)?.message ?? e))) signerHealth.success();
+          else signerHealth.timeout();
+        }
         if (!ok) rec.error = e instanceof Error ? e.message : String(e);
         console.info(
           `[signer] ${rec.method}${rec.kind !== undefined ? `:${rec.kind}` : ""} P${rec.prio} "${rec.label}" ${rec.status} ${rec.ms}ms`,
@@ -422,7 +428,7 @@ function schedule<T>(
       };
       const t = setTimeout(
         () => finish(false, undefined, new Error(`signer did not answer "${rec.label}" in time`)),
-        timeoutMs,
+        nip07Mode ? timeoutMs * NIP07_TIMEOUT_SCALE : timeoutMs,
       );
       fn().then(
         (v) => finish(true, v),
@@ -502,7 +508,29 @@ let lastTypingAt = 0;
 let lastBgReadAt = 0;
 const higherPriorityWork = () => [...active].some((r) => r.prio <= 2);
 
+/** NIP-07 auto-recovery: while health says unresponsive, ask the extension for the public key now and then; an answer resets health. */
+let recoveryTimer: ReturnType<typeof setInterval> | undefined;
+function startNip07Recovery(inner: Signer) {
+  clearInterval(recoveryTimer);
+  recoveryTimer = setInterval(() => {
+    if (signerHealth.get().state !== "unresponsive") return;
+    void inner.getPublicKey().then(
+      () => signerHealth.success(),
+      (e) => {
+        if (!/in time|timeout/i.test(String(e?.message ?? e))) signerHealth.success(); // an error answer still means it's alive
+      },
+    );
+  }, 10_000);
+}
+
 export function instrumentSigner<S extends Signer>(inner: S): S {
+  nip07Mode = inner.kind === "nip07";
+  signerHealth.setSignerKind(inner.kind === "nip07" ? "nip07" : "nip46");
+  if (nip07Mode) {
+    // A "no-session" state left over from before sign-in must not fast-fail every call of the freshly connected extension.
+    signerHealth.reset();
+    startNip07Recovery(inner);
+  }
   const signNormal = (ev: UnsignedEvent, prio: SignPriority): Promise<SignedEvent> => {
     // Signer known dead: don't queue doomed relay-auth/background signs behind it (user-initiated sends still try, as a probe).
     if (prio !== 0 && signerHealth.blocksBackground()) return dropped(ev.kind, "signer isn't responding");

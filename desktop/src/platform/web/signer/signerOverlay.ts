@@ -23,7 +23,12 @@ function mk<K extends keyof HTMLElementTagNameMap>(tag: K, css: string, text?: s
   return e;
 }
 
+export const EXT_DOWN_TITLE = "Your browser extension isn't responding";
+export const EXT_DOWN_MSG = "Check that it's unlocked and approve any prompts.";
+const isExt = () => signerHealth.signerKind() === "nip07";
+
 export function describeDown(reason: SignerHealthReason): string {
+  if (isExt()) return EXT_DOWN_MSG; // browser extension (NIP-07): no remote-signer wording
   switch (reason) {
     case "revoked":
       return "Your signer says this connection is no longer authorized (the session was revoked or removed). Reconnect it to continue.";
@@ -47,11 +52,11 @@ function actions(a: SignerActions, status: HTMLElement, after: () => void) {
   };
   retry.onclick = async () => {
     busy(true);
-    status.textContent = "Checking your signer…";
+    status.textContent = isExt() ? "Checking your extension…" : "Checking your signer…";
     const ok = await a.probe().catch(() => false);
     busy(false);
     if (ok) after();
-    else status.textContent = "Still no answer from your signer.";
+    else status.textContent = isExt() ? "Still no answer from your extension." : "Still no answer from your signer.";
   };
   rec.onclick = async () => {
     busy(true);
@@ -71,7 +76,8 @@ function actions(a: SignerActions, status: HTMLElement, after: () => void) {
       location.reload();
     }
   };
-  row.append(retry, rec, out);
+  if (isExt()) row.append(retry); // extension: Retry only (nothing to re-pair, no remote session to sign out of)
+  else row.append(retry, rec, out);
   return row;
 }
 
@@ -165,7 +171,7 @@ export function startSignerBanner(a: SignerActions) {
       "signer-down-banner",
     ) as HTMLDivElement;
     el.setAttribute("role", "alert");
-    const t = mk("div", "font-weight:600", "Your signer isn't responding");
+    const t = mk("div", "font-weight:600", isExt() ? EXT_DOWN_TITLE : "Your signer isn't responding", "signer-down-title");
     const m = mk("div", "font-size:13px;opacity:.9;margin-top:2px", describeDown(h.reason));
     const status = mk("div", "font-size:12px;opacity:.8;margin-top:6px", "");
     el.append(t, m, status, actions(a, status, () => signerHealth.success()));

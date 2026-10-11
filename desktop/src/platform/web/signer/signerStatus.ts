@@ -1,4 +1,4 @@
-import { ESCALATE_WAIT_MS, signerHealth } from "./signerHealth";
+import { ESCALATE_WAIT_MS, nip07EscalateWaitMs, signerHealth } from "./signerHealth";
 // Tiny vanilla-DOM "Waiting for your signer…" indicator, independent of the React app tree.
 type St = { pending: number; authUrl: string | null; queued: number; labels: string[] };
 let st: St = { pending: 0, authUrl: null, queued: 0, labels: [] };
@@ -48,7 +48,10 @@ function update() {
   }
 }
 let escalateTimer: ReturnType<typeof setTimeout> | undefined;
+let waitStart = 0;
 // "Waiting for your signer…" that lasts too long (and isn't the user approving in the signer app) becomes the unresponsive state.
+// NIP-07: the extension may be waiting for a popup approval and answers in a queue, so only count time with NO answer at all,
+// and use a much longer limit. Every completed request (signerHealth.success) pushes the deadline out.
 function watchEscalation() {
   const waiting = st.pending > 0 || st.queued > 0;
   if (!waiting || st.authUrl) {
@@ -56,10 +59,20 @@ function watchEscalation() {
     escalateTimer = undefined;
     return;
   }
-  escalateTimer ??= setTimeout(() => {
-    escalateTimer = undefined;
-    if ((st.pending > 0 || st.queued > 0) && !st.authUrl) signerHealth.escalate("long-wait");
-  }, ESCALATE_WAIT_MS);
+  if (escalateTimer) return;
+  waitStart = Date.now();
+  const arm = (ms: number) => {
+    escalateTimer = setTimeout(() => {
+      escalateTimer = undefined;
+      if (!((st.pending > 0 || st.queued > 0) && !st.authUrl)) return;
+      if (signerHealth.signerKind() === "nip07") {
+        const quietFor = Date.now() - Math.max(signerHealth.lastAlive(), waitStart);
+        if (quietFor < nip07EscalateWaitMs()) return arm(nip07EscalateWaitMs() - quietFor);
+      }
+      signerHealth.escalate("long-wait");
+    }, ms);
+  };
+  arm(signerHealth.signerKind() === "nip07" ? nip07EscalateWaitMs() : ESCALATE_WAIT_MS);
 }
 export const signerStatus = {
   get: () => st,

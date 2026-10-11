@@ -31,7 +31,11 @@ export async function installMockExtension(
   );
   await context.addInitScript(
     ({ pk, withNip44, delay }) => {
-      const wait = () => new Promise((r) => setTimeout(r, delay));
+      // window.__nostrStall = true holds every extension call (like an un-clicked approval popup) until set false again.
+      const wait = async () => {
+        await new Promise((r) => setTimeout(r, delay));
+        while (window.__nostrStall) await new Promise((r) => setTimeout(r, 100));
+      };
       window.nostr = {
         getPublicKey: async () => {
           await wait();
@@ -44,8 +48,8 @@ export async function installMockExtension(
         ...(withNip44
           ? {
               nip44: {
-                encrypt: (p, t) => window.__nostrEnc(p, t),
-                decrypt: (p, c) => window.__nostrDec(p, c),
+                encrypt: async (p, t) => (await wait(), window.__nostrEnc(p, t)),
+                decrypt: async (p, c) => (await wait(), window.__nostrDec(p, c)),
               },
             }
           : {}),

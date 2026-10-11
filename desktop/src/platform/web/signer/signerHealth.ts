@@ -9,6 +9,17 @@ export type SignerHealthState = "ok" | "slow" | "unresponsive" | "no-session" | 
 export type SignerHealthReason = "timeout" | "revoked" | "probe-failed" | "long-wait" | "none";
 
 export const UNRESPONSIVE_AFTER = 2;
+/** Which signer is active. Remote (NIP-46) signers answer in seconds; a NIP-07 extension may wait on a popup the user must click. */
+export type ActiveSignerKind = "nip07" | "nip46" | null;
+/** NIP-07: only call the extension unresponsive after this long with nothing answered (popup approvals are slow). */
+export const NIP07_ESCALATE_WAIT_MS = 120_000;
+/** e2e hook: `window.__BUZZ_NIP07_ESCALATE_MS` shortens the NIP-07 escalation wait so tests don't take two minutes. */
+export const nip07EscalateWaitMs = (): number => {
+  const o = (globalThis as { __BUZZ_NIP07_ESCALATE_MS?: unknown }).__BUZZ_NIP07_ESCALATE_MS;
+  return typeof o === "number" && o > 0 ? o : NIP07_ESCALATE_WAIT_MS;
+};
+/** NIP-07 request timeouts are this many times the remote-signer ones (a user may need to find and click the popup). */
+export const NIP07_TIMEOUT_SCALE = 4;
 /** The "Waiting for your signer…" toast escalates to unresponsive after this long with a request still pending. */
 export const ESCALATE_WAIT_MS = 25_000;
 
@@ -23,6 +34,8 @@ export function isRevokedAnswer(message: string): boolean {
 type Snapshot = { state: SignerHealthState; reason: SignerHealthReason; consecutiveTimeouts: number };
 
 let snap: Snapshot = { state: "ok", reason: "none", consecutiveTimeouts: 0 };
+let activeKind: ActiveSignerKind = null;
+let lastAlive = Date.now();
 let before: SignerHealthState = "ok"; // state to return to when reconnecting ends without news
 const listeners = new Set<() => void>();
 const emit = () => {
@@ -37,12 +50,21 @@ const set = (p: Partial<Snapshot>) => {
 
 export const signerHealth = {
   get: (): Readonly<Snapshot> => snap,
+  signerKind: (): ActiveSignerKind => activeKind,
+  setSignerKind(k: ActiveSignerKind) {
+    if (activeKind === k) return;
+    activeKind = k;
+    emit();
+  },
+  /** ms timestamp of the last real answer from the signer. */
+  lastAlive: () => lastAlive,
   subscribe(f: () => void) {
     listeners.add(f);
     return () => void listeners.delete(f);
   },
   /** A request got a real answer (result, or a user "no"): the signer is alive. */
   success() {
+    lastAlive = Date.now();
     set({ state: "ok", reason: "none", consecutiveTimeouts: 0 });
   },
   timeout() {

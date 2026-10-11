@@ -104,8 +104,18 @@ export function signOutSigner(): Promise<void> {
   return done;
 }
 
-/** Liveness probe of the active NIP-46 session (no-op true for NIP-07, which is a local extension). */
+/** Liveness probe of the active signer. NIP-07: ask the extension for the public key (long timeout: it may show a popup). */
 export async function probeActiveSigner(timeoutMs = 8000, onAttempt?: (attempt: number, timeoutMs: number) => void): Promise<boolean> {
+  if (getSession()?.kind === "nip07" && active) {
+    const ms = 20_000;
+    onAttempt?.(0, ms);
+    const ok = await Promise.race([
+      active.getPublicKey().then(() => true, (e) => !/in time|timeout/i.test(String(e?.message ?? e))),
+      new Promise<boolean>((r) => setTimeout(() => r(false), ms)),
+    ]);
+    if (ok) signerHealth.success();
+    return ok;
+  }
   if (getSession()?.kind !== "nip46" || !activePubkey) return true;
   const r = await probeNip46(activePubkey, timeoutMs, onAttempt);
   if (!r.ok) signerHealth.probeFailed(r.reason === "revoked" || r.reason === "mismatch" ? "revoked" : "probe-failed");
