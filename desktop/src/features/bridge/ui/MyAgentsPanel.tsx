@@ -4,6 +4,7 @@ import * as React from "react";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { nowS } from "../protocol";
 import { useBridgeAgents } from "../useBridgeAgents";
+import { AgentDetail } from "./AgentDetail";
 
 function ago(s: number): string {
   if (s < 60) return `${s}s ago`;
@@ -19,10 +20,23 @@ export function MyAgentsPanel() {
     const t = window.setInterval(force, 10_000);
     return () => window.clearInterval(t);
   }, []);
+  const [selected, setSelected] = React.useState<string | null>(null);
   if (!b.available) return null;
   const age =
     b.lastHeardTs === null ? null : Math.max(0, nowS() - b.lastHeardTs);
   const offline = b.presence === "offline";
+  const selectedAgent = selected
+    ? b.snapshot?.agents.find((a) => a.pubkey === selected)
+    : undefined;
+  if (selected && selectedAgent)
+    return (
+      <AgentDetail
+        agent={selectedAgent}
+        entries={b.transcripts.get(selectedAgent.pubkey.toLowerCase()) ?? []}
+        offline={offline}
+        onBack={() => setSelected(null)}
+      />
+    );
   return (
     <section
       data-testid="my-agents"
@@ -64,7 +78,14 @@ export function MyAgentsPanel() {
             key={a.pubkey}
             data-testid="my-agent-row"
             data-status={a.status}
+            role="button"
+            tabIndex={0}
+            onClick={() => setSelected(a.pubkey)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") setSelected(a.pubkey);
+            }}
             style={{
+              cursor: "pointer",
               border: "1px solid rgba(128,128,128,.3)",
               borderRadius: 8,
               padding: "8px 12px",
@@ -101,8 +122,7 @@ export function MyAgentsPanel() {
         ))}
       </ul>
       <p style={{ fontSize: 11, opacity: 0.5, marginTop: 12 }}>
-        Read-only. Starting, stopping and messaging agents arrives in the next
-        bridge slice.
+        Tap an agent to see its recent activity.
       </p>
     </section>
   );

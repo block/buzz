@@ -226,7 +226,7 @@ const pub = new BridgePublisher(
     signEvent: async (e) => signNode(e),
     publish: postEvent,
   },
-  { deviceId: "e2e-desktop", platform: "e2e" },
+  { deviceId: "e2e-desktop", platform: "e2e", onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
 );
 pub.start();
 pub.update({
@@ -302,6 +302,48 @@ check(
   `${dAfter}`,
 );
 
+// 4b. transcripts: the desktop publishes redacted chunks; the agent detail view shows them live
+const OPUS = "ab".repeat(32);
+pub.update({
+  agents: [
+    agent({ name: "Opus v3", status: "running" }),
+    agent({ pubkey: "cd".repeat(32), name: "Sonnet", status: "stopped" }),
+  ],
+  generatedAt: nowS(),
+});
+await sleep(300);
+const dTx0 = await bridgeDecrypts();
+pub.updateTranscript(OPUS, [
+  { id: "t1", t: Date.now() - 3000, role: "user", text: "please fix the build" },
+  { id: "t2", t: Date.now() - 2000, role: "assistant", text: "Looking at ~/…/src/x.ts with TOKEN=[redacted]" },
+]);
+await page.locator('[data-testid="my-agent-row"]').filter({ hasText: "Opus v3" }).first().click();
+await page.locator('[data-testid="agent-detail"]').waitFor({ timeout: 20000 });
+await page
+  .waitForFunction(() => document.querySelectorAll('[data-testid="transcript-entry"]').length >= 2, null, { timeout: 40000 })
+  .catch(() => {});
+const txt1 = await page.locator('[data-testid="agent-transcript"]').innerText();
+check(
+  "4b. agent detail shows the published transcript (user + assistant entries)",
+  /please fix the build/.test(txt1) && /Looking at/.test(txt1),
+  txt1.replace(/\n/g, " | ").slice(0, 160),
+);
+pub.updateTranscript(OPUS, [
+  { id: "t1", t: Date.now() - 3000, role: "user", text: "please fix the build" },
+  { id: "t2", t: Date.now() - 2000, role: "assistant", text: "Looking at ~/…/src/x.ts with TOKEN=[redacted] — done, build is green" },
+  { id: "t3", t: Date.now() - 1000, role: "tool", text: "ok", tool: { name: "bash", status: "completed" } },
+]);
+await page
+  .waitForFunction(() => /build is green/.test(document.querySelector('[data-testid="agent-transcript"]')?.textContent || "") && document.querySelectorAll('[data-testid="transcript-entry"]').length === 3, null, { timeout: 40000 })
+  .catch(() => {});
+check(
+  "4c. live update: grown entry replaced in place, new tool entry appended, no extra signer calls",
+  (await page.locator('[data-testid="transcript-entry"]').count()) === 3 &&
+    (await bridgeDecrypts()) === dTx0,
+  `entries=${await page.locator('[data-testid="transcript-entry"]').count()} decrypts ${dTx0}→${await bridgeDecrypts()}`,
+);
+await page.locator('[data-testid="agent-detail-back"]').click();
+
 // 4. reload: sessionStorage-cached key means no signer decrypt on relaunch
 const dPre = 0;
 await page.reload();
@@ -328,6 +370,21 @@ check(
   /Opus v3/.test(await panel.innerText().catch(() => "")) &&
     (await bridgeDecrypts()) === 0,
   `signer decrypts after reload: ${await bridgeDecrypts()}`,
+);
+
+// 4d. live updates still flow after a reload (live subscription re-established)
+const tLive = Date.now();
+pub.update({
+  agents: [agent({ name: "Opus v4", status: "running" }), agent({ pubkey: "cd".repeat(32), name: "Sonnet", status: "stopped" })],
+  generatedAt: nowS(),
+});
+await page
+  .waitForFunction(() => /Opus v4/.test(document.querySelector('[data-testid="my-agents"]')?.textContent || ""), null, { timeout: 60000 })
+  .catch(() => {});
+check(
+  "4d. after reload a new snapshot arrives live",
+  /Opus v4/.test(await panel.innerText().catch(() => "")),
+  `${Date.now() - tLive} ms`,
 );
 
 // 5. no plaintext on the relay, no prod traffic, no page errors

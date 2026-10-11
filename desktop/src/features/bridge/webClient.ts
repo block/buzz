@@ -6,6 +6,12 @@ import {
   D_AGENTS,
   D_HEARTBEAT,
   D_KEY,
+  D_RES_PREFIX,
+  D_TX_PREFIX,
+  WEB_MAX_ENTRIES_PER_AGENT,
+  type CommandResultBody,
+  type TranscriptChunkBody,
+  type TranscriptEntry,
   decryptEnvelope,
   envelopeLive,
   keyFromHex,
@@ -29,6 +35,10 @@ export type BridgeState = {
   heartbeat: HeartbeatBody | null;
   keyState: "none" | "decrypting" | "ready" | "failed";
   versionTooNew: boolean;
+  /** agent pubkey -> entries (oldest first, merged by entry id, bounded). */
+  transcripts: ReadonlyMap<string, readonly TranscriptEntry[]>;
+  /** cmdId -> latest result seen from the desktop. */
+  results: ReadonlyMap<string, CommandResultBody & { ts: number }>;
 };
 
 export type WebClientIO = {
@@ -46,8 +56,20 @@ export class BridgeWebClient {
     heartbeat: null,
     keyState: "none",
     versionTooNew: false,
+    transcripts: new Map(),
+    results: new Map(),
   };
-  readonly stats = { signerDecrypts: 0, localDecrypts: 0, dropped: 0 };
+  readonly stats = {
+    signerDecrypts: 0,
+    localDecrypts: 0,
+    dropped: 0,
+    /** debug ring: last applied/dropped payloads */
+    log: [] as string[],
+  };
+  private note(s: string) {
+    this.stats.log.push(s);
+    if (this.stats.log.length > 30) this.stats.log.shift();
+  }
   private listeners = new Set<() => void>();
   readonly keys = new Map<string, Uint8Array>(); // kid -> K
   private keyHeadAt = 0;
@@ -88,7 +110,7 @@ export class BridgeWebClient {
     if (tagValue(ev, "t") !== BRIDGE_TAG) return;
     if (this.seen.has(ev.id)) return;
     this.seen.add(ev.id);
-    if (this.seen.size > 500) this.seen.clear();
+    if (this.seen.size > 3000) this.seen.clear();
     const d = tagValue(ev, "d");
     const exp = Number(tagValue(ev, "expiration"));
     if (Number.isFinite(exp) && exp > 0 && nowS() > exp) {
@@ -96,7 +118,13 @@ export class BridgeWebClient {
       return;
     }
     if (d === D_KEY) return this.ingestKey(ev);
-    if (d !== D_AGENTS && d !== D_HEARTBEAT) return;
+    if (
+      d !== D_AGENTS &&
+      d !== D_HEARTBEAT &&
+      !d?.startsWith(D_TX_PREFIX) &&
+      !d?.startsWith(D_RES_PREFIX)
+    )
+      return;
     const kid = tagValue(ev, "kid");
     const key = kid ? this.keys.get(kid) : undefined;
     if (!kid || !key) {
@@ -111,12 +139,36 @@ export class BridgeWebClient {
   private applyPayload(d: string, ev: BridgeEventLike, key: Uint8Array) {
     this.stats.localDecrypts++;
     const env = decryptEnvelope(ev.content, key);
+    this.note(`${d.slice(15)} ${env ? `${env.type}#${env.seq}` : "undecryptable"}`);
     if (!env) {
       this.stats.dropped++;
       return;
     }
-    if (!envelopeLive(env) || !this.seq.accept(env)) {
+    // Chunks and results are idempotent (merged by entry id / command id, deduped by event id), so only
+    // snapshot/heartbeat use the monotonic seq guard.
+    const guarded = d === D_AGENTS || d === D_HEARTBEAT;
+    if (!envelopeLive(env) || (guarded && !this.seq.accept(env))) {
       this.stats.dropped++;
+      return;
+    }
+    if (d.startsWith(D_TX_PREFIX) && env.type === "transcript.chunk") {
+      this.applyChunk(env.body as TranscriptChunkBody, env.seq);
+      return;
+    }
+    if (d.startsWith(D_RES_PREFIX) && env.type === "cmd.result") {
+      const cmdId = d.slice(D_RES_PREFIX.length);
+      if (env.re !== cmdId) {
+        this.stats.dropped++;
+        return;
+      }
+      const body = env.body as CommandResultBody;
+      if (!body || typeof body.status !== "string") return;
+      const prev = this.state.results.get(cmdId);
+      // never regress a final result to an ack
+      if (prev && prev.status !== "accepted" && body.status === "accepted") return;
+      const results = new Map(this.state.results);
+      results.set(cmdId, { ...body, ts: env.ts });
+      this.set({ results });
       return;
     }
     if (d === D_AGENTS && env.type === "agents.snapshot") {
@@ -136,6 +188,41 @@ export class BridgeWebClient {
       });
     }
   }
+
+  private entryRev = new Map<string, number>();
+  private applyChunk(body: TranscriptChunkBody, seq: number) {
+    if (
+      !body ||
+      typeof body.agentPubkey !== "string" ||
+      !Array.isArray(body.entries)
+    )
+      return;
+    const agent = body.agentPubkey.toLowerCase();
+    const byId = new Map<string, TranscriptEntry>(
+      (this.state.transcripts.get(agent) ?? []).map((e) => [e.id, e]),
+    );
+    for (const e of body.entries) {
+      if (!e || typeof e.id !== "string" || typeof e.text !== "string") continue;
+      const rk = `${agent}|${e.id}`;
+      // chunks can arrive out of order: only a higher chunk seq may replace an entry
+      if ((this.entryRev.get(rk) ?? -1) >= seq) continue;
+      this.entryRev.set(rk, seq);
+      byId.set(e.id, e);
+    }
+    const merged = [...byId.values()].sort((a, b) => a.t - b.t);
+    const bounded = merged.slice(-WEB_MAX_ENTRIES_PER_AGENT);
+    const transcripts = new Map(this.state.transcripts);
+    transcripts.set(agent, bounded);
+    this.set({ transcripts });
+  }
+
+  /** Current session key for building commands (null until the key event is unlocked). */
+  currentKey(): { kid: string; key: Uint8Array } | null {
+    const kid = this.keyHeadKid;
+    const key = kid ? this.keys.get(kid) : undefined;
+    return kid && key ? { kid, key } : null;
+  }
+  private keyHeadKid = "";
 
   private async ingestKey(ev: BridgeEventLike) {
     if (
@@ -163,6 +250,7 @@ export class BridgeWebClient {
       if (w.v !== 1 || typeof w.key !== "string" || nowS() > w.expiresAt)
         throw new Error("bad key");
       this.keys.set(w.kid, keyFromHex(w.key));
+      this.keyHeadKid = w.kid;
     } catch {
       this.set({ keyState: "failed" });
       return;

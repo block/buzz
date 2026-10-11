@@ -53,29 +53,55 @@ export function useBridgeAgents(
     };
     let unsub: (() => Promise<void>) | null = null;
     let cancelled = false;
+    let retry: number | null = null;
+    let attempt = 0;
     const onEvent = (e: RelayEvent) => void c.ingest(e);
-    // Backfill newest-first-ish (key first so payloads decrypt locally), then go live.
-    void relayClient
-      .fetchEvents({ ...filter, limit: 20 })
-      .then((evs) => {
-        const sorted = [...evs].sort(
-          (a, b) =>
-            (a.tags.some((t) => t[1]?.endsWith("/key")) ? -1 : 0) -
-            (b.tags.some((t) => t[1]?.endsWith("/key")) ? -1 : 0),
-        );
-        for (const e of sorted) void c.ingest(e);
-      })
-      .catch(() => {});
-    void relayClient
-      .subscribeLive({ ...filter, limit: 0 }, onEvent)
-      .then((u) => {
-        if (cancelled) void u();
-        else unsub = u;
-      })
-      .catch(() => {});
+    // Backfill (key first so payloads decrypt locally), then go live. Both are retried: a swallowed failure here
+    // used to leave the panel frozen after a reload until the next full refresh.
+    const backfill = () =>
+      relayClient
+        .fetchEvents({ ...filter, limit: 150 })
+        .then((evs) => {
+          const sorted = [...evs].sort(
+            (a, b) =>
+              (a.tags.some((t) => t[1]?.endsWith("/key")) ? -1 : 0) -
+              (b.tags.some((t) => t[1]?.endsWith("/key")) ? -1 : 0),
+          );
+          for (const e of sorted) void c.ingest(e);
+        })
+        .catch((e) => console.warn("[bridge] backfill failed:", e));
+    const goLive = () => {
+      if (cancelled) return;
+      relayClient
+        // limit>0: the relay replays recent events at subscribe time, atomically with going live (no gap).
+        .subscribeLive({ ...filter, limit: 150 }, onEvent)
+        .then((u) => {
+          attempt = 0;
+          if (cancelled) void u();
+          else {
+            unsub = u;
+            // Events published between the first backfill and the subscription going live (slow signer/AUTH after a
+            // reload can take many seconds) would otherwise be missed: backfill again now that live is on.
+            void backfill();
+          }
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          attempt++;
+          const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5));
+          console.warn(`[bridge] live subscribe failed; retrying in ${delay}ms:`, e);
+          retry = window.setTimeout(goLive, delay);
+        });
+    };
+    void backfill();
+    goLive();
+    // After a relay reconnect, events published while we were away must be re-fetched.
+    const offReconnect = relayClient.subscribeToReconnects(() => void backfill());
     const t = window.setInterval(() => c.tick(), 5_000);
     return () => {
       cancelled = true;
+      offReconnect();
+      if (retry !== null) window.clearTimeout(retry);
       window.clearInterval(t);
       void unsub?.();
       setClient(null);
@@ -99,4 +125,6 @@ const EMPTY: BridgeState = {
   heartbeat: null,
   keyState: "none",
   versionTooNew: false,
+  transcripts: new Map(),
+  results: new Map(),
 };

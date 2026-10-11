@@ -1,7 +1,20 @@
 // Desktop side of the bridge: publishes the key wrap, agent snapshots (on change + forced refresh) and heartbeats.
 // IO is injected so it is testable and so the web build (which never runs it) pulls in nothing native.
-import type { AgentsSnapshotBody, HeartbeatBody } from "./protocol";
+import type {
+  AgentsSnapshotBody,
+  CommandResultBody,
+  HeartbeatBody,
+  TranscriptChunkBody,
+  TranscriptEntry,
+} from "./protocol";
 import {
+  CMD_RESULT_TTL_S,
+  resD,
+  TX_DEBOUNCE_MS,
+  TX_MAX_EVENTS_PER_MIN,
+  TX_MIN_INTERVAL_MS,
+  TX_TTL_S,
+  txChunkD,
   bridgeTags,
   buildEnvelope,
   D_AGENTS,
@@ -22,6 +35,7 @@ import {
   type WrappedKey,
 } from "./protocol";
 import { snapshotSignature } from "./snapshot";
+import { packChunks, TranscriptTracker } from "./transcript";
 
 export type PublisherIO = {
   encryptToSelf(plaintext: string): Promise<string>;
@@ -41,6 +55,8 @@ export type PublisherOptions = {
   deviceId: string;
   appVersion?: string;
   platform?: string;
+  /** Capabilities advertised in the heartbeat (the web hides controls the desktop doesn't list). */
+  caps?: string[];
   onError?: (e: unknown) => void;
 };
 
@@ -59,8 +75,31 @@ export class BridgePublisher {
   private agentsRunning = 0;
   private startedAt: number;
   private destroyed = false;
+  private knownAgents = new Set<string>();
+  private tx = new Map<
+    string,
+    {
+      tracker: TranscriptTracker;
+      pending: TranscriptEntry[] | null;
+      timer: ReturnType<typeof setTimeout> | null;
+      lastAt: number;
+      seq: number;
+    }
+  >();
+  private txSentAt: number[] = [];
   readonly kid = this.key.kid;
-  readonly stats = { snapshots: 0, heartbeats: 0, keyWraps: 0, skipped: 0 };
+  /** Current session key, for the command handler's decrypt. */
+  get sessionKey(): Uint8Array {
+    return this.key.key;
+  }
+  readonly stats = {
+    snapshots: 0,
+    heartbeats: 0,
+    keyWraps: 0,
+    skipped: 0,
+    txChunks: 0,
+    txThrottled: 0,
+  };
 
   private io: PublisherIO;
   private opts: PublisherOptions;
@@ -89,6 +128,8 @@ export class BridgePublisher {
     this.destroyed = true;
     if (this.timer) (this.io.clearTimeout ?? clearTimeout)(this.timer);
     if (this.hbTimer) clearInterval(this.hbTimer);
+    for (const t of this.tx.values())
+      if (t.timer) (this.io.clearTimeout ?? clearTimeout)(t.timer);
     this.timer = null;
     this.hbTimer = null;
   }
@@ -96,6 +137,7 @@ export class BridgePublisher {
   /** Called whenever agent state may have changed; coalesces and rate-limits. */
   update(body: AgentsSnapshotBody) {
     if (this.destroyed) return;
+    this.knownAgents = new Set(body.agents.map((a) => a.pubkey.toLowerCase()));
     this.agentsRunning = body.agents.filter(
       (a) => a.status === "running",
     ).length;
@@ -175,6 +217,114 @@ export class BridgePublisher {
     }
   }
 
+  /** True if this agent was in the latest snapshot (only known agents' transcripts are published). */
+  knowsAgent(pubkey: string): boolean {
+    return this.knownAgents.has(pubkey.toLowerCase());
+  }
+
+  /**
+   * Feed the agent's current redacted transcript entries (all of them; the tracker sends only new/changed ones).
+   * Debounced per agent, and globally capped to TX_MAX_EVENTS_PER_MIN chunk events.
+   */
+  updateTranscript(agentPubkey: string, entries: TranscriptEntry[]) {
+    if (this.destroyed) return;
+    const agent = agentPubkey.toLowerCase();
+    if (!this.knownAgents.has(agent)) return;
+    let st = this.tx.get(agent);
+    if (!st) {
+      st = { tracker: new TranscriptTracker(), pending: null, timer: null, lastAt: 0, seq: 0 };
+      this.tx.set(agent, st);
+    }
+    const delta = st.tracker.delta(entries);
+    if (delta.length === 0) return;
+    st.pending = entries;
+    this.scheduleTx(agent);
+  }
+
+  private scheduleTx(agent: string, extraWait = 0) {
+    const st = this.tx.get(agent);
+    if (!st || st.timer) return;
+    const wait = Math.max(
+      TX_DEBOUNCE_MS,
+      TX_MIN_INTERVAL_MS - (this.nowMs() - st.lastAt),
+      extraWait,
+    );
+    st.timer = (this.io.setTimeout ?? setTimeout)(() => {
+      st.timer = null;
+      void this.flushTranscript(agent);
+    }, wait);
+  }
+
+  async flushTranscript(agent: string) {
+    const st = this.tx.get(agent);
+    if (!st || !st.pending || this.destroyed) return;
+    const now = this.nowMs();
+    this.txSentAt = this.txSentAt.filter((t) => now - t < 60_000);
+    const delta = st.tracker.delta(st.pending);
+    if (delta.length === 0) {
+      st.pending = null;
+      return;
+    }
+    const chunks = packChunks(agent, delta);
+    if (this.txSentAt.length + chunks.length > TX_MAX_EVENTS_PER_MIN) {
+      this.stats.txThrottled++;
+      this.scheduleTx(agent, 10_000); // retry later; pending is kept
+      return;
+    }
+    try {
+      await this.ensureKey();
+      for (const entries of chunks) {
+        const body: TranscriptChunkBody = { agentPubkey: agent, entries };
+        const env = buildEnvelope({
+          type: "transcript.chunk",
+          kid: this.kid,
+          dev: this.opts.deviceId,
+          seq: ++st.seq,
+          ttlS: TX_TTL_S,
+          body,
+        });
+        await this.publishEnv(txChunkD(agent, st.seq), env, TX_TTL_S);
+        this.txSentAt.push(this.nowMs());
+        this.stats.txChunks++;
+        st.tracker.markSent(entries);
+      }
+      st.lastAt = this.nowMs();
+      // Newer changes may have arrived while publishing.
+      const again = st.pending ? st.tracker.delta(st.pending) : [];
+      if (again.length === 0) st.pending = null;
+      else this.scheduleTx(agent);
+    } catch (e) {
+      this.opts.onError?.(e);
+      this.scheduleTx(agent, 15_000);
+    }
+  }
+
+  private resultCreatedAt = new Map<string, number>();
+
+  /** Publish an ack/result for a command (replaceable per command id; ack -> final). */
+  async publishResult(cmdId: string, body: CommandResultBody) {
+    if (this.destroyed) return;
+    try {
+      await this.ensureKey();
+      const env = buildEnvelope({
+        type: "cmd.result",
+        kid: this.kid,
+        dev: this.opts.deviceId,
+        seq: Date.now(),
+        ttlS: CMD_RESULT_TTL_S,
+        body,
+        re: cmdId,
+      });
+      const prev = this.resultCreatedAt.get(cmdId) ?? 0;
+      const createdAt = Math.max(env.ts, prev + 1); // replaceable ordering: final must sort after the ack
+      this.resultCreatedAt.set(cmdId, createdAt);
+      if (this.resultCreatedAt.size > 500) this.resultCreatedAt.clear();
+      await this.publishEnv(resD(cmdId), env, CMD_RESULT_TTL_S, createdAt);
+    } catch (e) {
+      this.opts.onError?.(e);
+    }
+  }
+
   private ensureKey(): Promise<void> {
     if (this.keyPublished) return Promise.resolve();
     this.keyPromise ??= this.publishKey().then(
@@ -213,12 +363,13 @@ export class BridgePublisher {
     d: string,
     env: ReturnType<typeof buildEnvelope>,
     ttlS: number,
+    createdAt = env.ts,
   ) {
     const content = encryptEnvelope(env, this.key.key);
     const signed = await this.io.signEvent({
       kind: BRIDGE_KIND,
       content,
-      createdAt: env.ts,
+      createdAt,
       tags: bridgeTags(d, this.kid, env.ts + ttlS),
     });
     await this.io.publish(signed);

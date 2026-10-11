@@ -10,6 +10,90 @@ export const D_PREFIX = "buzz.bridge.v1/";
 export const D_KEY = `${D_PREFIX}key`;
 export const D_AGENTS = `${D_PREFIX}agents`;
 export const D_HEARTBEAT = `${D_PREFIX}hb`;
+export const D_TX_PREFIX = `${D_PREFIX}tx/`;
+export const D_CMD_PREFIX = `${D_PREFIX}cmd/`;
+export const D_RES_PREFIX = `${D_PREFIX}res/`;
+export const txChunkD = (agentPubkey: string, seq: number) =>
+  `${D_TX_PREFIX}${agentPubkey.toLowerCase()}/${seq}`;
+export const cmdD = (cmdId: string) => `${D_CMD_PREFIX}${cmdId}`;
+export const resD = (cmdId: string) => `${D_RES_PREFIX}${cmdId}`;
+
+/** Transcript chunk plaintext cap (bytes of JSON body). */
+export const MAX_CHUNK_BYTES = 16 * 1024;
+/** Per-entry text cap after redaction. */
+export const MAX_ENTRY_TEXT = 1500;
+/** On first publish for an agent, only this many most-recent entries are sent. */
+export const TX_INITIAL_BACKLOG = 40;
+/** Chunk events expire after 6 h (relay may ignore; clients enforce). */
+export const TX_TTL_S = 6 * 3600;
+export const TX_DEBOUNCE_MS = 1_500;
+export const TX_MIN_INTERVAL_MS = 4_000;
+/** Global cap on transcript chunk events per rolling minute (protects the relay). */
+export const TX_MAX_EVENTS_PER_MIN = 24;
+/** Web keeps at most this many entries per agent. */
+export const WEB_MAX_ENTRIES_PER_AGENT = 300;
+
+export const CMD_MAX_TTL_S = 120;
+export const CMD_MAX_TEXT = 4000;
+export const CMD_RESULT_TTL_S = 24 * 3600;
+export const CMD_SEEN_LIMIT = 1000;
+
+export type CommandType =
+  | "agent.start"
+  | "agent.stop"
+  | "agent.message"
+  | "prompt.approve"
+  | "prompt.deny";
+/** Commands that change state or send content: the web must get an explicit confirmation before sending. */
+export const DESTRUCTIVE_COMMANDS: readonly CommandType[] = [
+  "agent.stop",
+  "agent.message",
+  "prompt.approve",
+  "prompt.deny",
+];
+export const ALL_COMMANDS: readonly CommandType[] = [
+  "agent.start",
+  ...DESTRUCTIVE_COMMANDS,
+];
+
+export type CommandBody =
+  | { agentPubkey: string }
+  | { agentPubkey: string; channelId: string; text: string }
+  | { agentPubkey: string; promptId: string };
+
+export type CommandResultBody = {
+  status: "accepted" | "ok" | "error";
+  code?: string;
+  message?: string;
+};
+
+export type TranscriptRole =
+  | "assistant"
+  | "user"
+  | "tool"
+  | "thought"
+  | "plan"
+  | "status"
+  | "permission"
+  | "error";
+
+export type TranscriptEntry = {
+  /** Stable id of the transcript item (same id + later content = update). */
+  id: string;
+  /** Item timestamp, unix ms. */
+  t: number;
+  role: TranscriptRole;
+  /** Redacted, clipped text. */
+  text: string;
+  /** For tool entries. */
+  tool?: { name: string; status: string; error?: boolean };
+  channelId?: string;
+};
+
+export type TranscriptChunkBody = {
+  agentPubkey: string;
+  entries: TranscriptEntry[];
+};
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 /** Heartbeats live 24 h so a long-offline desktop still shows "offline · last seen …"; freshness is judged by `ts` vs OFFLINE_AFTER_S, not by exp. */
@@ -55,7 +139,12 @@ export type HeartbeatBody = {
   caps: string[];
 };
 
-export type BridgeType = "agents.snapshot" | "presence.heartbeat";
+export type BridgeType =
+  | "agents.snapshot"
+  | "presence.heartbeat"
+  | "transcript.chunk"
+  | "cmd.result"
+  | CommandType;
 
 export type Envelope<B = unknown> = {
   v: number;

@@ -4,11 +4,16 @@ import * as React from "react";
 
 import { useActiveAgentTurnsByChannel } from "@/features/agents/activeAgentTurnsStore";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import {
+  getAgentTranscript,
+  subscribeAgentObserverStore,
+} from "@/features/agents/observerRelayStore";
 import { relayClient } from "@/shared/api/relayClient";
 import { nip44EncryptToSelf, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 import { BridgePublisher } from "./publisher";
 import { buildAgentsSnapshot } from "./snapshot";
+import { entriesFromItems } from "./transcript";
 
 const DEVICE_KEY = "buzz-bridge-device-id";
 
@@ -60,7 +65,25 @@ export function useBridgePublisher(
     );
     publisherRef.current = p;
     p.start();
+    // Transcripts: recompute an agent's redacted entries at most once per second after observer activity.
+    const dirty = new Set<string>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushDirty = () => {
+      flushTimer = null;
+      for (const agent of dirty) {
+        if (p.knowsAgent(agent))
+          p.updateTranscript(agent, entriesFromItems(getAgentTranscript(agent)));
+      }
+      dirty.clear();
+    };
+    const unsubObserver = subscribeAgentObserverStore((update) => {
+      if (!update?.agentPubkey) return;
+      dirty.add(update.agentPubkey);
+      flushTimer ??= setTimeout(flushDirty, 1000);
+    });
     return () => {
+      unsubObserver();
+      if (flushTimer) clearTimeout(flushTimer);
       p.destroy();
       publisherRef.current = null;
     };
@@ -88,5 +111,9 @@ export function useBridgePublisher(
         Date.now(),
       ),
     );
+    // Publish what each running agent has already said (new agents/relaunch: backlog of the last entries).
+    for (const a of agents)
+      if (a.status === "running")
+        p.updateTranscript(a.pubkey, entriesFromItems(getAgentTranscript(a.pubkey)));
   }, [agents, channelTurns]);
 }
