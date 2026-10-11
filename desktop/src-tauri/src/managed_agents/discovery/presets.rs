@@ -225,6 +225,16 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli_install_hint: None,
         underlying_cli_install_instructions_url: None,
     },
+    PresetHarness {
+        id: "letta",
+        label: "Letta",
+        command: "letta-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/letta-ai/letta-acp",
+        install_hint: "Buzz talks to Letta through the letta-acp adapter \
+            (npm install -g @letta-ai/letta-acp).",
+        underlying_cli: None,
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
