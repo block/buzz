@@ -223,3 +223,201 @@ test("ignores malformed cache payloads", async () => {
     undefined,
   );
 });
+
+// ── Parse cost ───────────────────────────────────────────────────────────────
+//
+// `readCache` is reached once per React render, per query observer, through
+// `resolveUserLabelPlaceholderData`. These pin the two costs that made an idle
+// window burn CPU: re-parsing bytes that have not changed, and parsing at all
+// for a caller that asked about no pubkeys.
+
+function seedCache(relayUrl, count) {
+  window.localStorage.setItem(
+    `buzz-user-labels.v1:${relayUrl}`,
+    JSON.stringify({
+      version: 1,
+      profiles: Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [
+          `pubkey-${index}`,
+          {
+            displayName: `Person ${index}`,
+            name: null,
+            nip05Handle: null,
+            updatedAt: index,
+          },
+        ]),
+      ),
+    }),
+  );
+}
+
+function countingParse() {
+  const original = JSON.parse;
+  let calls = 0;
+  JSON.parse = (...args) => {
+    calls += 1;
+    return original(...args);
+  };
+  return {
+    calls: () => calls,
+    restore: () => {
+      JSON.parse = original;
+    },
+  };
+}
+
+test("unchanged cache bytes are parsed once, not once per read", async () => {
+  const subject = await loadSubject();
+  installLocalStorage();
+  subject.resetUserLabelCacheMemo();
+  seedCache("wss://relay.example", 200);
+
+  const parse = countingParse();
+  try {
+    for (let i = 0; i < 25; i += 1) {
+      subject.readCachedUserLabels("wss://relay.example", ["pubkey-1"]);
+    }
+    assert.equal(parse.calls(), 1);
+  } finally {
+    parse.restore();
+  }
+
+  assert.deepEqual(
+    subject.readCachedUserLabels("wss://relay.example", ["pubkey-1"]).profiles[
+      "pubkey-1"
+    ].displayName,
+    "Person 1",
+  );
+});
+
+test("an empty pubkey list never touches storage", async () => {
+  const subject = await loadSubject();
+  const values = installLocalStorage();
+  subject.resetUserLabelCacheMemo();
+  seedCache("wss://relay.example", 200);
+
+  let reads = 0;
+  const getItem = window.localStorage.getItem;
+  window.localStorage.getItem = (key) => {
+    reads += 1;
+    return getItem(key);
+  };
+
+  // A closed UserProfilePopover passes `[]` and mounts per message row, per
+  // avatar and per member-list entry, so this is the common call.
+  assert.equal(
+    subject.readCachedUserLabels("wss://relay.example", []),
+    undefined,
+  );
+  assert.equal(
+    subject.resolveUserLabelPlaceholderData(
+      undefined,
+      "wss://relay.example",
+      [],
+    ),
+    undefined,
+  );
+  assert.equal(reads, 0);
+  assert.ok(values.size > 0);
+});
+
+test("a write is seen by the next read", async () => {
+  const subject = await loadSubject();
+  installLocalStorage();
+  subject.resetUserLabelCacheMemo();
+
+  subject.writeCachedUserLabels("wss://relay.example", {
+    abcdef: {
+      displayName: "Alice",
+      name: null,
+      avatarUrl: null,
+      nip05Handle: null,
+      ownerPubkey: null,
+    },
+  });
+  assert.equal(
+    subject.readCachedUserLabels("wss://relay.example", ["abcdef"]).profiles
+      .abcdef.displayName,
+    "Alice",
+  );
+
+  subject.writeCachedUserLabels("wss://relay.example", {
+    abcdef: {
+      displayName: "Alice Renamed",
+      name: null,
+      avatarUrl: null,
+      nip05Handle: null,
+      ownerPubkey: null,
+    },
+  });
+  assert.equal(
+    subject.readCachedUserLabels("wss://relay.example", ["abcdef"]).profiles
+      .abcdef.displayName,
+    "Alice Renamed",
+  );
+});
+
+test("one relay's labels are never served for another", async () => {
+  const subject = await loadSubject();
+  installLocalStorage();
+  subject.resetUserLabelCacheMemo();
+  window.localStorage.setItem(
+    "buzz-user-labels.v1:wss://a.example",
+    JSON.stringify({
+      version: 1,
+      profiles: {
+        abcdef: {
+          displayName: "From A",
+          name: null,
+          nip05Handle: null,
+          updatedAt: 1,
+        },
+      },
+    }),
+  );
+  window.localStorage.setItem(
+    "buzz-user-labels.v1:wss://b.example",
+    JSON.stringify({
+      version: 1,
+      profiles: {
+        abcdef: {
+          displayName: "From B",
+          name: null,
+          nip05Handle: null,
+          updatedAt: 1,
+        },
+      },
+    }),
+  );
+
+  for (const [relay, expected] of [
+    ["wss://a.example", "From A"],
+    ["wss://b.example", "From B"],
+    ["wss://a.example", "From A"],
+  ]) {
+    assert.equal(
+      subject.readCachedUserLabels(relay, ["abcdef"]).profiles.abcdef
+        .displayName,
+      expected,
+    );
+  }
+});
+
+test("resetUserLabelCacheMemo forces the next read to re-parse", async () => {
+  const subject = await loadSubject();
+  installLocalStorage();
+  subject.resetUserLabelCacheMemo();
+  seedCache("wss://relay.example", 50);
+
+  const parse = countingParse();
+  try {
+    subject.readCachedUserLabels("wss://relay.example", ["pubkey-1"]);
+    subject.readCachedUserLabels("wss://relay.example", ["pubkey-1"]);
+    assert.equal(parse.calls(), 1);
+    subject.resetUserLabelCacheMemo();
+    subject.readCachedUserLabels("wss://relay.example", ["pubkey-1"]);
+    assert.equal(parse.calls(), 2);
+  } finally {
+    parse.restore();
+  }
+});
