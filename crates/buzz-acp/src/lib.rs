@@ -5927,6 +5927,14 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_teaches_channel_broadcast_replies() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("ordinary replies also pass `--broadcast`"));
+        assert!(prompt.contains("NIP-CW window row"));
+        assert!(prompt.contains("DMs never use `--broadcast`"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
