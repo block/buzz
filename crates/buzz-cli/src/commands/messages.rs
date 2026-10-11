@@ -2,7 +2,7 @@ use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
-use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+use crate::client::{normalize_events, normalize_write_response, BlobDescriptor, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -598,6 +598,29 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
     matches
 }
 
+/// Markdown line for an uploaded attachment. Images and video render inline;
+/// any other file is a plain `[filename](url)` link, which clients show as a
+/// file card.
+fn attachment_markdown(desc: &BlobDescriptor) -> String {
+    if desc.mime_type.starts_with("video/") {
+        return format!("\n![video]({})", desc.url);
+    }
+    if desc.mime_type.starts_with("image/") {
+        return format!("\n![image]({})", desc.url);
+    }
+    let label = desc
+        .filename
+        .as_deref()
+        .or_else(|| desc.url.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("file");
+    let escaped = label
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    format!("\n[{escaped}]({})", desc.url)
+}
+
 pub struct SendMessageParams {
     pub channel_id: String,
     pub content: String,
@@ -656,13 +679,7 @@ pub async fn cmd_send_message(
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
         media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        media_content.push_str(&attachment_markdown(&desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1105,6 +1122,33 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn generic_attachments_become_file_links_and_media_stays_inline() {
+        let desc = |mime: &str, filename: Option<&str>| -> crate::client::BlobDescriptor {
+            serde_json::from_value(json!({
+                "url": "https://relay.test/media/abc.pdf",
+                "sha256": "abc",
+                "size": 3,
+                "type": mime,
+                "uploaded": 0,
+                "filename": filename,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            super::attachment_markdown(&desc("application/pdf", Some("Q3 [draft].pdf"))),
+            "\n[Q3 \\[draft\\].pdf](https://relay.test/media/abc.pdf)"
+        );
+        assert_eq!(
+            super::attachment_markdown(&desc("application/pdf", None)),
+            "\n[abc.pdf](https://relay.test/media/abc.pdf)"
+        );
+        assert_eq!(
+            super::attachment_markdown(&desc("image/png", None)),
+            "\n![image](https://relay.test/media/abc.pdf)"
+        );
+    }
 
     #[test]
     fn compact_event_format_remains_the_three_key_contract() {
