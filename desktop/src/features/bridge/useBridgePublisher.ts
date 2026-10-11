@@ -17,7 +17,7 @@ import {
 } from "@/shared/api/tauriManagedAgents";
 import type { RelayEvent } from "@/shared/api/types";
 import { isAgentManagementAllowed, remoteInfoForHeartbeat, subscribeRemoteAccess } from "./remoteAccessStore";
-import { type BrowserHost, makeBrowserDeps, remoteBrowserManager } from "./browserHost";
+import { makeBrowserDeps, playgroundBrowserHost, remoteBrowserManager, snapshotBrowserSessions } from "./browserHost";
 import { BridgeCommandHandler, makeSeenSet } from "./commandHandler";
 import { BRIDGE_KIND, BRIDGE_TAG, CMD_MAX_TTL_S, nowS } from "./protocol";
 import { BridgePublisher } from "./publisher";
@@ -43,7 +43,6 @@ export function useBridgePublisher(
   pubkey: string | undefined,
   relayUrl: string | undefined,
   channelName: (channelId: string) => string | undefined,
-  browserHost?: BrowserHost,
 ): void {
   const enabled = isTauri() && !!pubkey && !!relayUrl;
   const agentsQuery = useManagedAgentsQuery({ enabled });
@@ -51,8 +50,8 @@ export function useBridgePublisher(
   const publisherRef = React.useRef<BridgePublisher | null>(null);
   const nameRef = React.useRef(channelName);
   nameRef.current = channelName;
-  const hostRef = React.useRef(browserHost);
-  hostRef.current = browserHost;
+  const agentNamesRef = React.useRef<(pubkey: string) => string | undefined>(() => undefined);
+  agentNamesRef.current = (pk) => agentsQuery.data?.find((a) => a.pubkey === pk)?.name;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayUrl identify the session; a change must restart the publisher (new key wrap).
   React.useEffect(() => {
@@ -78,9 +77,10 @@ export function useBridgePublisher(
           "agent.start",
           "agent.stop",
           "agent.message",
-          ...(hostRef.current
-            ? ["browser.open", "browser.close", "browser.screenshot"]
-            : []),
+          "browser.open",
+          "browser.close",
+          "browser.screenshot",
+          "browser.agent",
         ],
         remote: remoteInfoForHeartbeat,
         onError: (e) => console.warn("[bridge] publish failed:", e),
@@ -97,7 +97,36 @@ export function useBridgePublisher(
         void p.sendHeartbeat();
       }
     });
-    if (hostRef.current) void p.publishBrowserSessions(remoteBrowserManager.list());
+    // Browser sync: publish the desktop's whole Browsers page now and whenever it (or an agent grant, or liveness) changes.
+    let lastSessions = "";
+    let syncTimer: ReturnType<typeof setTimeout> | null = null;
+    let syncing = false;
+    const syncBrowsers = async (force = false) => {
+      if (syncing) return;
+      syncing = true;
+      try {
+        const live = new Set(playgroundBrowserHost.rows().map((r) => r.sid));
+        for (const id of remoteBrowserManager.ids()) if (!live.has(id)) remoteBrowserManager.remove(id);
+        const list = await snapshotBrowserSessions(playgroundBrowserHost, (pk) => agentNamesRef.current(pk), nowS());
+        const key = JSON.stringify(list.map(({ openedAt: _o, ...rest }) => rest));
+        if (force || key !== lastSessions) {
+          lastSessions = key;
+          await p.publishBrowserSessions(list);
+        }
+      } catch (e) {
+        console.warn("[bridge] browser sync failed:", e);
+      } finally {
+        syncing = false;
+      }
+    };
+    const scheduleSync = () => {
+      if (syncTimer) clearTimeout(syncTimer);
+      syncTimer = setTimeout(() => void syncBrowsers(), 600);
+    };
+    void syncBrowsers(true);
+    const unsubBrowsers = playgroundBrowserHost.subscribe(scheduleSync);
+    const unsubGrants = playgroundBrowserHost.subscribeGrants(scheduleSync);
+    const syncInterval = setInterval(() => void syncBrowsers(), 20_000); // liveness (Cold/Live) changes without a store event
     // Commands from the member's own browser (validated in BridgeCommandHandler; see docs/pwa-bridge-protocol.md §6).
     const SEEN_KEY = "buzz-bridge-cmd-seen";
     const handler = new BridgeCommandHandler({
@@ -146,13 +175,11 @@ export function useBridgePublisher(
       },
       publishResult: (id, body) => p.publishResult(id, body),
       agentManagementAllowed: isAgentManagementAllowed,
-      browser: hostRef.current
-        ? makeBrowserDeps(
-            () => hostRef.current as BrowserHost,
-            (id, shot) => p.publishShot(id, shot),
-            () => p.publishBrowserSessions(remoteBrowserManager.list()),
-          )
-        : undefined,
+      browser: makeBrowserDeps(
+        () => playgroundBrowserHost,
+        (id, shot) => p.publishShot(id, shot),
+        () => syncBrowsers(true),
+      ),
       onDrop: (reason, id) =>
         console.warn(`[bridge] ignored command ${id.slice(0, 8)}: ${reason}`),
     });
@@ -193,6 +220,10 @@ export function useBridgePublisher(
     return () => {
       cmdCancelled = true;
       unsubRemote();
+      unsubBrowsers();
+      unsubGrants();
+      clearInterval(syncInterval);
+      if (syncTimer) clearTimeout(syncTimer);
       void unsubCmd?.();
       unsubObserver();
       if (flushTimer) clearTimeout(flushTimer);

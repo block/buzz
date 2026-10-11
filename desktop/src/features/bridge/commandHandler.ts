@@ -34,6 +34,10 @@ export type BrowserDeps = {
     shot: { sessionId: string; mime: string; w: number; h: number; chunks: Uint8Array[] },
   ): Promise<void>;
   publishSessions(): Promise<void>;
+  /** True when this id is a browser on the desktop's Browsers page (any browser, not only ones opened remotely). Absent = manager only. */
+  exists?(sessionId: string): boolean;
+  /** Observe/Drive: sets (or clears, mode "off") the agent grant on a browser. Only reachable when "Allow remote agent management" is on. */
+  setAgent?(input: { sessionId: string; mode: "off" | "observe" | "drive"; agentPubkey?: string; channelId?: string }): Promise<void>;
 };
 
 export type CommandDeps = {
@@ -118,8 +122,29 @@ export class BridgeCommandHandler {
       await this.finish(cmdId, { status: "error", code: "unsupported", message: "Browser sessions aren't available on this desktop." });
       return "dropped";
     }
+    const known = (id: string) => (b.exists ? b.exists(id) : b.manager.has(id));
+    if (type === "browser.agent" && d.agentManagementAllowed && !d.agentManagementAllowed()) {
+      await this.finish(cmdId, { status: "error", code: "remote_disabled", message: "Remote agent management is off on this computer. Turn on \"Allow remote agent management\" in its Settings → Agents to drive or observe browsers." });
+      return "dropped";
+    }
     try {
-      if (type === "browser.open") {
+      if (type === "browser.agent") {
+        const id = typeof body.sessionId === "string" ? body.sessionId : "";
+        const mode = body.mode;
+        const agentPubkey = typeof body.agentPubkey === "string" ? body.agentPubkey.toLowerCase() : "";
+        const channelId = typeof body.channelId === "string" ? body.channelId : "";
+        if (!known(id)) await this.finish(cmdId, { status: "error", code: "unknown_session", message: "That browser isn't on your desktop any more." });
+        else if (mode !== "off" && mode !== "observe" && mode !== "drive") await this.finish(cmdId, { status: "error", code: "bad_request", message: "Unknown mode." });
+        else if (mode !== "off" && (!d.agents().has(agentPubkey) || !channelId || channelId.length > 200))
+          await this.finish(cmdId, { status: "error", code: "bad_request", message: "Choose one of your desktop's agents and a channel." });
+        else if (!b.setAgent) await this.finish(cmdId, { status: "error", code: "unsupported", message: "This desktop can't set browser agents remotely." });
+        else {
+          await d.publishResult(cmdId, { status: "accepted" });
+          await b.setAgent({ sessionId: id, mode, agentPubkey, channelId });
+          await b.publishSessions();
+          await this.finish(cmdId, { status: "ok" });
+        }
+      } else if (type === "browser.open") {
         const v = validateBrowserUrl(body.url);
         if (!v.ok) await this.finish(cmdId, { status: "error", code: v.code, message: v.message });
         else if (!b.manager.canOpen())
@@ -133,7 +158,7 @@ export class BridgeCommandHandler {
         }
       } else if (type === "browser.close") {
         const id = typeof body.sessionId === "string" ? body.sessionId : "";
-        if (!b.manager.has(id)) await this.finish(cmdId, { status: "error", code: "unknown_session", message: "That browser session isn't open remotely." });
+        if (!known(id)) await this.finish(cmdId, { status: "error", code: "unknown_session", message: "That browser isn't on your desktop any more." });
         else {
           await d.publishResult(cmdId, { status: "accepted" });
           await b.close(id);
@@ -143,8 +168,8 @@ export class BridgeCommandHandler {
         }
       } else {
         const id = typeof body.sessionId === "string" ? body.sessionId : "";
-        if (!b.manager.has(id)) {
-          await this.finish(cmdId, { status: "error", code: "unknown_session", message: "That browser session isn't open remotely." });
+        if (!known(id)) {
+          await this.finish(cmdId, { status: "error", code: "unknown_session", message: "That browser isn't on your desktop any more." });
         } else {
           const gate = b.manager.beginShot(id, Date.now());
           if (gate) {

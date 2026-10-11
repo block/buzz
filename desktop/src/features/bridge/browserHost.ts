@@ -1,16 +1,126 @@
-// Slice R desktop glue: remote browser sessions are pinned sites added by a confirmed "Open on desktop" command.
-import { closePinWebview, screenshotPinWebview } from "@/features/pinned-sites/lib/pinWebview";
-import type { PinnedSiteDraft } from "@/features/pinned-sites/lib/types";
+// Slice R desktop glue: the bridge's browsers ARE the desktop's Browsers page (playground sessions). A browser added from the
+// web is a normal playground browser (so it shows on the desktop Browsers page); the desktop's full list is published back.
+import { clearBrowserAgentGrant, listBrowserAgentGrants, setBrowserAgentGrant, subscribeBrowserAgentGrant } from "@/features/browser-agent/lib/api";
+import { buildBrowserSessionCard } from "@/features/browsers/lib/addBrowserSession";
+import { disposeBrowserSession } from "@/features/browsers/lib/disposeBrowserSession";
+import { mainTabSid } from "@/features/playground/lib/browserGroups";
+import {
+  addPlaygroundSession,
+  getPlaygroundStore,
+  listPlaygroundBrowsers,
+  showPlaygroundSession,
+  subscribePlayground,
+} from "@/features/playground/lib/sessions";
+import { isPlaygroundWebviewOpen, screenshotPlaygroundWebview } from "@/features/playground/lib/webview";
 import type { BrowserDeps } from "./commandHandler";
-import { BrowserSessionManager, fitImage, type Encoded } from "./browserSessions";
+import type { BrowserSessionInfo } from "./protocol";
+import { BrowserSessionManager, buildDesktopSessionList, fitImage, type DesktopBrowserRow, type Encoded } from "./browserSessions";
 
 export const remoteBrowserManager = new BrowserSessionManager();
 
+/** Everything the bridge needs from the desktop's Browsers page; injectable for tests. */
 export type BrowserHost = {
-  savePin(input: { draft: PinnedSiteDraft }): Promise<{ id: string; name: string }>;
-  deletePin(pin: { id: string; name: string }): Promise<void>;
-  goPin(pinId: string): void;
+  rows(): DesktopBrowserRow[];
+  subscribe(fn: () => void): () => void;
+  add(url: string, name: string): { sid: string; title: string };
+  show(sid: string): void;
+  remove(sid: string): Promise<void>;
+  isOpen(sid: string): Promise<boolean>;
+  screenshot(sid: string): Promise<{ bytes: number[] }>;
+  /** sid -> current agent grant (surfaceId is the active tab; matched by any tab of the browser). */
+  grants(): Promise<Array<{ surfaceId: string; agentPubkey: string; mode: "observe" | "drive"; webviewLabel: string }>>;
+  setAgent(input: { sid: string; agentPubkey: string; channelId: string; mode: "observe" | "drive" }): Promise<void>;
+  clearAgent(sid: string): Promise<void>;
+  subscribeGrants(fn: () => void): () => void;
 };
+
+export const playgroundBrowserHost: BrowserHost = {
+  rows() {
+    const { sessions, browsers } = getPlaygroundStore();
+    const out: DesktopBrowserRow[] = [];
+    if (browsers.size === 0) {
+      // Orphan sessions render as one-tab browsers on the Browsers page too.
+      for (const m of sessions.values()) out.push({ sid: m.sid, title: m.name, url: m.url });
+      return out;
+    }
+    for (const b of browsers.values()) {
+      const main = sessions.get(mainTabSid(b)) ?? sessions.get(b.tabSids[0] ?? "");
+      if (main) out.push({ sid: main.sid, title: main.name, url: main.url });
+    }
+    return out;
+  },
+  subscribe: (fn) => subscribePlayground(fn),
+  add(url, name) {
+    const card = buildBrowserSessionCard({ url, name });
+    if (!card) throw new Error("That link can't be opened.");
+    addPlaygroundSession(card, { preferSidePanel: true });
+    showPlaygroundSession(card.sid, { preferSidePanel: true });
+    return { sid: card.sid, title: card.name };
+  },
+  show: (sid) => showPlaygroundSession(sid, { preferSidePanel: true }),
+  async remove(sid) {
+    const row = {
+      key: `browser:${sid}`,
+      browserId: "",
+      surfaceId: sid,
+      mainSurfaceId: sid,
+      title: "",
+      url: "",
+      host: "main" as const,
+      windowLabel: "main",
+      tabCount: 1,
+      secondaryTabs: [],
+    };
+    const b = listPlaygroundBrowsers().find((x) => x.tabSids.includes(sid));
+    if (b) row.browserId = b.browserId;
+    const grants = await listBrowserAgentGrants().catch(() => []);
+    await disposeBrowserSession({ row, grants, isEmbeddedLabel: () => false });
+  },
+  isOpen: (sid) => isPlaygroundWebviewOpen(sid),
+  screenshot: (sid) => screenshotPlaygroundWebview(sid),
+  grants: () => listBrowserAgentGrants().catch(() => []),
+  async setAgent(i) {
+    await setBrowserAgentGrant({
+      surface: "playground",
+      surfaceId: i.sid,
+      agentId: i.agentPubkey,
+      agentPubkey: i.agentPubkey,
+      channelId: i.channelId,
+      mode: i.mode,
+      allowReplace: true,
+    });
+  },
+  async clearAgent(sid) {
+    const gs = await listBrowserAgentGrants().catch(() => []);
+    for (const g of gs) if (g.surfaceId === sid) await clearBrowserAgentGrant(g.webviewLabel);
+  },
+  subscribeGrants(fn) {
+    const p = subscribeBrowserAgentGrant(fn);
+    return () => void p.then((u) => u());
+  },
+};
+
+/** Current published list for this host (async because liveness and grants are native queries). */
+export async function snapshotBrowserSessions(
+  host: BrowserHost,
+  agentName: (pubkey: string) => string | undefined,
+  now: number,
+): Promise<BrowserSessionInfo[]> {
+  const rows = host.rows();
+  const open = new Map<string, boolean>();
+  await Promise.all(rows.map(async (r) => open.set(r.sid, await host.isOpen(r.sid).catch(() => false))));
+  const grants = await host.grants();
+  return buildDesktopSessionList({
+    rows,
+    remoteIds: new Set(remoteBrowserManager.ids()),
+    isOpen: (sid) => open.get(sid),
+    agentOf: (sid) => {
+      const g = grants.find((x) => x.surfaceId === sid);
+      return g ? { pubkey: g.agentPubkey, name: agentName(g.agentPubkey) ?? g.agentPubkey.slice(0, 8), mode: g.mode } : undefined;
+    },
+    now,
+  });
+}
 
 async function encodeJpeg(png: Uint8Array, maxW: number, quality: number): Promise<Encoded> {
   const bmp = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
@@ -36,43 +146,41 @@ export function makeBrowserDeps(
   publishShot: BrowserDeps["publishShot"],
   publishSessions: () => Promise<void>,
 ): BrowserDeps {
-  const pins = new Map<string, { id: string; name: string }>();
   const deps: BrowserDeps = {
     manager: remoteBrowserManager,
     publishShot,
     publishSessions,
+    exists: (sessionId) => host().rows().some((r) => r.sid === sessionId),
     async open(url, hostname) {
-      const pin = await host().savePin({
-        draft: { name: hostname, url, icon: "globe", pollForChanges: false, openMatchingLinks: false, community: false },
-      });
-      pins.set(pin.id, pin);
-      host().goPin(pin.id);
-      return { sessionId: pin.id, title: pin.name };
+      const r = host().add(url, hostname);
+      return { sessionId: r.sid, title: r.title };
     },
     async close(sessionId) {
-      await closePinWebview(sessionId);
-      const pin = pins.get(sessionId);
-      if (pin) await host().deletePin(pin);
-      pins.delete(sessionId);
+      await host().remove(sessionId);
     },
     async capture(sessionId) {
-      // The pin's webview is only live while its screen is showing, so bring it forward first.
-      host().goPin(sessionId);
-      await sleep(1200);
-      const r = await screenshotPinWebview(sessionId);
+      // A "Cold" browser has no webview yet: bring it forward first so it starts, then wait for it to load.
+      const wasOpen = await host().isOpen(sessionId).catch(() => false);
+      host().show(sessionId);
+      await sleep(wasOpen ? 600 : 2500);
+      const r = await host().screenshot(sessionId);
       if (!r.bytes?.length) throw new Error("The page isn't open on the desktop right now.");
       const png = Uint8Array.from(r.bytes);
       const fit = await fitImage((w, q) => encodeJpeg(png, w, q));
       if (!fit) throw new Error("The screenshot is too large to send.");
       return { mime: "image/jpeg", w: fit.w, h: fit.h, bytes: fit.bytes };
     },
+    async setAgent({ sessionId, mode, agentPubkey, channelId }) {
+      if (mode === "off") await host().clearAgent(sessionId);
+      else await host().setAgent({ sid: sessionId, agentPubkey: agentPubkey ?? "", channelId: channelId ?? "", mode });
+    },
   };
   stopAllRemoteBrowserSessions = async () => {
-    for (const s of remoteBrowserManager.list()) {
+    for (const id of remoteBrowserManager.ids()) {
       try {
-        await deps.close(s.sessionId);
+        await deps.close(id);
       } finally {
-        remoteBrowserManager.remove(s.sessionId);
+        remoteBrowserManager.remove(id);
       }
     }
     await publishSessions();

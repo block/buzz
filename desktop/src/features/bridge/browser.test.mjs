@@ -5,7 +5,7 @@ import { BridgeCommandHandler, makeSeenSet } from "./commandHandler.ts";
 import { BridgeCommander } from "./commander.ts";
 import { BridgePublisher } from "./publisher.ts";
 import { BridgeWebClient } from "./webClient.ts";
-import { BrowserSessionManager, chunkImage, fitImage, validateBrowserUrl } from "./browserSessions.ts";
+import { BrowserSessionManager, buildDesktopSessionList, chunkImage, fitImage, publishableUrl, validateBrowserUrl } from "./browserSessions.ts";
 import { SHOT_CHUNK_BYTES, SHOT_MAX_BYTES } from "./protocol.ts";
 
 const sk = new Uint8Array(32).fill(7);
@@ -62,7 +62,7 @@ function loop(browserOver = {}) {
   const timers = [];
   io.setTimeout = (fn) => (timers.push(fn), timers.length);
   io.clearTimeout = () => {};
-  const pub = new BridgePublisher(io, { deviceId: "d", caps: ["agents.snapshot", "browser.open", "browser.close", "browser.screenshot"] });
+  const pub = new BridgePublisher(io, { deviceId: "d", caps: ["agents.snapshot", "browser.open", "browser.close", "browser.screenshot", "browser.agent"] });
   const client = new BridgeWebClient(pk, { decryptFromSelf: async (c) => nip44.v2.decrypt(c, selfKey), cacheGet: () => null, cachePut() {} });
   const wire = [];
   const commander = new BridgeCommander(client, { signEvent: io.signEvent, publish: async (s) => void wire.push(s) }, "tab1");
@@ -169,4 +169,82 @@ test("without browser support the desktop answers unsupported", async () => {
   await h2.handle(L.wire.pop());
   await L.flush();
   assert.equal(L.client.state.results.get(id).code, "unsupported");
+});
+
+test("sync list: desktop browsers are published with sanitized urls, liveness, origin and agent; private pages are restricted", () => {
+  assert.equal(publishableUrl("https://example.com/a/b?token=secret#frag"), "https://example.com/a/b");
+  assert.equal(publishableUrl("http://localhost:3000/x"), null);
+  assert.equal(publishableUrl("http://100.64.1.2/"), null);
+  const list = buildDesktopSessionList({
+    rows: [
+      { sid: "w1", title: "Docs", url: "https://docs.example.com/p?k=1" },
+      { sid: "d1", title: "Dev server", url: "http://localhost:5173/" },
+      { sid: "d2", title: "", url: "https://news.example.org/" },
+    ],
+    remoteIds: new Set(["w1"]),
+    isOpen: (sid) => (sid === "d2" ? false : sid === "w1" ? true : undefined),
+    agentOf: (sid) => (sid === "w1" ? { pubkey: "ab".repeat(32), name: "Scout", mode: "observe" } : undefined),
+    now: 5,
+  });
+  assert.deepEqual(list[0], { sessionId: "w1", title: "Docs", host: "docs.example.com", openedAt: 5, url: "https://docs.example.com/p", status: "live", origin: "web", agent: { pubkey: "ab".repeat(32), name: "Scout", mode: "observe" } });
+  assert.equal(list[1].restricted, true);
+  assert.equal(list[1].url, undefined);
+  assert.equal(list[1].host, "restricted");
+  assert.equal(list[2].status, "cold");
+  assert.equal(list[2].origin, "desktop");
+  assert.equal(list[2].title, "news.example.org");
+  assert.ok(!JSON.stringify(list).includes("secret") && !JSON.stringify(list).includes("k=1"));
+});
+
+test("a browser that exists only on the desktop can be listed, screenshotted and removed from the web (exists hook)", async () => {
+  const desktop = new Set(["native-1"]);
+  const L = loop({ exists: (id) => desktop.has(id), close: async (id) => void desktop.delete(id) });
+  L.pub.start(); L.pub.update({ agents: [], generatedAt: 1 }); await L.run(); await L.flush();
+  const run = async (type, body) => {
+    const id = await L.commander.send(type, body, { confirmed: true });
+    await L.handler.handle(L.wire.pop());
+    await L.flush();
+    return L.client.state.results.get(id);
+  };
+  assert.equal((await run("browser.screenshot", { sessionId: "native-1" })).status, "ok");
+  assert.equal((await run("browser.close", { sessionId: "native-1" })).status, "ok");
+  assert.equal((await run("browser.close", { sessionId: "native-1" })).code, "unknown_session");
+});
+
+test("browser.agent (Observe/Drive): refused when remote agent management is off; validated and executed when on; web client keeps agent chips", async () => {
+  const calls = [];
+  let allowed = false;
+  const agentPk = "cd".repeat(32);
+  const mk = () => {
+    const L = loop({ exists: (id) => id === "b1", setAgent: async (i) => void calls.push(i) });
+    return L;
+  };
+  const L = mk();
+  L.pub.start(); L.pub.update({ agents: [{ pubkey: agentPk, name: "A", status: "running", activeTurns: [] }], generatedAt: 1 }); await L.run(); await L.flush();
+  // rebuild the handler with the gate (loop() has no gate by default)
+  const gated = new BridgeCommandHandler({
+    memberPubkey: pk, sessionKey: () => ({ kid: L.pub.kid, key: L.pub.sessionKey }), agents: () => L.pub.agents(),
+    seen: makeSeenSet(() => [], () => {}), executors: { start: async () => {}, stop: async () => {}, message: async () => {} },
+    publishResult: (id, b) => L.pub.publishResult(id, b), agentManagementAllowed: () => allowed,
+    browser: { manager: L.manager, open: async () => ({ sessionId: "x", title: "x" }), close: async () => {}, capture: async () => ({ mime: "image/jpeg", w: 1, h: 1, bytes: L.img }), publishShot: async () => {}, publishSessions: async () => {}, exists: (id) => id === "b1", setAgent: async (i) => void calls.push(i) },
+  });
+  const run = async (type, body) => {
+    const id = await L.commander.send(type, body, { confirmed: true });
+    await gated.handle(L.wire.pop());
+    await L.flush();
+    return L.client.state.results.get(id);
+  };
+  const body = { sessionId: "b1", mode: "drive", agentPubkey: agentPk, channelId: "chan-1" };
+  assert.equal((await run("browser.agent", body)).code, "remote_disabled");
+  assert.equal(calls.length, 0);
+  // observe-only stays view-only: even with the switch off a screenshot still works (it is not an agent command)
+  assert.equal((await run("browser.screenshot", { sessionId: "b1" })).status, "ok");
+  allowed = true;
+  assert.equal((await run("browser.agent", { ...body, agentPubkey: "ee".repeat(32) })).code, "bad_request");
+  assert.equal((await run("browser.agent", { ...body, mode: "root" })).code, "bad_request");
+  assert.equal((await run("browser.agent", { ...body, sessionId: "zzz" })).code, "unknown_session");
+  assert.equal((await run("browser.agent", body)).status, "ok");
+  assert.equal((await run("browser.agent", { sessionId: "b1", mode: "off" })).status, "ok");
+  assert.deepEqual(calls.map((c) => c.mode), ["drive", "off"]);
+  await assert.rejects(L.commander.send("browser.agent", body), /confirmation/i);
 });

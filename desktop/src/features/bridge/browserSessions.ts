@@ -34,6 +34,50 @@ export function validateBrowserUrl(raw: unknown): UrlCheck {
   return { ok: true, url: u.toString(), host: u.hostname };
 }
 
+/** What may be published about a page: the URL minus query/fragment, or null when it isn't an allowed (public http/https) address. */
+export function publishableUrl(raw: unknown): string | null {
+  const v = validateBrowserUrl(raw);
+  if (!v.ok) return null;
+  const u = new URL(v.url);
+  u.search = "";
+  u.hash = "";
+  return u.toString().slice(0, BROWSER_MAX_URL);
+}
+
+export type DesktopBrowserRow = { sid: string; title: string; url: string; openedAt?: number };
+export const BROWSER_LIST_MAX = 10;
+
+/** Builds the list the desktop publishes: every browser on its Browsers page, URL-sanitized, with liveness and the agent on it. */
+export function buildDesktopSessionList(input: {
+  rows: readonly DesktopBrowserRow[];
+  remoteIds: ReadonlySet<string>;
+  isOpen: (sid: string) => boolean | undefined;
+  agentOf: (sid: string) => BrowserSessionInfo["agent"] | undefined;
+  now: number;
+}): BrowserSessionInfo[] {
+  return input.rows.slice(0, BROWSER_LIST_MAX).map((r) => {
+    const url = publishableUrl(r.url);
+    let host = "";
+    try {
+      host = new URL(r.url).hostname;
+    } catch {
+      /* unparseable */
+    }
+    const open = input.isOpen(r.sid);
+    const agent = input.agentOf(r.sid);
+    return {
+      sessionId: r.sid,
+      title: (r.title || host || "Browser").slice(0, 80),
+      host: url ? host : "restricted",
+      openedAt: r.openedAt ?? input.now,
+      ...(url ? { url } : { restricted: true }),
+      ...(open === undefined ? {} : { status: open ? ("live" as const) : ("cold" as const) }),
+      origin: input.remoteIds.has(r.sid) ? ("web" as const) : ("desktop" as const),
+      ...(agent ? { agent } : {}),
+    };
+  });
+}
+
 export class BrowserSessionManager {
   private sessions = new Map<string, BrowserSessionInfo>();
   private lastShotAt = new Map<string, number>();
@@ -62,6 +106,12 @@ export class BrowserSessionManager {
   }
   get(id: string) {
     return this.sessions.get(id);
+  }
+  size() {
+    return this.sessions.size;
+  }
+  ids() {
+    return [...this.sessions.keys()];
   }
   canOpen() {
     return this.sessions.size < this.max;

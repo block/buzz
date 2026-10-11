@@ -81,7 +81,6 @@ import { useRemoteAccessEvents } from "@/features/bridge/useRemoteAccessEvents";
 import { RemoteBrowserIndicator } from "@/features/bridge/ui/RemoteBrowserIndicator";
 import {
   useCommunityPinnedSitesLiveUpdates,
-  usePinnedSites,
 } from "@/features/pinned-sites/hooks";
 import { closeLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import { hideAllPinWebviews } from "@/features/pinned-sites/lib/pinWebview";
@@ -291,17 +290,11 @@ export function AppShell() {
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
   useRemoteAccessEvents();
-  const pinnedSites = usePinnedSites();
   // PWA bridge (slice A): desktop publishes agent status for the member's own browser. No-op outside Tauri.
   useBridgePublisher(
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
     (id) => channels.find((c) => c.id === id)?.name,
-    {
-      savePin: (input) => pinnedSites.savePin(input),
-      deletePin: (pin) => pinnedSites.deletePin(pin as never),
-      goPin: (pinId) => void goPinnedSite(pinId),
-    },
   );
   const dmChannelIds = React.useMemo(() => {
     const ids = new Set<string>();

@@ -32,6 +32,26 @@ import {
   type WrappedKey,
 } from "./protocol";
 
+/** Keeps only known, well-typed fields of a published browser (the body is decrypted but still treated as untrusted). */
+export function cleanSession(x: BrowserSessionInfo): BrowserSessionInfo {
+  const str = (v: unknown, n: number) => (typeof v === "string" ? v.slice(0, n) : undefined);
+  const a = x.agent as BrowserSessionInfo["agent"] | undefined;
+  const url = str(x.url, 2048);
+  return {
+    sessionId: x.sessionId.slice(0, 200),
+    title: str(x.title, 80) ?? "",
+    host: x.host.slice(0, 253),
+    openedAt: typeof x.openedAt === "number" ? x.openedAt : 0,
+    ...(url && /^https?:\/\//i.test(url) ? { url } : {}),
+    ...(x.status === "live" || x.status === "cold" ? { status: x.status } : {}),
+    ...(x.origin === "web" || x.origin === "desktop" ? { origin: x.origin } : {}),
+    ...(x.restricted === true ? { restricted: true } : {}),
+    ...(a && typeof a.pubkey === "string" && (a.mode === "observe" || a.mode === "drive")
+      ? { agent: { pubkey: a.pubkey.slice(0, 64), name: str(a.name, 60) ?? a.pubkey.slice(0, 8), mode: a.mode } }
+      : {}),
+  };
+}
+
 export type BridgeState = {
   presence: DesktopPresence;
   /** Seconds since the desktop was last heard from (heartbeat or snapshot), null if never. */
@@ -180,7 +200,8 @@ export class BridgeWebClient {
         this.set({
           browserSessions: b.sessions
             .filter((x) => x && typeof x.sessionId === "string" && typeof x.host === "string")
-            .slice(0, 10),
+            .slice(0, 10)
+            .map(cleanSession),
         });
       return;
     }

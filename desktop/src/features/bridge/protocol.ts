@@ -46,7 +46,8 @@ export type CommandType =
   | "prompt.deny"
   | "browser.open"
   | "browser.close"
-  | "browser.screenshot";
+  | "browser.screenshot"
+  | "browser.agent";
 /** Commands that change state or send content: the web must get an explicit confirmation before sending. */
 export const DESTRUCTIVE_COMMANDS: readonly CommandType[] = [
   "agent.stop",
@@ -55,6 +56,7 @@ export const DESTRUCTIVE_COMMANDS: readonly CommandType[] = [
   "prompt.deny",
   "browser.open",
   "browser.close",
+  "browser.agent",
 ];
 /** browser.screenshot is view-only and user-initiated per press, so it needs no confirm; the desktop still rate-limits it. */
 export const ALL_COMMANDS: readonly CommandType[] = [
@@ -79,11 +81,23 @@ export const SHOT_MAX_PER_MIN = 10;
 export const BROWSER_MAX_SESSIONS = 2;
 export const BROWSER_MAX_URL = 2048;
 
+export type BrowserAgentMode = "observe" | "drive";
+/** One browser of the desktop's Browsers page, as published to the member's own devices (no secrets: query/hash stripped, only allowed URLs). */
 export type BrowserSessionInfo = {
   sessionId: string;
   title: string;
   host: string;
   openedAt: number;
+  /** Allowed page URL without query or fragment. Absent when the page is a private/local address (listed as restricted). */
+  url?: string;
+  /** "cold" = the desktop webview isn't running yet (a screenshot will start it). */
+  status?: "live" | "cold";
+  /** Where it was added: from a web/mobile device through the bridge, or on the desktop itself. */
+  origin?: "web" | "desktop";
+  /** True when the URL is private/local/tailnet and so isn't shared. */
+  restricted?: boolean;
+  /** The agent currently observing/driving it, if any. */
+  agent?: { pubkey: string; name: string; mode: BrowserAgentMode };
 };
 export type BrowserSessionsBody = { sessions: BrowserSessionInfo[] };
 export type ShotChunkBody = {
@@ -102,7 +116,8 @@ export type CommandBody =
   | { agentPubkey: string; channelId: string; text: string }
   | { agentPubkey: string; promptId: string }
   | { url: string }
-  | { sessionId: string };
+  | { sessionId: string }
+  | { sessionId: string; mode: "off" | BrowserAgentMode; agentPubkey?: string; channelId?: string };
 
 export type CommandResultBody = {
   status: "accepted" | "ok" | "error";
