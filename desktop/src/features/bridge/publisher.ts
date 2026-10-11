@@ -3,6 +3,7 @@
 import { bytesToBase64 } from "./browserSessions";
 import type {
   BrowserSessionInfo,
+  RemoteInfo,
   BrowserSessionsBody,
   ShotChunkBody,
   AgentSummary,
@@ -67,6 +68,8 @@ export type PublisherOptions = {
   platform?: string;
   /** Capabilities advertised in the heartbeat (the web hides controls the desktop doesn't list). */
   caps?: string[];
+  /** Slice B listener state, read on every heartbeat. */
+  remote?: () => RemoteInfo | undefined;
   onError?: (e: unknown) => void;
 };
 
@@ -219,6 +222,7 @@ export class BridgePublisher {
         agentsRunning: this.agentsRunning,
         uptimeSec: Math.floor((this.nowMs() - this.startedAt) / 1000),
         caps: this.opts.caps ?? DEFAULT_CAPS,
+        ...(this.opts.remote?.() ? { remote: this.opts.remote() } : {}),
       };
       const env = buildEnvelope({
         type: "presence.heartbeat",

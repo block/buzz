@@ -48,7 +48,12 @@ const sessionCache = {
 
 export function useBridgeAgents(
   pubkey: string | undefined,
-): BridgeState & { available: boolean; commander: BridgeCommander | null } {
+): BridgeState & {
+  available: boolean;
+  commander: BridgeCommander | null;
+  /** Signs with the member key via the remote signer and returns the event as JSON (for slice B challenges). */
+  signJson: (e: { kind: number; content: string; createdAt: number; tags: string[][] }) => Promise<string>;
+} {
   const enabled = !isTauri() && !!pubkey;
   const [client, setClient] = React.useState<BridgeWebClient | null>(null);
   const [commander, setCommander] = React.useState<BridgeCommander | null>(null);
@@ -147,7 +152,12 @@ export function useBridgeAgents(
   );
   const getSnap = React.useCallback(() => client?.state ?? EMPTY, [client]);
   const state = React.useSyncExternalStore(subscribe, getSnap);
-  return { ...state, available: enabled, commander };
+  return {
+    ...state,
+    available: enabled,
+    commander,
+    signJson: async (e) => JSON.stringify(await signRelayEvent(e)),
+  };
 }
 
 const EMPTY: BridgeState = {

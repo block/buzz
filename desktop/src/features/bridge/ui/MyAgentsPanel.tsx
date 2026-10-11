@@ -7,6 +7,7 @@ import { useBridgeAgents } from "../useBridgeAgents";
 import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
 import { BrowserPanel } from "./BrowserPanel";
+import { RemotePanel } from "./RemotePanel";
 
 function ago(s: number): string {
   if (s < 60) return `${s}s ago`;
@@ -129,6 +130,7 @@ export function MyAgentsPanel() {
         ))}
       </ul>
       {b.commander && <BrowserPanel commander={b.commander} bridge={b} />}
+      <RemotePanel bridge={b} signJson={b.signJson} />
       <p style={{ fontSize: 11, opacity: 0.5, marginTop: 12 }}>
         Tap an agent to see its recent activity.
       </p>

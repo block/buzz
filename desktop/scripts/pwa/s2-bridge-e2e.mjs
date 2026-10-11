@@ -2,6 +2,7 @@
 // The desktop side is the REAL BridgePublisher (src/features/bridge/publisher.ts) acting as "the desktop"; the page is the real web build.
 // Run: node --import ./test-loader.mjs --experimental-strip-types scripts/pwa/s2-bridge-e2e.mjs [appUrl]
 import { chromium } from "playwright";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { finalizeEvent, getPublicKey, nip44 } from "nostr-tools";
 import { startMockSigner } from "./mock-nip46-signer.mjs";
@@ -222,13 +223,27 @@ check(
 );
 
 // 2. real desktop publisher comes online with a NEW key + agents; the live page updates
+
+// Slice B harness: the real buzz-remote-access listener (examples/serve.rs), loopback only, standing in for the tailnet.
+const RA_BIN = process.env.RA_SERVE_BIN || "/tmp/ra-target/debug/examples/serve";
+const raProc = spawn(RA_BIN, [myPk, new URL(APP).origin], { stdio: ["ignore", "pipe", "inherit"] });
+const raAddr = await new Promise((resolve, reject) => {
+  const t = setTimeout(() => reject(new Error("serve harness did not start")), 20000);
+  raProc.stdout.on("data", (d) => {
+    const m = /listening (\S+)/.exec(String(d));
+    if (m) { clearTimeout(t); resolve(m[1]); }
+  });
+});
+process.on("exit", () => raProc.kill());
+
 const pub = new BridgePublisher(
   {
     encryptToSelf: async (p) => nip44.v2.encrypt(p, selfKey),
     signEvent: async (e) => signNode(e),
     publish: postEvent,
   },
-  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot"], onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
+  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot"], remote: () => ({ desktopId: "dev-desktop", name: "E2E Mac", url: `ws://${raAddr}/v1/ws`, status: "on", terminals: true }),
+    onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
 );
 pub.start();
 pub.update({
@@ -475,6 +490,27 @@ const shotSrc = await page.locator('[data-testid="br-shot-img"]').getAttribute("
 check("7d. See screenshot shows one encrypted-chunk image", /^data:image\/jpeg;base64,/.test(shotSrc || ""), (shotSrc || "").slice(0, 40));
 await sleep(1500);
 check("7e. no screenshot is taken without a press (one capture only)", brManager.beginShot("pin-e2e", Date.now()) === "rate_limited");
+
+// 8. slice B: terminal over the direct connection (member-key challenge per launch)
+await page.locator('[data-testid="remote-panel"]').waitFor({ timeout: 60000 }).catch(() => {});
+check("8a. remote panel appears from the signed heartbeat", (await page.locator('[data-testid="remote-panel"]').count()) === 1);
+await page.locator('[data-testid="remote-sessions"]').click();
+await sleep(6000);
+check("8b. listing sessions connects (challenge signed) without errors", (await page.locator('[data-testid="remote-message"]').count()) === 0);
+await page.locator('[data-testid="remote-open"]').click();
+await page.locator('[data-testid="remote-terminal"]').waitFor({ timeout: 60000 }).catch(() => {});
+await page.locator('[data-testid="remote-input"]').fill("echo e2e-$((6*7))").catch(() => {});
+await page.locator('[data-testid="remote-input"]').press("Enter").catch(() => {});
+await page.waitForFunction(() => /e2e-42/.test(document.querySelector('[data-testid="remote-screen"]')?.textContent || "") && (document.querySelector('[data-testid="remote-screen"]')?.textContent || "").split("e2e-42").length > 2, null, { timeout: 30000 }).catch(() => {});
+const screenTxt = await page.locator('[data-testid="remote-screen"]').innerText().catch(() => "");
+check("8c. terminal opens and runs a command on the desktop shell", screenTxt.split("\n").some((l) => l.trim() === "e2e-42"), screenTxt.slice(-80).replace(/\n/g, "|"));
+await page.locator('[data-testid="remote-close"]').click();
+await sleep(1000);
+raProc.kill();
+await sleep(1000);
+await page.locator('[data-testid="remote-open"]').click().catch(() => {});
+await page.locator('[data-testid="remote-message"]').waitFor({ timeout: 30000 }).catch(() => {});
+check("8d. listener gone -> 'Connect to Tailscale on this device' copy", /Connect to Tailscale on this device/.test(await page.locator('[data-testid="remote-message"]').innerText().catch(() => "")));
 clearInterval(pollTimer);
 
 // 5. no plaintext on the relay, no prod traffic, no page errors

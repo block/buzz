@@ -175,7 +175,21 @@ export type AgentsSnapshotBody = {
   generatedAt: number;
 };
 
+/** Slice B: what a desktop advertises about its direct (tailnet) listener, inside the encrypted heartbeat. */
+export type RemoteInfo = {
+  desktopId: string;
+  name: string;
+  /** wss://<tailnet-host>:9443/v1/ws (ws://127.0.0.1 only for local dev/e2e) */
+  url: string;
+  status: "on" | "off";
+  /** Why it's off (e.g. "Tailscale isn't running on this Mac."). */
+  reason?: string;
+  /** Second, separate toggle. */
+  terminals: boolean;
+};
+
 export type HeartbeatBody = {
+  remote?: RemoteInfo;
   bridge: "v1";
   appVersion?: string;
   platform?: string;
