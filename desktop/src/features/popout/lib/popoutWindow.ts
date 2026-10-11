@@ -281,6 +281,19 @@ export async function openPopoutWindow(input: {
     openEmbeddedWindow({ label, payload });
     return;
   }
+  if (!isTauri()) {
+    // Web build: no OS windows. Channel/thread pop-outs become a new browser tab.
+    if (input.channelId && (input.kind === "thread" || input.kind === "split")) {
+      const { openConversationInNewTab } = await import(
+        "@/platform/web/openTab"
+      );
+      await openConversationInNewTab({
+        channelId: input.channelId,
+        threadId: input.threadId,
+      });
+    }
+    return;
+  }
   writePopoutPayload(label, payload);
   // OS playground/split reparents the one live WKWebView. Park the main
   // overlay and hide on main so the stage can claim it in the pop-out.
@@ -290,9 +303,6 @@ export async function openPopoutWindow(input: {
   ) {
     dismissPlayground();
     void hidePlaygroundWebview(input.playground.sid);
-  }
-  if (!isTauri()) {
-    return;
   }
   await invoke(
     "open_popout_window",
