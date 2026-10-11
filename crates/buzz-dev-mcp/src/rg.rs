@@ -1,6 +1,8 @@
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use regex::{Regex, RegexBuilder};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024; // 1MB per line — skip files with longer lines (likely binary)
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
@@ -12,7 +14,7 @@ pub fn run(args: Vec<String>) -> i32 {
     if let Some(code) = try_system_rg(&args) {
         return code;
     }
-    fallback(args)
+    fallback(args, &mut io::stderr())
 }
 
 fn try_system_rg(args: &[String]) -> Option<i32> {
@@ -165,13 +167,22 @@ impl CappedSink {
     }
 }
 
-fn fallback(args: Vec<String>) -> i32 {
+fn usage_error(err: &mut dyn Write, message: impl std::fmt::Display) -> i32 {
+    tracing::error!("{message}");
+    let _ = writeln!(err, "{message}");
+    2
+}
+
+fn compile_pattern(pattern: &str, ignore_case: bool) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+}
+
+fn fallback(args: Vec<String>, err: &mut dyn Write) -> i32 {
     let opts = match parse(args) {
         Ok(o) => o,
-        Err(e) => {
-            tracing::error!("rg (fallback): {e}");
-            return 2;
-        }
+        Err(e) => return usage_error(err, format!("rg (fallback): {e}")),
     };
     let mut sink = CappedSink::new();
     let mut found = false;
@@ -192,16 +203,12 @@ fn fallback(args: Vec<String>) -> i32 {
     }
 
     let pattern = match &opts.pattern {
-        Some(p) => p.clone(),
-        None => {
-            tracing::error!("rg (fallback): missing PATTERN");
-            return 2;
-        }
+        Some(p) => p.as_str(),
+        None => return usage_error(err, "rg (fallback): missing PATTERN"),
     };
-    let needle = if opts.ignore_case {
-        pattern.to_lowercase()
-    } else {
-        pattern
+    let re = match compile_pattern(pattern, opts.ignore_case) {
+        Ok(re) => re,
+        Err(e) => return usage_error(err, format!("rg (fallback): invalid regex: {e}")),
     };
 
     for root in &opts.paths {
@@ -209,7 +216,7 @@ fn fallback(args: Vec<String>) -> i32 {
             if sink.capped {
                 return false;
             }
-            if scan_file(path, &needle, &opts, &mut sink, &mut printed) {
+            if scan_file(path, &re, &opts, &mut sink, &mut printed) {
                 found = true;
             }
             !sink.capped
@@ -262,7 +269,7 @@ fn read_bounded_line(reader: &mut impl BufRead, max: usize) -> Option<Result<Str
 
 fn scan_file(
     path: &Path,
-    needle: &str,
+    re: &Regex,
     opts: &RgArgs,
     sink: &mut CappedSink,
     printed: &mut std::collections::HashSet<PathBuf>,
@@ -289,11 +296,7 @@ fn scan_file(
         if sink.capped {
             return found;
         }
-        let is_match = if opts.ignore_case {
-            line.to_lowercase().contains(needle)
-        } else {
-            line.contains(needle)
-        };
+        let is_match = re.is_match(&line);
 
         if is_match {
             found = true;
@@ -475,17 +478,99 @@ mod tests {
     }
 
     #[test]
-    fn fallback_finds_match_in_file() {
-        // End-to-end: create a file, run the fallback parser, scan it.
-        // We can't easily capture stdout here, so we verify scan_file
-        // returns true (match found).
+    fn fallback_finds_literal_match_and_exits_0() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "alpha\nNEEDLE\nbeta\n").expect("write");
+        let mut err = Vec::new();
+        let code = fallback(vec!["NEEDLE".into(), f.display().to_string()], &mut err);
+        assert_eq!(
+            code,
+            0,
+            "literal NEEDLE should match; stderr={}",
+            String::from_utf8_lossy(&err)
+        );
+        assert!(err.is_empty(), "literal match must not write stderr");
+    }
+
+    #[test]
+    fn fallback_alternation_finds_matches_and_exits_0() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("rgtest.txt");
+        std::fs::write(&f, "alpha route\nbeta road\n").expect("write");
+        let mut err = Vec::new();
+        let code = fallback(vec!["alpha|beta".into(), f.display().to_string()], &mut err);
+        assert_eq!(
+            code,
+            0,
+            "alpha|beta should match both lines; stderr={}",
+            String::from_utf8_lossy(&err)
+        );
+        assert!(
+            err.is_empty(),
+            "successful regex match must not write stderr"
+        );
+    }
+
+    #[test]
+    fn fallback_ignore_case_applies_to_compiled_regex() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "Alpha route\n").expect("write");
+        let mut err = Vec::new();
+        let code = fallback(
+            vec!["-i".into(), "ALPHA|BETA".into(), f.display().to_string()],
+            &mut err,
+        );
+        assert_eq!(
+            code,
+            0,
+            "case-insensitive alternation should match; stderr={}",
+            String::from_utf8_lossy(&err)
+        );
+    }
+
+    #[test]
+    fn fallback_unsupported_flag_writes_stderr_and_exits_2() {
+        let mut err = Vec::new();
+        let code = fallback(
+            vec!["-e".into(), "foo".into(), "-e".into(), "bar".into()],
+            &mut err,
+        );
+        assert_eq!(code, 2);
+        let msg = String::from_utf8(err).expect("utf8");
+        assert!(
+            msg.contains("unsupported flag"),
+            "stderr must describe the unsupported flag, got: {msg}"
+        );
+        assert!(msg.contains("-e"), "stderr must name the flag, got: {msg}");
+    }
+
+    #[test]
+    fn fallback_invalid_regex_writes_stderr_and_exits_2() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "alpha\n").expect("write");
+        let mut err = Vec::new();
+        let code = fallback(vec!["(".into(), f.display().to_string()], &mut err);
+        assert_eq!(code, 2);
+        let msg = String::from_utf8(err).expect("utf8");
+        assert!(
+            msg.contains("invalid regex"),
+            "stderr must report regex compile failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scan_file_uses_compiled_regex() {
         let dir = tempfile::tempdir().expect("tempdir");
         let f = dir.path().join("a.txt");
         std::fs::write(&f, "alpha\nNEEDLE\nbeta\n").expect("write");
         let opts = parse(vec!["NEEDLE".into(), f.display().to_string()]).expect("parse");
+        let re = compile_pattern("NEEDLE", false).expect("compile");
         let mut sink = CappedSink::new();
         let mut printed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        let found = scan_file(&f, "NEEDLE", &opts, &mut sink, &mut printed);
+        let found = scan_file(&f, &re, &opts, &mut sink, &mut printed);
         assert!(found, "expected NEEDLE to be found");
     }
 }
