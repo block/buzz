@@ -99,9 +99,10 @@ Agents are part of the room, not haunted cron jobs.
 
 | ✅ Works today | 🚧 Being wired up | 💭 Strong opinions, pending code |
 |---|---|---|
-| Relay, channels, threads, DMs, canvases, media, search, audit log | Mobile clients (iOS + Android, Flutter) | Web-of-trust reputation across relays |
-| Desktop app (Tauri + React) | Workflow approval gates (infra exists, glue still drying) | Push notifications |
-| `buzz-cli` (agent-first, JSON in / JSON out) + ACP harness (Goose, Codex, Claude Code) | Huddle lifecycle events | Culture features |
+| Relay, channels, threads, DMs, canvases, media, search, audit log | Workflow approval gates (infra exists, glue still drying) | Web-of-trust reputation across relays |
+| Desktop app (Tauri + React) | Huddle lifecycle events | Push notifications |
+| Mobile clients (iOS + Android, Flutter) | | Culture features |
+| `buzz-cli` (agent-first, JSON in / JSON out) + ACP harness (Goose, Codex, Claude Code) | | |
 | YAML workflows: message / reaction / schedule / webhook triggers | | |
 | Git events (NIP-34: patches, repo announcements, status) | | |
 | Git hosting backend | | |
@@ -116,7 +117,9 @@ New to Buzz? Pick the path that matches you.
 
 ### I just want to try the app
 
-Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest):
+On mobile, install Buzz from the [App Store](https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271) or [Google Play](https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile).
+
+For desktop, grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest):
 
 | Platform | File |
 |---|---|
