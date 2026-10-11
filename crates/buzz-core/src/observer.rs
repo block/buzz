@@ -21,8 +21,14 @@ pub const OBSERVER_FRAME_CONTROL: &str = "control";
 pub const NIP44_MIN_CONTENT_LEN: usize = 132;
 /// Maximum NIP-44 v2 ciphertext length.
 pub const NIP44_MAX_CONTENT_LEN: usize = 87_472;
-/// Maximum observer plaintext JSON size accepted by helpers.
+/// Maximum observer plaintext JSON size per NIP-44 spec. Retained as the
+/// documented spec value; the gate that actually rejects payloads is
+/// `NIP44_ENCRYPT_MAX` below.
 pub const OBSERVER_MAX_PLAINTEXT_LEN: usize = 65_535;
+/// Effective NIP-44 v2 encrypt limit (bytes). `nostr`'s `nip44::encrypt` refuses
+/// larger plaintext, so this — not the spec cap above — gates these helpers.
+// nostr 0.44.7 nip44/v2.rs:35 MAX_SUPPORTED_PLAINTEXT_SIZE = 65_536 - 128 (비공개 상수라 하드코딩)
+pub const NIP44_ENCRYPT_MAX: usize = 65_408;
 
 /// Errors returned by observer payload encryption/decryption helpers.
 #[derive(Debug, Error)]
@@ -61,11 +67,11 @@ pub fn encrypt_observer_payload<T: Serialize>(
     payload: &T,
 ) -> Result<String, ObserverPayloadError> {
     let mut plaintext = serde_json::to_string(payload)?;
-    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
+    if plaintext.len() > NIP44_ENCRYPT_MAX {
         let got = plaintext.len();
         plaintext.zeroize();
         return Err(ObserverPayloadError::PlaintextTooLarge {
-            max: OBSERVER_MAX_PLAINTEXT_LEN,
+            max: NIP44_ENCRYPT_MAX,
             got,
         });
     }
@@ -96,11 +102,11 @@ pub fn decrypt_observer_payload<T: DeserializeOwned>(
         &event.pubkey,
         event.content.as_str(),
     )?;
-    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
+    if plaintext.len() > NIP44_ENCRYPT_MAX {
         let got = plaintext.len();
         plaintext.zeroize();
         return Err(ObserverPayloadError::PlaintextTooLarge {
-            max: OBSERVER_MAX_PLAINTEXT_LEN,
+            max: NIP44_ENCRYPT_MAX,
             got,
         });
     }

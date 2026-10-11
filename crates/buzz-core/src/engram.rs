@@ -23,9 +23,17 @@ pub const CORE_SLUG: &str = "core";
 /// Versioned independently of the NIP number; future revisions MUST change it.
 pub const D_TAG_DOMAIN: &[u8] = b"agent-memory/v1/d-tag";
 
-/// NIP-44 plaintext limit (bytes). Bodies whose serialized JSON exceeds this
-/// MUST NOT be encrypted (spec: *Encryption*).
+/// NIP-44 plaintext limit (bytes) per spec (*Encryption*). Retained as the
+/// documented spec value; the gate that actually rejects oversized bodies is
+/// `NIP44_ENCRYPT_MAX` below.
 pub const NIP44_PLAINTEXT_MAX: usize = 65_535;
+
+/// Effective NIP-44 v2 encrypt limit (bytes). `nostr`'s `nip44::encrypt` refuses
+/// plaintext larger than this — 127 bytes below the spec cap — so this, not
+/// `NIP44_PLAINTEXT_MAX`, is the real gate. Kept separate so the spec value
+/// stays on record while the gate tracks the implementation.
+// nostr 0.44.7 nip44/v2.rs:35 MAX_SUPPORTED_PLAINTEXT_SIZE = 65_536 - 128 (비공개 상수라 하드코딩)
+pub const NIP44_ENCRYPT_MAX: usize = 65_408;
 
 /// Maximum slug length in bytes (spec: *Slugs*).
 pub const SLUG_MAX_LEN: usize = 255;
@@ -51,8 +59,8 @@ pub enum EngramError {
     /// Encryption failed.
     #[error("encrypt failed: {0}")]
     Encrypt(String),
-    /// Body exceeds the NIP-44 plaintext cap.
-    #[error("body exceeds {NIP44_PLAINTEXT_MAX}-byte plaintext limit ({0} bytes)")]
+    /// Body exceeds the effective NIP-44 encrypt limit.
+    #[error("body exceeds {NIP44_ENCRYPT_MAX}-byte plaintext limit ({0} bytes)")]
     BodyTooLarge(usize),
     /// Signing error.
     #[error("sign failed: {0}")]
@@ -431,7 +439,8 @@ pub fn extract_refs(body: &str) -> Vec<String> {
 ///
 /// * `created_at` is the timestamp to sign — callers MUST supply a value
 ///   respecting the *Writing* monotonic rule (`max(now, T_head + 1)`).
-/// * Returns `BodyTooLarge` if the serialized body exceeds 65,535 bytes.
+/// * Returns `BodyTooLarge` if the serialized body exceeds the effective
+///   NIP-44 encrypt limit (`NIP44_ENCRYPT_MAX`, 65,408 bytes).
 pub fn build_event(
     agent_keys: &Keys,
     owner_pubkey: &PublicKey,
@@ -439,7 +448,7 @@ pub fn build_event(
     created_at: u64,
 ) -> Result<Event, EngramError> {
     let plaintext = body.to_json_bytes();
-    if plaintext.len() > NIP44_PLAINTEXT_MAX {
+    if plaintext.len() > NIP44_ENCRYPT_MAX {
         return Err(EngramError::BodyTooLarge(plaintext.len()));
     }
     // `to_json_bytes` only emits ASCII control chars or `&str` bytes, so
@@ -877,14 +886,63 @@ mod tests {
     fn body_too_large_rejected_at_build_time() {
         let agent = keys_from_hex(SECKEY_A);
         let owner = keys_from_hex(SECKEY_O);
-        // Build a value whose JSON representation just barely exceeds the limit.
-        let huge = "a".repeat(NIP44_PLAINTEXT_MAX);
+        // 게이트를 넉넉히 넘기기만 하면 되는 값. 직렬화 65,568 = 게이트(65,408) + 160.
+        // 65,535 라는 숫자 자체에 의미는 없다 — 상수 분리 전부터 쓰던 값이라 그대로 둔다.
+        let huge = "a".repeat(65_535);
         let body = Body::Memory {
             slug: "mem/example".into(),
             value: Some(huge),
         };
+        assert_eq!(body.to_json_bytes().len(), 65_568);
         let err = build_event(&agent, &owner.public_key(), &body, 1).unwrap_err();
         assert!(matches!(err, EngramError::BodyTooLarge(_)));
+    }
+
+    // Guards our gate against the NIP-44 blind spot (serialized 65,409..=65,535):
+    // sizes nostr's `nip44::encrypt` rejects but the old spec-cap gate (65,535)
+    // waved through. References our impl-limit constant — we are measuring our
+    // own gate here.
+    #[test]
+    fn build_event_rejects_inside_nip44_blind_spot() {
+        let agent = keys_from_hex(SECKEY_A);
+        let owner = keys_from_hex(SECKEY_O);
+        // {"slug":"mem/example","value":"<v>"} => 33-byte envelope.
+        let envelope = 33usize;
+        let target = 65_500usize; // inside the blind spot (65,409..=65,535)
+        let body = Body::Memory {
+            slug: "mem/example".into(),
+            value: Some("a".repeat(target - envelope)),
+        };
+        // Without this the envelope arithmetic could drift and still go green.
+        assert_eq!(body.to_json_bytes().len(), target);
+        let err = build_event(&agent, &owner.public_key(), &body, 1).unwrap_err();
+        assert!(matches!(err, EngramError::BodyTooLarge(_)));
+    }
+
+    // Watches the external nostr limit, not our gate: literals only, no
+    // reference to our constant, and no message/ErrorKind assertion. If nostr
+    // moves MAX_SUPPORTED_PLAINTEXT_SIZE, one of these two flips and the test
+    // fails so we notice — a constant reference here would just be tautological.
+    #[test]
+    fn nip44_plaintext_boundary_is_65408() {
+        let a = keys_from_hex(SECKEY_A);
+        let b = keys_from_hex(SECKEY_O);
+        // 65,408 = nostr 0.44.7 nip44/v2.rs:35 · 0.45.1 :31 MAX_SUPPORTED_PLAINTEXT_SIZE.
+        // 이 테스트는 그 외부 값을 감시한다. 리터럴을 유지할 것.
+        assert!(nip44::encrypt(
+            a.secret_key(),
+            &b.public_key(),
+            "a".repeat(65_408),
+            Version::V2
+        )
+        .is_ok());
+        assert!(nip44::encrypt(
+            a.secret_key(),
+            &b.public_key(),
+            "a".repeat(65_409),
+            Version::V2
+        )
+        .is_err());
     }
 
     #[test]
