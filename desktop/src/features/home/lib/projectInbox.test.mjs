@@ -163,7 +163,7 @@ test("presents project work with its canonical subject and project filter", () =
         activity: [],
         agentActivity: [],
       },
-      meta: { since: 0, total: 1, generatedAt: 1_700_000_000 },
+      meta: { since: 0, total: 1 },
     },
   });
 
@@ -206,7 +206,7 @@ test("groups uppercase NIP-34 pull request updates with their root", () => {
         activity: [],
         agentActivity: [],
       },
-      meta: { since: 0, total: 2, generatedAt: 1_700_000_100 },
+      meta: { since: 0, total: 2 },
     },
   });
 
@@ -236,7 +236,7 @@ test("does not group project events from different repositories", () => {
         activity: [],
         agentActivity: [],
       },
-      meta: { since: 0, total: 2, generatedAt: 1_700_000_100 },
+      meta: { since: 0, total: 2 },
     },
   });
 

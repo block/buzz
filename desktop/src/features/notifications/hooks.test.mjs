@@ -34,7 +34,7 @@ const homeFeed = (feed) => ({
     agentActivity: [],
     ...feed,
   },
-  meta: { since: 0, total: 0, generatedAt: 0 },
+  meta: { since: 0, total: 0 },
 });
 
 test("home badge excludes thread activity already shown in a channel preview", () => {

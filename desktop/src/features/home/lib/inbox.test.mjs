@@ -35,7 +35,6 @@ function feedWith(overrides) {
     meta: {
       since: 0,
       total: 0,
-      generatedAt: 0,
     },
   };
 }

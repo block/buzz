@@ -401,10 +401,11 @@ export async function getHomeFeed(
       activity: response.feed.activity.map(fromRawFeedItem),
       agentActivity: response.feed.agent_activity.map(fromRawFeedItem),
     },
+    // `generated_at` is left out: it changes on every poll, so the result would
+    // never compare equal and each refetch would re-render every feed reader.
     meta: {
       since: response.meta.since,
       total: response.meta.total,
-      generatedAt: response.meta.generated_at,
     },
   };
 }
