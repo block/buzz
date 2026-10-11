@@ -458,6 +458,60 @@ function relayMembersFromEvent(e: NostrEvent) {
   return { members };
 }
 
+// ── Reactions / delete (mirror of src-tauri add_reaction, remove_reaction, delete_message) ──
+// Signed at user-action priority (0) so a queue of settings decrypts can't delay a click.
+const USER_ACTION = { priority: 0 } as const;
+const SHORTCODE = /^[A-Za-z0-9_-]+$/;
+
+async function publishNow(kind: number, tags: string[][], content = "") {
+  const signed = (await getSigner().signEvent(
+    { kind, content, tags },
+    USER_ACTION,
+  )) as unknown as NostrEvent;
+  return submitSignedEvent(signed);
+}
+
+function eventIdArg(v: unknown): string {
+  const id = String(v ?? "").trim();
+  if (!HEX64.test(id)) throw new Error(`invalid event ID: ${id}`);
+  return id.toLowerCase();
+}
+
+async function addReaction(a: Args) {
+  const target = eventIdArg(a?.eventId);
+  const emoji = String(a?.emoji ?? "").trim();
+  const url: string | undefined = a?.emojiUrl ?? undefined;
+  if (url != null) {
+    // NIP-30 custom emoji: `:shortcode:` content + ["emoji", shortcode, url] (same validation as buzz-sdk)
+    const code = emoji.replace(/^:+|:+$/g, "");
+    if (!code) throw new Error("invalid custom emoji reaction: emoji shortcode must not be empty");
+    if (code.length > 64 || !SHORTCODE.test(code))
+      throw new Error("invalid custom emoji reaction: emoji shortcode may only contain ASCII letters, digits, hyphens, and underscores (max 64)");
+    if (!url || url.length > 2048 || !/^https?:\/\//.test(url))
+      throw new Error("invalid custom emoji reaction: emoji image URL must be http(s) and at most 2048 bytes");
+    const sc = code.toLowerCase();
+    await publishNow(7, [["e", target], ["emoji", sc, url]], `:${sc}:`);
+    return;
+  }
+  if ([...emoji].length > 64) throw new Error("emoji exceeds maximum length of 64 characters");
+  await publishNow(7, [["e", target]], emoji);
+}
+
+async function removeReaction(a: Args) {
+  const target = eventIdArg(a?.eventId);
+  const emoji = String(a?.emoji ?? "").trim();
+  const mine = await queryRelay([{ kinds: [7], "#e": [target], authors: [me()] }]);
+  const ev = mine.find((e) => e.content.trim() === emoji);
+  if (!ev) throw new Error("could not find your reaction event for this emoji");
+  await publishNow(5, [["e", ev.id]]);
+}
+
+async function deleteMessage(a: Args) {
+  const channelId = String(a?.channelId ?? "");
+  if (!UUID.test(channelId)) throw new Error(`invalid channel UUID: ${channelId}`);
+  await publishNow(5, [["h", channelId], ["e", eventIdArg(a?.eventId)]]);
+}
+
 export const chatHandlers: Record<
   string,
   (a: Args) => unknown | Promise<unknown>
@@ -621,6 +675,9 @@ export const chatHandlers: Record<
     };
   },
   send_channel_message: sendChannelMessage,
+  add_reaction: addReaction,
+  remove_reaction: removeReaction,
+  delete_message: deleteMessage,
   // local head cache is a desktop SQLite optimisation; web starts cold (IndexedDB cache = later slice)
   channel_head_cache_load: () => [],
   channel_head_cache_store: () => undefined,
