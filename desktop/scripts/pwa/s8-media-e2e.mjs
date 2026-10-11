@@ -119,6 +119,23 @@ const ok = img ? await img.evaluate((i) => i.complete && i.naturalWidth > 0) : f
 check("message image renders as a loaded blob: <img> (not broken)", ok);
 await page.screenshot({ path: "/tmp/s8-media.png" });
 
+// Draft path: pasting an image into the composer shows a loaded thumbnail (blob:) BEFORE sending, not a broken icon
+await page.goto(`${APP}#/channels/${render}`);
+const editor = await page.waitForSelector('[contenteditable="true"]', { timeout: 30000 });
+await editor.click();
+await page.evaluate(async (pngB64) => {
+  const el = document.querySelector('[contenteditable="true"]');
+  const bytes = Uint8Array.from(atob(pngB64), (c) => c.charCodeAt(0));
+  const dt = new DataTransfer();
+  dt.items.add(new File([bytes], "draft.png", { type: "image/png" }));
+  el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+}, PNG);
+const thumb = await page.waitForSelector('[data-testid="composer-attachment-thumb"]', { timeout: 30000 }).catch(() => null);
+if (thumb) await page.waitForFunction(() => { const i = document.querySelector('[data-testid="composer-attachment-thumb"]'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 15000 }).catch(() => {});
+const draftOk = thumb ? await thumb.evaluate((i) => i.complete && i.naturalWidth > 0 && i.src.startsWith("blob:")) : false;
+check("pasted image: draft thumbnail loads (naturalWidth > 0) before send", draftOk);
+await page.screenshot({ path: "/tmp/s8-media-draft.png" });
+
 // Component path: a message image renders (not a broken icon) and shows placeholder -> image
 await page.route("**/__relay/**/media/**", async (route) => route.fulfill({ status: 401, body: '{"error":"authentication failed"}' }));
 const err = await page.evaluate(async (u) => {

@@ -15,6 +15,7 @@ import {
 
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useRelayMediaSrc } from "@/shared/lib/useRelayMediaSrc";
 import {
   shortHash,
   type UploadingAttachmentPreview,
@@ -288,6 +289,14 @@ const MediaAttachmentItem = React.forwardRef<
       ? rewriteRelayUrl(attachment.thumb)
       : undefined;
 
+  // Web: relay media needs a signed fetch, so resolve to blob: URLs (identity on desktop).
+  const thumbMedia = useRelayMediaSrc(isVideo ? undefined : thumbUrl);
+  const posterMedia = useRelayMediaSrc(videoPosterUrl);
+  const fullMedia = useRelayMediaSrc(
+    isVideo ? undefined : rewriteRelayUrl(attachment.url),
+    open,
+  );
+
   // Only Buzz-hosted uploads have a content hash. URL-only provider media
   // must remain externally hosted instead of being copied into storage by the
   // image editor's save path.
@@ -361,9 +370,9 @@ const MediaAttachmentItem = React.forwardRef<
           >
             {isVideo ? (
               <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
-                {videoPosterUrl ? (
+                {posterMedia.src ? (
                   <img
-                    src={videoPosterUrl}
+                    src={posterMedia.src}
                     alt=""
                     className="h-full w-full object-cover"
                   />
@@ -375,11 +384,17 @@ const MediaAttachmentItem = React.forwardRef<
                   <Play className="h-4 w-4 fill-white text-white" />
                 </div>
               </div>
-            ) : (
+            ) : thumbMedia.src ? (
               <img
-                src={thumbUrl}
+                src={thumbMedia.src}
                 alt=""
+                data-testid="composer-attachment-thumb"
                 className="h-full w-full object-cover"
+              />
+            ) : (
+              <div
+                className="h-full w-full bg-muted/80"
+                data-testid="composer-attachment-thumb-pending"
               />
             )}
             {isSpoilered ? (
@@ -420,7 +435,7 @@ const MediaAttachmentItem = React.forwardRef<
               {mode === "edit" && !isVideo ? (
                 <ComposerImageEditor
                   alt={mediaLabel}
-                  src={rewriteRelayUrl(attachment.url)}
+                  src={fullMedia.src ?? ""}
                   sourceUrl={attachment.url}
                   sourceType={attachment.type}
                   onCancel={handleEditorCancel}
@@ -444,7 +459,7 @@ const MediaAttachmentItem = React.forwardRef<
                     "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
                     isSpoilered && "blur-2xl brightness-75",
                   )}
-                  src={rewriteRelayUrl(attachment.url)}
+                  src={fullMedia.src}
                 />
               )}
               {mode === "view" && isSpoilered ? (
