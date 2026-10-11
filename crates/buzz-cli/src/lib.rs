@@ -279,6 +279,9 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Sign and verify NIP-FP work fingerprints (pre-registration)
+    #[command(subcommand)]
+    Trust(TrustCmd),
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2012,6 +2015,39 @@ pub enum PackCmd {
     },
 }
 
+/// Subcommands for `buzz trust` (NIP-FP, `docs/nips/NIP-FP.md`).
+#[derive(Subcommand)]
+pub enum TrustCmd {
+    /// Sign a work fingerprint and print it as a transport bundle
+    /// (pre-registration). Coverage is always "selected".
+    #[command(
+        after_help = "Example:\n  buzz trust fingerprint --d my-work --select <event-id> \\\n    --select <event-id>=https://other.relay > bundle.json"
+    )]
+    Fingerprint {
+        /// The fingerprint's `d` tag (one fingerprint per d)
+        #[arg(long)]
+        d: String,
+        /// Selected work event: `<event-id>` or `<event-id>=<origin-url>`;
+        /// the origin defaults to the current relay. Repeatable.
+        #[arg(long, required = true)]
+        select: Vec<String>,
+    },
+    /// Verify a fingerprint or transport bundle against its origins and print
+    /// the selection / observed / interpretation report. No score.
+    #[command(after_help = "Example:\n  buzz trust verify bundle.json --cutoff 1791600000")]
+    Verify {
+        /// Path to the bundle JSON, or `-` for stdin
+        bundle: String,
+        /// Unix-seconds `until` bound for discovery (default: now)
+        #[arg(long)]
+        cutoff: Option<u64>,
+        /// Pubkey (hex or npub) the viewer already knows; selects the
+        /// `nip-fp/viewer-known` policy. Repeatable.
+        #[arg(long)]
+        viewer_known: Vec<String>,
+    },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -2214,6 +2250,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Trust(sub) => commands::trust::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2385,6 +2422,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "trust",
             "upload",
             "users",
             "workflows",
@@ -2561,6 +2599,7 @@ mod tests {
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
+        assert_eq!(names(&cmd, "trust"), vec!["fingerprint", "verify"]);
         assert_eq!(
             names(&cmd, "moderation"),
             vec![
@@ -2595,6 +2634,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 6),
             ("social", 7),
+            ("trust", 2),
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),
