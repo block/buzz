@@ -18,6 +18,8 @@ type UseHomeInboxReadStateOptions = {
   getMessageReadAt?: (messageId: string) => number | null;
   /** Invalidation signal for the channel-marker projection. */
   readStateVersion: number;
+  /** False until NIP-RS has finished its first hydrate. */
+  isReadStateReady?: boolean;
   /** Local fallback "done" set (used only for items with no channelId). */
   localDoneSet: ReadonlySet<string>;
   /** Per-item local unread override for inbox rows. */
@@ -133,6 +135,63 @@ export function resolveInboxItemReadAt(
   return channelId ? options.getChannelReadAt(channelId) : null;
 }
 
+export function isInboxItemChannelBacked(item: InboxItem): boolean {
+  return getInboxThreadRootId(item) !== null || Boolean(item.item.channelId);
+}
+
+/**
+ * Projects which inbox rows are "done". Channel/thread rows follow NIP-RS.
+ * Missing markers during the first hydrate are unknown, not unread — otherwise
+ * unread-only Inbox paints a fake pile until ReadStateManager finishes (~7s).
+ * Local done-set is only a fallback for rows with no channel (reminders).
+ */
+export function projectInboxDoneSet(
+  items: InboxItem[],
+  options: {
+    getChannelReadAt: (channelId: string) => number | null;
+    getMessageReadAt?: (messageId: string) => number | null;
+    getThreadReadAt: (
+      rootId: string,
+      channelId?: string | null,
+    ) => number | null;
+    isReadStateReady?: boolean;
+    localDoneSet: ReadonlySet<string>;
+    localUnreadSet: ReadonlySet<string>;
+  },
+): Set<string> {
+  const result = new Set<string>();
+  const isReadStateReady = options.isReadStateReady ?? true;
+  for (const item of items) {
+    if (hasGroupedUnreadOverride(item, options.localUnreadSet)) {
+      continue;
+    }
+
+    const isChannelBacked = isInboxItemChannelBacked(item);
+    const readAt = resolveInboxItemReadAt(item, options);
+    if (readAt !== null) {
+      if (item.latestActivityAt <= readAt) {
+        result.add(item.id);
+      }
+      continue;
+    }
+
+    // Unknown marker before hydrate completes: do not treat as unread.
+    if (!isReadStateReady && isChannelBacked) {
+      result.add(item.id);
+      continue;
+    }
+
+    if (isChannelBacked) {
+      continue;
+    }
+
+    if (options.localDoneSet.has(item.id)) {
+      result.add(item.id);
+    }
+  }
+  return result;
+}
+
 /**
  * Projects Home inbox read-state from the shared NIP-RS read marker, with
  * the local `useFeedItemState` done-set as a fallback for items that don't
@@ -150,6 +209,7 @@ export function useHomeInboxReadState({
   getThreadReadAt,
   getMessageReadAt,
   readStateVersion,
+  isReadStateReady = true,
   localDoneSet,
   localUnreadSet = EMPTY_ITEM_SET,
   markChannelRead,
@@ -168,44 +228,27 @@ export function useHomeInboxReadState({
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getChannelReadAt
-  const effectiveDoneSet = React.useMemo<ReadonlySet<string>>(() => {
-    const result = new Set<string>();
-    for (const item of items) {
-      if (hasGroupedUnreadOverride(item, localUnreadSet)) {
-        continue;
-      }
-
-      const threadRootId = getInboxThreadRootId(item);
-      const readAt = resolveInboxItemReadAt(item, {
+  const effectiveDoneSet = React.useMemo<ReadonlySet<string>>(
+    () =>
+      projectInboxDoneSet(items, {
         getChannelReadAt,
         getMessageReadAt,
         getThreadReadAt,
-      });
-      if (readAt !== null) {
-        if (item.latestActivityAt <= readAt) {
-          result.add(item.id);
-        }
-        continue;
-      }
-
-      if (threadRootId !== null || item.item.channelId) {
-        continue;
-      }
-
-      if (localDoneSet.has(item.id)) {
-        result.add(item.id);
-      }
-    }
-    return result;
-  }, [
-    getChannelReadAt,
-    getThreadReadAt,
-    getMessageReadAt,
-    items,
-    localDoneSet,
-    localUnreadSet,
-    readStateVersion,
-  ]);
+        isReadStateReady,
+        localDoneSet,
+        localUnreadSet,
+      }),
+    [
+      getChannelReadAt,
+      getThreadReadAt,
+      getMessageReadAt,
+      isReadStateReady,
+      items,
+      localDoneSet,
+      localUnreadSet,
+      readStateVersion,
+    ],
+  );
 
   const markItemRead = React.useCallback(
     (itemId: string) => {
