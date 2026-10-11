@@ -38,6 +38,12 @@ pub struct TerminalLaunch {
     pub session: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub name: String,
+    pub status: String,
+}
+
 pub enum TermInput {
     Data(Vec<u8>),
     Resize(u16, u16),
@@ -52,6 +58,10 @@ pub struct TerminalHandle {
 /// Supplied by the app (real PTY/herdr launch); a fake in tests.
 pub trait TerminalBackend: Send + Sync {
     fn open(&self, launch: TerminalLaunch) -> Result<TerminalHandle, String>;
+    /// Named sessions the web may attach to (herdr). Empty for plain shells.
+    fn list_sessions(&self) -> Vec<SessionInfo> {
+        vec![]
+    }
 }
 
 #[derive(Clone)]
@@ -270,6 +280,18 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
         match v["t"].as_str().unwrap_or("") {
             "ping" => {
                 let _ = out_tx.send(Message::text(json!({"t":"pong"}).to_string())).await;
+            }
+            "sessions.list" => {
+                // read-only metadata, but still only for authenticated connections with terminals enabled
+                if !sh.terminals_enabled.load(Ordering::SeqCst) {
+                    let _ = out_tx.send(err("terminals_disabled")).await;
+                    continue;
+                }
+                let list = match sh.cfg.backend.clone() {
+                    Some(b) => tokio::task::spawn_blocking(move || b.list_sessions()).await.unwrap_or_default(),
+                    None => vec![],
+                };
+                let _ = out_tx.send(Message::text(json!({"t":"sessions","sessions":list}).to_string())).await;
             }
             "term.challenge" => {
                 if !sh.terminals_enabled.load(Ordering::SeqCst) {

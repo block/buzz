@@ -335,3 +335,24 @@ async fn real_pty_backend_runs_a_shell_with_a_clean_environment() {
     assert!(!s.contains("hunter2"));
     assert!(s.lines().any(|l| l.trim() == "0"), "app env must not leak into the terminal: {s}");
 }
+
+#[test]
+fn herdr_session_list_parsing() {
+    let out = "name status directory socket\ndefault running /Users/x/.config/herdr /s/herdr.sock\nbuzz stopped /d /s2\nbad;name running /d /s\n";
+    let l = buzz_remote_access::pty::parse_herdr_sessions(out);
+    assert_eq!(l.iter().map(|s| (s.name.as_str(), s.status.as_str())).collect::<Vec<_>>(), vec![("default", "running"), ("buzz", "stopped")]);
+}
+
+#[tokio::test]
+async fn sessions_list_needs_auth_and_terminals_on() {
+    let (srv, keys, _) = setup().await;
+    let mut ws = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    assert_eq!(auth(&mut ws, &keys).await["t"], "ready");
+    send(&mut ws, json!({"t":"sessions.list"})).await;
+    assert_eq!(recv(&mut ws).await["code"], "terminals_disabled");
+    srv.set_terminals_enabled(true);
+    send(&mut ws, json!({"t":"sessions.list"})).await;
+    let r = recv(&mut ws).await;
+    assert_eq!((r["t"].as_str(), r["sessions"].as_array().map(|a| a.len())), (Some("sessions"), Some(0)));
+    srv.shutdown();
+}

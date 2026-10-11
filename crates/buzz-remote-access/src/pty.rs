@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::mpsc;
 
-use crate::server::{TermInput, TerminalBackend, TerminalHandle, TerminalLaunch};
+use crate::server::{SessionInfo, TermInput, TerminalBackend, TerminalHandle, TerminalLaunch};
 
 #[derive(Clone, Debug)]
 pub enum TerminalMode {
@@ -61,7 +61,30 @@ impl PtyBackend {
     }
 }
 
+/// Parses `herdr session list` (whitespace columns: name status directory socket; first line is the header).
+pub fn parse_herdr_sessions(out: &str) -> Vec<SessionInfo> {
+    out.lines()
+        .skip(1)
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let (name, status) = (it.next()?, it.next()?);
+            let ok = name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+            ok.then(|| SessionInfo { name: name.into(), status: status.into() })
+        })
+        .collect()
+}
+
 impl TerminalBackend for PtyBackend {
+    fn list_sessions(&self) -> Vec<SessionInfo> {
+        let TerminalMode::Herdr { bin } = &self.mode else { return vec![] };
+        std::process::Command::new(bin)
+            .args(["session", "list"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map(|o| parse_herdr_sessions(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default()
+    }
+
     fn open(&self, l: TerminalLaunch) -> Result<TerminalHandle, String> {
         let pair = native_pty_system()
             .openpty(PtySize { rows: l.rows, cols: l.cols, pixel_width: 0, pixel_height: 0 })

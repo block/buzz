@@ -9,7 +9,7 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let member = nostr::PublicKey::parse(&a[1]).expect("member pubkey");
     let mut cfg = ServerConfig::new(member, "dev-desktop", vec![a[2].clone()]);
-    cfg.backend = Some(Arc::new(PtyBackend::new(TerminalMode::Shell)));
+    cfg.backend = Some(Arc::new(PtyBackend::new(if std::env::var("RA_HERDR").is_ok() { TerminalMode::Herdr { bin: "herdr".into() } } else { TerminalMode::Shell })));
     let srv = RemoteServer::start(cfg, a.get(3).and_then(|p| p.parse().ok()).unwrap_or(0)).await.unwrap();
     srv.set_terminals_enabled(true);
     println!("listening {}", srv.addr);
