@@ -226,7 +226,7 @@ check(
 
 // Slice B harness: the real buzz-remote-access listener (examples/serve.rs), loopback only, standing in for the tailnet.
 const RA_BIN = process.env.RA_SERVE_BIN || "/tmp/ra-target/debug/examples/serve";
-const raProc = spawn(RA_BIN, [myPk, new URL(APP).origin], { stdio: ["ignore", "pipe", "inherit"] });
+const raProc = spawn(RA_BIN, [myPk, new URL(APP).origin], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, RA_MGMT: "fake" } }); // fake = in-memory agent store behind the real listener
 const raAddr = await new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error("serve harness did not start")), 20000);
   raProc.stdout.on("data", (d) => {
@@ -674,6 +674,40 @@ check("9c. web Settings → Buzz Term has 'Allow remote terminal', enabled while
 await page.evaluate(() => { location.hash = "#/agents"; });
 check("9a3. Agents nav entry appears once it is on with a host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-agents-view"]:not([data-unavailable])'), null, { timeout: 15000 }).then(() => true, () => false));
 check("9c2. Terminal nav entry appears with a reachable terminal host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-buzz-term-view"]:not([data-unavailable])'), null, { timeout: 15000 }).then(() => true, () => false));
+// 10. agent management over the direct connection (real listener + in-memory agent store; relay stays the fallback)
+await page.evaluate(() => { location.hash = "#/agents"; });
+await page.locator('[data-testid="agents-path"]').waitFor({ timeout: 20000 }).catch(() => {});
+check("10a. before connecting the path label says 'Via relay' and 'Connect directly' is offered", await page.waitForFunction(() => document.querySelector('[data-testid="agents-path"]')?.getAttribute("data-path") === "relay" && !!document.querySelector('[data-testid="direct-connect"]'), null, { timeout: 30000 }).then(() => true, () => false));
+await page.locator('[data-testid="direct-connect"]').click().catch(() => {});
+check("10b. after one signer approval the label says 'Direct' with the signature expiry", await page.waitForFunction(() => document.querySelector('[data-testid="agents-path"]')?.getAttribute("data-path") === "direct" && /signed until/.test(document.querySelector('[data-testid="agents-path-line"]')?.textContent || ""), null, { timeout: 60000 }).then(() => true, () => false));
+check("10c. direct list shows ALL agents including stopped ones (relay list shows running only)", await page.waitForFunction(() => document.querySelectorAll('[data-testid="direct-agent-row"]').length >= 3 && !!document.querySelector('[data-testid="direct-agent-row"][data-status="stopped"]'), null, { timeout: 20000 }).then(() => true, () => false));
+await page.locator('[data-testid="direct-new"]').click().catch(() => {});
+await page.locator('[data-testid="direct-create-name"]').fill("E2E Agent").catch(() => {});
+await page.locator('[data-testid="direct-create-runtime"]').selectOption("claude").catch(() => {});
+await page.locator('[data-testid="direct-create-model"]').fill("opus").catch(() => {});
+await page.locator('[data-testid="direct-create-submit"]').click().catch(() => {});
+check("10d. create: the new agent appears over the direct connection (runtime + model applied)", await page.waitForFunction(() => /Created E2E Agent/.test(document.querySelector('[data-testid="direct-note"]')?.textContent || "") && [...document.querySelectorAll('[data-testid="direct-agent-row"]')].some((r) => /E2E Agent/.test(r.textContent || "") && /claude/.test(r.textContent || "") && /opus/.test(r.textContent || "")), null, { timeout: 30000 }).then(() => true, () => false));
+const row = () => page.locator('[data-testid="direct-agent-row"]', { hasText: /E2E Agent|E2E Renamed/ }).first();
+await row().locator('[data-testid="direct-edit"]').click().catch(() => {});
+await page.locator('[data-testid="direct-edit-name"]').fill("E2E Renamed").catch(() => {});
+await page.locator('[data-testid="direct-edit-save"]').click().catch(() => {});
+check("10e. rename works over the direct connection", await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="direct-agent-row"]')].some((r) => /E2E Renamed/.test(r.textContent || "")), null, { timeout: 30000 }).then(() => true, () => false));
+await row().locator('[data-testid="direct-edit"]').click().catch(() => {});
+await page.locator('[data-testid="direct-edit-provider"]').fill("openai").catch(() => {});
+await page.locator('[data-testid="direct-edit-model"]').fill("gpt-x").catch(() => {});
+await page.locator('[data-testid="direct-edit-save"]').click().catch(() => {});
+check("10f. provider/model edit is saved; a running agent is told to restart for it to apply", await page.waitForFunction(() => /Restart E2E Renamed for the change to apply/.test(document.querySelector('[data-testid="direct-note"]')?.textContent || "") && [...document.querySelectorAll('[data-testid="direct-agent-row"]')].some((r) => /openai/.test(r.textContent || "") && /gpt-x/.test(r.textContent || "")), null, { timeout: 30000 }).then(() => true, () => false));
+const bravo = () => page.locator('[data-testid="direct-agent-row"]', { hasText: "Bravo" });
+await bravo().locator('[data-testid="direct-start"]').click().catch(() => {});
+check("10g. start a stopped agent directly", await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="direct-agent-row"]')].some((r) => /Bravo/.test(r.textContent || "") && r.getAttribute("data-status") === "running"), null, { timeout: 30000 }).then(() => true, () => false));
+await bravo().locator('[data-testid="direct-stop"]').click().catch(() => {});
+await page.locator('[data-testid="direct-stop-yes"]').click().catch(() => {});
+check("10h. stop needs a confirmation and then stops it", await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="direct-agent-row"]')].some((r) => /Bravo/.test(r.textContent || "") && r.getAttribute("data-status") === "stopped"), null, { timeout: 30000 }).then(() => true, () => false));
+raProc.stdin.write("agents off\n"); // desktop turns "Allow remote agent management" off: every request is refused at once
+await sleep(500);
+await bravo().locator('[data-testid="direct-start"]').click().catch(() => {});
+check("10i. with management switched off on the desktop, a direct request is refused with the Settings hint", await page.waitForFunction(() => /Allow remote agent management/.test(document.querySelector('[data-testid="direct-op-error"]')?.textContent || ""), null, { timeout: 30000 }).then(() => true, () => false));
+raProc.stdin.write("agents on\n");
 await page.evaluate(() => { location.hash = "#/settings"; });
 await page.getByRole("button", { name: /Buzz Term/ }).first().click({ timeout: 10000 }).catch(() => {});
 raProc.kill();

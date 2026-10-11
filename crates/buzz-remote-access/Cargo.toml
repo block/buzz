@@ -18,4 +18,4 @@ base64 = "0.22"
 portable-pty = "0.9"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
+tokio = { version = "1", features = ["test-util", "io-std"] }
