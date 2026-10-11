@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -182,7 +183,7 @@ impl TerminalBackend for Echo {
                 }
             }
         });
-        Ok(TerminalHandle { output: orx, input: itx })
+        Ok(TerminalHandle { output: orx, input: itx, scrollback: Some(5000) })
     }
 }
 
@@ -319,7 +320,7 @@ async fn real_pty_backend_runs_a_shell_with_a_clean_environment() {
     std::env::set_var("BUZZ_SECRET_TEST", "hunter2");
     let mut be = PtyBackend::new(TerminalMode::Shell);
     be.shell = Some("/bin/sh".into());
-    let mut h = be.open(TerminalLaunch { launch_id: "launch-0001".into(), cols: 80, rows: 24, session: None }).unwrap();
+    let mut h = be.open(TerminalLaunch { launch_id: "launch-0001".into(), cols: 80, rows: 24, session: None, host: None }).unwrap();
     h.input.send(TermInput::Data(b"echo ready-$((6*7)); env | grep -c BUZZ_SECRET; exit\n".to_vec())).await.unwrap();
     let mut all = Vec::new();
     let end = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -355,4 +356,145 @@ async fn sessions_list_needs_auth_and_terminals_on() {
     let r = recv(&mut ws).await;
     assert_eq!((r["t"].as_str(), r["sessions"].as_array().map(|a| a.len())), (Some("sessions"), Some(0)));
     srv.shutdown();
+}
+
+// ── agent management over the direct connection ──────────────────────────────────────────────────────────────
+struct FakeMgmt {
+    calls: Arc<Mutex<Vec<(String, Value)>>>,
+}
+impl buzz_remote_access::ManagementBackend for FakeMgmt {
+    fn call(&self, op: String, params: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> {
+        self.calls.lock().unwrap().push((op.clone(), params.clone()));
+        Box::pin(async move {
+            match op.as_str() {
+                "agents.list" => Ok(json!({"agents":[{"name":"a"}]})),
+                "agent.slow" => {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    Ok(json!({}))
+                }
+                _ => Err("nope".into()),
+            }
+        })
+    }
+}
+
+async fn setup_mgmt(ttl: Duration) -> (RemoteServer, Keys, Arc<Mutex<Vec<(String, Value)>>>) {
+    let keys = Keys::generate();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mut cfg = ServerConfig::new(keys.public_key(), "dsk1", vec![ORIGIN.into()]);
+    cfg.mgmt = Some(Arc::new(FakeMgmt { calls: calls.clone() }));
+    cfg.session_ttl = ttl;
+    (RemoteServer::start(cfg, 0).await.unwrap(), keys, calls)
+}
+
+#[tokio::test]
+async fn management_is_off_by_default_needs_auth_and_checks_the_switch_on_every_request() {
+    let (srv, keys, calls) = setup_mgmt(Duration::from_secs(3600)).await;
+    // unauthenticated connections can't reach it
+    let mut anon = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    recv(&mut anon).await;
+    send(&mut anon, json!({"t":"mgmt","id":"r1","op":"agents.list"})).await;
+    assert_eq!(recv(&mut anon).await["code"], "auth_required");
+    let mut ws = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    let ready = auth(&mut ws, &keys).await;
+    assert_eq!((ready["agents"].as_bool(), ready["sessionTtlS"].as_u64()), (Some(false), Some(3600)));
+    send(&mut ws, json!({"t":"mgmt","id":"r1","op":"agents.list"})).await;
+    let r = recv(&mut ws).await;
+    assert_eq!((r["t"].as_str(), r["id"].as_str(), r["ok"].as_bool(), r["error"].as_str()), (Some("mgmt.result"), Some("r1"), Some(false), Some("agents_disabled")));
+    assert!(calls.lock().unwrap().is_empty(), "nothing reaches the app while the switch is off");
+    srv.set_agents_enabled(true);
+    send(&mut ws, json!({"t":"mgmt","id":"r2","op":"agents.list","params":{"x":1}})).await;
+    let r = recv(&mut ws).await;
+    assert_eq!((r["ok"].as_bool(), r["result"]["agents"][0]["name"].as_str()), (Some(true), Some("a")));
+    assert_eq!(calls.lock().unwrap()[0], ("agents.list".to_string(), json!({"x":1})));
+    // app-side errors come back as errors
+    send(&mut ws, json!({"t":"mgmt","id":"r3","op":"agent.bogus"})).await;
+    assert_eq!(recv(&mut ws).await["error"], "nope");
+    // malformed op / id are refused before the app sees them
+    for bad in [json!({"t":"mgmt","id":"r4","op":"a b"}), json!({"t":"mgmt","id":"","op":"agents.list"}), json!({"t":"mgmt","id":"r5","op":"x".repeat(200)})] {
+        send(&mut ws, bad).await;
+        assert_eq!(recv(&mut ws).await["error"], "bad_request");
+    }
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    // turning the switch off while a request runs withholds its result
+    send(&mut ws, json!({"t":"mgmt","id":"r6","op":"agent.slow"})).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    srv.set_agents_enabled(false);
+    let r = recv(&mut ws).await;
+    assert_eq!((r["id"].as_str(), r["error"].as_str()), (Some("r6"), Some("agents_disabled")));
+    srv.shutdown();
+}
+
+#[tokio::test]
+async fn signature_lifetime_is_capped_at_24h_and_expiry_closes_the_connection() {
+    let (srv, keys, _) = setup_mgmt(Duration::from_secs(48 * 3600)).await;
+    let mut ws = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    assert_eq!(auth(&mut ws, &keys).await["sessionTtlS"], 24 * 3600);
+    srv.shutdown();
+    let (srv, keys, _) = setup_mgmt(Duration::from_secs(1)).await;
+    let mut ws = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    assert_eq!(auth(&mut ws, &keys).await["sessionTtlS"], 1);
+    // a connection authenticated after the lifetime is changed uses the new value
+    srv.set_session_ttl(Duration::from_secs(7200));
+    assert_eq!(recv(&mut ws).await["code"], "session_expired");
+    let mut ws2 = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    assert_eq!(auth(&mut ws2, &keys).await["sessionTtlS"], 7200);
+    srv.shutdown();
+}
+
+// ── terminals: Buzz Term settings and the per-launch host ────────────────────────────────────────────────────
+#[tokio::test]
+async fn launch_carries_the_per_launch_host_and_opened_reports_scrollback() {
+    let (srv, keys, opened) = setup().await;
+    let mut ws = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    auth(&mut ws, &keys).await;
+    srv.set_terminals_enabled(true);
+    for (lid, host, want) in [("launch-0001", Some("herdr"), Some("herdr")), ("launch-0002", Some("bogus"), None), ("launch-0003", None, None)] {
+        send(&mut ws, json!({"t":"term.challenge","launchId":lid})).await;
+        let c = recv(&mut ws).await;
+        let ev = sign(&keys, c["nonce"].as_str().unwrap(), c["connId"].as_str().unwrap(), "dsk1", &format!("terminal:{lid}"), None);
+        send(&mut ws, json!({"t":"term.open","launchId":lid,"cols":80,"rows":24,"host":host,"event":ev})).await;
+        let r = recv(&mut ws).await;
+        assert_eq!((r["t"].as_str(), r["scrollback"].as_u64()), (Some("term.opened"), Some(5000)));
+        recv(&mut ws).await; // prompt
+        assert_eq!(opened.lock().unwrap().last().unwrap().host.as_deref(), want);
+    }
+    srv.shutdown();
+}
+
+#[tokio::test]
+async fn pty_backend_honors_default_directory_and_shell_and_falls_back_safely() {
+    use buzz_remote_access::pty::{resolve_cwd, resolve_shell};
+    use buzz_remote_access::{PtyBackend, TerminalMode};
+    let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    // real PTY started in the configured directory with the configured shell
+    let mut be = PtyBackend::new(TerminalMode::Shell);
+    be.shell = Some("/bin/sh".into());
+    be.cwd = Some(dir.clone());
+    be.scrollback = Some(2500);
+    let mut h = be.open(TerminalLaunch { launch_id: "launch-0001".into(), cols: 80, rows: 24, session: None, host: None }).unwrap();
+    assert_eq!(h.scrollback, Some(2500));
+    h.input.send(TermInput::Data(b"echo cwd-is-$(pwd -P); echo shell-is-$0; exit\n".to_vec())).await.unwrap();
+    let mut all = Vec::new();
+    let end = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < end {
+        match tokio::time::timeout(Duration::from_millis(500), h.output.recv()).await {
+            Ok(Some(c)) => all.extend(c),
+            Ok(None) => break,
+            Err(_) => {}
+        }
+    }
+    let s = String::from_utf8_lossy(&all);
+    assert!(s.contains(&format!("cwd-is-{}", dir.display())), "{s}");
+    assert!(s.contains("shell-is--sh") || s.contains("shell-is-/bin/sh") || s.contains("shell-is-sh"), "{s}");
+    // pure resolution rules
+    let home = Some(PathBuf::from("/Users/x"));
+    assert_eq!(resolve_cwd(Some(&PathBuf::from("/definitely/not/here")), home.clone()), home);
+    assert_eq!(resolve_cwd(None, home.clone()), home);
+    assert_eq!(resolve_cwd(Some(&dir), home.clone()), Some(dir.clone()));
+    assert_eq!(resolve_cwd(Some(&PathBuf::from("relative/dir")), home.clone()), home);
+    assert_eq!(resolve_shell(Some(&PathBuf::from("zsh")), Some("/bin/bash".into())), PathBuf::from("/bin/bash")); // not absolute
+    assert_eq!(resolve_shell(Some(&PathBuf::from("/no/such/shell")), None), PathBuf::from("/bin/zsh"));
+    assert_eq!(resolve_shell(Some(&PathBuf::from("/bin/sh")), Some("/bin/bash".into())), PathBuf::from("/bin/sh"));
+    assert_eq!(resolve_shell(Some(&PathBuf::from("/etc/hosts")), Some("/bin/bash".into())), PathBuf::from("/bin/bash")); // not executable
 }

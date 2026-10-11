@@ -20,20 +20,55 @@ pub enum TerminalMode {
 #[derive(Clone, Debug)]
 pub struct PtyBackend {
     pub mode: TerminalMode,
-    /// Overrides $SHELL (tests).
+    /// Overrides $SHELL (Settings → Buzz Term → Shell, and tests).
     pub shell: Option<PathBuf>,
+    /// Starting directory (Settings → Buzz Term → Default directory). Must exist; otherwise the home directory is used.
+    pub cwd: Option<PathBuf>,
+    /// Reported to the web so it keeps that many lines of history (Settings → Buzz Term → Scrollback).
+    pub scrollback: Option<u32>,
+}
+
+/// The shell to run: the configured one only if it is an absolute path to an executable file, else `$SHELL`, else zsh.
+pub fn resolve_shell(configured: Option<&std::path::Path>, env_shell: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = configured {
+        if p.is_absolute() && is_executable_file(p) {
+            return p.to_path_buf();
+        }
+    }
+    env_shell.unwrap_or_else(|| PathBuf::from("/bin/zsh"))
+}
+
+fn is_executable_file(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+/// The starting directory: `~`/`~/x` expanded, must be an existing directory, else the home directory.
+pub fn resolve_cwd(configured: Option<&std::path::Path>, home: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(c) = configured {
+        let s = c.to_string_lossy();
+        let expanded = if s == "~" {
+            home.clone()
+        } else if let Some(rest) = s.strip_prefix("~/") {
+            home.clone().map(|h| h.join(rest))
+        } else {
+            Some(c.to_path_buf())
+        };
+        if let Some(d) = expanded {
+            if d.is_absolute() && d.is_dir() {
+                return Some(d);
+            }
+        }
+    }
+    home
 }
 
 impl PtyBackend {
     pub fn new(mode: TerminalMode) -> Self {
-        Self { mode, shell: None }
+        Self { mode, shell: None, cwd: None, scrollback: None }
     }
     fn command(&self, l: &TerminalLaunch) -> CommandBuilder {
-        let shell = self
-            .shell
-            .clone()
-            .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
+        let shell = resolve_shell(self.shell.as_deref(), std::env::var_os("SHELL").map(PathBuf::from));
         let mut cmd = match (&self.mode, &l.session) {
             (TerminalMode::Herdr { bin }, Some(name)) => {
                 let mut c = CommandBuilder::new(bin);
@@ -54,8 +89,8 @@ impl PtyBackend {
             }
         }
         cmd.env("TERM", "xterm-256color");
-        if let Some(home) = std::env::var_os("HOME") {
-            cmd.cwd(home);
+        if let Some(dir) = resolve_cwd(self.cwd.as_deref(), std::env::var_os("HOME").map(PathBuf::from)) {
+            cmd.cwd(dir);
         }
         cmd
     }
@@ -126,6 +161,6 @@ impl TerminalBackend for PtyBackend {
         std::thread::spawn(move || {
             let _ = child.wait();
         });
-        Ok(TerminalHandle { output: orx, input: itx })
+        Ok(TerminalHandle { output: orx, input: itx, scrollback: self.scrollback })
     }
 }

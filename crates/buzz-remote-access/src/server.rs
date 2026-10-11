@@ -7,9 +7,12 @@
 //!   client -> {"t":"term.open","launchId","cols","rows","session"?,"event":..} purpose "terminal:<launchId>"
 //!   server -> {"t":"term.opened","id"} / {"t":"term.out","id","data":b64} / {"t":"term.closed","id"}
 //!   client -> {"t":"term.in","id","data":b64} / {"t":"term.resize","id","cols","rows"} / {"t":"term.close","id"}
+//!   client -> {"t":"mgmt","id","op","params"}                   -> {"t":"mgmt.result","id","ok":bool,"result"|"error"}
+//!     (agent management; refused with "agents_disabled" unless the desktop's "Allow remote agent management" is on)
+//!   server -> {"t":"error","code":"session_expired"} then close  when the signed connection's lifetime ends
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,6 +39,9 @@ pub struct TerminalLaunch {
     pub rows: u16,
     /// herdr session name to attach/launch with; None = the user's plain shell.
     pub session: Option<String>,
+    /// What the web asked for on THIS launch: "shell" or "herdr". The desktop's own Buzz Term setting decides what
+    /// is allowed (a request can always ask for less, never for herdr when the desktop doesn't use it).
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -53,6 +59,24 @@ pub enum TermInput {
 pub struct TerminalHandle {
     pub output: mpsc::Receiver<Vec<u8>>,
     pub input: mpsc::Sender<TermInput>,
+    /// Lines of history the web should keep for this terminal (the desktop's Buzz Term scrollback setting).
+    pub scrollback: Option<u32>,
+}
+
+/// Agent management requests (list/start/stop/message/create/rename/update/providers). Implemented by the app, which
+/// owns the real agent store; a fake in tests. The server only checks auth, the switch, op shape and size.
+pub trait ManagementBackend: Send + Sync {
+    fn call(&self, op: String, params: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>;
+}
+
+/// Longest a signed connection may live (matches the desktop's "Signature lifetime" maximum, 24 h).
+pub const MAX_SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
+const MGMT_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_MGMT_INFLIGHT: usize = 4;
+const MAX_MGMT_OP: usize = 48;
+
+fn clamp_ttl(t: Duration) -> Duration {
+    t.clamp(Duration::from_secs(1), MAX_SESSION_TTL)
 }
 
 /// Supplied by the app (real PTY/herdr launch); a fake in tests.
@@ -77,6 +101,9 @@ pub struct ServerConfig {
     pub max_connections: usize,
     pub max_terminals: usize,
     pub backend: Option<Arc<dyn TerminalBackend>>,
+    pub mgmt: Option<Arc<dyn ManagementBackend>>,
+    /// How long one signed connection (one connect signature) stays valid; clamped to [`MAX_SESSION_TTL`].
+    pub session_ttl: Duration,
 }
 
 impl ServerConfig {
@@ -91,6 +118,8 @@ impl ServerConfig {
             max_connections: 8,
             max_terminals: 3,
             backend: None,
+            mgmt: None,
+            session_ttl: Duration::from_secs(3600),
         }
     }
 }
@@ -99,6 +128,8 @@ struct Shared {
     cfg: ServerConfig,
     book: Mutex<ChallengeBook>,
     terminals_enabled: AtomicBool,
+    agents_enabled: AtomicBool,
+    ttl_s: AtomicU64,
     conns: AtomicUsize,
     terms: AtomicUsize,
     kill: broadcast::Sender<()>,
@@ -118,10 +149,13 @@ impl RemoteServer {
         debug_assert!(addr.ip().is_loopback());
         let (kill, _) = broadcast::channel(8);
         let (stop, _) = broadcast::channel(1);
+        let ttl0 = clamp_ttl(cfg.session_ttl).as_secs();
         let shared = Arc::new(Shared {
             book: Mutex::new(ChallengeBook::new(cfg.member, cfg.desktop_id.clone())),
             cfg,
             terminals_enabled: AtomicBool::new(false), // terminals are off by default
+            agents_enabled: AtomicBool::new(false),
+            ttl_s: AtomicU64::new(ttl0),
             conns: AtomicUsize::new(0),
             terms: AtomicUsize::new(0),
             kill,
@@ -159,6 +193,17 @@ impl RemoteServer {
         if !on {
             let _ = self.shared.kill.send(());
         }
+    }
+    /// "Allow remote agent management". Off by default; checked on every request, so turning it off takes effect at once.
+    pub fn set_agents_enabled(&self, on: bool) {
+        self.shared.agents_enabled.store(on, Ordering::SeqCst);
+    }
+    pub fn agents_enabled(&self) -> bool {
+        self.shared.agents_enabled.load(Ordering::SeqCst)
+    }
+    /// Changes the signature lifetime applied to connections authenticated from now on (clamped to 24 h).
+    pub fn set_session_ttl(&self, ttl: Duration) {
+        self.shared.ttl_s.store(clamp_ttl(ttl).as_secs(), Ordering::SeqCst);
     }
     pub fn terminals_enabled(&self) -> bool {
         self.shared.terminals_enabled.load(Ordering::SeqCst)
@@ -250,9 +295,21 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
         let _ = writer.await;
         return;
     }
+    let ttl = Duration::from_secs(sh.ttl_s.load(Ordering::SeqCst));
     let _ = out_tx
-        .send(Message::text(json!({"t":"ready","desktopId":sh.cfg.desktop_id,"terminals":sh.terminals_enabled.load(Ordering::SeqCst)}).to_string()))
+        .send(Message::text(
+            json!({
+                "t":"ready",
+                "desktopId":sh.cfg.desktop_id,
+                "terminals":sh.terminals_enabled.load(Ordering::SeqCst),
+                "agents":sh.agents_enabled.load(Ordering::SeqCst),
+                "sessionTtlS":ttl.as_secs(),
+            })
+            .to_string(),
+        ))
         .await;
+    let expires = tokio::time::Instant::now() + ttl;
+    let mgmt_inflight = Arc::new(AtomicUsize::new(0));
 
     // 2. authenticated loop
     let mut terms: HashMap<String, mpsc::Sender<TermInput>> = HashMap::new();
@@ -261,6 +318,11 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
     loop {
         let next = tokio::select! {
             m = tokio::time::timeout(sh.cfg.idle_timeout, rx.next()) => m,
+            _ = tokio::time::sleep_until(expires) => {
+                // the signed connection's lifetime is over: the web has to sign a new connect challenge
+                let _ = out_tx.send(err("session_expired")).await;
+                break;
+            }
             _ = kill.recv() => {
                 for (id, t) in terms.drain() { let _ = t.send(TermInput::Close).await; let _ = out_tx.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await; }
                 continue;
@@ -292,6 +354,45 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                     None => vec![],
                 };
                 let _ = out_tx.send(Message::text(json!({"t":"sessions","sessions":list}).to_string())).await;
+            }
+            "mgmt" => {
+                let id = v["id"].as_str().unwrap_or("").to_string();
+                let fail = |code: &str| Message::text(json!({"t":"mgmt.result","id":id,"ok":false,"error":code}).to_string());
+                let op = v["op"].as_str().unwrap_or("").to_string();
+                if id.is_empty() || id.len() > 64 || op.is_empty() || op.len() > MAX_MGMT_OP || !op.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+                    let _ = out_tx.send(fail("bad_request")).await;
+                    continue;
+                }
+                if !sh.agents_enabled.load(Ordering::SeqCst) {
+                    let _ = out_tx.send(fail("agents_disabled")).await;
+                    continue;
+                }
+                let Some(backend) = sh.cfg.mgmt.clone() else {
+                    let _ = out_tx.send(fail("no_backend")).await;
+                    continue;
+                };
+                if mgmt_inflight.fetch_add(1, Ordering::SeqCst) >= MAX_MGMT_INFLIGHT {
+                    mgmt_inflight.fetch_sub(1, Ordering::SeqCst);
+                    let _ = out_tx.send(fail("busy")).await;
+                    continue;
+                }
+                let params = v.get("params").cloned().unwrap_or(Value::Null);
+                let (out2, inflight, sh2) = (out_tx.clone(), mgmt_inflight.clone(), sh.clone());
+                tokio::spawn(async move {
+                    let r = tokio::time::timeout(MGMT_TIMEOUT, backend.call(op, params)).await;
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                    // re-check: the switch may have been turned off while the request ran; the result is then withheld
+                    let m = if !sh2.agents_enabled.load(Ordering::SeqCst) {
+                        json!({"t":"mgmt.result","id":id,"ok":false,"error":"agents_disabled"})
+                    } else {
+                        match r {
+                            Ok(Ok(res)) => json!({"t":"mgmt.result","id":id,"ok":true,"result":res}),
+                            Ok(Err(e)) => json!({"t":"mgmt.result","id":id,"ok":false,"error":e.chars().take(300).collect::<String>()}),
+                            Err(_) => json!({"t":"mgmt.result","id":id,"ok":false,"error":"timeout"}),
+                        }
+                    };
+                    let _ = out2.send(Message::text(m.to_string())).await;
+                });
             }
             "term.challenge" => {
                 if !sh.terminals_enabled.load(Ordering::SeqCst) {
@@ -386,6 +487,7 @@ async fn open_terminal(
         cols: v["cols"].as_u64().unwrap_or(80).clamp(10, 500) as u16,
         rows: v["rows"].as_u64().unwrap_or(24).clamp(2, 200) as u16,
         session,
+        host: v["host"].as_str().filter(|h| matches!(*h, "shell" | "herdr")).map(str::to_string),
     };
     let handle = match backend.open(launch) {
         Ok(h) => h,
@@ -395,7 +497,7 @@ async fn open_terminal(
         }
     };
     terms.insert(lid.to_string(), handle.input.clone());
-    let _ = out_tx.send(Message::text(json!({"t":"term.opened","id":lid}).to_string())).await;
+    let _ = out_tx.send(Message::text(json!({"t":"term.opened","id":lid,"scrollback":handle.scrollback}).to_string())).await;
     let (sh2, out2, id) = (sh.clone(), out_tx.clone(), lid.to_string());
     let mut output = handle.output;
     tokio::spawn(async move {
