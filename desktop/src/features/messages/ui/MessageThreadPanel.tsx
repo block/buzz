@@ -16,6 +16,7 @@ import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageCo
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -119,7 +120,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onRetryThreadReplies?: () => void;
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
-  threadTypingPubkeys: string[];
+  threadTypingEntries: TypingIndicatorEntry[];
   videoReviewPresentation?: VideoReviewPresentation;
   activityAccessoryContent?: React.ReactNode;
   activityAccessoryVisible: boolean;
@@ -200,7 +201,7 @@ export function MessageThreadPanel({
   onRetryThreadReplies,
   threadUnreadCount,
   threadReplyUnreadCounts,
-  threadTypingPubkeys,
+  threadTypingEntries,
   activityAccessoryContent,
   activityAccessoryVisible,
   canResetWidth,
@@ -231,7 +232,7 @@ export function MessageThreadPanel({
   // Whether the composer dock trades its quiet-state spacer for the
   // conditional activity accessory (agent working and/or someone typing).
   const hasComposerBottomActivity =
-    activityAccessoryVisible || threadTypingPubkeys.length > 0;
+    activityAccessoryVisible || threadTypingEntries.length > 0;
 
   // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
@@ -880,13 +881,13 @@ export function MessageThreadPanel({
                     {activityAccessoryContent}
                   </div>
                 ) : null}
-                {threadTypingPubkeys.length > 0 ? (
+                {threadTypingEntries.length > 0 ? (
                   <TypingIndicatorRow
                     channel={channel}
                     className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
                     currentPubkey={currentPubkey}
                     profiles={profiles}
-                    typingPubkeys={threadTypingPubkeys}
+                    typingEntries={threadTypingEntries}
                     variant="activity"
                   />
                 ) : null}

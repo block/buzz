@@ -284,7 +284,7 @@ export function ProjectConversationPanel({
         onRetryThreadReplies={() => {
           void threadRepliesQuery.refetch();
         }}
-        threadTypingPubkeys={[]}
+        threadTypingEntries={[]}
         widthPx={widthPx}
       />,
       {

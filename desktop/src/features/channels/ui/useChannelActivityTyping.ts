@@ -75,31 +75,29 @@ export function useChannelActivityTyping({
       ),
     [channelAgentSessionAgents],
   );
-  const threadTypingPubkeys = React.useMemo(
+  const threadTypingEntries = React.useMemo(
     () =>
-      typingEntries
-        .filter(
-          (entry) =>
-            entry.threadHeadId === openThreadHeadId &&
-            !channelAgentPubkeys.has(normalizePubkey(entry.pubkey)),
-        )
-        .map((entry) => entry.pubkey),
+      typingEntries.filter(
+        (entry) =>
+          entry.threadHeadId === openThreadHeadId &&
+          !channelAgentPubkeys.has(normalizePubkey(entry.pubkey)),
+      ),
     [channelAgentPubkeys, openThreadHeadId, typingEntries],
   );
-  const { botTypingEntries, humanTypingPubkeys } = React.useMemo<{
+  const { botTypingEntries, humanTypingEntries } = React.useMemo<{
     botTypingEntries: TypingIndicatorEntry[];
-    humanTypingPubkeys: string[];
+    humanTypingEntries: TypingIndicatorEntry[];
   }>(() => {
     const botTypingEntries: TypingIndicatorEntry[] = [];
-    const humanTypingPubkeys: string[] = [];
+    const humanTypingEntries: TypingIndicatorEntry[] = [];
     for (const entry of typingEntries) {
       if (channelAgentPubkeys.has(normalizePubkey(entry.pubkey))) {
         botTypingEntries.push(entry);
       } else if (entry.threadHeadId === null) {
-        humanTypingPubkeys.push(entry.pubkey);
+        humanTypingEntries.push(entry);
       }
     }
-    return { botTypingEntries, humanTypingPubkeys };
+    return { botTypingEntries, humanTypingEntries };
   }, [channelAgentPubkeys, typingEntries]);
 
   // Mirror bot typing into the unified working signal so surfaces that read
@@ -125,8 +123,8 @@ export function useChannelActivityTyping({
     agentSessionCandidates: agentCandidates,
     botTypingEntries,
     channelAgentSessionAgents,
-    humanTypingPubkeys,
-    threadTypingPubkeys,
+    humanTypingEntries,
+    threadTypingEntries,
   };
 }
 
