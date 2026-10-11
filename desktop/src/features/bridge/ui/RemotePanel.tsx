@@ -76,7 +76,13 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
       bufRef.current = new TermBuffer();
       const dec = new TextDecoder();
       const t = await c.openTerminal(
-        { cols: 80, rows: 24, session: herdrMode || termHost === undefined ? chosenSession || undefined : undefined },
+        {
+          cols: 80,
+          rows: 24,
+          session: herdrMode || termHost === undefined ? chosenSession || undefined : undefined,
+          // the host is chosen per launch: what the desktop's Buzz Term setting says it uses (the desktop never grants more than its own setting)
+          ...(termHost ? { host: herdrMode ? ("herdr" as const) : ("shell" as const) } : {}),
+        },
         (bytes) => {
           bufRef.current.write(dec.decode(bytes, { stream: true }));
           force();
@@ -88,6 +94,8 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
         },
       );
       termRef.current = t;
+      // the desktop's Settings → Buzz Term → Scrollback decides how much history this terminal keeps
+      if (t.scrollback) bufRef.current.maxLines = t.scrollback;
       setOpen(true);
     });
   const send = (s: string) => termRef.current?.write(s);

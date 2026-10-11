@@ -10,6 +10,8 @@ export type RemoteAccessStatus = {
   dnsName: string | null;
   enabled: boolean;
   terminals: boolean;
+  /** Direct agent management is on (the relay path doesn't need the listener). */
+  agents: boolean;
   url: string | null;
   openTerminals: number;
 };
@@ -47,6 +49,30 @@ const set = (s: RemoteAccessStatus) => {
 };
 const herdr = () => getTermPreferences().sessionHost === "herdr";
 
+/** Settings → Buzz Term as the Rust terminal backend needs it; read there at every remote launch (no process-wide flag). */
+export function termConfigArgs() {
+  const t = getTermPreferences();
+  return { herdr: t.sessionHost === "herdr", shell: t.shell, cwd: t.cwd, scrollback: t.scrollback };
+}
+export async function pushTermConfig(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await invoke("remote_access_set_term_config", termConfigArgs());
+  } catch {
+    /* older build without the command */
+  }
+}
+/** "Allow remote agent management" + signature lifetime, pushed to the listener (the switch is re-checked per request). */
+export async function pushAgentConfig(): Promise<void> {
+  if (!isTauri()) return;
+  const p = getRemotePrefs();
+  try {
+    set(await invoke<RemoteAccessStatus>("remote_access_set_agents", { on: p.agentManagement, ttlS: p.sigTtlS }));
+  } catch {
+    /* older build without the command */
+  }
+}
+
 export function desktopId(): string {
   try {
     let id = localStorage.getItem(DEVICE_KEY);
@@ -60,12 +86,20 @@ export function desktopId(): string {
   }
 }
 
+let startupSynced = false;
 export async function refreshRemoteAccess(): Promise<void> {
   if (!isTauri()) return;
   try {
     set(await invoke<RemoteAccessStatus>("remote_access_status"));
   } catch {
     /* command unavailable (older build) */
+    return;
+  }
+  // Once per launch: "Allow remote agent management" is a saved setting, so bring the direct listener back up after a restart.
+  if (!startupSynced) {
+    startupSynced = true;
+    await pushAgentConfig();
+    if (getRemotePrefs().agentManagement) await syncListener().catch(() => {});
   }
 }
 
@@ -99,27 +133,35 @@ async function syncListener(): Promise<void> {
 }
 export async function setAgentManagement(on: boolean): Promise<void> {
   localStorage.setItem(PREF_AGENTS, on ? "1" : "0");
+  await pushAgentConfig(); // before the listener starts, so it comes up with the right switch and lifetime
   await syncListener();
   emit();
 }
+/** Signature lifetime for direct connections (max 24 h): applies to connections signed from now on. */
 export function setSignatureTtl(seconds: number): void {
   if ((SIG_TTL_OPTIONS_S as readonly number[]).includes(seconds)) localStorage.setItem(PREF_TTL, String(seconds));
+  void pushAgentConfig();
   emit();
 }
 /** Turn terminals on/off; terminals need the tailnet listener, which this starts if needed. */
 export async function setTerminalsAllowed(on: boolean): Promise<void> {
   if (on && !status?.tailscaleUp) throw new Error(status?.reason ?? "Remote terminals need Tailscale running on this computer.");
+  await pushTermConfig();
   if (on && !status?.enabled) await setRemoteAccessEnabled(true);
   await setRemoteTerminals(on);
   if (!on) await syncListener();
 }
 
 export async function setRemoteAccessEnabled(enabled: boolean): Promise<void> {
-  set(await invoke<RemoteAccessStatus>("remote_access_set_enabled", { enabled, desktopId: desktopId(), herdr: herdr() }));
+  if (enabled) {
+    await pushTermConfig();
+    await pushAgentConfig();
+  }
+  set(await invoke<RemoteAccessStatus>("remote_access_set_enabled", { enabled, desktopId: desktopId() }));
 }
 
 export async function setRemoteTerminals(on: boolean): Promise<void> {
-  set(await invoke<RemoteAccessStatus>("remote_access_set_terminals", { on, herdr: herdr() }));
+  set(await invoke<RemoteAccessStatus>("remote_access_set_terminals", { on }));
 }
 
 /** What the bridge heartbeat advertises (undefined = this build/desktop has no slice B). */
@@ -142,16 +184,19 @@ export function remoteInfoForHeartbeat(): RemoteInfo | undefined {
   };
 }
 
-// The Rust backend only learns shell-vs-herdr when a switch is flipped (the `herdr` argument). Re-push it whenever
-// Settings → Buzz Term → Session host changes while remote access is on, so the next remote terminal uses the new mode;
-// the heartbeat also advertises it (termHost / termSession) so the web Buzz term page can show the effective setting.
+// The Rust backend reads Settings → Buzz Term (session host, shell, default directory, scrollback) at every remote launch from
+// the last pushed copy. Push it at startup and whenever any of those settings change, and re-publish the heartbeat (it
+// advertises the session host and session name so the web Buzz term page can show the effective setting).
 if (isTauri()) {
-  let lastHost = herdr();
+  let last = JSON.stringify(termConfigArgs());
+  void pushTermConfig();
+  void pushAgentConfig();
   subscribeTermPreferences(() => {
-    const now = herdr();
-    const hostChanged = now !== lastHost;
-    lastHost = now;
-    emit(); // re-publish the heartbeat (session name or host may have changed)
-    if (hostChanged && status?.enabled) void setRemoteTerminals(status.terminals).catch(() => {});
+    emit();
+    const now = JSON.stringify(termConfigArgs());
+    if (now !== last) {
+      last = now;
+      void pushTermConfig();
+    }
   });
 }

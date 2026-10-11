@@ -289,7 +289,7 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
-  useRemoteAccessEvents();
+  useRemoteAccessEvents(identityQuery.data?.pubkey);
   // PWA bridge (slice A): desktop publishes agent status for the member's own browser. No-op outside Tauri.
   useBridgePublisher(
     identityQuery.data?.pubkey,

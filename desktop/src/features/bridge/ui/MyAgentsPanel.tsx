@@ -2,11 +2,15 @@
 import * as React from "react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { directAgentsFor } from "../directAgents";
 import { nowS } from "../protocol";
+import { transportFor } from "../remoteHosts";
 import { hiddenAgentCount, NO_RUNNING_AGENTS, visibleRelayAgents } from "../relayAgentView";
 import { useBridgeAgents } from "../useBridgeAgents";
 import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
+import { DirectAgentsSection, PathBadge, useDirectState } from "./DirectAgentsPanel";
+import { useRemoteHostsFor } from "./WebRemoteSettings";
 
 function ago(s: number): string {
   if (s < 60) return `${s}s ago`;
@@ -23,7 +27,26 @@ export function MyAgentsPanel() {
     return () => window.clearInterval(t);
   }, []);
   const [selected, setSelected] = React.useState<string | null>(null);
+  // Direct (tailnet) path: preferred for management when the desktop offers it and this device can reach it; the relay is the fallback.
+  const rh = useRemoteHostsFor(b);
+  const host = rh.selected("agents") ?? rh.hosts.find((h) => h.supports.agents);
+  const transport = transportFor("agents", host, host ? rh.reachOf(host) : "unknown");
+  const direct = React.useMemo(
+    () => (host?.hasDirect && b.available ? directAgentsFor({ desktopId: host.id, url: host.url }, b.signJson) : null),
+    [host?.id, host?.url, host?.hasDirect, b.available], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const dstate = useDirectState(direct);
+  const [connecting, setConnecting] = React.useState(false);
   if (!b.available) return null;
+  const directLive = dstate.live && !!direct;
+  const connectDirect = () => {
+    if (!direct) return;
+    setConnecting(true);
+    direct
+      .connect()
+      .catch(() => {})
+      .finally(() => setConnecting(false));
+  };
   const age =
     b.lastHeardTs === null ? null : Math.max(0, nowS() - b.lastHeardTs);
   const offline = b.presence === "offline";
@@ -43,7 +66,7 @@ export function MyAgentsPanel() {
         onBack={() => setSelected(null)}
         controls={
           b.commander && managementOn ? (
-            <AgentControls agent={selectedAgent} commander={b.commander} bridge={b} />
+            <AgentControls agent={selectedAgent} commander={b.commander} bridge={b} direct={directLive ? direct : null} />
           ) : null
         }
       />
@@ -73,6 +96,15 @@ export function MyAgentsPanel() {
         {b.keyState === "failed" &&
           " · couldn't unlock the bridge key (approve the request in your signer)"}
       </p>
+      <PathBadge
+        direct={direct}
+        canDirect={transport === "direct"}
+        managementOn={managementOn}
+        onConnect={connectDirect}
+        busy={connecting}
+        unreachable={transport === "relay" && !!host?.hasDirect}
+      />
+      {directLive && direct && <DirectAgentsSection direct={direct} />}
       {!managementOn && (
         <div
           data-testid="agents-management-info"
@@ -85,14 +117,14 @@ export function MyAgentsPanel() {
           </p>
           <ul style={{ margin: "6px 0 0", paddingLeft: 18, opacity: 0.85 }}>
             <li>Over the relay (works from anywhere, slower): list, start, stop and message agents.</li>
-            <li>Over a direct tailnet connection (faster): everything above plus create, rename, change provider, model and persona, and delete.</li>
+            <li>Over a direct tailnet connection (faster): everything above plus all agents (including stopped ones), create, rename, and change provider, model and runtime.</li>
           </ul>
         </div>
       )}
-      {b.snapshot && shownAgents.length === 0 && (
+      {!directLive && b.snapshot && shownAgents.length === 0 && (
         <p data-testid="my-agents-empty" style={{ fontSize: 13, opacity: 0.7 }}>{NO_RUNNING_AGENTS}</p>
       )}
-      {hiddenCount > 0 && (
+      {!directLive && hiddenCount > 0 && (
         <p data-testid="my-agents-hidden-note" style={{ fontSize: 11, opacity: 0.6, margin: "0 0 8px" }}>
           {hiddenCount} stopped {hiddenCount === 1 ? "agent is" : "agents are"} hidden here; only running agents are listed over the relay.
         </p>
@@ -102,7 +134,7 @@ export function MyAgentsPanel() {
           listStyle: "none",
           padding: 0,
           margin: 0,
-          display: "grid",
+          display: directLive ? "none" : "grid",
           gap: 8,
           opacity: offline ? 0.55 : 1,
         }}

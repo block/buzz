@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { CMD_MAX_TEXT, nowS, type AgentSummary, type CommandType } from "../protocol";
 import type { BridgeCommander, SentCommand } from "../commander";
+import { type DirectAgents, directErrorCopy, isDirectDown } from "../directAgents";
 import type { BridgeState } from "../webClient";
 
 const VERB: Record<string, string> = {
@@ -15,8 +16,10 @@ export function AgentControls(props: {
   agent: AgentSummary;
   commander: BridgeCommander;
   bridge: BridgeState;
+  /** A live signed direct connection: start/stop/message use it and fall back to the relay if it drops. */
+  direct?: DirectAgents | null;
 }) {
-  const { agent, commander, bridge } = props;
+  const { agent, commander, bridge, direct } = props;
   const [, tick] = React.useReducer((x: number) => x + 1, 0);
   React.useEffect(() => commander.subscribe(tick), [commander]);
   React.useEffect(() => {
@@ -36,6 +39,23 @@ export function AgentControls(props: {
 
   const fire = async (type: CommandType, confirmed: boolean) => {
     setError(null);
+    if (direct?.live) {
+      try {
+        if (type === "agent.message") await direct.message(agent.pubkey, channelId, text);
+        else if (type === "agent.start") await direct.start(agent.pubkey);
+        else await direct.stop(agent.pubkey);
+        setConfirming(null);
+        if (type === "agent.message") setText("");
+        return;
+      } catch (e) {
+        if (!isDirectDown(e)) {
+          setError(directErrorCopy(e));
+          setConfirming(null);
+          return;
+        }
+        // the direct path dropped: fall through to the relay with the same command
+      }
+    }
     try {
       if (type === "agent.message")
         await commander.send(type, { agentPubkey: agent.pubkey, channelId, text }, { confirmed, label: `Message: ${text.slice(0, 40)}` });

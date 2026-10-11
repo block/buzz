@@ -25,7 +25,11 @@ import { useBridgeAgents } from "../useBridgeAgents";
 
 export function useRemoteHosts() {
   const pubkey = useIdentityQuery().data?.pubkey;
-  const b = useBridgeAgents(pubkey);
+  return useRemoteHostsFor(useBridgeAgents(pubkey));
+}
+
+/** Same as useRemoteHosts, for a caller that already holds the bridge state (avoids a second relay subscription). */
+export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>) {
   const prefs = React.useSyncExternalStore(subscribeWebRemotePrefs, getWebRemotePrefs);
   const hosts = React.useMemo(() => hostsFrom(b), [b.heartbeat, b.lastHeardTs]); // eslint-disable-line react-hooks/exhaustive-deps
   const [reach, setReach] = React.useState<Record<string, Reach>>({});
@@ -100,7 +104,7 @@ function HostList(props: { feature: Feature; hosts: RemoteHost[]; reachOf: (h: R
             </label>
             {feature === "agents" && t === "relay" && (
               <p className="ml-6 text-xs text-muted-foreground/70" data-testid="remote-host-relay-note">
-                Using the relay — slower, and without create/edit/delete. Connect to your tailnet for a direct connection.
+                Using the relay — slower, and without create, rename or edit. Connect to your tailnet for a direct connection.
               </p>
             )}
           </li>

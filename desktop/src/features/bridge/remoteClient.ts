@@ -12,15 +12,30 @@ export type WsLike = {
 export type WsFactory = (url: string) => WsLike;
 
 export type RemoteSession = { name: string; status: string };
-export type TerminalHandle = { write(s: string): void; resize(cols: number, rows: number): void; close(): void };
+export type TerminalHandle = {
+  write(s: string): void;
+  resize(cols: number, rows: number): void;
+  close(): void;
+  /** Lines of history to keep, from the desktop's Settings → Buzz Term → Scrollback (plain shells only). */
+  scrollback?: number;
+};
 
 export class RemoteError extends Error {
   /** unreachable = socket never opened; otherwise the desktop's error code */
   code: string;
-  constructor(code: string) {
-    super(code);
+  /** Human-readable detail from the desktop, when it sent one. */
+  detail?: string;
+  constructor(code: string, detail?: string) {
+    super(detail ? `${code}: ${detail}` : code);
     this.code = code;
+    this.detail = detail;
   }
+}
+
+/** The desktop sends management errors as "<code>: <message>" (or just a code such as agents_disabled / timeout). */
+export function parseMgmtError(e: string): RemoteError {
+  const i = e.indexOf(": ");
+  return i > 0 && /^[a-z_]+$/.test(e.slice(0, i)) ? new RemoteError(e.slice(0, i), e.slice(i + 2)) : new RemoteError(e);
 }
 
 /** Only wss:// to anything, or ws:// to loopback (dev/e2e). The URL comes from the authenticated heartbeat. */
@@ -55,6 +70,11 @@ export class RemoteConnection {
   private ping: ReturnType<typeof setInterval> | null = null;
   ready = false;
   terminals = false;
+  /** "Allow remote agent management" was on when this connection was signed (it is re-checked on every request). */
+  agents = false;
+  /** One connect signature covers the whole connection; it ends at `expiresAt` (ms) and the web signs again. */
+  sessionTtlS = 0;
+  expiresAt = 0;
   onClose: (() => void) | null = null;
 
   private info: { desktopId: string; url: string };
@@ -152,6 +172,9 @@ export class RemoteConnection {
     const ready = await this.waitFor((f) => f.t === "ready");
     this.ready = true;
     this.terminals = ready.terminals === true;
+    this.agents = ready.agents === true;
+    this.sessionTtlS = typeof ready.sessionTtlS === "number" ? ready.sessionTtlS : 0;
+    this.expiresAt = this.sessionTtlS ? Date.now() + this.sessionTtlS * 1000 : 0;
     this.ping = setInterval(() => ws.send(JSON.stringify({ t: "ping" })), 30_000);
   }
 
@@ -163,9 +186,20 @@ export class RemoteConnection {
       .slice(0, 50);
   }
 
+  /** One agent-management request over the direct connection (the desktop checks the switch on every request). */
+  async mgmt<T = Record<string, unknown>>(op: string, params: Record<string, unknown> = {}, ms = 120_000): Promise<T> {
+    const ws = this.ws;
+    if (!ws || !this.ready) throw new RemoteError("closed");
+    const id = crypto.randomUUID();
+    ws.send(JSON.stringify({ t: "mgmt", id, op, params }));
+    const r = await this.waitFor((f) => f.t === "mgmt.result" && f.id === id, ms);
+    if (r.ok !== true) throw parseMgmtError(String(r.error ?? "failed"));
+    return (r.result ?? {}) as T;
+  }
+
   /** Each launch asks the signer for a fresh signature (purpose terminal:<launchId>). */
   async openTerminal(
-    opts: { cols: number; rows: number; session?: string },
+    opts: { cols: number; rows: number; session?: string; host?: "shell" | "herdr" },
     onData: (b: Uint8Array) => void,
     onClosed: () => void,
   ): Promise<TerminalHandle> {
@@ -176,14 +210,17 @@ export class RemoteConnection {
     const challenge = await this.waitFor((f) => f.t === "challenge" && f.purpose === `terminal:${launchId}`);
     const event = await this.signChallenge(challenge, `terminal:${launchId}`);
     this.termOut.set(launchId, { data: onData, closed: onClosed });
-    ws.send(JSON.stringify({ t: "term.open", launchId, cols: opts.cols, rows: opts.rows, session: opts.session ?? null, event }));
+    ws.send(JSON.stringify({ t: "term.open", launchId, cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null, event }));
+    let scrollback: number | undefined;
     try {
-      await this.waitFor((f) => f.t === "term.opened" && f.id === launchId, 30_000);
+      const opened = await this.waitFor((f) => f.t === "term.opened" && f.id === launchId, 30_000);
+      scrollback = typeof opened.scrollback === "number" ? opened.scrollback : undefined;
     } catch (e) {
       this.termOut.delete(launchId);
       throw e;
     }
     return {
+      scrollback,
       write: (s) => ws.send(JSON.stringify({ t: "term.in", id: launchId, data: b64(s) })),
       resize: (cols, rows) => ws.send(JSON.stringify({ t: "term.resize", id: launchId, cols, rows })),
       close: () => ws.send(JSON.stringify({ t: "term.close", id: launchId })),

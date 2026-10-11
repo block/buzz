@@ -64,10 +64,10 @@ test("error-state copy", () => {
   const on = { desktopId: "d", name: "Mac", url: "wss://x", status: "on", terminals: true };
   assert.equal(describeRemote("online", on).problem, "none");
   assert.match(describeRemote("offline", on).message, /asleep or app closed/);
-  assert.match(describeRemote("online", { ...on, status: "off", reason: "Tailscale isn't running on this Mac." }).message, /Remote access is off on Mac.*Tailscale isn't running/);
+  assert.match(describeRemote("online", { ...on, status: "off", reason: "Tailscale isn't running on this Mac." }).message, /Remote access isn't available on Mac.*Tailscale isn't running/);
   assert.match(describeRemote("online", on, "unreachable").message, /Connect to Tailscale on this device/);
   assert.match(describeRemote("online", on, "declined").message, /declined in your signer/);
-  assert.match(describeRemote("online", on, "terminals_disabled").message, /Remote terminals are off on Mac/);
+  assert.match(describeRemote("online", on, "terminals_disabled").message, /"Allow remote terminal" is off on Mac/);
 });
 
 test("term buffer: CR/BS/erase, escapes dropped", () => {
