@@ -135,5 +135,10 @@ class ContactEntry {
 
   const ContactEntry({required this.pubkey, this.relayUrl, this.petname});
 
-  List<String> toTag() => ['p', pubkey.toLowerCase(), ?relayUrl, ?petname];
+  List<String> toTag() => [
+    'p',
+    pubkey.toLowerCase(),
+    relayUrl ?? '',
+    petname ?? '',
+  ];
 }
