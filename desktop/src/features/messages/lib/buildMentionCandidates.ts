@@ -248,3 +248,47 @@ export function buildMentionCandidates({
     },
   );
 }
+
+/** Rebuild definition linkage from fresh authority, never from displayed rows. */
+export function refreshMentionCandidateDefinitions(
+  input: BuildMentionCandidatesInput,
+  personas: AgentPersona[],
+  managedAgents: ManagedAgent[],
+): MentionCandidate[] {
+  const activePersonas = personas.filter((persona) => persona.isActive);
+  const activePersonaById = new Map(
+    activePersonas.map((persona) => [persona.id, persona]),
+  );
+  const linkedAgents = managedAgents.filter((agent) =>
+    Boolean(agent.personaId),
+  );
+  return buildMentionCandidates({
+    ...input,
+    activePersonas,
+    activePersonaById,
+    managedAgents,
+    managedAgentDirectoryReady: true,
+    mentionableAgentPubkeys: new Set([
+      ...input.mentionableAgentPubkeys,
+      ...managedAgents.map((agent) => normalizePubkey(agent.pubkey)),
+    ]),
+    managedAgentNamesByPubkey: new Map(
+      managedAgents.map((agent) => [normalizePubkey(agent.pubkey), agent.name]),
+    ),
+    managedAgentPersonaIds: new Set(
+      linkedAgents.map((agent) => agent.personaId as string),
+    ),
+    managedAgentPersonaIdsByPubkey: new Map(
+      linkedAgents.map((agent) => [
+        normalizePubkey(agent.pubkey),
+        agent.personaId as string,
+      ]),
+    ),
+    personaNameByPubkey: new Map(
+      linkedAgents.map((agent) => [
+        normalizePubkey(agent.pubkey),
+        activePersonaById.get(agent.personaId as string)?.displayName ?? "",
+      ]),
+    ),
+  });
+}

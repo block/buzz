@@ -61,6 +61,7 @@ import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityAp
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
 import { refreshRostersOnMembershipChange } from "@/features/channels/rosterFreshness";
+import { refreshDirectoryOnMembershipChange } from "@/features/channels/membershipDirectorySync";
 import { seedProjectSnapshot } from "@/features/projects/projectSnapshot";
 import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
@@ -243,6 +244,10 @@ function CommunityQueryProvider({
 
   useEffect(() => setAvatarProfileSyncQueryClient(queryClient), [queryClient]);
   useEffect(() => refreshRostersOnMembershipChange(queryClient), [queryClient]);
+  useEffect(
+    () => refreshDirectoryOnMembershipChange(queryClient),
+    [queryClient],
+  );
 
   useEffect(() => {
     const e2eWindow = window as Window & {

@@ -1,3 +1,4 @@
+import { resetMembershipDirectorySync } from "@/features/channels/membershipDirectorySync";
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
@@ -68,6 +69,7 @@ async function resetCommunityState({
   resetAvatarState: boolean;
 }): Promise<void> {
   relayClient.disconnect();
+  resetMembershipDirectorySync();
   await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
   clearAllDrafts();

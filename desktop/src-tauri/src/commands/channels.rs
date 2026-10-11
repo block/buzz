@@ -147,14 +147,27 @@ fn profile_join_pubkeys(members: &[crate::models::ChannelMemberInfo], limit: usi
 pub async fn get_channel_members(
     channel_id: String,
     read_your_writes: Option<bool>,
+    roster_only: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<ChannelMembersResponse, String> {
-    let events = query_relay(
+    read_channel_members(
         &state,
-        &[channel_members_filter(
-            &channel_id,
-            read_your_writes.unwrap_or(false),
-        )],
+        &channel_id,
+        read_your_writes.unwrap_or(false),
+        roster_only.unwrap_or(false),
+    )
+    .await
+}
+
+pub(crate) async fn read_channel_members(
+    state: &AppState,
+    channel_id: &str,
+    read_your_writes: bool,
+    roster_only: bool,
+) -> Result<ChannelMembersResponse, String> {
+    let events = query_relay(
+        state,
+        &[channel_members_filter(channel_id, read_your_writes)],
     )
     .await?;
 
@@ -164,12 +177,20 @@ pub async fn get_channel_members(
         .transpose()?
         .ok_or_else(|| "channel members not found".to_string())?;
 
+    // Publication admission needs the roster as of this read. Return it with
+    // no further await: a removal during profile enrichment would otherwise
+    // reach the caller as a stale "still a member" answer.
+    if roster_only {
+        mark_bot_members_as_agents(&mut response);
+        return Ok(response);
+    }
+
     // Batch-fetch kind:0 profiles to populate display names, capped so the
     // query cost is bounded on large rosters (see MEMBER_PROFILE_JOIN_LIMIT).
     let pubkeys = profile_join_pubkeys(&response.members, MEMBER_PROFILE_JOIN_LIMIT);
     if !pubkeys.is_empty() {
         let profile_events = query_relay(
-            &state,
+            state,
             &[serde_json::json!({
                 "kinds": [0],
                 "authors": pubkeys,
@@ -209,6 +230,15 @@ pub async fn get_channel_members(
     }
 
     Ok(response)
+}
+
+/// `role == "bot"` agent flags are roster-derived, with or without profiles.
+fn mark_bot_members_as_agents(response: &mut ChannelMembersResponse) {
+    for member in &mut response.members {
+        if member.role == "bot" {
+            member.is_agent = true;
+        }
+    }
 }
 
 // ── Writes (signed events) ──────────────────────────────────────────────────

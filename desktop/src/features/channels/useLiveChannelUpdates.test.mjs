@@ -378,3 +378,93 @@ test("unmount disposes both established and pending channel streams", async () =
     h.restore();
   }
 });
+
+for (const type of ["member_joined", "member_left", "member_removed"]) {
+  test(`background ${type} retires the directory read and refreshes once`, async () => {
+    const { QueryObserver } = await import("@tanstack/react-query");
+    const { waitFor } = await import("@testing-library/react");
+    const { KIND_SYSTEM_MESSAGE } = await import("@/shared/constants/kinds");
+    const { resetMembershipDirectorySync } = await import(
+      "./membershipDirectorySync.ts"
+    );
+    const h = await mount(channels(2));
+    const key = ["relay-agents"];
+    let resolveOld;
+    const old = new Promise((resolve) => {
+      resolveOld = resolve;
+    });
+    let calls = 0;
+    h.queryClient.setQueryData(key, [
+      { pubkey: PEER, channelIds: ["channel-1"] },
+    ]);
+    const observer = new QueryObserver(h.queryClient, {
+      queryKey: key,
+      staleTime: Infinity,
+      queryFn: () => (++calls === 1 ? old : Promise.resolve([])),
+    });
+    const dispose = observer.subscribe(() => {});
+    try {
+      void h.queryClient.refetchQueries({ queryKey: key });
+      assert.equal(calls, 1);
+      const sub = h.subscriptions.find((entry) =>
+        entry.filter["#h"]?.includes("channel-1"),
+      );
+      assert.ok(sub, "the background channel has a real live subscription");
+      const event = message(`membership-${type}`, {
+        kind: KIND_SYSTEM_MESSAGE,
+        content: JSON.stringify({ type }),
+        tags: [["h", "channel-1"]],
+      });
+      await h.deliver(sub, event);
+      assert.equal(h.queryClient.getQueryState(key).isInvalidated, true);
+      assert.equal(h.queryClient.getQueryState(key).fetchStatus, "idle");
+      await waitFor(() => assert.equal(calls, 2));
+      await h.act(async () =>
+        resolveOld([{ pubkey: PEER, channelIds: ["channel-1"] }]),
+      );
+      assert.deepEqual(h.queryClient.getQueryData(key), []);
+      await h.deliver(sub, event);
+      assert.equal(h.queryClient.getQueryState(key).isInvalidated, false);
+      assert.equal(calls, 2, "replayed event does not invalidate again");
+    } finally {
+      resolveOld([]);
+      dispose();
+      resetMembershipDirectorySync();
+      h.restore();
+    }
+  });
+}
+
+test("ordinary and malformed system messages do not refresh the mention directory", async () => {
+  const { KIND_SYSTEM_MESSAGE } = await import("@/shared/constants/kinds");
+  const h = await mount(channels(2));
+  const key = ["relay-agents"];
+  h.queryClient.setQueryData(key, []);
+  try {
+    for (const [index, content] of [
+      "not JSON",
+      "null",
+      JSON.stringify({ type: "topic_changed" }),
+    ].entries()) {
+      await h.deliver(
+        h.subscriptions[1],
+        message(`not-membership-${index}`, {
+          kind: KIND_SYSTEM_MESSAGE,
+          content,
+          tags: [["h", "channel-1"]],
+        }),
+      );
+      assert.equal(h.queryClient.getQueryState(key).isInvalidated, false);
+    }
+    await h.deliver(
+      h.subscriptions[1],
+      message("ordinary", {
+        content: JSON.stringify({ type: "member_removed" }),
+        tags: [["h", "channel-1"]],
+      }),
+    );
+    assert.equal(h.queryClient.getQueryState(key).isInvalidated, false);
+  } finally {
+    h.restore();
+  }
+});

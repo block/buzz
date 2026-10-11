@@ -324,7 +324,15 @@ export async function getChannelMessagesBefore(
 
 export async function getChannelMembers(
   channelId: string,
-  options?: { readYourWrites?: boolean },
+  options?: {
+    readYourWrites?: boolean;
+    /**
+     * Return the roster snapshot with no profile enrichment after it, so no
+     * removal can land between the read and the answer. Members carry no
+     * profile display names.
+     */
+    rosterOnly?: boolean;
+  },
 ): Promise<ChannelMember[]> {
   const response = await invokeTauri<RawChannelMembersResponse>(
     "get_channel_members",
@@ -334,6 +342,7 @@ export async function getChannelMembers(
         options?.readYourWrites ||
         shouldReadChannelMembersFromWriter(channelId) ||
         undefined,
+      rosterOnly: options?.rosterOnly || undefined,
     },
   );
   return response.members.map(fromRawChannelMember);

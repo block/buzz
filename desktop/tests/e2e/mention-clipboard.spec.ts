@@ -796,7 +796,11 @@ test("forum post and reply selection copies carry the mention", async ({
   await expect(input).toHaveText(FORUM_REPLY_BODY);
   await expect(input.locator(".mention-chip")).toHaveText("John Smith");
 
+  // John is not in the forum: a forum signs only members, so it asks first.
   await page.getByTestId("send-message").click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("John Smith");
+  await dialog.getByRole("button", { name: "Invite", exact: true }).click();
   await expect(input).toHaveText("");
   await expect
     .poll(() => readSentMentionPubkeys(page, FORUM_REPLY_BODY))

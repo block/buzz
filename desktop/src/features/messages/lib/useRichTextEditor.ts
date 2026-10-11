@@ -374,6 +374,18 @@ export function useRichTextEditor({
       ],
       editorProps: {
         handleDOMEvents: {
+          // The composer owns displayed autocomplete choices. Skip ProseMirror
+          // keymaps first (Enter would split the document), but keep bubbling
+          // to its React handler, which decides admission and prevents default.
+          keydown: (_view, event) =>
+            Boolean(
+              isAutocompleteOpen?.current &&
+                !event.shiftKey &&
+                !event.ctrlKey &&
+                !event.metaKey &&
+                !event.altKey &&
+                ["Enter", "Tab", "ArrowUp", "ArrowDown"].includes(event.key),
+            ),
           // Both modalities reach the same DOM event: ⌘C/⌘X and the Edit menu
           // (and the context menu) all dispatch `copy` / `cut` here.
           copy: (view, event) =>

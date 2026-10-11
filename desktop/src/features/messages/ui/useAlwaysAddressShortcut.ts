@@ -1,4 +1,5 @@
 import * as React from "react";
+import type { MentionAdmissionOwner } from "../lib/useMentionAdmission";
 
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
@@ -15,7 +16,10 @@ export function useAlwaysAddressShortcut({
   lockedAgent?: Pick<MentionSuggestion, "avatarUrl" | "displayName" | "pubkey">;
   mentions: UseMentionsResult;
   onOpenPicker: (insertTrigger?: boolean) => void;
-  onToggle: (suggestion: MentionSuggestion) => void;
+  onToggle: (
+    suggestion: MentionSuggestion,
+    options: { owner: MentionAdmissionOwner },
+  ) => void;
 }) {
   const {
     getDefaultAgentSuggestion,
@@ -46,7 +50,9 @@ export function useAlwaysAddressShortcut({
         if (!isMentionOpen) onOpenPicker(false);
         return true;
       }
-      onToggle(suggestion);
+      onToggle(suggestion, {
+        owner: isMentionOpen ? "displayed-choice" : "default-agent",
+      });
       return true;
     },
     [

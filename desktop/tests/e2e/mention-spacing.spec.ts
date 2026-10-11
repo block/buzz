@@ -36,3 +36,30 @@ for (const deliberateMove of [false, true]) {
     });
   });
 }
+
+test("composer owns mention separators when the shared runtime stylesheet is removed", async ({
+  page,
+}) => {
+  // Tiptap shares one injected sheet between editors. Route remounts can remove
+  // it while the surviving/new composer is already mounted. Editing semantics
+  // must be owned by application CSS, not that transient editor resource.
+  await page.evaluate(() => {
+    document.querySelectorAll("style[data-tiptap-style]").forEach((el) => {
+      el.remove();
+    });
+  });
+  const input = page.getByTestId("message-input");
+  await expect(input).toHaveCSS("white-space", "break-spaces");
+  await input.fill("Hey @Ali");
+  await page
+    .getByTestId("message-composer")
+    .getByTestId("mention-autocomplete")
+    .getByText("Alice Chen", { exact: true })
+    .click();
+  await page.keyboard.type("hello");
+  expect(await input.textContent()).toBe("Hey @Alice Chen hello");
+  // A deliberate caret movement still controls subsequent typing.
+  await input.press("ArrowLeft");
+  await page.keyboard.type("x");
+  expect(await input.textContent()).toBe("Hey @Alice Chen hellxo");
+});
