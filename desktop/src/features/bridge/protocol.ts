@@ -43,28 +43,73 @@ export type CommandType =
   | "agent.stop"
   | "agent.message"
   | "prompt.approve"
-  | "prompt.deny";
+  | "prompt.deny"
+  | "browser.open"
+  | "browser.close"
+  | "browser.screenshot";
 /** Commands that change state or send content: the web must get an explicit confirmation before sending. */
 export const DESTRUCTIVE_COMMANDS: readonly CommandType[] = [
   "agent.stop",
   "agent.message",
   "prompt.approve",
   "prompt.deny",
+  "browser.open",
+  "browser.close",
 ];
+/** browser.screenshot is view-only and user-initiated per press, so it needs no confirm; the desktop still rate-limits it. */
 export const ALL_COMMANDS: readonly CommandType[] = [
   "agent.start",
   ...DESTRUCTIVE_COMMANDS,
+  "browser.screenshot",
 ];
+
+// ---- Slice R: desktop browser sessions (view-only) ----
+export const D_SHOT_PREFIX = `${D_PREFIX}shot/`;
+export const D_BROWSER_SESSIONS = `${D_PREFIX}snap/browser`;
+export const shotD = (cmdId: string, i: number) => `${D_SHOT_PREFIX}${cmdId}/${i}`;
+/** Image bytes per chunk event (keeps the encrypted event content well under the relay's ~64 KiB content limit). */
+export const SHOT_CHUNK_BYTES = 24 * 1024;
+export const SHOT_MAX_CHUNKS = 5;
+export const SHOT_MAX_BYTES = SHOT_CHUNK_BYTES * SHOT_MAX_CHUNKS;
+export const SHOT_MAX_WIDTH = 1000;
+export const SHOT_TTL_S = 300;
+/** At most one screenshot per session every 3 s, 10 per minute overall, one in flight. */
+export const SHOT_MIN_INTERVAL_MS = 3_000;
+export const SHOT_MAX_PER_MIN = 10;
+export const BROWSER_MAX_SESSIONS = 2;
+export const BROWSER_MAX_URL = 2048;
+
+export type BrowserSessionInfo = {
+  sessionId: string;
+  title: string;
+  host: string;
+  openedAt: number;
+};
+export type BrowserSessionsBody = { sessions: BrowserSessionInfo[] };
+export type ShotChunkBody = {
+  sessionId: string;
+  mime: string;
+  w: number;
+  h: number;
+  i: number;
+  n: number;
+  /** base64 of this chunk's image bytes */
+  data: string;
+};
 
 export type CommandBody =
   | { agentPubkey: string }
   | { agentPubkey: string; channelId: string; text: string }
-  | { agentPubkey: string; promptId: string };
+  | { agentPubkey: string; promptId: string }
+  | { url: string }
+  | { sessionId: string };
 
 export type CommandResultBody = {
   status: "accepted" | "ok" | "error";
   code?: string;
   message?: string;
+  /** Small structured result (e.g. {sessionId} for browser.open, {chunks} for browser.screenshot). */
+  result?: Record<string, unknown>;
 };
 
 export type TranscriptRole =
@@ -143,6 +188,8 @@ export type BridgeType =
   | "agents.snapshot"
   | "presence.heartbeat"
   | "transcript.chunk"
+  | "browser.sessions"
+  | "browser.shot"
   | "cmd.result"
   | CommandType;
 

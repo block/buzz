@@ -1,0 +1,1 @@
+import{t as e}from"./synthwave-84-CI1I1HVP.js";export{e as default};

@@ -4,6 +4,12 @@ import {
   BRIDGE_KIND,
   BRIDGE_TAG,
   D_AGENTS,
+  D_BROWSER_SESSIONS,
+  D_SHOT_PREFIX,
+  SHOT_MAX_CHUNKS,
+  type BrowserSessionInfo,
+  type BrowserSessionsBody,
+  type ShotChunkBody,
   D_HEARTBEAT,
   D_KEY,
   D_RES_PREFIX,
@@ -39,6 +45,10 @@ export type BridgeState = {
   transcripts: ReadonlyMap<string, readonly TranscriptEntry[]>;
   /** cmdId -> latest result seen from the desktop. */
   results: ReadonlyMap<string, CommandResultBody & { ts: number }>;
+  /** Browser sessions the desktop currently shows remotely (slice R). */
+  browserSessions: readonly BrowserSessionInfo[];
+  /** sessionId -> latest assembled screenshot (data URL) with the command that produced it. */
+  shots: ReadonlyMap<string, { cmdId: string; src: string; w: number; h: number; ts: number }>;
 };
 
 export type WebClientIO = {
@@ -58,6 +68,8 @@ export class BridgeWebClient {
     versionTooNew: false,
     transcripts: new Map(),
     results: new Map(),
+    browserSessions: [],
+    shots: new Map(),
   };
   readonly stats = {
     signerDecrypts: 0,
@@ -121,6 +133,8 @@ export class BridgeWebClient {
     if (
       d !== D_AGENTS &&
       d !== D_HEARTBEAT &&
+      d !== D_BROWSER_SESSIONS &&
+      !d?.startsWith(D_SHOT_PREFIX) &&
       !d?.startsWith(D_TX_PREFIX) &&
       !d?.startsWith(D_RES_PREFIX)
     )
@@ -146,9 +160,28 @@ export class BridgeWebClient {
     }
     // Chunks and results are idempotent (merged by entry id / command id, deduped by event id), so only
     // snapshot/heartbeat use the monotonic seq guard.
-    const guarded = d === D_AGENTS || d === D_HEARTBEAT;
+    const guarded = d === D_AGENTS || d === D_HEARTBEAT || d === D_BROWSER_SESSIONS;
     if (!envelopeLive(env) || (guarded && !this.seq.accept(env))) {
       this.stats.dropped++;
+      return;
+    }
+    if (d === D_BROWSER_SESSIONS && env.type === "browser.sessions") {
+      const b = env.body as BrowserSessionsBody;
+      if (b && Array.isArray(b.sessions))
+        this.set({
+          browserSessions: b.sessions
+            .filter((x) => x && typeof x.sessionId === "string" && typeof x.host === "string")
+            .slice(0, 10),
+        });
+      return;
+    }
+    if (d.startsWith(D_SHOT_PREFIX) && env.type === "browser.shot") {
+      const cmdId = d.slice(D_SHOT_PREFIX.length).split("/")[0];
+      if (env.re !== cmdId) {
+        this.stats.dropped++;
+        return;
+      }
+      this.applyShot(cmdId, env.ts, env.body as ShotChunkBody);
       return;
     }
     if (d.startsWith(D_TX_PREFIX) && env.type === "transcript.chunk") {
@@ -187,6 +220,39 @@ export class BridgeWebClient {
         presence: presenceOf(lastHeardTs),
       });
     }
+  }
+
+  private shotParts = new Map<string, { n: number; parts: Map<number, string>; b: ShotChunkBody; ts: number }>();
+  private applyShot(cmdId: string, ts: number, b: ShotChunkBody) {
+    if (
+      !b ||
+      typeof b.sessionId !== "string" ||
+      typeof b.data !== "string" ||
+      !Number.isInteger(b.i) ||
+      !Number.isInteger(b.n) ||
+      b.n < 1 ||
+      b.n > SHOT_MAX_CHUNKS ||
+      b.i < 0 ||
+      b.i >= b.n ||
+      !/^image\/(jpeg|png|webp)$/.test(b.mime)
+    )
+      return;
+    let acc = this.shotParts.get(cmdId);
+    if (!acc || acc.n !== b.n) {
+      acc = { n: b.n, parts: new Map(), b, ts };
+      this.shotParts.set(cmdId, acc);
+      if (this.shotParts.size > 8) this.shotParts.delete(this.shotParts.keys().next().value as string);
+    }
+    acc.parts.set(b.i, b.data);
+    if (acc.parts.size < acc.n) return;
+    this.shotParts.delete(cmdId);
+    const prev = this.state.shots.get(b.sessionId);
+    if (prev && prev.ts > ts) return;
+    let src = `data:${b.mime};base64,`;
+    for (let i = 0; i < acc.n; i++) src += acc.parts.get(i);
+    const shots = new Map(this.state.shots);
+    shots.set(b.sessionId, { cmdId, src, w: Number(b.w) || 0, h: Number(b.h) || 0, ts });
+    this.set({ shots });
   }
 
   private entryRev = new Map<string, number>();

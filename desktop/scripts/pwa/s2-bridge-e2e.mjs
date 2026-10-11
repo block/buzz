@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { finalizeEvent, getPublicKey, nip44 } from "nostr-tools";
 import { startMockSigner } from "./mock-nip46-signer.mjs";
 import { BridgePublisher } from "../../src/features/bridge/publisher.ts";
+import { BrowserSessionManager } from "../../src/features/bridge/browserSessions.ts";
 import { BridgeCommandHandler, makeSeenSet } from "../../src/features/bridge/commandHandler.ts";
 import {
   BRIDGE_KIND,
@@ -227,7 +228,7 @@ const pub = new BridgePublisher(
     signEvent: async (e) => signNode(e),
     publish: postEvent,
   },
-  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message"], onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
+  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot"], onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
 );
 pub.start();
 pub.update({
@@ -390,6 +391,9 @@ check(
 
 // 6. controls: web confirmation + desktop-side validation, over the real relay
 const execCalls = [];
+const brManager = new BrowserSessionManager(2);
+const brCalls = [];
+const JPEG1 = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
 const handler = new BridgeCommandHandler({
   memberPubkey: myPk,
   sessionKey: () => ({ kid: pub.kid, key: pub.sessionKey }),
@@ -402,6 +406,14 @@ const handler = new BridgeCommandHandler({
   },
   publishResult: async (id, b) => {
     await pub.publishResult(id, b);
+  },
+  browser: {
+    manager: brManager,
+    open: async (url, host) => (brCalls.push(["open", url]), { sessionId: "pin-e2e", title: host }),
+    close: async (id) => void brCalls.push(["close", id]),
+    capture: async () => ({ mime: "image/jpeg", w: 1, h: 1, bytes: new Uint8Array(JPEG1) }),
+    publishShot: (id, s) => pub.publishShot(id, s),
+    publishSessions: () => pub.publishBrowserSessions(brManager.list()),
   },
 });
 const seenEv = new Set();
@@ -438,6 +450,31 @@ check(
 );
 await sleep(3500);
 check("6c. replayed relay events never re-execute", execCalls.length === 1, `${execCalls.length}`);
+
+// 7. slice R: remote browser (view-only), over the real relay
+await page.locator('[data-testid="agent-detail-back"]').click();
+await page.locator('[data-testid="browser-panel"]').waitFor({ timeout: 40000 });
+await page.locator('[data-testid="br-url"]').fill("http://localhost:9999/admin");
+await page.locator('[data-testid="br-open"]').click();
+await page.locator('[data-testid="br-confirm"]').waitFor();
+await page.locator('[data-testid="br-confirm"] button:has-text("Cancel")').click();
+await sleep(3000);
+check("7a. Open on desktop asks for confirmation; Cancel sends nothing", brCalls.length === 0);
+await page.locator('[data-testid="br-open"]').click();
+await page.locator('[data-testid="br-confirm-yes"]').click();
+await page.waitForFunction(() => /failed/.test(document.querySelector('[data-testid="browser-panel"]')?.textContent || ""), null, { timeout: 60000 }).catch(() => {});
+check("7b. desktop refuses a private/local address (no session opened)", brCalls.length === 0 && brManager.list().length === 0 && /Private and local/.test(await page.locator('[data-testid="browser-panel"]').innerText()));
+await page.locator('[data-testid="br-url"]').fill("https://example.com/page");
+await page.locator('[data-testid="br-open"]').click();
+await page.locator('[data-testid="br-confirm-yes"]').click();
+await page.locator('[data-testid="br-session"]').waitFor({ timeout: 60000 }).catch(() => {});
+check("7c. confirmed open -> session listed on the web", (await page.locator('[data-testid="br-session"]').count()) === 1 && brCalls.length === 1, JSON.stringify(brCalls));
+await page.locator('[data-testid="br-shot"]').click();
+await page.locator('[data-testid="br-shot-img"]').waitFor({ timeout: 60000 }).catch(() => {});
+const shotSrc = await page.locator('[data-testid="br-shot-img"]').getAttribute("src").catch(() => "");
+check("7d. See screenshot shows one encrypted-chunk image", /^data:image\/jpeg;base64,/.test(shotSrc || ""), (shotSrc || "").slice(0, 40));
+await sleep(1500);
+check("7e. no screenshot is taken without a press (one capture only)", brManager.beginShot("pin-e2e", Date.now()) === "rate_limited");
 clearInterval(pollTimer);
 
 // 5. no plaintext on the relay, no prod traffic, no page errors

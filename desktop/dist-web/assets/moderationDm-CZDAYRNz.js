@@ -1,0 +1,1 @@
+import{bt as e}from"./useHistorySearchState-GTbEtH60.js";function t(t,n,r){if(t?.channelType!==`dm`||!r)return!1;let i=e(r),a=n?e(n):null,o=t.participantPubkeys.map(e).filter(e=>e!==a);return o.length===1&&o[0]===i}export{t};

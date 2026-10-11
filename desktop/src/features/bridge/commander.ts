@@ -72,6 +72,16 @@ export class BridgeCommander {
     return r ? "accepted" : "pending";
   }
 
+  /** True while a screenshot request is still waiting on the desktop (the web UI allows one at a time). */
+  shotBusy(now = nowS()): boolean {
+    for (const s of this.sent.values()) {
+      if (s.type !== "browser.screenshot") continue;
+      const st = this.statusOf(s.id, now);
+      if (st === "pending" || st === "accepted") return true;
+    }
+    return false;
+  }
+
   async send(
     type: CommandType,
     body: CommandBody,
@@ -79,6 +89,8 @@ export class BridgeCommander {
   ): Promise<string> {
     if ((DESTRUCTIVE_COMMANDS as readonly string[]).includes(type) && opts.confirmed !== true)
       throw new CommandError("confirmation_required", "This action needs an explicit confirmation.");
+    if (type === "browser.screenshot" && this.shotBusy())
+      throw new CommandError("busy", "A screenshot is already on its way.");
     if (!this.supports(type))
       throw new CommandError("unsupported", "Your desktop doesn't support this action (update the desktop app).");
     if (this.client.state.presence !== "online")
@@ -103,7 +115,7 @@ export class BridgeCommander {
     next.set(env.id, {
       id: env.id,
       type,
-      agentPubkey: (body as { agentPubkey: string }).agentPubkey,
+      agentPubkey: (body as { agentPubkey?: string }).agentPubkey ?? "",
       label: opts.label ?? type,
       ts: env.ts,
       exp: env.exp,

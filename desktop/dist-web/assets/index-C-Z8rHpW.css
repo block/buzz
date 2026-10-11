@@ -1,0 +1,1 @@
+html{-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}html,body{height:100dvh}#root{box-sizing:border-box;height:100dvh;min-height:100dvh;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}@media (pointer:coarse){input,textarea,select,[contenteditable=true]{font-size:max(16px,1em)}}

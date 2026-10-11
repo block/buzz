@@ -1,6 +1,7 @@
 // Desktop-side command intake for the bridge (docs/pwa-bridge-protocol.md §6). Pure: all IO is injected.
 // A command is executed only if EVERY check passes; anything else is dropped (silently to the sender, loudly to onDrop).
 import { verifyEvent } from "nostr-tools";
+import { chunkImage, validateBrowserUrl, type BrowserSessionManager } from "./browserSessions";
 import {
   ALL_COMMANDS,
   BRIDGE_KIND,
@@ -20,6 +21,21 @@ import {
 
 export type KnownAgent = { status: "running" | "stopped" | "deployed" | "not_deployed" };
 
+/** Slice R: the desktop's built-in browser sessions (pinned sites), view-only from the web. */
+export type BrowserDeps = {
+  manager: BrowserSessionManager;
+  /** Adds the link as a browser session in the desktop client and returns its id. */
+  open(url: string, host: string): Promise<{ sessionId: string; title: string }>;
+  close(sessionId: string): Promise<void>;
+  /** One fresh, compressed image of the session (already size-capped by the caller's encoder). */
+  capture(sessionId: string): Promise<{ mime: string; w: number; h: number; bytes: Uint8Array }>;
+  publishShot(
+    cmdId: string,
+    shot: { sessionId: string; mime: string; w: number; h: number; chunks: Uint8Array[] },
+  ): Promise<void>;
+  publishSessions(): Promise<void>;
+};
+
 export type CommandDeps = {
   /** The member's own pubkey (hex, lowercase). */
   memberPubkey: string;
@@ -34,6 +50,7 @@ export type CommandDeps = {
     message(agentPubkey: string, channelId: string, text: string): Promise<string | void>;
   };
   publishResult(cmdId: string, body: CommandResultBody): Promise<void>;
+  browser?: BrowserDeps;
   onDrop?(reason: string, eventId: string): void;
   now?(): number; // unix seconds
   /** Overridable for tests; defaults to nostr-tools verifyEvent (id hash + schnorr signature). */
@@ -81,6 +98,82 @@ export class BridgeCommandHandler {
     return "dropped";
   }
 
+  private async finish(cmdId: string, res: CommandResultBody) {
+    this.results.set(cmdId, res);
+    if (this.results.size > 300) this.results.delete(this.results.keys().next().value as string);
+    await this.deps.publishResult(cmdId, res);
+  }
+
+  private async handleBrowser(
+    type: CommandType,
+    cmdId: string,
+    body: Record<string, unknown>,
+  ): Promise<HandleOutcome> {
+    const d = this.deps;
+    const b = d.browser;
+    d.seen.add(cmdId);
+    if (!b) {
+      await this.finish(cmdId, { status: "error", code: "unsupported", message: "Browser sessions aren't available on this desktop." });
+      return "dropped";
+    }
+    try {
+      if (type === "browser.open") {
+        const v = validateBrowserUrl(body.url);
+        if (!v.ok) await this.finish(cmdId, { status: "error", code: v.code, message: v.message });
+        else if (!b.manager.canOpen())
+          await this.finish(cmdId, { status: "error", code: "session_limit", message: "Too many remote browser sessions are open. Close one first." });
+        else {
+          await d.publishResult(cmdId, { status: "accepted" });
+          const { sessionId, title } = await b.open(v.url, v.host);
+          b.manager.add({ sessionId, title, host: v.host, openedAt: (d.now ?? nowS)() });
+          await b.publishSessions();
+          await this.finish(cmdId, { status: "ok", result: { sessionId } });
+        }
+      } else if (type === "browser.close") {
+        const id = typeof body.sessionId === "string" ? body.sessionId : "";
+        if (!b.manager.has(id)) await this.finish(cmdId, { status: "error", code: "unknown_session", message: "That browser session isn't open remotely." });
+        else {
+          await d.publishResult(cmdId, { status: "accepted" });
+          await b.close(id);
+          b.manager.remove(id);
+          await b.publishSessions();
+          await this.finish(cmdId, { status: "ok" });
+        }
+      } else {
+        const id = typeof body.sessionId === "string" ? body.sessionId : "";
+        if (!b.manager.has(id)) {
+          await this.finish(cmdId, { status: "error", code: "unknown_session", message: "That browser session isn't open remotely." });
+        } else {
+          const gate = b.manager.beginShot(id, Date.now());
+          if (gate) {
+            await this.finish(cmdId, {
+              status: "error",
+              code: gate,
+              message: gate === "busy" ? "A screenshot is already being taken." : "Please wait a few seconds before another screenshot.",
+            });
+          } else {
+            try {
+              await d.publishResult(cmdId, { status: "accepted" });
+              const shot = await b.capture(id);
+              const chunks = chunkImage(shot.bytes);
+              if (!chunks) await this.finish(cmdId, { status: "error", code: "too_large", message: "The screenshot is too large to send." });
+              else {
+                await b.publishShot(cmdId, { sessionId: id, mime: shot.mime, w: shot.w, h: shot.h, chunks });
+                await this.finish(cmdId, { status: "ok", result: { chunks: chunks.length } });
+              }
+            } finally {
+              b.manager.endShot();
+            }
+          }
+        }
+      }
+    } catch (e) {
+      await this.finish(cmdId, { status: "error", code: "failed", message: String(e instanceof Error ? e.message : e).slice(0, 200) });
+    }
+    this.stats.executed++;
+    return "executed";
+  }
+
   async handle(ev: BridgeEventLike): Promise<HandleOutcome> {
     const d = this.deps;
     const now = (d.now ?? nowS)();
@@ -119,6 +212,7 @@ export class BridgeCommandHandler {
     if (d.seen.has(cmdId)) return this.drop("replayed-unknown", ev.id); // seen in a previous run: never re-execute
     // 6. body validation + known agent
     const body = (env.body ?? {}) as Record<string, unknown>;
+    if (type.startsWith("browser.")) return this.handleBrowser(type, cmdId, body);
     const agentPubkey = typeof body.agentPubkey === "string" ? body.agentPubkey.toLowerCase() : "";
     const agent = HEX64.test(agentPubkey) ? d.agents().get(agentPubkey) : undefined;
     d.seen.add(cmdId); // claim the id before any await so a concurrent duplicate can't double-run

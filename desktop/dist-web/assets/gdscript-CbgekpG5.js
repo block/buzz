@@ -1,0 +1,1 @@
+import{t as e}from"./gdscript-HuAKigly.js";export{e as default};

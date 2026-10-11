@@ -1,0 +1,1 @@
+import{t as e}from"./solarized-light-BrgbgcS-.js";export{e as default};

@@ -16,6 +16,7 @@ import {
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
 import type { RelayEvent } from "@/shared/api/types";
+import { type BrowserHost, makeBrowserDeps, remoteBrowserManager } from "./browserHost";
 import { BridgeCommandHandler, makeSeenSet } from "./commandHandler";
 import { BRIDGE_KIND, BRIDGE_TAG, CMD_MAX_TTL_S, nowS } from "./protocol";
 import { BridgePublisher } from "./publisher";
@@ -41,6 +42,7 @@ export function useBridgePublisher(
   pubkey: string | undefined,
   relayUrl: string | undefined,
   channelName: (channelId: string) => string | undefined,
+  browserHost?: BrowserHost,
 ): void {
   const enabled = isTauri() && !!pubkey && !!relayUrl;
   const agentsQuery = useManagedAgentsQuery({ enabled });
@@ -48,6 +50,8 @@ export function useBridgePublisher(
   const publisherRef = React.useRef<BridgePublisher | null>(null);
   const nameRef = React.useRef(channelName);
   nameRef.current = channelName;
+  const hostRef = React.useRef(browserHost);
+  hostRef.current = browserHost;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayUrl identify the session; a change must restart the publisher (new key wrap).
   React.useEffect(() => {
@@ -73,12 +77,16 @@ export function useBridgePublisher(
           "agent.start",
           "agent.stop",
           "agent.message",
+          ...(hostRef.current
+            ? ["browser.open", "browser.close", "browser.screenshot"]
+            : []),
         ],
         onError: (e) => console.warn("[bridge] publish failed:", e),
       },
     );
     publisherRef.current = p;
     p.start();
+    if (hostRef.current) void p.publishBrowserSessions(remoteBrowserManager.list());
     // Commands from the member's own browser (validated in BridgeCommandHandler; see docs/pwa-bridge-protocol.md §6).
     const SEEN_KEY = "buzz-bridge-cmd-seen";
     const handler = new BridgeCommandHandler({
@@ -126,6 +134,13 @@ export function useBridgePublisher(
         },
       },
       publishResult: (id, body) => p.publishResult(id, body),
+      browser: hostRef.current
+        ? makeBrowserDeps(
+            () => hostRef.current as BrowserHost,
+            (id, shot) => p.publishShot(id, shot),
+            () => p.publishBrowserSessions(remoteBrowserManager.list()),
+          )
+        : undefined,
       onDrop: (reason, id) =>
         console.warn(`[bridge] ignored command ${id.slice(0, 8)}: ${reason}`),
     });

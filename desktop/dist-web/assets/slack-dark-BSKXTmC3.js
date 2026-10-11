@@ -1,0 +1,1 @@
+import{t as e}from"./slack-dark-DxeWyZbY.js";export{e as default};

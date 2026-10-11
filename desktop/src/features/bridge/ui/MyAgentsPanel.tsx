@@ -6,6 +6,7 @@ import { nowS } from "../protocol";
 import { useBridgeAgents } from "../useBridgeAgents";
 import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
+import { BrowserPanel } from "./BrowserPanel";
 
 function ago(s: number): string {
   if (s < 60) return `${s}s ago`;
@@ -127,6 +128,7 @@ export function MyAgentsPanel() {
           </li>
         ))}
       </ul>
+      {b.commander && <BrowserPanel commander={b.commander} bridge={b} />}
       <p style={{ fontSize: 11, opacity: 0.5, marginTop: 12 }}>
         Tap an agent to see its recent activity.
       </p>

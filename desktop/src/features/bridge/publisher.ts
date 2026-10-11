@@ -1,6 +1,10 @@
 // Desktop side of the bridge: publishes the key wrap, agent snapshots (on change + forced refresh) and heartbeats.
 // IO is injected so it is testable and so the web build (which never runs it) pulls in nothing native.
+import { bytesToBase64 } from "./browserSessions";
 import type {
+  BrowserSessionInfo,
+  BrowserSessionsBody,
+  ShotChunkBody,
   AgentSummary,
   AgentsSnapshotBody,
   CommandResultBody,
@@ -9,6 +13,9 @@ import type {
   TranscriptEntry,
 } from "./protocol";
 import {
+  D_BROWSER_SESSIONS,
+  SHOT_TTL_S,
+  shotD,
   CMD_RESULT_TTL_S,
   resD,
   TX_DEBOUNCE_MS,
@@ -309,6 +316,59 @@ export class BridgePublisher {
       this.scheduleTx(agent, 15_000);
     }
   }
+
+  /** Publish one screenshot as encrypted chunk events (one request -> one image; replaceable per command/chunk). */
+  async publishShot(
+    cmdId: string,
+    shot: { sessionId: string; mime: string; w: number; h: number; chunks: Uint8Array[] },
+  ) {
+    await this.ensureKey();
+    const n = shot.chunks.length;
+    for (let i = 0; i < n; i++) {
+      const body: ShotChunkBody = {
+        sessionId: shot.sessionId,
+        mime: shot.mime,
+        w: shot.w,
+        h: shot.h,
+        i,
+        n,
+        data: bytesToBase64(shot.chunks[i]),
+      };
+      const env = buildEnvelope({
+        type: "browser.shot",
+        kid: this.kid,
+        dev: this.opts.deviceId,
+        seq: Date.now() + i,
+        ttlS: SHOT_TTL_S,
+        body,
+        re: cmdId,
+      });
+      await this.publishEnv(shotD(cmdId, i), env, SHOT_TTL_S);
+    }
+  }
+
+  /** Publish the list of remotely visible browser sessions (replaceable snapshot). */
+  async publishBrowserSessions(sessions: BrowserSessionInfo[]) {
+    if (this.destroyed) return;
+    try {
+      await this.ensureKey();
+      const env = buildEnvelope({
+        type: "browser.sessions",
+        kid: this.kid,
+        dev: this.opts.deviceId,
+        seq: Date.now(),
+        ttlS: SNAPSHOT_TTL_S,
+        body: { sessions } satisfies BrowserSessionsBody,
+      });
+      const prev = this.sessionsAt;
+      const createdAt = Math.max(env.ts, prev + 1);
+      this.sessionsAt = createdAt;
+      await this.publishEnv(D_BROWSER_SESSIONS, env, SNAPSHOT_TTL_S, createdAt);
+    } catch (e) {
+      this.opts.onError?.(e);
+    }
+  }
+  private sessionsAt = 0;
 
   private resultCreatedAt = new Map<string, number>();
 

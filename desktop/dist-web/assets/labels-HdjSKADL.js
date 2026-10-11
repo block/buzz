@@ -1,0 +1,1 @@
+import{y as e}from"./webview-DRPXESau.js";function t(e,t=`main`){let n=t.trim()||`main`;return n===`main`?`pin-${e}`:`pin-${e}--${n}`}function n(n){return n.surface===`playground`?e(n.surfaceId,n.windowLabel??`main`):t(n.surfaceId,n.windowLabel??`main`)}export{t as n,n as t};

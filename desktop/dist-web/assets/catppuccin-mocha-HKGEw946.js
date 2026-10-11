@@ -1,0 +1,1 @@
+import{t as e}from"./catppuccin-mocha-DgKA2Av3.js";export{e as default};

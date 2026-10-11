@@ -108,3 +108,12 @@ Slice B (direct WS over Tailscale) and C (hosted tunnel) carry the **same envelo
 
 ### 10.3 Live subscription
 The web subscribes with `limit: 150` (relay replay + live atomically) instead of a one-off fetch followed by `limit: 0`, which could miss events published during a slow-signer reconnect after a reload. A relay reconnect triggers a re-fetch; a failed subscribe retries with backoff.
+
+### 10.4 Slice R: remote browser (as built, view-only)
+
+- Commands (same signed/validated path as Stop/Send): `browser.open {url}` and `browser.close {sessionId}` need web confirmation; `browser.screenshot {sessionId}` is view-only, one press = one image, no confirmation (but costs one signer call, like any command).
+- A "session" is a personal pinned site added by `browser.open` (desktop `usePinnedSites().savePin`, then navigates to `/pins/<id>`). Only sessions opened this way (this launch) can be screenshotted; `browser.close` removes the pin.
+- Desktop policy (`browserSessions.ts`): http(s) only, no embedded credentials, no loopback/private/link-local/tailnet/`.local` hosts; max 2 remote sessions; one screenshot in flight, >=3 s between shots per session, <=10/min overall.
+- Sessions list: replaceable `buzz.bridge.v1/snap/browser` (`browser.sessions`). Screenshot: the desktop captures the pin webview (`pin_webview_screenshot`), downscales to <=1000 px wide JPEG (quality/width stepped down until <=120 KiB), splits into <=24 KiB chunks, and publishes encrypted `buzz.bridge.v1/shot/<cmdId>/<i>` events (`browser.shot`, TTL 5 min). The web assembles chunks into one data URL and keeps only the latest image per session.
+- Desktop shows a "remotely visible" banner with a Stop sharing button while any session is open.
+- Known limits: the pin webview only exists while its screen is showing, so a screenshot request navigates the desktop to that pin first; sessions are not persisted across desktop restarts (the pin itself remains until closed).

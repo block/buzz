@@ -77,7 +77,11 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
-import { useCommunityPinnedSitesLiveUpdates } from "@/features/pinned-sites/hooks";
+import { RemoteBrowserIndicator } from "@/features/bridge/ui/RemoteBrowserIndicator";
+import {
+  useCommunityPinnedSitesLiveUpdates,
+  usePinnedSites,
+} from "@/features/pinned-sites/hooks";
 import { closeLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import { hideAllPinWebviews } from "@/features/pinned-sites/lib/pinWebview";
 import { useArchiveSync } from "@/features/local-archive/useArchiveSync";
@@ -285,11 +289,17 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
+  const pinnedSites = usePinnedSites();
   // PWA bridge (slice A): desktop publishes agent status for the member's own browser. No-op outside Tauri.
   useBridgePublisher(
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
     (id) => channels.find((c) => c.id === id)?.name,
+    {
+      savePin: (input) => pinnedSites.savePin(input),
+      deletePin: (pin) => pinnedSites.deletePin(pin as never),
+      goPin: (pinId) => void goPinnedSite(pinId),
+    },
   );
   const dmChannelIds = React.useMemo(() => {
     const ids = new Set<string>();
@@ -782,6 +792,7 @@ export function AppShell() {
   });
   return (
     <PreventSleepProvider>
+      <RemoteBrowserIndicator />
       {!hideAppChrome ? (
         <AppShellTrayMenu
           channels={channels}

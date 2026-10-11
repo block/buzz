@@ -1,0 +1,1 @@
+import{t as e}from"./labels-HdjSKADL.js";export{e as browserWebviewLabel};

@@ -160,4 +160,6 @@ const EMPTY: BridgeState = {
   versionTooNew: false,
   transcripts: new Map(),
   results: new Map(),
+  browserSessions: [],
+  shots: new Map(),
 };
