@@ -1,10 +1,12 @@
 // Full-screen lightbox for a browser's latest screenshot (web Browsers page). Fits the viewport at any width; closes on
 // Close, Esc or a tap outside the panel. "New screenshot" updates the large image in place (the caller owns the command).
-import { Camera, X } from "lucide-react";
+import { Camera, Maximize2, X } from "lucide-react";
 import * as React from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "@/shared/ui/button";
+
+import { ScreenshotFullscreen } from "./ScreenshotFullscreen";
 
 export function BrowserScreenshotViewer({
   busy,
@@ -30,16 +32,19 @@ export function BrowserScreenshotViewer({
   title: string;
   url: string;
 }) {
+  const [fullscreen, setFullscreen] = React.useState(false);
   React.useEffect(() => {
+    if (fullscreen) return; // Esc belongs to the full-screen view (it goes Back to this viewer)
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, fullscreen]);
 
   return createPortal(
-    // biome-ignore lint/a11y/useKeyWithClickEvents: Esc is handled on the document.
+    <>
+    {/* biome-ignore lint/a11y/useKeyWithClickEvents: Esc is handled on the document. */}
     <div
       aria-label={`Screenshot of ${title}`}
       aria-modal="true"
@@ -61,6 +66,10 @@ export function BrowserScreenshotViewer({
               {takenAt ? `Screenshot taken ${new Date(takenAt * 1000).toLocaleTimeString()}` : "No screenshot yet"}
             </p>
           </div>
+          <Button aria-label="Full screen" data-testid="shot-viewer-fullscreen" disabled={!src} onClick={() => setFullscreen(true)} size="xs" type="button" variant="secondary">
+            <Maximize2 className="mr-1 h-3 w-3" />
+            <span className="hidden sm:inline">Full screen</span>
+          </Button>
           <Button data-testid="shot-viewer-new" disabled={disabled || busy} onClick={onNew} size="xs" type="button" variant="secondary">
             <Camera className="mr-1 h-3 w-3" />
             New screenshot
@@ -86,7 +95,20 @@ export function BrowserScreenshotViewer({
           )}
         </div>
       </div>
-    </div>,
+    </div>
+    {fullscreen && src ? (
+        <ScreenshotFullscreen
+          busy={busy}
+          disabled={disabled}
+          onBack={() => setFullscreen(false)}
+          onNew={onNew}
+          src={src}
+          statusText={statusText}
+          takenAt={takenAt}
+          title={title}
+        />
+      ) : null}
+    </>,
     document.body,
   );
 }

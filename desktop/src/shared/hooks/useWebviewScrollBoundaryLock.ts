@@ -104,6 +104,10 @@ export function useWebviewScrollBoundaryLock(enabled = true) {
           continue;
         }
 
+        // Surfaces that handle the wheel themselves (e.g. the full-screen screenshot zoom) opt out of the lock.
+        if (target.hasAttribute("data-wheel-zoom")) {
+          return;
+        }
         targetsTerminal ||= target.matches(TERMINAL_SUBSTRATE_SELECTOR);
         const scrollableY = deltaY !== 0 && isScrollableY(target);
         const scrollableX = deltaX !== 0 && isScrollableX(target);
