@@ -185,22 +185,44 @@ export function useBridgePublisher(
     });
     let unsubCmd: (() => Promise<void>) | null = null;
     let cmdCancelled = false;
-    void relayClient
-      .subscribeLive(
-        {
-          kinds: [BRIDGE_KIND],
-          authors: [pubkey as string],
-          "#t": [BRIDGE_TAG],
-          since: nowS() - CMD_MAX_TTL_S - 60,
-          limit: 50,
-        },
-        (e: RelayEvent) => void handler.handle(e),
-      )
-      .then((u) => {
-        if (cmdCancelled) void u();
-        else unsubCmd = u;
-      })
-      .catch((e) => console.warn("[bridge] command subscription failed:", e));
+    // The command subscription used to be tried once: if the relay connection was still being (re)established when the app
+    // loaded ("Relay connection attempt was superseded"), commands from the web were never received until the next reload.
+    // Now it retries with backoff, and after every relay reconnect it re-fetches recent commands (the handler is idempotent).
+    const cmdFilter = () => ({
+      kinds: [BRIDGE_KIND],
+      authors: [pubkey as string],
+      "#t": [BRIDGE_TAG],
+      since: nowS() - CMD_MAX_TTL_S - 60,
+      limit: 50,
+    });
+    let cmdRetry: ReturnType<typeof setTimeout> | null = null;
+    let cmdAttempt = 0;
+    const subscribeCommands = () => {
+      if (cmdCancelled) return;
+      relayClient
+        .subscribeLive(cmdFilter(), (e: RelayEvent) => void handler.handle(e))
+        .then((u) => {
+          cmdAttempt = 0;
+          if (cmdCancelled) void u();
+          else unsubCmd = u;
+        })
+        .catch((e) => {
+          if (cmdCancelled) return;
+          cmdAttempt++;
+          const delay = Math.min(30_000, 1_000 * 2 ** Math.min(cmdAttempt, 5));
+          console.warn(`[bridge] command subscription failed; retrying in ${delay}ms:`, e);
+          cmdRetry = setTimeout(subscribeCommands, delay);
+        });
+    };
+    subscribeCommands();
+    const offCmdReconnect = relayClient.subscribeToReconnects(() => {
+      relayClient
+        .fetchEvents(cmdFilter())
+        .then((evs: RelayEvent[]) => {
+          for (const e of evs) void handler.handle(e);
+        })
+        .catch((e: unknown) => console.warn("[bridge] command catch-up failed:", e));
+    });
     // Transcripts: recompute an agent's redacted entries at most once per second after observer activity.
     const dirty = new Set<string>();
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -221,6 +243,8 @@ export function useBridgePublisher(
       cmdCancelled = true;
       unsubRemote();
       unsubBrowsers();
+      offCmdReconnect();
+      if (cmdRetry) clearTimeout(cmdRetry);
       unsubGrants();
       clearInterval(syncInterval);
       if (syncTimer) clearTimeout(syncTimer);
