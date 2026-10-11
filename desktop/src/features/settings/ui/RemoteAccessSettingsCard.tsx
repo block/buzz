@@ -1,4 +1,7 @@
+import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
+
+import { WebRemoteAgentManagement, WebRemoteTerminal } from "@/features/bridge/ui/WebRemoteSettings";
 
 import {
   getRemoteAccess,
@@ -42,6 +45,10 @@ function useRemote() {
 
 /** Settings → Agents. */
 export function RemoteAgentManagementCard() {
+  if (!isTauri()) return <WebRemoteAgentManagement />;
+  return <DesktopRemoteAgentManagementCard />;
+}
+function DesktopRemoteAgentManagementCard() {
   const { status, error, busy, run, prefs } = useRemote();
   if (!status) return null;
   return (
@@ -98,6 +105,10 @@ export function RemoteAgentManagementCard() {
 
 /** Settings → Buzz Term. */
 export function RemoteTerminalCard() {
+  if (!isTauri()) return <WebRemoteTerminal />;
+  return <DesktopRemoteTerminalCard />;
+}
+function DesktopRemoteTerminalCard() {
   const { status, error, busy, run } = useRemote();
   if (!status) return null;
   const canEnable = status.tailscaleUp || status.terminals;

@@ -242,7 +242,7 @@ const pub = new BridgePublisher(
     signEvent: async (e) => signNode(e),
     publish: postEvent,
   },
-  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot"], remote: () => ({ desktopId: "dev-desktop", name: "E2E Mac", url: `ws://${raAddr}/v1/ws`, status: "on", terminals: true }),
+  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot"], remote: () => ({ desktopId: "dev-desktop", name: "E2E Mac", url: `ws://${raAddr}/v1/ws`, status: "on", terminals: true, agents: true, sigTtlS: 3600 }),
     onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
 );
 pub.start();
@@ -506,7 +506,25 @@ const screenTxt = await page.locator('[data-testid="remote-screen"]').innerText(
 check("8c. terminal opens and runs a command on the desktop shell", screenTxt.split("\n").some((l) => l.trim() === "e2e-42"), screenTxt.slice(-80).replace(/\n/g, "|"));
 await page.locator('[data-testid="remote-close"]').click();
 await sleep(1000);
+// 9. web Settings: two switches, host pickers, path labels (Direct while the listener is up, Via relay once it is gone)
+await page.evaluate(() => { location.hash = "#/settings"; });
+await page.getByRole("button", { name: /^Agents$/ }).first().click({ timeout: 20000 }).catch(() => {});
+await page.locator('[data-testid="web-remote-agents-toggle"]').waitFor({ timeout: 20000 }).catch(() => {});
+check("9a. web Settings → Agents has 'Allow remote agent management' (enabled: a host supports it)", await page.waitForFunction(() => { const e = document.querySelector('[data-testid="web-remote-agents-toggle"]'); return !!e && !e.hasAttribute("disabled"); }, null, { timeout: 30000 }).then(() => true, () => false));
+await page.locator('[data-testid="web-remote-agents-toggle"]').click().catch(() => {});
+await page.locator('[data-testid="remote-hosts-agents"]').waitFor({ timeout: 10000 }).catch(() => {});
+check("9b. host list shows the host with a 'Direct' label once reachable", await page.waitForFunction(() => /Direct/.test(document.querySelector('[data-testid="remote-hosts-agents"]')?.textContent || ""), null, { timeout: 20000 }).then(() => true, () => false));
+await page.getByRole("button", { name: /Buzz Term/ }).first().click({ timeout: 10000 }).catch(() => {});
+await page.locator('[data-testid="web-remote-terminal-toggle"]').waitFor({ timeout: 15000 }).catch(() => {});
+check("9c. web Settings → Buzz Term has 'Allow remote terminal', enabled while the tailnet host is reachable", await page.waitForFunction(() => !document.querySelector('[data-testid="web-remote-terminal-toggle"]')?.hasAttribute("disabled"), null, { timeout: 20000 }).then(() => true, () => false));
 raProc.kill();
+await sleep(1000);
+check("9d. host gone: terminal switch greys out; agent management falls back to 'Via relay'", await page.waitForFunction(() => document.querySelector('[data-testid="web-remote-terminal-toggle"]')?.hasAttribute("disabled"), null, { timeout: 40000 }).then(() => true, () => false));
+await page.getByRole("button", { name: /^Agents$/ }).first().click().catch(() => {});
+check("9e. agents path label says 'Via relay' with the slower/limited note", await page.waitForFunction(() => /Via relay/.test(document.querySelector('[data-testid="remote-hosts-agents"]')?.textContent || "") && !!document.querySelector('[data-testid="remote-host-relay-note"]'), null, { timeout: 40000 }).then(() => true, () => false));
+await page.evaluate(() => { location.hash = "#/agents"; });
+await page.locator('[data-testid="my-agents"]').waitFor({ timeout: 20000 }).catch(() => {});
+
 await sleep(1000);
 await page.locator('[data-testid="remote-open"]').click().catch(() => {});
 await page.locator('[data-testid="remote-message"]').waitFor({ timeout: 30000 }).catch(() => {});
