@@ -504,6 +504,7 @@ fn newest_agent_log_breaks_mtime_ties_deterministically() {
 
 // ── keyring-dev-migration tests ────────────────────────────────────────
 
+#[cfg(debug_assertions)]
 #[test]
 fn copy_agent_keys_copies_keys_present_in_src_to_dst() {
     // Keys in src but not in dst must be copied in a single bulk write,
@@ -557,6 +558,7 @@ fn copy_agent_keys_copies_keys_present_in_src_to_dst() {
     );
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn copy_agent_keys_skips_keys_already_in_dst() {
     // Idempotency: a key already present in dst must NOT be overwritten
@@ -587,6 +589,7 @@ fn copy_agent_keys_skips_keys_already_in_dst() {
     assert_eq!(*src.read_count.borrow(), 0);
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn copy_agent_keys_skips_keys_absent_from_src() {
     // A pubkey with no entry in src (new agent that will mint a fresh key)
@@ -614,6 +617,7 @@ fn copy_agent_keys_skips_keys_absent_from_src() {
     );
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn copy_agent_keys_skips_all_when_dst_unreachable() {
     // When dst keyring is unreachable the migration must be a no-op — never
@@ -634,6 +638,7 @@ fn copy_agent_keys_skips_all_when_dst_unreachable() {
     );
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn copy_agent_keys_skips_entirely_when_marker_present() {
     // After the first migration, the marker is in dst. Subsequent calls
@@ -668,6 +673,7 @@ fn copy_agent_keys_skips_entirely_when_marker_present() {
     );
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn copy_agent_keys_writes_marker_even_with_empty_agent_list() {
     // An empty pubkey list (no agents yet) must still write the marker so
