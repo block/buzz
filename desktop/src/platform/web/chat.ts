@@ -3,7 +3,7 @@
 // relayClientSession WebSocket (NIP-42 AUTH signed via create_auth_event → signer).
 import { getSigner, signerPubkey } from "./signer";
 import { markBootReady, noteSigner } from "./signer/instrument";
-import { queryRelay, submitSignedEvent } from "./relayHttp";
+import { queryRelay, queryRelayHttp, submitSignedEvent } from "./relayHttp";
 import { relayHttpBase, wsToHttp } from "./relayConfig";
 import type { Filter, NostrEvent } from "./nostrTypes";
 import {
@@ -495,6 +495,33 @@ export const chatHandlers: Record<
       events,
       next_cursor:
         events.length >= cap && last
+          ? { created_at: last.created_at, event_id: last.id }
+          : null,
+    };
+  },
+  // Thread subtree read (mirror of src-tauri get_thread_replies). `depth_limit` is a bridge-only field, so this always goes over
+  // HTTP /query (one NIP-98 token at read priority P1, which a settings decrypt (P2) can never queue ahead of).
+  get_thread_replies: async (a) => {
+    const cap = Math.min(a?.limit ?? 200, 500);
+    const f: Filter = {
+      "#e": [a?.rootEventId],
+      kinds: TIMELINE_KINDS,
+      depth_limit: a?.depthLimit ?? 64,
+      limit: cap,
+      include_aux: true,
+    };
+    if (a?.channelId) f["#h"] = [a.channelId];
+    if (a?.cursor) {
+      f.thread_cursor = a.cursor.created_at;
+      f.thread_cursor_id = a.cursor.event_id;
+    }
+    const events = await queryRelayHttp([f]);
+    const replies = events.filter((e) => TIMELINE_KINDS.includes(e.kind));
+    const last = replies[replies.length - 1];
+    return {
+      events,
+      next_cursor:
+        replies.length >= cap && last
           ? { created_at: last.created_at, event_id: last.id }
           : null,
     };
