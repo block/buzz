@@ -201,6 +201,10 @@ export type RemoteInfo = {
   reason?: string;
   /** Second, separate toggle: "Allow remote terminal" (tailnet only). */
   terminals: boolean;
+  /** What a new remote terminal runs on this desktop, from Settings → Buzz Term → Session host ("herdr" = attach/create a herdr session). */
+  termHost?: "shell" | "herdr";
+  /** Default herdr session name from Settings → Buzz Term (only meaningful when termHost is "herdr"; blank = herdr's unnamed default). */
+  termSession?: string;
   /** "Allow remote agent management" is on (list/start/stop/message over relay; full management on a direct connection). */
   agents?: boolean;
   /** How long one signed connection challenge stays valid on this desktop (seconds). */

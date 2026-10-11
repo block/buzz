@@ -10,6 +10,7 @@ import { Route as settingsRouteImport } from "./routes/settings";
 import { Route as remindersRouteImport } from "./routes/reminders";
 import { Route as pulseRouteImport } from "./routes/pulse";
 import { Route as projectsRouteImport } from "./routes/projects";
+import { Route as buzzTermRouteImport } from "./routes/buzz-term";
 import { Route as browsersRouteImport } from "./routes/browsers";
 import { Route as botsRouteImport } from "./routes/bots";
 import { Route as agentsRouteImport } from "./routes/agents";
@@ -45,6 +46,11 @@ const pulseRoute = pulseRouteImport.update({
 const projectsRoute = projectsRouteImport.update({
   id: "/projects",
   path: "/projects",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const buzzTermRoute = buzzTermRouteImport.update({
+  id: "/buzz-term",
+  path: "/buzz-term",
   getParentRoute: () => rootRouteImport,
 } as any);
 const browsersRoute = browsersRouteImport.update({
@@ -109,6 +115,7 @@ export interface FileRoutesByFullPath {
   "/agents": typeof agentsRoute;
   "/bots": typeof botsRoute;
   "/browsers": typeof browsersRoute;
+  "/buzz-term": typeof buzzTermRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -127,6 +134,7 @@ export interface FileRoutesByTo {
   "/agents": typeof agentsRoute;
   "/bots": typeof botsRoute;
   "/browsers": typeof browsersRoute;
+  "/buzz-term": typeof buzzTermRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -146,6 +154,7 @@ export interface FileRoutesById {
   "/agents": typeof agentsRoute;
   "/bots": typeof botsRoute;
   "/browsers": typeof browsersRoute;
+  "/buzz-term": typeof buzzTermRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -166,6 +175,7 @@ export interface FileRouteTypes {
     | "/agents"
     | "/bots"
     | "/browsers"
+    | "/buzz-term"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -184,6 +194,7 @@ export interface FileRouteTypes {
     | "/agents"
     | "/bots"
     | "/browsers"
+    | "/buzz-term"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -202,6 +213,7 @@ export interface FileRouteTypes {
     | "/agents"
     | "/bots"
     | "/browsers"
+    | "/buzz-term"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -221,6 +233,7 @@ export interface RootRouteChildren {
   agentsRoute: typeof agentsRoute;
   botsRoute: typeof botsRoute;
   browsersRoute: typeof browsersRoute;
+  buzzTermRoute: typeof buzzTermRoute;
   projectsRoute: typeof projectsRoute;
   pulseRoute: typeof pulseRoute;
   remindersRoute: typeof remindersRoute;
@@ -270,6 +283,13 @@ declare module "@tanstack/react-router" {
       path: "/projects";
       fullPath: "/projects";
       preLoaderRoute: typeof projectsRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/buzz-term": {
+      id: "/buzz-term";
+      path: "/buzz-term";
+      fullPath: "/buzz-term";
+      preLoaderRoute: typeof buzzTermRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/browsers": {
@@ -357,6 +377,7 @@ const rootRouteChildren: RootRouteChildren = {
   agentsRoute: agentsRoute,
   botsRoute: botsRoute,
   browsersRoute: browsersRoute,
+  buzzTermRoute: buzzTermRoute,
   projectsRoute: projectsRoute,
   pulseRoute: pulseRoute,
   remindersRoute: remindersRoute,

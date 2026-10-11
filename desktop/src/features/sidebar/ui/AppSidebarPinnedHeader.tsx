@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { WebRemoteWatcher, useWebRemoteNav } from "@/features/bridge/ui/WebRemoteSettings";
 import {
   Activity,
@@ -167,9 +167,8 @@ export function AppSidebarPrimaryMenu({
   const web = !isTauri();
   const remoteNav = useWebRemoteNav();
   const navigate = useNavigate();
-  // The Buzz term instructions page lives at /agents?unavailable=term: it highlights Buzz term, never Agents.
-  const routeSearch = useSearch({ strict: false }) as { unavailable?: string };
-  const onBuzzTermPage = web && routeSearch.unavailable === "term";
+  // The Buzz term page (/buzz-term, also the instructions state) highlights Buzz term, never Agents.
+  const onBuzzTermPage = web && selectedView === "buzzTerm";
   // Agents is NEVER greyed out: it always opens the Agents page (the relay-bridge list + what to enable for management).
   // Buzz term is plain greyed out while unavailable; clicking opens an instructions page.
   const terminalLocked = web && !remoteNav.terminal;
@@ -260,7 +259,7 @@ export function AppSidebarPrimaryMenu({
                 className="data-[active=true]:font-normal"
                 data-testid={rowTestId("open-agents-view")}
                 isActive={isPrimaryNavRowActive(
-                  selectedView === "agents" && !onBuzzTermPage,
+                  selectedView === "agents",
                   terminalPanel,
                 )}
                 onClick={parkPlaygroundThen(
@@ -339,13 +338,13 @@ export function AppSidebarPrimaryMenu({
                 data-unavailable={terminalLocked ? "true" : undefined}
                 isActive={buzzTermActive || onBuzzTermPage}
                 onClick={() => {
-                  if (terminalLocked) {
-                    void navigate({ to: "/agents", search: { unavailable: "term" } });
+                  if (web) {
+                    // Always opens the Buzz term page; while unavailable it shows the instructions (row stays greyed).
+                    void navigate({ to: "/buzz-term" });
                     return;
                   }
                   // Open Term before park so pin restore sees left-nav Term
                   // active and PinnedSiteSurface does not re-show on top.
-                  if (web) return onSelectAgents(); // web: the remote terminal lives in the Agents view (RemotePanel)
                   openTerminalPanel("maximized", "all");
                   parkPlaygroundHost();
                 }}

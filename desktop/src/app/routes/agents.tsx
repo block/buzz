@@ -14,8 +14,6 @@ type AgentsRouteSearch = {
   profilePersona?: string;
   profileTab?: ProfilePanelTab;
   profileView?: ProfilePanelView;
-  /** Web: the greyed-out Buzz term nav row opens this page with the explanation instead of the feature. */
-  unavailable?: "term";
 };
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -30,7 +28,6 @@ function validateAgentsSearch(
     profilePersona: nonEmptyString(search.profilePersona),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,
-    unavailable: search.unavailable === "term" ? search.unavailable : undefined,
   };
 }
 
@@ -44,20 +41,7 @@ export const Route = createFileRoute("/agents")({
   component: AgentsRouteComponent,
 });
 
-const RemoteUnavailablePage = React.lazy(async () => {
-  const module = await import("@/features/bridge/ui/RemoteUnavailablePage");
-  return { default: module.RemoteUnavailablePage };
-});
-
 function AgentsRouteComponent() {
-  const { unavailable } = Route.useSearch();
-  if (unavailable) {
-    return (
-      <React.Suspense fallback={null}>
-        <RemoteUnavailablePage feature={unavailable} />
-      </React.Suspense>
-    );
-  }
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="agents" />}>
       <AgentsScreen />

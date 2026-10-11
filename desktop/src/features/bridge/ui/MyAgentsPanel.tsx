@@ -7,7 +7,6 @@ import { hiddenAgentCount, NO_RUNNING_AGENTS, visibleRelayAgents } from "../rela
 import { useBridgeAgents } from "../useBridgeAgents";
 import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
-import { RemotePanel } from "./RemotePanel";
 
 function ago(s: number): string {
   if (s < 60) return `${s}s ago`;
@@ -157,9 +156,8 @@ export function MyAgentsPanel() {
         ))}
       </ul>
       <p data-testid="browsers-pointer" style={{ fontSize: 12, opacity: 0.7, marginTop: 12 }}>
-        Your desktop's browsers (add, screenshot, remove, observe and drive) are on the Browsers page in the left menu.
+        Your desktop's browsers (add, screenshot, remove, observe and drive) are on the Browsers page, and its terminal is on the Buzz term page, both in the left menu.
       </p>
-      <RemotePanel bridge={b} signJson={b.signJson} />
       <p style={{ fontSize: 11, opacity: 0.5, marginTop: 12 }}>
         Tap an agent to see its recent activity.
       </p>

@@ -237,13 +237,15 @@ const raAddr = await new Promise((resolve, reject) => {
 process.on("exit", () => raProc.kill());
 
 let raAgentsOn = true;
+let raTermHost = "shell"; // what the desktop advertises from Settings → Buzz Term → Session host
+let raTermSession = "work";
 const pub = new BridgePublisher(
   {
     encryptToSelf: async (p) => nip44.v2.encrypt(p, selfKey),
     signEvent: async (e) => signNode(e),
     publish: postEvent,
   },
-  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot", "browser.agent"], remote: () => ({ desktopId: "dev-desktop", name: "E2E Mac", url: `ws://${raAddr}/v1/ws`, status: "on", terminals: true, agents: raAgentsOn, sigTtlS: 3600 }),
+  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot", "browser.agent"], remote: () => ({ desktopId: "dev-desktop", name: "E2E Mac", url: `ws://${raAddr}/v1/ws`, status: "on", terminals: true, termHost: raTermHost, ...(raTermHost === "herdr" ? { termSession: raTermSession } : {}), agents: raAgentsOn, sigTtlS: 3600 }),
     onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
 );
 pub.start();
@@ -290,7 +292,7 @@ for (let i = 1; i <= 3; i++) {
   await sleep(5500);
   pub.update({
     agents: [
-      agent({ name: `Opus v${i}`, status: i === 3 ? "stopped" : "running" }),
+      agent({ name: `Opus v${i}`, status: "running" }), // (the relay bridge lists running agents only)
       agent({ pubkey: "cd".repeat(32), name: "Sonnet", status: "stopped" }),
     ],
     generatedAt: nowS(),
@@ -555,41 +557,6 @@ const scaleOf = () => page.locator('[data-testid="shot-fs-img"]').getAttribute("
 await vis("shot-fs-in").click();
 check("7u. + zooms in", Number(await scaleOf()) > 1.4, await scaleOf());
 await page.locator('[data-testid="shot-fs-stage"]').hover();
-await page.evaluate(() => { const st = document.querySelector('[data-testid="shot-fs-stage"]'); const r = st.getBoundingClientRect(); st.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, bubbles: true, cancelable: true })); });
-await sleep(300);
-check("7v. wheel / trackpad zoom event zooms further (real layout)", Number(await scaleOf()) > 1.6, await scaleOf());
-await vis("shot-fs-reset").click();
-const sb = await page.locator('[data-testid="shot-fs-stage"]').boundingBox();
-await page.mouse.dblclick(sb.x + sb.width / 2, sb.y + sb.height / 2);
-await sleep(200);
-check("7w. double-click zooms in", Number(await scaleOf()) > 2, await scaleOf());
-await page.mouse.dblclick(sb.x + sb.width / 2, sb.y + sb.height / 2);
-await sleep(200);
-check("7x. double-click again resets to 1x", Number(await scaleOf()) === 1, await scaleOf());
-await vis("shot-fs-in").click();
-await vis("shot-fs-in").click();
-const tr0 = await page.locator('[data-testid="shot-fs-img"]').evaluate((e) => e.style.transform);
-await page.mouse.move(sb.x + sb.width / 2, sb.y + sb.height / 2);
-await page.mouse.down();
-await page.mouse.move(sb.x + sb.width / 2 + 40, sb.y + sb.height / 2 + 30, { steps: 4 });
-await page.mouse.up();
-const tr1 = await page.locator('[data-testid="shot-fs-img"]').evaluate((e) => e.style.transform);
-check("7y. dragging pans when zoomed in", tr0 !== tr1, `${tr0} -> ${tr1}`);
-await vis("shot-fs-new").waitFor();
-await page.keyboard.press("Escape");
-check("7z. Esc goes Back to the viewer (viewer still open, zoom reset on next entry)", await page.waitForFunction(() => !document.querySelector('[data-testid="shot-fullscreen"]') && !!document.querySelector('[data-testid="shot-viewer"]'), null, { timeout: 5000 }).then(() => true, () => false));
-await vis("shot-viewer-fullscreen").click();
-check("7z2. zoom is reset when re-entering full screen", Number(await scaleOf()) === 1);
-await vis("shot-fs-back").click();
-// 7t. full screen: height fills the page, wheel/+/- zoom, double-click toggle, drag pan, Back/Esc
-await vis("shot-viewer-fullscreen").click();
-await vis("shot-fullscreen").waitFor({ timeout: 5000 }).catch(() => {});
-const fsGeo = await page.evaluate(() => { const st = document.querySelector('[data-testid="shot-fs-stage"]').getBoundingClientRect(); const im = document.querySelector('[data-testid="shot-fs-img"]').getBoundingClientRect(); return { sh: st.height, ih: im.height, top: st.top }; });
-check("7t. full screen: the screenshot's height fills the page area (contain by height)", Math.abs(fsGeo.sh - fsGeo.ih) < 2, JSON.stringify(fsGeo));
-const scaleOf = () => page.locator('[data-testid="shot-fs-img"]').getAttribute("data-scale");
-await vis("shot-fs-in").click();
-check("7u. + zooms in", Number(await scaleOf()) > 1.4, await scaleOf());
-await page.locator('[data-testid="shot-fs-stage"]').hover();
 await page.mouse.wheel(0, -300);
 await sleep(300);
 check("7v. mouse wheel / trackpad zooms further (real wheel, app scroll-lock bypassed)", Number(await scaleOf()) > 1.6, await scaleOf());
@@ -652,11 +619,15 @@ check("7m. phone width: same structure, no horizontal overflow", sp.content && s
 await page.setViewportSize({ width: 1280, height: 800 });
 await page.evaluate(() => { location.hash = "#/agents"; });
 // 8. slice B: terminal over the direct connection (member-key challenge per launch)
+// the web Buzz term page needs this device's own switch + host (same gate as the nav row)
+await page.evaluate(() => localStorage.setItem("buzz-web-remote-prefs", JSON.stringify({ agentsOn: false, terminalOn: true, agentsHost: null, terminalHost: "dev-desktop" })));
+await page.reload();
+await page.evaluate(() => { location.hash = "#/buzz-term"; });
 await page.locator('[data-testid="remote-panel"]').waitFor({ timeout: 60000 }).catch(() => {});
-check("8a. remote panel appears from the signed heartbeat", (await page.locator('[data-testid="remote-panel"]').count()) === 1);
-await page.locator('[data-testid="remote-sessions"]').click();
-await sleep(6000);
-check("8b. listing sessions connects (challenge signed) without errors", (await page.locator('[data-testid="remote-message"]').count()) === 0);
+check("8a. remote terminal panel appears on its own Buzz term page (route /buzz-term) from the signed heartbeat", (await page.locator('[data-testid="remote-panel"]').count()) === 1 && /Buzz term/.test(await page.locator('[data-testid="buzz-term-title"]').innerText().catch(() => "")));
+check("8a2. Buzz term row is highlighted on its page and Agents is not", await page.evaluate(() => document.querySelector('[data-testid*="open-buzz-term-view"]')?.getAttribute("data-active") === "true" && document.querySelector('[data-testid*="open-agents-view"]')?.getAttribute("data-active") !== "true"));
+check("8a3. shell setting: page says 'Using a normal shell', no herdr picker", /Using a normal shell/.test(await page.locator('[data-testid="remote-term-setting"]').innerText().catch(() => "")) && (await page.locator('[data-testid="remote-sessions"]').count()) === 0 && (await page.locator('[data-testid="remote-session-select"]').count()) === 0);
+check("8b. no herdr session listing is offered or needed in shell mode, no errors", (await page.locator('[data-testid="remote-message"]').count()) === 0);
 await page.locator('[data-testid="remote-open"]').click();
 await page.locator('[data-testid="remote-terminal"]').waitFor({ timeout: 60000 }).catch(() => {});
 await page.locator('[data-testid="remote-input"]').fill("echo e2e-$((6*7))").catch(() => {});
@@ -666,6 +637,12 @@ const screenTxt = await page.locator('[data-testid="remote-screen"]').innerText(
 check("8c. terminal opens and runs a command on the desktop shell", screenTxt.split("\n").some((l) => l.trim() === "e2e-42"), screenTxt.slice(-80).replace(/\n/g, "|"));
 await page.locator('[data-testid="remote-close"]').click();
 await sleep(1000);
+raTermHost = "herdr";
+await pub.sendHeartbeat();
+check("8e. herdr setting: page says 'Using herdr: session work' and offers the herdr session picker defaulting to it", await page.waitForFunction(() => /Using herdr: session work/.test(document.querySelector('[data-testid="remote-term-setting"]')?.textContent || "") && !!document.querySelector('[data-testid="remote-sessions"]') && document.querySelector('[data-testid="remote-session-select"]')?.value === "work", null, { timeout: 30000 }).then(() => true, () => false));
+raTermHost = "shell";
+await pub.sendHeartbeat();
+check("8f. Agents page no longer hosts the terminal panel", await (async () => { await page.evaluate(() => { location.hash = "#/agents"; }); await page.locator('[data-testid="my-agents"]').waitFor({ timeout: 20000 }).catch(() => {}); return (await page.locator('[data-testid="remote-panel"]').count()) === 0; })());
 // 9. web Settings: two switches, host pickers, path labels (Direct while the listener is up, Via relay once it is gone)
 await page.evaluate(() => { location.hash = "#/settings"; });
 await page.getByRole("button", { name: /^Agents$/ }).first().click({ timeout: 20000 }).catch(() => {});
@@ -690,7 +667,10 @@ check("9b. host list shows the host with a 'Direct' label once reachable", await
 await page.getByRole("button", { name: /Buzz Term/ }).first().click({ timeout: 10000 }).catch(() => {});
 await page.locator('[data-testid="web-remote-terminal-toggle"]').waitFor({ timeout: 15000 }).catch(() => {});
 check("9c. web Settings → Buzz Term has 'Allow remote terminal', enabled while the tailnet host is reachable", await page.waitForFunction(() => !document.querySelector('[data-testid="web-remote-terminal-toggle"]')?.hasAttribute("disabled"), null, { timeout: 20000 }).then(() => true, () => false));
-await page.locator('[data-testid="web-remote-terminal-toggle"]').click().catch(() => {});
+{ // section 8 already turned this device's terminal switch on (so the Buzz term page works): only click if it is off
+  const t = page.locator('[data-testid="web-remote-terminal-toggle"]');
+  if ((await t.getAttribute("aria-checked").catch(() => null)) !== "true") await t.click().catch(() => {});
+}
 await page.evaluate(() => { location.hash = "#/agents"; });
 check("9a3. Agents nav entry appears once it is on with a host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-agents-view"]:not([data-unavailable])'), null, { timeout: 15000 }).then(() => true, () => false));
 check("9c2. Terminal nav entry appears with a reachable terminal host selected", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-buzz-term-view"]:not([data-unavailable])'), null, { timeout: 15000 }).then(() => true, () => false));
@@ -702,7 +682,7 @@ await page.evaluate(() => { location.hash = "#/projects"; }); // the left nav is
 check("9d0. Terminal nav row greys out when the host becomes unreachable", await page.waitForFunction(() => !!document.querySelector('[data-testid*="open-buzz-term-view"][data-unavailable="true"]'), null, { timeout: 40000 }).then(() => true, () => false));
 check("9d0b. web nav row is named 'Buzz term' (not 'Terminal'), plain grey, not crossed out", await page.evaluate(() => { const el = document.querySelector('[data-testid*="open-buzz-term-view"][data-unavailable="true"]'); return !!el && /Buzz term/.test(el.textContent || "") && !/Terminal/.test(el.textContent || "") && Number(getComputedStyle(el).opacity) < 1 && !/line-through/.test(getComputedStyle(el).textDecorationLine); }));
 await page.locator('[data-testid*="open-buzz-term-view"]').first().click().catch(() => {});
-check("9d0c. clicking the greyed Buzz term row opens its instructions page (not a toast) with the exact settings", await page.waitForFunction(() => !!document.querySelector('[data-testid="remote-unavailable-page"][data-feature="term"]') && /Buzz term isn't available/.test(document.body.innerText) && /Settings → Buzz Term → Allow remote terminal/.test(document.body.innerText) && /tailnet/.test(document.body.innerText) && location.hash.includes("unavailable=term"), null, { timeout: 8000 }).then(() => true, () => false));
+check("9d0c. clicking the greyed Buzz term row opens its instructions page (not a toast) with the exact settings", await page.waitForFunction(() => !!document.querySelector('[data-testid="remote-unavailable-page"][data-feature="term"]') && /Buzz term isn't available/.test(document.body.innerText) && /Settings → Buzz Term → Allow remote terminal/.test(document.body.innerText) && /tailnet/.test(document.body.innerText) && location.hash.includes("/buzz-term"), null, { timeout: 8000 }).then(() => true, () => false));
 check("9d0d. on the Buzz term instructions page the Buzz term row is highlighted (still grey) and Agents is not", await page.evaluate(() => { const t = document.querySelector('[data-testid*="open-buzz-term-view"]'); const a = document.querySelector('[data-testid*="open-agents-view"]'); return t?.getAttribute("data-active") === "true" && t?.getAttribute("data-unavailable") === "true" && Number(getComputedStyle(t).opacity) < 1 && a?.getAttribute("data-active") !== "true"; }));
 await page.evaluate(() => { location.hash = "#/settings"; });
 await page.getByRole("button", { name: /Buzz Term/ }).first().click({ timeout: 10000 }).catch(() => {});
@@ -712,10 +692,8 @@ check("9e. agents path label says 'Via relay' with the slower/limited note", awa
 await page.evaluate(() => { location.hash = "#/agents"; });
 await page.locator('[data-testid="my-agents"]').waitFor({ timeout: 20000 }).catch(() => {});
 
-await sleep(1000);
-await page.locator('[data-testid="remote-open"]').click().catch(() => {});
-await page.locator('[data-testid="remote-message"]').waitFor({ timeout: 30000 }).catch(() => {});
-check("8d. listener gone -> 'Connect to Tailscale on this device' copy", /Connect to Tailscale on this device/.test(await page.locator('[data-testid="remote-message"]').innerText().catch(() => "")));
+await page.evaluate(() => { location.hash = "#/buzz-term"; });
+check("8d. listener gone -> the Buzz term page shows its instructions (tailnet / Allow remote terminal), no terminal panel", await page.waitForFunction(() => !!document.querySelector('[data-testid="remote-unavailable-page"]') && /tailnet/.test(document.body.innerText) && !document.querySelector('[data-testid="remote-panel"]'), null, { timeout: 30000 }).then(() => true, () => false));
 clearInterval(pollTimer);
 
 // 5. no plaintext on the relay, no prod traffic, no page errors

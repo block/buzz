@@ -8,6 +8,7 @@ export type AppView =
   | "messages"
   | "browsers"
   | "agents"
+  | "buzzTerm"
   | "bots"
   | "workflows"
   | "pulse"
@@ -266,6 +267,14 @@ export function deriveShellRoute(pathname: string): {
       selectedChannelId: null,
       selectedPinId: null,
       selectedView: "agents",
+    };
+  }
+
+  if (pathname === "/buzz-term") {
+    return {
+      selectedChannelId: null,
+      selectedPinId: null,
+      selectedView: "buzzTerm",
     };
   }
 

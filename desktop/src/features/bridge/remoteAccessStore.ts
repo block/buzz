@@ -1,7 +1,7 @@
 // Desktop-side state of slice B (Rust `remote_access_*` commands). The Settings card and the bridge heartbeat share it.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import { getTermPreferences } from "@/features/terminal/termPreferences";
+import { getTermPreferences, subscribeTermPreferences } from "@/features/terminal/termPreferences";
 import { SIG_TTL_DEFAULT_S, SIG_TTL_OPTIONS_S, type RemoteInfo } from "./protocol";
 
 export type RemoteAccessStatus = {
@@ -135,7 +135,23 @@ export function remoteInfoForHeartbeat(): RemoteInfo | undefined {
     status: s.enabled && s.url ? "on" : "off",
     ...(s.enabled ? {} : { reason: s.tailscaleUp ? undefined : (s.reason ?? "Tailscale isn't running on this Mac.") }),
     terminals: s.terminals,
+    termHost: herdr() ? "herdr" : "shell",
+    ...(herdr() ? { termSession: getTermPreferences().sessionName } : {}),
     agents: prefs.agentManagement,
     sigTtlS: prefs.sigTtlS,
   };
+}
+
+// The Rust backend only learns shell-vs-herdr when a switch is flipped (the `herdr` argument). Re-push it whenever
+// Settings → Buzz Term → Session host changes while remote access is on, so the next remote terminal uses the new mode;
+// the heartbeat also advertises it (termHost / termSession) so the web Buzz term page can show the effective setting.
+if (isTauri()) {
+  let lastHost = herdr();
+  subscribeTermPreferences(() => {
+    const now = herdr();
+    const hostChanged = now !== lastHost;
+    lastHost = now;
+    emit(); // re-publish the heartbeat (session name or host may have changed)
+    if (hostChanged && status?.enabled) void setRemoteTerminals(status.terminals).catch(() => {});
+  });
 }

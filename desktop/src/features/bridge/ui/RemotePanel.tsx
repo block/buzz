@@ -16,7 +16,12 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
   const bufRef = React.useRef(new TermBuffer());
   const [, force] = React.useReducer((x: number) => x + 1, 0);
   const [sessions, setSessions] = React.useState<RemoteSession[]>([]);
-  const [session, setSession] = React.useState("");
+  // Effective Buzz Term setting on the desktop. termHost undefined = an older desktop that doesn't advertise it (legacy behaviour).
+  const termHost = info?.termHost;
+  const herdrMode = termHost === "herdr";
+  const [session, setSession] = React.useState<string | null>(null);
+  const defaultSession = herdrMode ? (info?.termSession ?? "") : "";
+  const chosenSession = session ?? defaultSession;
   const [open, setOpen] = React.useState(false);
   const [line, setLine] = React.useState("");
   const screenRef = React.useRef<HTMLPreElement>(null);
@@ -71,7 +76,7 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
       bufRef.current = new TermBuffer();
       const dec = new TextDecoder();
       const t = await c.openTerminal(
-        { cols: 80, rows: 24, session: session || undefined },
+        { cols: 80, rows: 24, session: herdrMode || termHost === undefined ? chosenSession || undefined : undefined },
         (bytes) => {
           bufRef.current.write(dec.decode(bytes, { stream: true }));
           force();
@@ -90,7 +95,14 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
 
   return (
     <div data-testid="remote-panel" style={{ marginTop: 16, borderTop: "1px solid #8884", paddingTop: 8 }}>
-      <h3 style={{ fontSize: 14, margin: "0 0 6px" }}>Terminal on {info.name}</h3>
+      <h3 style={{ fontSize: 14, margin: "0 0 6px" }}>Buzz term on {info.name}</h3>
+      {termHost && (
+        <p data-testid="remote-term-setting" style={{ fontSize: 12, margin: "0 0 6px", opacity: 0.85 }}>
+          {herdrMode
+            ? `Using herdr: ${info.termSession ? `session ${info.termSession}` : "the default session"} (Settings → Buzz Term → Session host on ${info.name}).`
+            : `Using a normal shell on ${info.name} (Settings → Buzz Term → Session host).`}
+        </p>
+      )}
       {d.message && (
         <p data-testid="remote-message" style={{ fontSize: 12, margin: "0 0 6px", color: d.problem === "none" ? undefined : "#c0392b" }}>
           {d.message}
@@ -101,14 +113,19 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
       )}
       {usable && info.status === "on" && info.terminals && !open && (
         <div style={{ display: "grid", gap: 6 }}>
+          {(herdrMode || termHost === undefined) && (
           <div>
             <button type="button" data-testid="remote-sessions" style={btn} disabled={!!busy} onClick={() => void loadSessions()}>
               List herdr sessions
             </button>
-            {sessions.length > 0 && (
-              <select data-testid="remote-session-select" value={session} onChange={(e) => setSession(e.target.value)} style={{ fontSize: 12 }}>
-                <option value="">Plain shell (new)</option>
-                {sessions.map((s) => (
+            {(sessions.length > 0 || herdrMode) && (
+              <select data-testid="remote-session-select" value={chosenSession} onChange={(e) => setSession(e.target.value)} style={{ fontSize: 12 }}>
+                {herdrMode ? (
+                  <option value={defaultSession}>{defaultSession ? `herdr: ${defaultSession} (default session)` : "herdr: default session"}</option>
+                ) : (
+                  <option value="">Plain shell (new)</option>
+                )}
+                {sessions.filter((x) => !herdrMode || x.name !== defaultSession).map((s) => (
                   <option key={s.name} value={s.name}>
                     herdr: {s.name} ({s.status})
                   </option>
@@ -116,6 +133,7 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
               </select>
             )}
           </div>
+          )}
           <div>
             <button type="button" data-testid="remote-open" style={btn} disabled={!!busy} onClick={() => void openTerm()}>
               {busy === "terminal" ? "Waiting for approval…" : "Open terminal"}
