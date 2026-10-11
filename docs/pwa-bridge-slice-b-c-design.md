@@ -47,6 +47,9 @@ Loopback bind + user-run `tailscale serve` (tailnet-only); member-key challenge 
 | Challenge refused/cancelled in the signer | "Approval was declined in your signer." |
 | Terminals disabled | "Remote terminals are off on <desktop name>." |
 
+### Status (Oct 11): B1 built, not wired into the app yet
+`crates/buzz-remote-access` (workspace member, depends on nothing in the app): loopback-only WS listener (127.0.0.1, Origin allow-list, 64 KiB frames, 8 connections, auth timeout, idle timeout), member-key challenge verification (kind 22242; tags challenge/conn/desktop/purpose; single use, 60 s, bound to connection and desktop), Tailscale detect + `serve` lifecycle on **https port 9443 only** (never `serve reset`, never funnel; the Mac's existing serve entries on 443/8443 are untouched; stale 9443 entry removed first; auto-off when Tailscale drops), terminals off by default, fresh signed `terminal:<launchId>` challenge per launch, 3-terminal cap, kill list, real PTY backend (clean environment; plain login shell, or `herdr session attach <name>` when the terminal setting is herdr and a session name is given). 7 Rust tests (incl. a real PTY). Not yet done: Tauri wiring + Settings switches, `remote` field in the heartbeat, web transport/xterm.js tab/error states, herdr session listing, desktop notification on terminal open.
+
 ### Work items (estimate 2–3 weeks)
 Rust: loopback listener + WS framing, Tailscale detection/serve lifecycle (incl. stale-entry cleanup), challenge verification, PTY bridge with resize/backpressure, herdr launch/attach/list, switches UI. Web: transport selector, desktops list, xterm.js tab, error states, challenge signing flow. Tests: Rust unit tests for challenge/replay/lifecycle; Playwright e2e with loopback standing in for the tailnet and a mock signer.
 

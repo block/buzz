@@ -33,6 +33,7 @@ members = [
     "crates/buzz-voice",
     "crates/buzz-backend-kubernetes",
     "crates/buzz-datastore-tracing",
+    "crates/buzz-remote-access",
     "examples/countdown-bot",
 ]
 exclude = ["desktop/src-tauri"]
