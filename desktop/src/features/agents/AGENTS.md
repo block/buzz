@@ -109,6 +109,12 @@ with a TypeScript lookup table or an id comparison in a component.
    harnesses always keep the field. Gate: `defaults hides model when optional
    harness has empty discovery` (and the failed-discovery counterpart) in
    `onboarding-agent-defaults.spec.ts`.
+   A confirmed non-empty catalog is also authoritative for save validation:
+   an explicit model omitted from that catalog stays visible with a warning,
+   is never silently cleared, and disables save until the operator chooses an
+   advertised model. Pending, failed, or unavailable discovery preserves the
+   configured value and must not block save. Runtime availability is checked
+   before model discovery, so an outdated adapter's catalog is never trusted.
 9. **The defaults modal is progressively disclosed.** An unset global config
    starts on the Buzz Agent-first deployment fallback and carries that visible
    harness into the next saved edit. The `progressive-defaults` disclosure
