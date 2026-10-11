@@ -312,3 +312,23 @@ test("shouldShowTranscriptRowTimestamp: compact preview stays dense", () => {
     false,
   );
 });
+
+test("an assistant headline never ends on half a surrogate pair", () => {
+  // The 69th code unit lands inside the emoji, where `slice` used to cut.
+  const text = `${"x".repeat(68)}🎉 and more words to push it past the limit`;
+  const headline = getActivityHeadline(makeMessage({ text }));
+  const lastBeforeEllipsis = headline.slice(0, -1);
+  const lastUnit = lastBeforeEllipsis.charCodeAt(lastBeforeEllipsis.length - 1);
+  assert.ok(
+    lastUnit < 0xd800 || lastUnit > 0xdbff,
+    `ends on a lone high surrogate: ${JSON.stringify(headline.slice(-3))}`,
+  );
+  assert.equal(headline, `${"x".repeat(68)}🎉…`);
+});
+
+test("an emoji-heavy headline is not falsely ellipsised", () => {
+  // 60 characters, 120 code units — under the 72-character limit, so it must
+  // come back whole. The old code-unit guard shortened it.
+  const text = "🎉".repeat(60);
+  assert.equal(getActivityHeadline(makeMessage({ text })), text);
+});
