@@ -639,6 +639,15 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
+/// NIP-FP: Work fingerprint — a subject's signed, replaceable index of
+/// *selected* work events (parameterized replaceable, d = fingerprint id).
+///
+/// Provisional. The index is a selection, never a completeness claim: a
+/// verifier refetches every referenced event from its origin and discovers
+/// later and contrary outcomes on its own. Accepting one grants no access and
+/// asserts nothing about the work. See `docs/nips/NIP-FP.md`.
+pub const KIND_WORK_FINGERPRINT: u32 = 30340;
+
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
     KIND_PROFILE,
@@ -775,6 +784,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
     KIND_PROJECT,
+    KIND_WORK_FINGERPRINT,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
@@ -876,6 +886,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_WORK_FINGERPRINT)); // 30340 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 

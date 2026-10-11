@@ -31,8 +31,9 @@ use crate::SdkError;
 pub use report::*;
 pub use verifier::Verifier;
 
-/// Provisional kind of a work fingerprint (addressable). Not yet registered.
-pub const FINGERPRINT_KIND: u16 = 30340;
+/// Provisional kind of a work fingerprint (addressable), as registered in
+/// [`buzz_core::kind::KIND_WORK_FINGERPRINT`].
+pub const FINGERPRINT_KIND: u16 = buzz_core::kind::KIND_WORK_FINGERPRINT as u16;
 
 /// Maximum selection tags a fingerprint may carry and a verifier processes.
 pub const MAX_SELECTIONS: usize = 256;

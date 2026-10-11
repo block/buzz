@@ -73,6 +73,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Join request (kind:9021)** | ✅ | Open channels only. Adds member, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
+| **Work fingerprints (kind:30340)** | ⚠️ | Provisional [NIP-FP](docs/nips/NIP-FP.md): a subject's signed index of *selected* work events. Community-global member write (a stray `#h` does not channel-scope it); advertised as the `nip-fp` NIP-11 extension. Storing one grants no access and asserts nothing about the work — verifiers refetch every referenced event. Buzz-only; no client renders it yet |
 
 ### What Doesn't Work
 

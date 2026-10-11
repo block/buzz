@@ -33,8 +33,8 @@ use buzz_core::kind::{
     KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
     KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
     KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_WORK_FINGERPRINT, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -594,6 +594,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // NIP-MP: a project is repository metadata — grouping repositories needs
         // the same scope as announcing them.
         KIND_PROJECT => Ok(Scope::ReposWrite),
+        // NIP-FP: a work fingerprint is the subject's own public claim about
+        // which of its work to show, written like long-form content.
+        KIND_WORK_FINGERPRINT => Ok(Scope::MessagesWrite),
         KIND_GIT_PATCH
         | KIND_GIT_PULL_REQUEST
         | KIND_GIT_PR_UPDATE
@@ -738,6 +741,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // `buzz-channel` tag is a metadata reference, not a routing directive,
             // so a project's state is never channel-scoped.
             | KIND_PROJECT
+            // NIP-FP: a work fingerprint is addressed by (pubkey, kind, d_tag) and
+            // may index work across channels and relays, so it is never
+            // channel-scoped.
+            | KIND_WORK_FINGERPRINT
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -4062,6 +4069,18 @@ mod postgres_tests {
     fn long_form_is_global_only() {
         // kind:30023 is always global — ingest nulls channel_id even if an h-tag is present
         assert!(is_global_only_kind(KIND_LONG_FORM));
+    }
+
+    #[test]
+    fn work_fingerprint_is_a_global_member_write() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_WORK_FINGERPRINT, &dummy),
+            Ok(Scope::MessagesWrite),
+            "kind:30340 must be accepted as an ordinary member write"
+        );
+        assert!(is_global_only_kind(KIND_WORK_FINGERPRINT));
+        assert!(!requires_h_channel_scope(KIND_WORK_FINGERPRINT));
     }
 
     #[test]

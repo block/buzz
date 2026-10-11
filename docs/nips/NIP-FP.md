@@ -47,7 +47,7 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY as defined in RFC
 |------|------|--------|-------|--------|
 | `30340` | Work fingerprint | subject | addressable | provisional |
 
-`30340` is provisional. It is unassigned in the NIPs registry and in `buzz-core/src/kind.rs` as of this draft, and it MUST NOT be treated as stable until it is registered. Production Buzz relays reject unregistered kinds, so until registration a fingerprint travels as a [transport bundle](#transport-bundle-pre-registration).
+`30340` is provisional. It is unassigned in the NIPs registry, and it MUST NOT be treated as stable until it is registered. Buzz relays built with `KIND_WORK_FINGERPRINT` in `buzz-core/src/kind.rs` accept it as a community-global member write and advertise the `nip-fp` NIP-11 extension. Relays without it reject unregistered kinds, so there a fingerprint travels as a [transport bundle](#transport-bundle-pre-registration).
 
 ## Fingerprint event
 

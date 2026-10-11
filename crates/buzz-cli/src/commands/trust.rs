@@ -1,9 +1,10 @@
 //! `buzz trust` — NIP-FP work fingerprints (`docs/nips/NIP-FP.md`).
 //!
 //! `fingerprint` signs a selection and prints it as a transport bundle
-//! (pre-registration). `verify` runs the SDK's sans-IO verifier against each
-//! origin's `/query` and NIP-11 document, so every signature it reports was
-//! checked on bytes fetched by this viewer.
+//! (pre-registration), or publishes it where kind:30340 is registered.
+//! `verify` runs the SDK's sans-IO verifier against each origin's `/query`
+//! and NIP-11 document, so every signature it reports was checked on bytes
+//! fetched by this viewer.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +21,9 @@ const MAX_ROUNDS: usize = 8;
 
 pub async fn dispatch(cmd: TrustCmd, client: &BuzzClient) -> Result<(), CliError> {
     match cmd {
-        TrustCmd::Fingerprint { d, select } => cmd_fingerprint(client, &d, &select),
+        TrustCmd::Fingerprint { d, select, publish } => {
+            cmd_fingerprint(client, &d, &select, publish).await
+        }
         TrustCmd::Verify {
             bundle,
             cutoff,
@@ -40,7 +43,12 @@ fn parse_selection(raw: &str, default_origin: &str) -> Result<Selected, CliError
     Ok(Selected { id, origin })
 }
 
-fn cmd_fingerprint(client: &BuzzClient, d: &str, select: &[String]) -> Result<(), CliError> {
+async fn cmd_fingerprint(
+    client: &BuzzClient,
+    d: &str,
+    select: &[String],
+    publish: bool,
+) -> Result<(), CliError> {
     let selections = select
         .iter()
         .map(|raw| parse_selection(raw, client.relay_url()))
@@ -48,7 +56,25 @@ fn cmd_fingerprint(client: &BuzzClient, d: &str, select: &[String]) -> Result<()
     let builder = trust::build_work_fingerprint(d, &selections)
         .map_err(|e| CliError::Usage(e.to_string()))?;
     let event = client.sign_event(builder)?;
-    print_json(&trust::transport_bundle(&event))
+    if !publish {
+        return print_json(&trust::transport_bundle(&event));
+    }
+    let id = event.id.to_hex();
+    let raw = client.submit_event(event).await?;
+    let response: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("relay response is not JSON: {e} ({raw})")))?;
+    if response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        let message = response.get("message").and_then(serde_json::Value::as_str);
+        return Err(CliError::Other(format!(
+            "relay rejected the fingerprint: {}",
+            message.unwrap_or(&raw)
+        )));
+    }
+    print_json(&serde_json::json!({ "id": id, "relay": response }))
 }
 
 fn read_bundle(path: &str) -> Result<serde_json::Value, CliError> {

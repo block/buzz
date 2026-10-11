@@ -2019,7 +2019,8 @@ pub enum PackCmd {
 #[derive(Subcommand)]
 pub enum TrustCmd {
     /// Sign a work fingerprint and print it as a transport bundle
-    /// (pre-registration). Coverage is always "selected".
+    /// (pre-registration), or publish it to a relay that accepts kind:30340.
+    /// Coverage is always "selected".
     #[command(
         after_help = "Example:\n  buzz trust fingerprint --d my-work --select <event-id> \\\n    --select <event-id>=https://other.relay > bundle.json"
     )]
@@ -2031,6 +2032,11 @@ pub enum TrustCmd {
         /// the origin defaults to the current relay. Repeatable.
         #[arg(long, required = true)]
         select: Vec<String>,
+        /// Publish the signed kind:30340 event to the current relay instead of
+        /// printing a bundle. Requires a relay advertising the `nip-fp`
+        /// NIP-11 extension; others reject the kind.
+        #[arg(long)]
+        publish: bool,
     },
     /// Verify a fingerprint or transport bundle against its origins and print
     /// the selection / observed / interpretation report. No score.
