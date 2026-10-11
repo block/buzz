@@ -44,6 +44,7 @@ import 'channel_link_navigation.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
+import 'mentions/mention_ack_store.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
 import 'channels_provider.dart';
