@@ -21,6 +21,7 @@ import { jobPhase, phaseText, type JobPhase } from "../lib/browserCommandJob";
 import { browserRowUrlLabel } from "../lib/browserRows";
 import { AddBrowserDialog } from "./AddBrowserDialog";
 import { BrowserRowThumb } from "./BrowserRowPreview";
+import { BrowserScreenshotViewer } from "./BrowserScreenshotViewer";
 
 type Job = {
   label: string;
@@ -41,6 +42,7 @@ export function WebBrowsersScreen() {
   const [addOpen, setAddOpen] = React.useState(false);
   const [job, setJob] = React.useState<Job | null>(null);
   const [, tick] = React.useReducer((x: number) => x + 1, 0);
+  const [viewer, setViewer] = React.useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = React.useState<string | null>(null);
   const [robotOpen, setRobotOpen] = React.useState<string | null>(null);
   const [robot, setRobot] = React.useState<{ agent: string; channel: string; mode: "off" | "observe" | "drive" }>({ agent: "", channel: "", mode: "observe" });
@@ -81,6 +83,8 @@ export function WebBrowsersScreen() {
   const send = (type: CommandType, body: CommandBody, label: string, confirmed = true) => () =>
     (commander as NonNullable<typeof commander>).send(type, body, { confirmed, label });
 
+  const takeShot = (s: BrowserSessionInfo) =>
+    start(`Screenshot ${s.host}`, send("browser.screenshot", { sessionId: s.sessionId }, `Screenshot ${s.host}`, false));
   const failedToSend = !!job?.error;
   const text = job
     ? failedToSend
@@ -155,7 +159,7 @@ export function WebBrowsersScreen() {
                     <div className="flex min-w-0 flex-wrap items-start gap-3">
                       <BrowserRowThumb
                         host={s.url ? browserPreviewFaviconHost(s.url) : null}
-                        onOpen={() => void 0}
+                        onOpen={() => setViewer(s.sessionId)}
                         sid={s.sessionId}
                         src={shot?.src ?? null}
                         title={s.title || s.host}
@@ -211,8 +215,9 @@ export function WebBrowsersScreen() {
                         ) : null}
                         <Button
                           data-testid="br-shot"
-                          disabled={!online || !commander || commander.shotBusy()}
-                          onClick={() => start(`Screenshot ${s.host}`, send("browser.screenshot", { sessionId: s.sessionId }, `Screenshot ${s.host}`, false))}
+                          disabled={!online || !commander || commander.shotBusy() || s.status === "cold"}
+                          title={s.status === "cold" ? "Cold - start it on the desktop first" : undefined}
+                          onClick={() => takeShot(s)}
                           size="xs"
                           type="button"
                           variant="secondary"
@@ -294,6 +299,27 @@ export function WebBrowsersScreen() {
           </ul>
         )}
       </div>
+      {viewer && sessions.find((x) => x.sessionId === viewer) ? (
+        (() => {
+          const vs = sessions.find((x) => x.sessionId === viewer) as BrowserSessionInfo;
+          const vshot = b.shots.get(vs.sessionId);
+          const isShotJob = !!job && job.label.startsWith("Screenshot");
+          return (
+            <BrowserScreenshotViewer
+              busy={busyJob || !!commander?.shotBusy()}
+              disabled={!online || !commander || vs.status === "cold"}
+              onClose={() => setViewer(null)}
+              onNew={() => takeShot(vs)}
+              src={vshot?.src ?? null}
+              statusText={isShotJob ? text : null}
+              statusTone={phase === "failed" || phase === "timeout" || failedToSend ? "error" : "info"}
+              takenAt={vshot?.ts ?? null}
+              title={vs.title || vs.host}
+              url={vs.restricted ? "Private address (not shared)" : vs.url ?? vs.host}
+            />
+          );
+        })()
+      ) : null}
       <AddBrowserDialog
         onOpenChange={setAddOpen}
         onSubmit={(card) => start(`Add ${card.url}`, send("browser.open", { url: card.url }, `Add ${card.url.slice(0, 40)}`))}

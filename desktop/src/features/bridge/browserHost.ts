@@ -11,6 +11,7 @@ import {
   showPlaygroundSession,
   subscribePlayground,
 } from "@/features/playground/lib/sessions";
+import { EMPTY_PREVIEW_PNG_BYTE_LENGTH } from "@/features/browsers/lib/browserPreview";
 import { isPlaygroundWebviewOpen, screenshotPlaygroundWebview } from "@/features/playground/lib/webview";
 import type { BrowserDeps } from "./commandHandler";
 import type { BrowserSessionInfo } from "./protocol";
@@ -139,8 +140,6 @@ async function encodeJpeg(png: Uint8Array, maxW: number, quality: number): Promi
 /** Set while the publisher is mounted: ends every remotely visible session (desktop "Stop sharing" button). */
 export let stopAllRemoteBrowserSessions: () => Promise<void> = async () => {};
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 export function makeBrowserDeps(
   host: () => BrowserHost,
   publishShot: BrowserDeps["publishShot"],
@@ -159,12 +158,14 @@ export function makeBrowserDeps(
       await host().remove(sessionId);
     },
     async capture(sessionId) {
-      // A "Cold" browser has no webview yet: bring it forward first so it starts, then wait for it to load.
-      const wasOpen = await host().isOpen(sessionId).catch(() => false);
-      host().show(sessionId);
-      await sleep(wasOpen ? 600 : 2500);
+      // Silent by design: never navigate, show, focus or start anything on the desktop. A Live browser's existing webview is
+      // snapshotted in place (the Browsers list thumbnails already do this every 4 s); a Cold one is refused with a clear reason.
+      const open = await host().isOpen(sessionId).catch(() => false);
+      if (!open)
+        throw new Error("Cold - start it first: this browser isn't running on the desktop. Open it there once, then take the screenshot.");
       const r = await host().screenshot(sessionId);
-      if (!r.bytes?.length) throw new Error("The page isn't open on the desktop right now.");
+      if (!r.bytes?.length || r.bytes.length <= EMPTY_PREVIEW_PNG_BYTE_LENGTH)
+        throw new Error("The desktop couldn't capture this browser right now (it may be hidden). Open it on the desktop, then retry.");
       const png = Uint8Array.from(r.bytes);
       const fit = await fitImage((w, q) => encodeJpeg(png, w, q));
       if (!fit) throw new Error("The screenshot is too large to send.");
