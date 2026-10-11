@@ -42,7 +42,6 @@ const EMPTY_LIST = [
   "list_managed_agent_runtimes",
   "list_agent_cards",
   "list_save_subscriptions",
-  "list_archived_identities",
   "list_project_local_repositories",
   "list_channel_templates",
   "list_voice_registry",
@@ -203,6 +202,8 @@ for (const c of EMPTY_LIST) handlers[c] = () => [];
 for (const c of FALSE_CMDS) handlers[c] = () => false;
 for (const c of NOOP) handlers[c] = () => undefined;
 for (const c of NULL_CMDS) handlers[c] = () => null;
+// Object-shaped placeholder (desktop returns { archived: string[] }); an empty array crashed the profile panel.
+handlers.list_archived_identities = () => ({ archived: [] });
 
 export class NativeOnlyError extends Error {
   constructor(
