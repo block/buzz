@@ -28,6 +28,18 @@ warn()   { echo -e "${YELLOW}[run-tests]${NC} $*"; }
 error()  { echo -e "${RED}[run-tests]${NC} $*" >&2; }
 section(){ echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; }
 
+# Hermit's bin/ entries are git symlinks. Windows checks them out as plain text
+# files when core.symlinks is false, and Hermit has no Windows build, so fall
+# back to whichever copy of the tool is already on PATH.
+hermit_tool() {
+  local tool="$1"
+  if [[ -x "${REPO_ROOT}/bin/${tool}" ]]; then
+    printf '%s' "${REPO_ROOT}/bin/${tool}"
+  else
+    printf '%s' "${tool}"
+  fi
+}
+
 cd "${REPO_ROOT}"
 
 # ---- Load .env if present ---------------------------------------------------
@@ -70,7 +82,7 @@ run_test_step() {
 # ---- Check / start infra (for integration tests) ----------------------------
 
 ensure_infra() {
-  "${REPO_ROOT}/bin/just" _ensure-migrations
+  "$(hermit_tool just)" _ensure-migrations
 }
 
 # ---- Unit tests (no infra needed) -------------------------------------------
