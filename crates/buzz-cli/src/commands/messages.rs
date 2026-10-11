@@ -4,12 +4,35 @@ use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
+};
+
+/// `messages get` is the one read here with a movable window: `--since` and
+/// `--before` both exist.
+const GET_LIMITS: ReadLimits = ReadLimits {
+    default: 50,
+    max: 200,
+    paging: Paging::TimestampWindow,
+};
+/// `messages thread` takes `--channel`, `--event` and `--depth-limit`; there is
+/// no timestamp window to walk, so the cap bounds what a thread read can show.
+const THREAD_LIMITS: ReadLimits = ReadLimits {
+    default: 100,
+    max: 500,
+    paging: Paging::None,
+};
+/// `messages search` exposes `--since` but no `--before`, so it cannot ask for
+/// results older than the ones it just returned.
+const SEARCH_LIMITS: ReadLimits = ReadLimits {
+    default: 20,
+    max: 100,
+    paging: Paging::SinceOnly,
 };
 
 /// Extract the thread root event ID from a Nostr tag array.
@@ -363,7 +386,8 @@ pub async fn cmd_get_messages(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
-    let limit = limit.unwrap_or(50).min(200);
+    let requested_limit = limit;
+    let limit = GET_LIMITS.effective(requested_limit);
 
     let mut filter = serde_json::json!({
         "kinds": [9, 40002, 40008, 45001, 45003],
@@ -389,6 +413,9 @@ pub async fn cmd_get_messages(
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    if let Some(notice) = truncation_notice(events.len(), requested_limit, GET_LIMITS) {
+        eprintln!("{notice}");
+    }
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -435,7 +462,8 @@ pub async fn cmd_get_thread(
         expected_root_id,
         &selected_event,
     )?;
-    let limit = limit.unwrap_or(100).min(500);
+    let requested_limit = limit;
+    let limit = THREAD_LIMITS.effective(requested_limit);
 
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
@@ -459,6 +487,15 @@ pub async fn cmd_get_thread(
             .and_then(|value| value.as_u64())
             .unwrap_or(0)
     });
+    // The root rides along in the same response but is not part of the reply
+    // page, so it must not count toward the limit.
+    let reply_count = events
+        .iter()
+        .filter(|e| e.get("id").and_then(|v| v.as_str()) != Some(root_event_id.as_str()))
+        .count();
+    if let Some(notice) = truncation_notice(reply_count, requested_limit, THREAD_LIMITS) {
+        eprintln!("{notice}");
+    }
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -477,7 +514,8 @@ pub async fn cmd_search(
             "at least one of --query or --author is required".into(),
         ));
     }
-    let limit = limit.unwrap_or(20).min(100);
+    let requested_limit = limit;
+    let limit = SEARCH_LIMITS.effective(requested_limit);
 
     let author_hex = match author {
         Some(a) => Some(resolve_author(client, a).await?),
@@ -505,6 +543,9 @@ pub async fn cmd_search(
         events.sort_by_key(|e| {
             std::cmp::Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0))
         });
+    }
+    if let Some(notice) = truncation_notice(events.len(), requested_limit, SEARCH_LIMITS) {
+        eprintln!("{notice}");
     }
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
@@ -1887,5 +1928,87 @@ mod tests {
             emoji_tags.is_empty(),
             "palette-error fallback must produce no emoji tags, got: {emoji_tags:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::{truncation_notice, GET_LIMITS, SEARCH_LIMITS, THREAD_LIMITS};
+
+    #[test]
+    fn a_short_read_is_provably_complete_and_says_nothing() {
+        assert_eq!(truncation_notice(49, None, GET_LIMITS), None);
+        assert_eq!(truncation_notice(0, Some(10), GET_LIMITS), None);
+    }
+
+    #[test]
+    fn a_full_read_on_the_default_names_the_default() {
+        let notice = truncation_notice(50, None, GET_LIMITS).expect("a full read must be reported");
+        assert!(notice.contains("showing 50 results"), "{notice}");
+        assert!(notice.contains("the default limit of 50"), "{notice}");
+        assert!(notice.contains("max 200"), "{notice}");
+    }
+
+    #[test]
+    fn a_full_read_on_an_explicit_limit_names_that_limit() {
+        let notice =
+            truncation_notice(30, Some(30), GET_LIMITS).expect("a full read must be reported");
+        assert!(notice.contains("--limit 30"), "{notice}");
+        assert!(!notice.contains("capped"), "{notice}");
+    }
+
+    #[test]
+    fn a_limit_above_the_cap_reports_the_cap_that_actually_applied() {
+        // The silent case from the report: a --limit far above the cap comes
+        // back at the cap with nothing saying so.
+        let notice =
+            truncation_notice(200, Some(1000), GET_LIMITS).expect("a capped read must be reported");
+        assert!(notice.contains("--limit 1000, capped at 200"), "{notice}");
+        // At the cap there is no larger limit to suggest.
+        assert!(notice.contains("--since / --before"), "{notice}");
+    }
+
+    #[test]
+    fn a_read_at_the_cap_suggests_paging_not_a_bigger_limit() {
+        let notice =
+            truncation_notice(200, Some(200), GET_LIMITS).expect("a full read must be reported");
+        assert!(!notice.contains("pass a larger"), "{notice}");
+    }
+
+    #[test]
+    fn the_search_cap_is_reported_even_though_the_flag_asked_for_more() {
+        // The reported case: `messages search --limit 500` returns 100.
+        let notice = truncation_notice(100, Some(500), SEARCH_LIMITS)
+            .expect("a capped search must be reported");
+        assert!(notice.contains("--limit 500, capped at 100"), "{notice}");
+        // search has --since but no --before, so it must not promise an older
+        // page it cannot fetch.
+        assert!(notice.contains("cannot request an older page"), "{notice}");
+        assert!(!notice.contains("--before"), "{notice}");
+    }
+
+    #[test]
+    fn a_capped_thread_read_does_not_name_flags_it_lacks() {
+        // `messages thread` has neither --since nor --before.
+        let notice = truncation_notice(500, Some(500), THREAD_LIMITS)
+            .expect("a capped thread read must be reported");
+        assert!(notice.contains("cannot request a larger page"), "{notice}");
+        assert!(!notice.contains("--since"), "{notice}");
+        assert!(!notice.contains("--before"), "{notice}");
+    }
+
+    #[test]
+    fn the_search_default_of_20_is_named() {
+        let notice =
+            truncation_notice(20, None, SEARCH_LIMITS).expect("a full search must be reported");
+        assert!(notice.contains("the default limit of 20"), "{notice}");
+        assert!(notice.contains("max 100"), "{notice}");
+    }
+
+    #[test]
+    fn more_rows_than_the_limit_still_reports() {
+        // Defensive: the relay is not supposed to overshoot the filter limit,
+        // but a longer response is still not a complete-read proof.
+        assert!(truncation_notice(51, None, GET_LIMITS).is_some());
     }
 }
