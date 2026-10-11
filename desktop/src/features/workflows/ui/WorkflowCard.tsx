@@ -7,6 +7,7 @@ import {
   MessageCircle,
   MessageSquare,
   SmilePlus,
+  SquareTerminal,
   Timer,
   Webhook,
   Zap,
@@ -50,6 +51,7 @@ const TRIGGER_ICONS: Record<string, LucideIcon> = {
   diff_posted: GitPullRequest,
   message_posted: MessageSquare,
   reaction_added: SmilePlus,
+  slash_command: SquareTerminal,
   schedule: CalendarClock,
   webhook: Webhook,
 };
@@ -68,6 +70,7 @@ const TRIGGER_ACCENTS: Record<string, string> = {
   diff_posted: "border-violet-400/30 bg-violet-600 text-white",
   message_posted: "border-blue-400/30 bg-blue-600 text-white",
   reaction_added: "border-pink-400/30 bg-pink-600 text-white",
+  slash_command: "border-cyan-400/30 bg-cyan-600 text-white",
   schedule: "border-emerald-400/30 bg-emerald-600 text-white",
   webhook: "border-orange-300/30 bg-orange-500 text-white",
 };

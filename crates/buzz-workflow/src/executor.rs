@@ -41,6 +41,14 @@ pub struct TriggerContext {
     /// NIP-10 `reply`/`root` marker e-tag). Lets a `message_posted` filter
     /// select only top-level messages via `trigger_is_reply == false`.
     pub is_reply: bool,
+    /// Matched slash command name without the leading slash. Empty for other
+    /// trigger types.
+    #[serde(default)]
+    pub command: String,
+    /// Text following the matched slash command, trimmed at both ends. Empty
+    /// when the command has no arguments or for other trigger types.
+    #[serde(default)]
+    pub args: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
 }
@@ -58,6 +66,8 @@ impl TriggerContext {
             "timestamp" => Some(&self.timestamp),
             "emoji" => Some(&self.emoji),
             "message_id" => Some(&self.message_id),
+            "command" => Some(&self.command),
+            "args" => Some(&self.args),
             other => self.webhook_fields.get(other).map(|s| s.as_str()),
         }
     }
@@ -217,6 +227,8 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 /// | `trigger.timestamp`               | `trigger_timestamp`       |
 /// | `trigger.emoji`                   | `trigger_emoji`           |
 /// | `trigger.message_id`              | `trigger_message_id`      |
+/// | `trigger.command`                 | `trigger_command`         |
+/// | `trigger.args`                    | `trigger_args`            |
 /// | `trigger.is_reply`                | `trigger_is_reply` (bool) |
 /// | `steps.STEP_ID.output.FIELD`      | `steps_STEP_ID_output_FIELD` |
 ///
@@ -298,6 +310,8 @@ pub fn build_eval_context(
         ("trigger_timestamp", trigger_ctx.timestamp.as_str()),
         ("trigger_emoji", trigger_ctx.emoji.as_str()),
         ("trigger_message_id", trigger_ctx.message_id.as_str()),
+        ("trigger_command", trigger_ctx.command.as_str()),
+        ("trigger_args", trigger_ctx.args.as_str()),
     ];
 
     for (name, val) in &trigger_fields {
@@ -1323,6 +1337,8 @@ mod tests {
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
             is_reply: false,
+            command: "new-task".to_owned(),
+            args: "Build feature XYZ".to_owned(),
             webhook_fields: HashMap::new(),
         }
     }
@@ -1339,6 +1355,18 @@ mod tests {
         let ctx = make_trigger();
         let out = resolve_template("By {{trigger.author}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "By abc123def456");
+    }
+
+    #[test]
+    fn resolve_slash_command_fields() {
+        let ctx = make_trigger();
+        let out = resolve_template(
+            "/{{trigger.command}} dispatched: {{trigger.args}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "/new-task dispatched: Build feature XYZ");
     }
 
     #[test]
@@ -1428,6 +1456,19 @@ mod tests {
             evaluate_condition("str_contains(trigger_text, \"P1\")", &ctx, &HashMap::new())
                 .await
                 .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn condition_can_filter_slash_command_and_args() {
+        let ctx = make_trigger();
+        let result = evaluate_condition(
+            "trigger_command == \"new-task\" && str_contains(trigger_args, \"feature XYZ\")",
+            &ctx,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert!(result);
     }
 
