@@ -1,4 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
+import { WebRemoteWatcher, useWebRemoteNav } from "@/features/bridge/ui/WebRemoteSettings";
 import {
   Activity,
   AppWindow,
@@ -162,6 +163,8 @@ export function AppSidebarPrimaryMenu({
   testIdScope,
 }: AppSidebarPrimaryMenuProps) {
   const { pins: allPins } = usePinnedSites();
+  const web = !isTauri();
+  const remoteNav = useWebRemoteNav();
   const pins = isTauri() ? allPins : []; // web/mobile: pinned sites are desktop-only (docs/pwa-web-differences.md #1)
   const { preferences, counts } = useSidebarMenuCounts();
   const terminalPanel = useTerminalPanel();
@@ -169,6 +172,7 @@ export function AppSidebarPrimaryMenu({
   const rowTestId = (id: string) => scopedPrimaryMenuTestId(testIdScope, id);
   return (
     <>
+      {web ? <WebRemoteWatcher /> : null}
       <SidebarHeader
         className="relative z-40 cursor-default select-none px-2 pb-0 pt-0"
         data-tauri-drag-region={dragRegion ? true : undefined}
@@ -242,7 +246,7 @@ export function AppSidebarPrimaryMenu({
               </SidebarMenuButton>
             </SidebarMenuItem>
           </PrimaryTabRow>
-          <PrimaryTabRow label="Agents" target={{ kind: "agents" }}>
+          {(!web || remoteNav.agents) && <PrimaryTabRow label="Agents" target={{ kind: "agents" }}>
             <SidebarMenuItem>
               <SidebarMenuButton
                 className="data-[active=true]:font-normal"
@@ -266,7 +270,7 @@ export function AppSidebarPrimaryMenu({
                 testId={rowTestId("sidebar-agents-count")}
               />
             </SidebarMenuItem>
-          </PrimaryTabRow>
+          </PrimaryTabRow>}
           <PrimaryTabRow label="Bots" target={{ kind: "bots" }}>
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -319,7 +323,7 @@ export function AppSidebarPrimaryMenu({
               />
             </SidebarMenuItem>
           </PrimaryTabRow>
-          <PrimaryTabRow label="Buzz Term" target={{ kind: "buzz-term" }}>
+          {(!web || remoteNav.terminal) && <PrimaryTabRow label={web ? "Terminal" : "Buzz Term"} target={{ kind: "buzz-term" }}>
             <SidebarMenuItem>
               <SidebarMenuButton
                 className="data-[active=true]:font-normal"
@@ -328,6 +332,7 @@ export function AppSidebarPrimaryMenu({
                 onClick={() => {
                   // Open Term before park so pin restore sees left-nav Term
                   // active and PinnedSiteSurface does not re-show on top.
+                  if (web) return onSelectAgents(); // web: the remote terminal lives in the Agents view (RemotePanel)
                   openTerminalPanel("maximized", "all");
                   parkPlaygroundHost();
                 }}
@@ -335,10 +340,10 @@ export function AppSidebarPrimaryMenu({
                 type="button"
               >
                 <SquareTerminal className="h-4 w-4" />
-                <SidebarMenuLabel>Buzz Term</SidebarMenuLabel>
+                <SidebarMenuLabel>{web ? "Terminal" : "Buzz Term"}</SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
-          </PrimaryTabRow>
+          </PrimaryTabRow>}
           <FeatureGate feature="workflows">
             <PrimaryTabRow label="Workflows" target={{ kind: "workflows" }}>
               <SidebarMenuItem>

@@ -54,11 +54,15 @@ export function useRemoteHosts() {
     const id = f === "agents" ? prefs.agentsHost : prefs.terminalHost;
     return hosts.find((h) => h.id === id && h.supports[f]);
   };
-  // Terminal can't stay on without a reachable terminal host.
+  // Keep prefs honest once the heartbeat is known (not while loading): terminal can't stay on without a reachable terminal host,
+  // agent management can't stay on without a host that supports it.
   React.useEffect(() => {
-    if (!prefs.terminalOn) return;
-    const h = selected("terminal");
-    if (!h || reachOf(h) === "unreachable") setWebRemotePrefs({ terminalOn: false });
+    if (hosts.length === 0) return;
+    if (prefs.terminalOn) {
+      const h = selected("terminal");
+      if (!h || reachOf(h) === "unreachable") setWebRemotePrefs({ terminalOn: false });
+    }
+    if (prefs.agentsOn && !selected("agents")) setWebRemotePrefs({ agentsOn: false });
   }); // eslint-disable-line react-hooks/exhaustive-deps
   return { b, hosts, prefs, reachOf, selected };
 }
@@ -175,4 +179,14 @@ export function WebRemoteTerminal() {
       )}
     </SettingsOptionGroup>
   );
+}
+
+/** Mounted in the left nav on web: keeps the switches consistent with what hosts offer, and exposes what the nav may show. */
+export function WebRemoteWatcher() {
+  useRemoteHosts();
+  return null;
+}
+export function useWebRemoteNav(): { agents: boolean; terminal: boolean } {
+  const prefs = React.useSyncExternalStore(subscribeWebRemotePrefs, getWebRemotePrefs);
+  return { agents: prefs.agentsOn && !!prefs.agentsHost, terminal: prefs.terminalOn && !!prefs.terminalHost };
 }
