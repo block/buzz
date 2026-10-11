@@ -44,6 +44,23 @@ export function traverseHistory(
   return true;
 }
 
+export function traverseHistoryBy(
+  history: Pick<History, "go">,
+  delta: number,
+): boolean {
+  if (delta === 0) {
+    return false;
+  }
+
+  const direction = delta < 0 ? "back" : "forward";
+  if (!allowNavigation({ kind: "history", direction })) {
+    return false;
+  }
+
+  history.go(delta);
+  return true;
+}
+
 export function registerNavigationGuard(guard: NavigationGuard): () => void {
   const registration = { guard };
   activeGuards.push(registration);
