@@ -389,6 +389,7 @@ class MessageContent extends HookConsumerWidget {
           duration: Duration(
             milliseconds: ((imeta?.duration ?? 0) * 1000).round(),
           ),
+          waveform: imeta?.waveform ?? const [],
         ),
       );
     }

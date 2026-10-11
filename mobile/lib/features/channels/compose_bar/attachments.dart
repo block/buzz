@@ -435,6 +435,7 @@ Future<BlobDescriptor> _uploadPendingAttachment(
   _PendingAttachmentKind.voiceNote => service.uploadVoiceNote(
     attachment.file,
     duration: attachment.duration ?? Duration.zero,
+    waveform: attachment.waveform,
     onProgress: onProgress,
     cancellationToken: cancellationToken,
   ),
