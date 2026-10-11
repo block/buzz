@@ -90,7 +90,7 @@ pub(crate) struct EffectiveAgentEnv {
 /// args, and layered env.  This is the single source of truth for what will
 /// actually run — computed once and shared across every consumer that needs
 /// the effective values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EffectiveHarnessDescriptor {
     /// The raw effective command string (e.g. `"buzz-agent"`, `"my-acp-agent"`).
     /// Used for `known_acp_runtime` lookup and hashing.

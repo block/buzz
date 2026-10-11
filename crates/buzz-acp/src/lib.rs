@@ -6303,6 +6303,21 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
     }
 }
 
+/// Retain model choices when a switch response has no new config options;
+/// effort from the previous model is not valid evidence for the selected model.
+fn config_options_without_effort(session: &serde_json::Value) -> Vec<serde_json::Value> {
+    session["configOptions"]
+        .as_array()
+        .map(|options| {
+            options
+                .iter()
+                .filter(|option| option["category"] != "thought_level")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
@@ -6326,40 +6341,12 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let mut session = client.session_new_full(&cwd, vec![], None, None).await?;
-        if let Some(desired) = args
-            .model
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            let response = match acp::resolve_model_switch_method(&session.raw, desired) {
-                Some(acp::ModelSwitchMethod::ConfigOption {
-                    config_id,
-                    option_value,
-                }) => {
-                    client
-                        .session_set_config_option(&session.session_id, &config_id, &option_value)
-                        .await?
-                }
-                Some(acp::ModelSwitchMethod::SetModel { model_id }) => {
-                    client
-                        .session_set_model(&session.session_id, &model_id)
-                        .await?
-                }
-                None => anyhow::bail!("model {desired:?} is not advertised by this adapter"),
-            };
-            if let Some(options) = response.get("configOptions") {
-                session.raw["configOptions"] = options.clone();
-            }
-            if let Some(models) = response.get("models") {
-                session.raw["models"] = models.clone();
-            }
-        }
+        let session = client.session_new_full(&cwd, vec![], None, None).await?;
         Ok::<_, anyhow::Error>((init, session))
     })
     .await;
 
-    let (init_result, session_resp) = match protocol_result {
+    let (init_result, mut session_resp) = match protocol_result {
         Ok(Ok(tuple)) => tuple,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -6372,6 +6359,52 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    // The catalog is already available. A retired model, rejected selection or
+    // failed optional effort probe must not hide replacement models. Keep the
+    // original catalog and omit effort unless the selected-model probe succeeds.
+    let mut effort_available = true;
+    if let Some(desired) = args
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let switch_result = tokio::time::timeout(MODELS_TIMEOUT, async {
+            match acp::resolve_model_switch_method(&session_resp.raw, desired) {
+                Some(acp::ModelSwitchMethod::ConfigOption {
+                    config_id,
+                    option_value,
+                }) => client
+                    .session_set_config_option(&session_resp.session_id, &config_id, &option_value)
+                    .await
+                    .map_err(anyhow::Error::from),
+                Some(acp::ModelSwitchMethod::SetModel { model_id }) => client
+                    .session_set_model(&session_resp.session_id, &model_id)
+                    .await
+                    .map_err(anyhow::Error::from),
+                None => Err(anyhow::anyhow!(
+                    "model {desired:?} is not advertised by this adapter"
+                )),
+            }
+        })
+        .await;
+        match switch_result {
+            Ok(Ok(response)) => {
+                // Avoid stale default-model effort if the response omits options.
+                session_resp.raw["configOptions"] =
+                    response.get("configOptions").cloned().unwrap_or_else(|| {
+                        serde_json::Value::Array(config_options_without_effort(&session_resp.raw))
+                    });
+                if let Some(models) = response.get("models") {
+                    session_resp.raw["models"] = models.clone();
+                }
+            }
+            other => {
+                effort_available = false;
+                eprintln!("warning: selected-model effort discovery unavailable: {other:?}");
+            }
+        }
+    }
 
     // Extract agent info from initialize response.
     // ACP spec uses "serverInfo" (MCP heritage); some agents may use "agentInfo".
@@ -6400,7 +6433,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
             },
             "stable": {
                 "configOptions": config_options,
-                "effortOption": session_resp.raw["configOptions"].as_array()
+                "effortOption": effort_available.then(|| &session_resp.raw["configOptions"]).and_then(|options| options.as_array())
                     .and_then(|options| options.iter().find(|option| option["category"] == "thought_level")),
             },
             "unstable": model_state.as_ref().map(|ms| serde_json::json!({

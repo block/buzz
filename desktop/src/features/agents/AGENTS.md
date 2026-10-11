@@ -55,12 +55,12 @@ with a TypeScript lookup table or an id comparison in a component.
    effort transport key expose `acpSession` options discovered for the model.
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
-   Known exception, pending follow-up: the effort write control (rule 14)
-   derives Claude's levels in `ui/effortPicker.ts`, including a TypeScript
-   table for Claude Code's model aliases (`default`, `opus`, `opusplan`,
-   `sonnet`), while this descriptor still says
-   `deferredUntilNativeOptionsAvailable`. Move those levels into the runtime
-   catalog or model data rather than extending the table.
+   Known exception, pending follow-up: the instance/create effort write control
+   (rule 14) derives Claude fallback levels in `ui/effortPicker.ts`, including
+   a TypeScript table for Claude Code's model aliases (`default`, `opus`,
+   `opusplan`, `sonnet`). Global and definition defaults use selected-model ACP
+   discovery. Move the remaining fallback levels into the runtime catalog or
+   model data rather than extending the table.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`
@@ -229,7 +229,7 @@ with a TypeScript lookup table or an id comparison in a component.
    hosting location, availability, or permission. Keep all identity surfaces on
    the shared provenance context, without per-row directory subscriptions. See
    [the provenance contract](../../../../docs/agent-management-provenance.md).
-14. **Thinking effort has two surfaces: a local-only WRITE control and a
+14. **Instance/create thinking effort has a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), mounted in `AgentInstanceEditDialog` beside
    the Model block and in the create dialog (`AgentDialog`, local agents
