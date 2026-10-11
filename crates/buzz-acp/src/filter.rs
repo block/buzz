@@ -384,13 +384,15 @@ pub async fn match_event(
             continue;
         }
 
-        // 3. Mention check — look for a `p` tag whose first element equals
-        //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
+        // 3. Mention check — look for a `p` or `mention` tag whose first element
+        //    equals agent_pubkey_hex. Clients emit `p` tags as the notification
+        //    mechanism and `mention` tags for agent-address mentions; both must
+        //    reach the agent. Uses tag.as_slice() for stable, library-independent
         //    access — avoids relying on the Display impl of tag kind.
         if rule.require_mention {
             let mentioned = event.tags.iter().any(|tag| {
                 let s = tag.as_slice();
-                s.first().map(|k| k.as_str()) == Some("p")
+                matches!(s.first().map(|k| k.as_str()), Some("p") | Some("mention"))
                     && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
             });
             if !mentioned {
@@ -658,6 +660,34 @@ mod tests {
 
         // With mention — matches.
         let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey)
+            .await
+            .unwrap();
+        assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    /// Clients emit `["mention", pubkey]` tags for agent-address mentions; the
+    /// mention filter must treat them like `p` tags.
+    #[tokio::test]
+    async fn test_match_event_mention_tag() {
+        let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let keys = Keys::generate();
+        let mention_tag = Tag::parse(["mention", agent_pubkey]).expect("tag parse");
+        let event = EventBuilder::new(Kind::Custom(9u16), "hello")
+            .tags([mention_tag])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = any_channel();
+
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![],
+            true,
+            None,
+            Some("mentioned"),
+        )];
+
+        let matched = match_event(&event, channel_id, &rules, agent_pubkey)
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
