@@ -742,3 +742,87 @@ for (const scenario of [
     }
   });
 }
+
+test("owned remote deployment can be deployed again under the same identity", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: LOCAL,
+        name: "Remote recovery",
+        status: "deployed",
+        backend: { type: "provider", id: "fixture", config: {} },
+        channelNames: ["agents"],
+      },
+    ],
+  });
+  await page.goto("/#/agents");
+  await page
+    .getByRole("button", { name: "Remote recovery agent profile" })
+    .click();
+  const deploy = page.getByTestId("user-profile-agent-restart");
+  await expect(deploy).toHaveAttribute("aria-label", "Deploy again");
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Shutdown");
+
+  // Exercise the rendered profile callback, including failed deploy and retry.
+  // Do not model presence as proof that another body is safe to start.
+  await page.evaluate(() => {
+    const w = window as typeof window & {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          payload: unknown,
+          options: unknown,
+        ) => Promise<unknown>;
+      };
+      __REDEPLOY_KEYS__?: string[];
+    };
+    const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+    w.__REDEPLOY_KEYS__ = [];
+    w.__TAURI_INTERNALS__.invoke = async (command, payload, options) => {
+      if (command === "start_managed_agent") {
+        w.__REDEPLOY_KEYS__?.push((payload as { pubkey: string }).pubkey);
+        if (w.__REDEPLOY_KEYS__?.length === 1) throw "provider unavailable";
+      }
+      return original(command, payload, options);
+    };
+  });
+  await deploy.click();
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "provider unavailable" }),
+  ).toBeVisible();
+  await expect(deploy).toBeEnabled();
+  await deploy.click();
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Deployment requested for Remote recovery." }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __REDEPLOY_KEYS__?: string[];
+          }
+        ).__REDEPLOY_KEYS__,
+    ),
+  ).toEqual([LOCAL, LOCAL]);
+  expect(
+    await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMANDS__ ?? []).filter((command) =>
+        [
+          "stop_managed_agent",
+          "delete_managed_agent",
+          "create_managed_agent",
+          "send_channel_message",
+        ].includes(command),
+      ),
+    ),
+  ).toEqual([]);
+});
