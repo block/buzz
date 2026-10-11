@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
+  useManagedAgentsQuery,
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
@@ -14,8 +15,12 @@ import {
 import {
   collectRuntimeWarnings,
   getDefaultPersonaRuntime,
-  resolvePersonaRuntime,
 } from "@/features/agents/lib/resolvePersonaRuntime";
+import {
+  isTeamDeploySourceReady,
+  runtimeForTeamPersonaDeploy,
+  runtimeLabelForTeamDeployPlan,
+} from "@/features/agents/lib/teamDeployRuntime";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
@@ -54,6 +59,7 @@ export function AddTeamToChannelDialog({
   const { globalConfig } = useGlobalAgentConfig();
   const channelsQuery = useChannelsQuery();
   const providersQuery = useAvailableAcpRuntimes();
+  const managedAgentsQuery = useManagedAgentsQuery();
   const [channelId, setChannelId] = React.useState("");
   const [role, setRole] = React.useState<Exclude<ChannelRole, "owner">>("bot");
   const deployMutation = useCreateChannelManagedAgentsMutation(
@@ -92,6 +98,37 @@ export function AddTeamToChannelDialog({
     [resolved, runtimes, defaultProvider],
   );
 
+  const sourceQueryGate = isTeamDeploySourceReady({
+    isPending: managedAgentsQuery.isPending,
+    isError: managedAgentsQuery.isError,
+    isFetched: managedAgentsQuery.isFetched,
+  });
+
+  const deployPlans = React.useMemo(() => {
+    if (!sourceQueryGate.ready || !managedAgentsQuery.data) {
+      return [];
+    }
+    return resolved.map((persona) => ({
+      persona,
+      plan: runtimeForTeamPersonaDeploy({
+        persona,
+        runtimes,
+        defaultProvider,
+        managedAgents: managedAgentsQuery.data,
+      }),
+    }));
+  }, [
+    defaultProvider,
+    managedAgentsQuery.data,
+    resolved,
+    runtimes,
+    sourceQueryGate.ready,
+  ]);
+
+  const setupRequiredPlans = deployPlans.filter(
+    (entry) => entry.plan.status === "setup-required",
+  );
+
   function reset() {
     setChannelId("");
     setRole("bot");
@@ -118,29 +155,29 @@ export function AddTeamToChannelDialog({
     channels.find((channel) => channel.id === channelId) ?? null;
 
   async function handleDeploy() {
-    if (!team || !selectedChannel || !defaultProvider) {
+    if (
+      !team ||
+      !selectedChannel ||
+      !sourceQueryGate.ready ||
+      !managedAgentsQuery.data ||
+      setupRequiredPlans.length > 0
+    ) {
       return;
     }
 
     try {
-      // Resolve each persona's preferred runtime. This dialog has no
-      // runtime selector, so the fallback is `defaultProvider` (first
-      // available runtime). Warnings are computed separately via the
-      // `runtimeWarnings` memo and rendered as inline alerts above.
-      const inputs = resolved.map((persona) => {
-        const { runtime: personaRuntime } = resolvePersonaRuntime(
-          persona.runtime,
-          runtimes,
-          defaultProvider,
-        );
-        const runtimeToUse = personaRuntime ?? defaultProvider;
-        return {
+      const inputs = [];
+      for (const { persona, plan } of deployPlans) {
+        if (plan.status !== "ready") {
+          return;
+        }
+        inputs.push({
           runtime: {
-            id: runtimeToUse.id,
-            label: runtimeToUse.label,
-            command: runtimeToUse.command,
-            defaultArgs: runtimeToUse.defaultArgs,
-            mcpCommand: runtimeToUse.mcpCommand,
+            id: plan.runtime.id,
+            label: plan.runtime.label,
+            command: plan.agentCommand,
+            defaultArgs: plan.runtime.defaultArgs,
+            mcpCommand: plan.runtime.mcpCommand,
           },
           name: persona.displayName,
           systemPrompt: persona.systemPrompt,
@@ -148,11 +185,15 @@ export function AddTeamToChannelDialog({
           model: persona.model ?? undefined,
           personaId: persona.id,
           teamId: team.id,
-          // One persona can be deployed under multiple teams with different instructions.
+          harnessOverride: plan.harnessOverride,
+          agentArgs: plan.agentArgs,
           forceNewInstance: true,
           role,
-        };
-      });
+        });
+      }
+      if (inputs.length === 0) {
+        return;
+      }
 
       const result = await deployMutation.mutateAsync(inputs);
       onDeployed(selectedChannel, result);
@@ -182,22 +223,36 @@ export function AddTeamToChannelDialog({
                   Agents ({resolved.length})
                 </span>
                 <div className="flex flex-wrap gap-2">
-                  {resolved.map((persona) => (
-                    <div
-                      className="flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/30 px-2 py-1"
-                      key={persona.id}
-                    >
-                      <ProfileAvatar
-                        avatarUrl={persona.avatarUrl}
-                        className="h-5 w-5 text-2xs"
-                        label={persona.displayName}
-                        shape="squircle"
-                      />
-                      <span className="text-xs font-medium">
-                        {persona.displayName}
-                      </span>
-                    </div>
-                  ))}
+                  {resolved.map((persona) => {
+                    const entry = deployPlans.find(
+                      (candidate) => candidate.persona.id === persona.id,
+                    );
+                    const runtimeLabel = runtimeLabelForTeamDeployPlan(
+                      entry?.plan,
+                      sourceQueryGate.blockReason,
+                    );
+                    return (
+                      <div
+                        className="flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/30 px-2 py-1"
+                        key={persona.id}
+                      >
+                        <ProfileAvatar
+                          avatarUrl={persona.avatarUrl}
+                          className="h-5 w-5 text-2xs"
+                          label={persona.displayName}
+                          shape="squircle"
+                        />
+                        <span className="flex flex-col leading-tight">
+                          <span className="text-xs font-medium">
+                            {persona.displayName}
+                          </span>
+                          <span className="text-3xs text-muted-foreground">
+                            {runtimeLabel}
+                          </span>
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ) : null}
@@ -275,6 +330,25 @@ export function AddTeamToChannelDialog({
                 ))
               : null}
 
+            {managedAgentsQuery.error instanceof Error ? (
+              <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                {managedAgentsQuery.error.message}
+              </p>
+            ) : null}
+
+            {setupRequiredPlans.length > 0 ? (
+              <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                {setupRequiredPlans
+                  .map((entry) =>
+                    entry.plan.status === "setup-required"
+                      ? entry.plan.reason
+                      : "",
+                  )
+                  .filter(Boolean)
+                  .join(" ")}
+              </p>
+            ) : null}
+
             {channelsQuery.error instanceof Error ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 {channelsQuery.error.message}
@@ -301,9 +375,10 @@ export function AddTeamToChannelDialog({
               disabled={
                 !team ||
                 !selectedChannel ||
-                !defaultProvider ||
                 resolved.length === 0 ||
                 missingPersonaCount > 0 ||
+                setupRequiredPlans.length > 0 ||
+                !sourceQueryGate.ready ||
                 channelsQuery.isLoading ||
                 providersQuery.isLoading ||
                 deployMutation.isPending
