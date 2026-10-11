@@ -156,3 +156,15 @@ Dependencies: A before B and C. B and C are independent of each other. Open deci
 - Not done / limits: approve/deny (no desktop mechanism), `command.run`, file view, project snapshots, multi-desktop picker, channel picker UX (the message box takes a channel id, suggested from the agent's active channels).
 - Decisions (JM): kind 30078 + d-tags; bridge key in `sessionStorage` only; destructive commands need web confirmation; desktop ignores expired / replayed / non-member / unknown-agent commands.
 - Next: slice B and C designs in `docs/pwa-bridge-slice-b-c-design.md` (nothing built; approvals listed there).
+
+
+## 13. Slice B revision, slice R, and dropped items (JM decisions, Oct 11, 2026)
+Full text: `docs/pwa-bridge-slice-b-c-design.md` (supersedes the slice B bullets in §11).
+- **Slice B (revised):** desktop loopback-only listener reachable only through the user's own tailnet. The user manages Tailscale; the desktop never installs/starts/signs in to Tailscale. The "Allow remote access" switch is enabled only when Tailscale is detected up; turning it on only publishes with `tailscale serve`; if Tailscale goes down the switch turns itself off and stays off until re-enabled; turning off or quitting removes the serve.
+- **Discovery:** each desktop puts name, tailnet address and remote-access status in its signed bridge heartbeat; the web lists the member's sharing desktops. Identity per connection = one-time challenge signed by the member key through the remote signer (Primal, can require Face ID), verified by that desktop against its own member key; multiple desktops verify independently.
+- **Terminals:** off by default (desktop toggle); every terminal launch needs a fresh signed challenge, then normal SSH-like interactive access (no per-command prompts, idle timeout). Respects the user's terminal setting (normal shell or herdr); with herdr the desktop launches/attaches with the session name so a desktop session can be resumed from the phone, and the web lists herdr sessions. Multi-attach caveats to verify.
+- **Web error states:** Tailscale off on the device; Mac asleep/app closed; remote access off (copy in the design doc).
+- **Dropped:** file viewer, file watching, file allow-list (terminal + OpenClaw cover it). **Deferred:** dev-server preview.
+- **New slice R — remote browser:** web "Open browser {url}" command through the existing signed, confirmed command path; desktop opens a session with its existing browser features; agents drive it with existing browser tools; screenshots published through the bridge as compressed encrypted chunks at ~1 frame per 1–2 s; view-only + agent-driven first, click/type/scroll later; visible "remotely visible" indicator on the desktop; concurrent session limit. Must first read how pinned sites/Stage sessions work (unknowns flagged). Smooth video needs slice B later.
+- **Slice C:** unchanged (hosted tunnel; server changes and security review need approval).
+- **Open questions:** listed honestly in the design doc §4 (herdr multi-attach, Tailscale detection details, signer challenge UX/latency, Stage internals, relay budget for frames, privacy of page pixels).
