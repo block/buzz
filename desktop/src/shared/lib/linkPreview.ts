@@ -284,9 +284,20 @@ function createPreview(
   // so click-through to the anchor is preserved.
   const canonical = new URL(parsed.href);
   canonical.hash = "";
+  let href = canonical.href;
+  // Bare-domain URLs: `new URL('https://example.com').href` is
+  // `https://example.com/` (trailing slash), but the user typed no slash.
+  // The relay previously required verbatim containment, so
+  // `https://example.com/` in the tag never matched `https://example.com`
+  // in the body (#6347). Normalize bare domains to no trailing slash so
+  // the canonical form matches what the user typed. The relay now also
+  // tolerates both forms, so either direction is accepted.
+  if (canonical.pathname === "/") {
+    href = canonical.origin + canonical.search;
+  }
   return {
     kind,
-    href: canonical.href,
+    href,
     provider,
     title,
     typeLabel,
