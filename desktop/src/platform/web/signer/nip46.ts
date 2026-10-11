@@ -534,13 +534,14 @@ let currentClient: Nip46Client | null = null;
  * Boot/mid-session liveness probe: a real round trip (get_public_key must come back as the saved pubkey) within `timeoutMs`.
  * On a miss it rebuilds the signer relay sockets and tries once more before reporting failure.
  */
-export async function probeNip46(userPubkey: string, timeoutMs = 8000): Promise<{ ok: true } | { ok: false; reason: "timeout" | "revoked" | "mismatch" | "no-client" }> {
+export async function probeNip46(userPubkey: string, timeoutMs = 8000, onAttempt?: (attempt: number, timeoutMs: number) => void): Promise<{ ok: true } | { ok: false; reason: "timeout" | "revoked" | "mismatch" | "no-client" }> {
   const c = currentClient;
   if (!c) return { ok: false, reason: "no-client" };
   signerHealth.reconnecting(true);
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt === 1) c.reconnectAll(true);
+      onAttempt?.(attempt, timeoutMs);
       try {
         const pk = await c.request("get_public_key", [], timeoutMs);
         if (pk !== userPubkey) return { ok: false, reason: "mismatch" };

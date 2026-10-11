@@ -105,9 +105,9 @@ export function signOutSigner(): Promise<void> {
 }
 
 /** Liveness probe of the active NIP-46 session (no-op true for NIP-07, which is a local extension). */
-export async function probeActiveSigner(timeoutMs = 8000): Promise<boolean> {
+export async function probeActiveSigner(timeoutMs = 8000, onAttempt?: (attempt: number, timeoutMs: number) => void): Promise<boolean> {
   if (getSession()?.kind !== "nip46" || !activePubkey) return true;
-  const r = await probeNip46(activePubkey, timeoutMs);
+  const r = await probeNip46(activePubkey, timeoutMs, onAttempt);
   if (!r.ok) signerHealth.probeFailed(r.reason === "revoked" || r.reason === "mismatch" ? "revoked" : "probe-failed");
   return r.ok;
 }

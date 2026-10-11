@@ -16,7 +16,7 @@ if ("serviceWorker" in navigator && import.meta.env.PROD) {
 sendStatus.configure({ keepFailedRows: true });
 startBootWatch(signOutSigner);
 const signerActions: SignerActions = {
-  probe: () => probeActiveSigner(),
+  probe: (onAttempt) => probeActiveSigner(8000, onAttempt),
   reconnect: async () => {
     const before = signerPubkey();
     const { showUnlockOverlay } = await import("./UnlockScreen");

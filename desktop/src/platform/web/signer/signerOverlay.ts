@@ -6,7 +6,7 @@ import { signerHealth, type SignerHealthReason } from "./signerHealth";
 
 export type SignerActions = {
   /** Round-trip probe; true if the signer answered. */
-  probe(): Promise<boolean>;
+  probe(onAttempt?: (attempt: number, timeoutMs: number) => void): Promise<boolean>;
   /** Re-pair (nostrconnect QR / bunker paste, the unlock UI). Resolves when a signer is connected again. */
   reconnect(): Promise<void>;
   signOut(): Promise<void>;
@@ -75,6 +75,45 @@ function actions(a: SignerActions, status: HTMLElement, after: () => void) {
   return row;
 }
 
+/**
+ * Live "Connecting to your signer…" text: seconds left for the current probe attempt (matches the real probe timeout) and
+ * dots cycling 1→2→3 in a fixed-width slot. Returns the attempt callback and a stop function.
+ */
+export function startProbeTicker(title: HTMLElement, status: HTMLElement) {
+  let label = "Connecting to your signer";
+  let deadline = 0;
+  let tick = 0;
+  const dots = mk("span", "display:inline-block;width:1.2em;text-align:left", "", "signer-gate-dots");
+  const secs = mk("span", "font-variant-numeric:tabular-nums;display:inline-block;min-width:1ch", "", "signer-gate-secs");
+  const render = () => {
+    dots.textContent = ".".repeat((tick % 3) + 1);
+    const left = deadline ? Math.max(1, Math.ceil((deadline - Date.now()) / 1000)) : 0;
+    secs.textContent = left ? String(left) : "";
+    title.firstChild && (title.firstChild.textContent = label);
+  };
+  title.textContent = label;
+  title.append(dots);
+  status.textContent = "";
+  status.append("Time left: ", secs, "s");
+  const dotTimer = setInterval(() => {
+    tick++;
+    render();
+  }, 450);
+  const secTimer = setInterval(render, 100);
+  render();
+  return {
+    onAttempt(attempt: number, timeoutMs: number) {
+      label = attempt === 0 ? "Connecting to your signer" : "Retrying";
+      deadline = Date.now() + timeoutMs;
+      render();
+    },
+    stop() {
+      clearInterval(dotTimer);
+      clearInterval(secTimer);
+    },
+  };
+}
+
 /** Resolves once the signer is proven alive (or the user reconnected). Never resolves while it's down: the user acts. */
 export async function runBootGate(a: SignerActions): Promise<void> {
   const root = mk(
@@ -83,12 +122,15 @@ export async function runBootGate(a: SignerActions): Promise<void> {
   );
   root.setAttribute("role", "alert");
   document.body.appendChild(root);
-  const title = mk("h1", "font:600 20px Inter,system-ui,sans-serif;margin:0 0 8px", "Connecting to your signer…", "signer-gate-title");
+  const title = mk("h1", "font:600 20px Inter,system-ui,sans-serif;margin:0 0 8px", "Connecting to your signer", "signer-gate-title");
   const msg = mk("p", "max-width:420px;margin:0;opacity:.85", "Checking that your remote signer is reachable.", "signer-gate-msg");
   const status = mk("p", "margin:10px 0 0;font-size:13px;opacity:.7", "", "signer-gate-status");
   root.append(title, msg, status);
   const done = () => root.remove();
-  const ok = await a.probe().catch(() => false);
+  const ticker = startProbeTicker(title, status);
+  const ok = await a.probe(ticker.onAttempt).catch(() => false);
+  ticker.stop();
+  status.textContent = "";
   if (ok) return done();
   if (signerHealth.get().state !== "unresponsive") signerHealth.probeFailed(); // keep a more specific reason (revoked) if set
   root.setAttribute("data-testid", "signer-down-screen");
