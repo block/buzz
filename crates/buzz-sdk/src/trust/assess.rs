@@ -563,7 +563,21 @@ impl<'a> Assessor<'a> {
         }
     }
 
+    /// Every `merge-commit` claimed by a reported merge status, valid or not.
+    fn claimed_commits(&self) -> BTreeSet<&'a str> {
+        self.items
+            .iter()
+            .filter(|i| i.role == Role::Outcome && i.kind == Some(1631))
+            .filter_map(|i| EventId::from_hex(&i.id).ok())
+            .filter_map(|id| self.stored(&id))
+            .filter_map(|s| evidence::tag_value(&s.event, "merge-commit"))
+            .collect()
+    }
+
+    /// Repository announcements, and the ref states that bear on a reported
+    /// merge. Other ref states are counted in coverage only.
     fn repo_items(&mut self) {
+        let commits = self.claimed_commits();
         let repo: Vec<&'a Stored> = self.v.store.values().collect();
         for stored in repo {
             let id = stored.event.id;
@@ -572,7 +586,9 @@ impl<'a> Assessor<'a> {
             }
             let role = if self.returned_by(stored, Step::Repo) {
                 Role::Authority
-            } else if self.returned_by(stored, Step::RefState) {
+            } else if self.returned_by(stored, Step::RefState)
+                && evidence::head_commit(&stored.event).is_some_and(|c| commits.contains(c))
+            {
                 Role::Ref
             } else {
                 continue;

@@ -20,7 +20,7 @@
   "cases": [
     {
       "name": "control_merged_pr",
-      "note": "Passing control. The subject's PR is merged by the repo owner, and a relay-signed ref state shows main at the merge commit. The merger is unrelated by any owner link, so independence is unknown, never independent. The viewer's policy knows the maintainer, so the rung-2 basis is viewer_known.",
+      "note": "Passing control. The subject's PR is merged by the repo owner, and a relay-signed ref state shows main at the merge commit. The merger is unrelated by any owner link, so independence is unknown, never independent. The viewer's policy knows the maintainer, so the rung-2 basis is viewer_known. A second ref state, signed by an outsider at an unrelated commit, bears on no reported merge: it is counted in coverage and not listed.",
       "policy": {
         "viewer_known": [
           "maintainer"
@@ -129,6 +129,29 @@
               [
                 "p",
                 "{pk:maintainer}"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "unrelated_ref",
+          "signer": "outsider",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000150,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
               ]
             ]
           }

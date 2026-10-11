@@ -173,7 +173,7 @@ A verifier produces a report with three sections. Implementations MAY add fields
 | `scope` | which coverage record returned it |
 | `selected` | whether the fingerprint lists it (work events) |
 | `target`, `target_selected` | the work event an outcome targets, and whether the fingerprint lists it |
-| `role` | `work`, `request`, `outcome`, `authority`, or `ref`. Attention events are counted per work event, not listed |
+| `role` | `work`, `request`, `outcome`, `authority`, or `ref`. A `ref` item is a `30618` whose `HEAD` commit is the `merge-commit` of a reported merge status; other ref states are counted in coverage only. Attention events are counted per work event, not listed |
 | `claim`, `polarity` | from the outcome vocabulary |
 | `authority` | `authorized`, `delegated`, `self_asserted`, `opinion`, or `unknown`, with the basis, e.g. "owner of `30617:<owner>:<d>`" or "maintainer set at the time unknown" |
 | `owner_link` | the verified owner, `none`, or `invalid` |
