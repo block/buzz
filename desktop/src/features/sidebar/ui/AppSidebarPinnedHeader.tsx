@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import {
   Activity,
   AppWindow,
@@ -160,7 +161,8 @@ export function AppSidebarPrimaryMenu({
   selectedView,
   testIdScope,
 }: AppSidebarPrimaryMenuProps) {
-  const { pins } = usePinnedSites();
+  const { pins: allPins } = usePinnedSites();
+  const pins = isTauri() ? allPins : []; // web/mobile: pinned sites are desktop-only (docs/pwa-web-differences.md #1)
   const { preferences, counts } = useSidebarMenuCounts();
   const terminalPanel = useTerminalPanel();
   const buzzTermActive = isLeftNavBuzzTermActive(terminalPanel);

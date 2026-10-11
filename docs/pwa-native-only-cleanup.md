@@ -38,3 +38,6 @@ Notes
 - Rows 25–27 are listed for completeness; they will work in the browser and are not removal candidates.
 - Row counts overlap loosely with the capability groups in `capabilities.ts` (agents 96, webviews 27, huddle_audio 28, git_projects 25, terminals 13, os_integration 10, keys_at_rest 31). The per-command lists are authoritative.
 - Suggested default if JM wants a quick decision: REMOVE rows 15–18, 20, 21, 24; HIDE rows 2, 4, 8, 12–14; keep everything else as labelled placeholders that bridge slices later fill in.
+
+## Decision (Oct 11): pinned sites are removed on web
+Pinned sites (Porthole, Wayfinder, …) do not exist in the web/mobile build: no Settings → "Pinned sites" section, no left-nav pinned group, `/pins/*` redirects home. Desktop is unchanged. The "Desktop browser" panel on My agents (slice R) is separate and stays. See docs/pwa-web-differences.md.

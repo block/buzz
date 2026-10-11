@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
@@ -892,7 +893,7 @@ export function renderSettingsSection(
     case "buzz-term":
       return <BuzzTermSettingsPanel />;
     case "pinned-sites":
-      return <PinnedSitesSettingsCard />;
+      return isTauri() ? <PinnedSitesSettingsCard /> : null;
     case "hosted-communities":
       return <HostedCommunitiesSettingsCard />;
     case "community-members":

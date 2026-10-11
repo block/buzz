@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
@@ -63,7 +64,7 @@ export const settingsNavGroups: Array<{
       "huddle",
       "shortcuts",
       "buzz-term",
-      "pinned-sites",
+      ...(isTauri() ? (["pinned-sites"] as SettingsSection[]) : []), // web: pinned sites are desktop-only (docs/pwa-web-differences.md #1)
       "custom-emoji",
       "local-archive",
       "channel-templates",
