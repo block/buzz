@@ -236,13 +236,14 @@ const raAddr = await new Promise((resolve, reject) => {
 });
 process.on("exit", () => raProc.kill());
 
+let raAgentsOn = true;
 const pub = new BridgePublisher(
   {
     encryptToSelf: async (p) => nip44.v2.encrypt(p, selfKey),
     signEvent: async (e) => signNode(e),
     publish: postEvent,
   },
-  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot"], remote: () => ({ desktopId: "dev-desktop", name: "E2E Mac", url: `ws://${raAddr}/v1/ws`, status: "on", terminals: true, agents: true, sigTtlS: 3600 }),
+  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message", "browser.open", "browser.close", "browser.screenshot", "browser.agent"], remote: () => ({ desktopId: "dev-desktop", name: "E2E Mac", url: `ws://${raAddr}/v1/ws`, status: "on", terminals: true, agents: raAgentsOn, sigTtlS: 3600 }),
     onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
 );
 pub.start();
@@ -408,6 +409,10 @@ check(
 const execCalls = [];
 const brManager = new BrowserSessionManager(2);
 const brCalls = [];
+// The desktop's Browsers page (sync): one browser that was added ON the desktop, plus whatever the web opens.
+const deskBrowsers = new Map([["native-1", { sessionId: "native-1", title: "Desktop news", host: "news.example.org", url: "https://news.example.org/", status: "cold", origin: "desktop", openedAt: nowS() }]]);
+const brAgentCalls = [];
+const publishDesk = () => pub.publishBrowserSessions([...deskBrowsers.values()]);
 const JPEG1 = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
 const handler = new BridgeCommandHandler({
   memberPubkey: myPk,
@@ -424,12 +429,15 @@ const handler = new BridgeCommandHandler({
   },
   browser: {
     manager: brManager,
-    open: async (url, host) => (brCalls.push(["open", url]), { sessionId: "pin-e2e", title: host }),
-    close: async (id) => void brCalls.push(["close", id]),
+    open: async (url, host) => (brCalls.push(["open", url]), deskBrowsers.set("pin-e2e", { sessionId: "pin-e2e", title: host, host, url, status: "live", origin: "web", openedAt: nowS() }), { sessionId: "pin-e2e", title: host }),
+    close: async (id) => void (brCalls.push(["close", id]), deskBrowsers.delete(id)),
+    exists: (id) => deskBrowsers.has(id),
+    setAgent: async (i) => void brAgentCalls.push(i),
     capture: async () => ({ mime: "image/jpeg", w: 1, h: 1, bytes: new Uint8Array(JPEG1) }),
     publishShot: (id, s) => pub.publishShot(id, s),
-    publishSessions: () => pub.publishBrowserSessions(brManager.list()),
+    publishSessions: publishDesk,
   },
+  agentManagementAllowed: () => raAgentsOn,
 });
 const seenEv = new Set();
 let wireCmds = 0;
@@ -468,7 +476,11 @@ check("6c. replayed relay events never re-execute", execCalls.length === 1, `${e
 
 // 7. slice R: remote browser (view-only), over the real relay
 await page.locator('[data-testid="agent-detail-back"]').click();
+check("7-0. My agents points to the Browsers page instead of hosting its own browser panel", (await page.locator('[data-testid="browsers-pointer"]').count()) === 1 && (await page.locator('[data-testid="browser-panel"]').count()) === 0);
+await publishDesk();
+await page.evaluate(() => { location.hash = "#/browsers"; });
 await page.locator('[data-testid="browser-panel"]').waitFor({ timeout: 40000 });
+check("7-1. Browsers page lists a browser that exists only on the desktop (synced), with Cold and its address", await page.waitForFunction(() => { const t = document.querySelector('[data-testid="browser-panel"]')?.textContent || ""; return /Desktop news/.test(t) && /Cold/.test(t) && /news\.example\.org/.test(t) && /added on desktop/.test(t); }, null, { timeout: 60000 }).then(() => true, () => false));
 await page.locator('[data-testid="br-url"]').fill("http://localhost:9999/admin");
 await page.locator('[data-testid="br-open"]').click();
 await page.locator('[data-testid="br-confirm"]').waitFor();
@@ -483,14 +495,33 @@ await page.locator('[data-testid="br-url"]').fill("https://example.com/page");
 await page.locator('[data-testid="br-open"]').click();
 await page.locator('[data-testid="br-confirm-yes"]').click();
 await page.locator('[data-testid="br-session"]').waitFor({ timeout: 60000 }).catch(() => {});
-check("7c. confirmed open -> session listed on the web", (await page.locator('[data-testid="br-session"]').count()) === 1 && brCalls.length === 1, JSON.stringify(brCalls));
-await page.locator('[data-testid="br-shot"]').click();
+check("7c. confirmed open -> session listed on the web next to the desktop one", (await page.waitForFunction(() => document.querySelectorAll('[data-testid="br-session"]').length === 2, null, { timeout: 30000 }).then(() => true, () => false)) && brCalls.length === 1, JSON.stringify(brCalls));
+await page.locator('[data-testid="br-session"]').filter({ hasText: "example.com" }).locator('[data-testid="br-shot"]').click();
 await page.locator('[data-testid="br-shot-img"]').waitFor({ timeout: 60000 }).catch(() => {});
 const shotSrc = await page.locator('[data-testid="br-shot-img"]').getAttribute("src").catch(() => "");
 check("7d. See screenshot shows one encrypted-chunk image", /^data:image\/jpeg;base64,/.test(shotSrc || ""), (shotSrc || "").slice(0, 40));
 await sleep(1500);
 check("7e. no screenshot is taken without a press (one capture only)", brManager.beginShot("pin-e2e", Date.now()) === "rate_limited");
 
+// 7f. robot (Observe/Drive) is gated by 'Allow remote agent management'
+check("7f. robot button is shown while remote agent management is on", (await page.locator('[data-testid="br-robot"]').count()) >= 1);
+await page.locator('[data-testid="br-session"]').filter({ hasText: "Desktop news" }).locator('[data-testid="br-robot"]').click();
+await page.locator('[data-testid="br-robot-agent"]').selectOption({ index: 1 });
+await page.locator('input[type=radio]').nth(2).check();
+await page.locator('[data-testid="br-robot-apply"]').click();
+await sleep(6000);
+check("7g. Drive command reaches the desktop (agent + mode) while the switch is on", brAgentCalls.length === 1 && brAgentCalls[0].mode === "drive" && brAgentCalls[0].sessionId === "native-1", JSON.stringify(brAgentCalls));
+raAgentsOn = false;
+await pub.sendHeartbeat();
+check("7h. robot button disappears when remote agent management is turned off", await page.waitForFunction(() => document.querySelectorAll('[data-testid="br-robot"]').length === 0, null, { timeout: 60000 }).then(() => true, () => false));
+raAgentsOn = true;
+await pub.sendHeartbeat();
+await page.waitForFunction(() => document.querySelectorAll('[data-testid="br-robot"]').length >= 1, null, { timeout: 60000 }).catch(() => {});
+await page.locator('[data-testid="br-session"]').filter({ hasText: "Desktop news" }).locator('[data-testid="br-remove"]').click();
+await page.locator('[data-testid="br-confirm-yes"]').click();
+check("7i. Remove on web removes a desktop-added browser on the desktop and the list syncs", await page.waitForFunction(() => document.querySelectorAll('[data-testid="br-session"]').length === 1, null, { timeout: 60000 }).then(() => true, () => false) && !deskBrowsers.has("native-1"));
+
+await page.evaluate(() => { location.hash = "#/agents"; });
 // 8. slice B: terminal over the direct connection (member-key challenge per launch)
 await page.locator('[data-testid="remote-panel"]').waitFor({ timeout: 60000 }).catch(() => {});
 check("8a. remote panel appears from the signed heartbeat", (await page.locator('[data-testid="remote-panel"]').count()) === 1);
