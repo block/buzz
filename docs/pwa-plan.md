@@ -148,3 +148,11 @@ Queue order: (1) signer performance fix, (2) built version served on its own HTT
 - Acceptance: terminal and preview work from a non-tailnet network; only the owner's pubkey can reach their desktop; server never sees plaintext if end-to-end encryption of tunnel payloads (NIP-44 to self) is enabled (decide at go).
 
 Dependencies: A before B and C. B and C are independent of each other. Open decisions at go time: event kinds, snapshot cadence, whether tunnel payloads are end-to-end encrypted in C, allow-list for non-owner devices.
+
+
+## 12. Slice A status (Oct 10, 2026) — transcripts and controls BUILT on `pwa/spike-on-release`
+- Branch `pwa/spike-on-release` = release `0.5.26-hula.1` (`f8e0ca19d`, identical to `main`) + PWA commits; `pwa/spike` is kept as the old line.
+- Done: key wrap, agents snapshot, heartbeat, transcript chunks + agent detail view, start/stop/message with web confirmation and desktop-side validation. Details and decisions: `docs/pwa-bridge-protocol.md` §10.
+- Not done / limits: approve/deny (no desktop mechanism), `command.run`, file view, project snapshots, multi-desktop picker, channel picker UX (the message box takes a channel id, suggested from the agent's active channels).
+- Decisions (JM): kind 30078 + d-tags; bridge key in `sessionStorage` only; destructive commands need web confirmation; desktop ignores expired / replayed / non-member / unknown-agent commands.
+- Next: slice B and C designs in `docs/pwa-bridge-slice-b-c-design.md` (nothing built; approvals listed there).

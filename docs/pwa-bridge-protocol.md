@@ -1,6 +1,6 @@
 # Buzz bridge protocol v1 (slice A — relay bridge)
 
-Status: v1 draft, first vertical cut implemented (agent snapshot + heartbeat + key wrap). Everything else below is specified here so slices A-rest, B and C reuse one envelope. See `pwa-plan.md` §11.
+Status: v1. Implemented: key wrap, agent snapshot, heartbeat, transcript chunks (read-only), commands agent.start / agent.stop / agent.message with ack/result. Not implemented: prompt.approve/deny (the desktop has no interactive permission prompts; reported as `unsupported`), command.run, file.get, snapshot.<topic>. Everything else below is specified here so slices A-rest, B and C reuse one envelope. See `pwa-plan.md` §11.
 
 ## 1. Goals / non-goals
 - A browser signed in as member M can see (and later control) the desktop client that M runs, through the Buzz relay, with **no new relay code, ports or server state**.
@@ -86,8 +86,25 @@ Slice B (direct WS over Tailscale) and C (hosted tunnel) carry the **same envelo
 - Clock skew: presence compares the desktop's `ts` with the browser clock; ±5 min tolerated for replay checks, but skew > 90 s would show a false "offline" (mitigation planned: a `cmd.ping` round trip that reports the desktop clock).
 
 
-## 10. Open decisions for JM
-1. Dedicated kinds (needs relay release) vs 30078+d-tag (works today). Recommendation: 30078 now.
-2. Where the unwrapped session key lives in the browser: `sessionStorage` (default; re-asks signer once per app launch) vs IndexedDB (fewer prompts, longer-lived secret).
-3. Whether destructive commands need desktop-side confirmation.
-4. Multi-desktop per member: v1 shows latest-active device only.
+## 10. Decisions (JM, Oct 10 2026) and implementation notes
+1. **Event type:** kind 30078 with `buzz.bridge.v1/…` d-tags. No relay change.
+2. **Bridge key in the browser:** `sessionStorage` only (one signer prompt per app launch). Never IndexedDB.
+3. **Destructive commands** (stop, message, approve/deny) need an explicit confirmation on the web side: `BridgeCommander.send` throws `confirmation_required` unless `confirmed: true`; the UI shows a confirm step. `agent.start` is not destructive. The desktop additionally enforces everything in §6 and never trusts the web UI.
+4. **Multiple desktops:** v1 shows the most recently active one.
+
+### 10.1 Transcripts (as built)
+- d-tag `tx/<agentPubkey>/<seq>` (seq per agent, per desktop launch). **No `tx/<agent>` head event** was built: the web learns of transcripts from the chunks themselves (fewer relay events). Reserved for later.
+- Body `{agentPubkey, entries:[{id,t,role,text,tool?,channelId?}]}`. Entries are keyed by `id`; a later chunk with the same id replaces the earlier entry (streaming messages grow). Chunks may arrive out of order: the web only lets a higher chunk `seq` replace an entry.
+- First publish for an agent sends only the last 40 entries; afterwards only new/changed entries. Per agent: debounce 1.5 s, at least 4 s between chunks. Global cap 24 chunk events per rolling minute (extra waits). Chunk ≤ 16 KiB plaintext, entry text ≤ 1,500 chars, tool result head ≤ 300 chars. Chunk events expire after 6 h. Web keeps ≤ 300 entries per agent.
+- Only agents present in the latest snapshot are published.
+- **Redaction** (`redact.ts`, applied to every entry): nsec/ncryptsec, PEM private keys, Bearer/Basic tokens, `sk-…`, `ghp_…`, `github_pat_…`, `xox*-`, AWS keys, JWTs, Google API keys, URL credentials, any `UPPER_SNAKE=value` assignment, JSON fields named key/token/secret/password/credential/authorization, home paths (`/Users/x/…`, `/home/x/…`, `C:\Users\x\…` → `~/…`), deep absolute paths (→ `…/last/two`). Raw prompt sections ("metadata" items) and tool **arguments** are never published; tool entries carry name, status and a short redacted result head only.
+
+### 10.2 Commands (as built)
+- Web: `agent.start`, `agent.stop`, `agent.message {agentPubkey, channelId, text ≤ 4000}`. Heartbeat `caps` lists what the desktop supports; the web hides/refuses anything not listed. `prompt.approve|deny` are in the protocol but the desktop answers `unsupported` and executes nothing.
+- Desktop (`BridgeCommandHandler`) executes only if ALL hold: kind 30078 + `t=buzz-bridge` + d-tag `cmd/<id>`; `event.pubkey` == member; valid event id+signature; event `created_at` within ±(120+300) s; `kid` tag == the current session key id; decrypts under the current key; envelope `id` == d-tag id; `v` ok; `now ≤ exp`; `ts ≤ now+300`; `exp − ts ≤ 120`; type in the allow-list; id not seen (persisted, 1,000 ids); `agentPubkey` is in the latest snapshot; type-specific body valid (`message` needs a running agent). Anything failing a crypto/authorship/time check is dropped silently (logged locally with the reason). A valid-but-unknown agent gets an `error/unknown_agent` result.
+- Idempotency: the id is claimed before execution. A replay in the same run republishes the stored result without re-executing; an id seen in a previous run is dropped. `start` on a running agent and `stop` on a stopped one succeed with a note and do nothing.
+- Result `res/<cmdId>`: `accepted` (ack) then `ok|error` (`code`: unknown_agent, bad_request, agent_not_running, unsupported, failed). Created-at of the final result is forced after the ack. The web shows pending → accepted → done/failed, or "desktop did not respond" after `exp`.
+- Message execution: sends a normal channel message as the member (`send_channel_message` with the agent as mention).
+
+### 10.3 Live subscription
+The web subscribes with `limit: 150` (relay replay + live atomically) instead of a one-off fetch followed by `limit: 0`, which could miss events published during a slow-signer reconnect after a reload. A relay reconnect triggers a re-fetch; a failed subscribe retries with backoff.
