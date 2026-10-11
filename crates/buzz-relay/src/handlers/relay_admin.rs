@@ -1228,4 +1228,61 @@ mod postgres_tests {
         assert!(target_socket.is_cancelled(), "the banned socket closes");
         assert!(!bystander_socket.is_cancelled(), "the bystander stays");
     }
+
+    /// A timeout and an untimeout each drop the target's cached restriction
+    /// row on the pod that handles them, so typing and observer frames see
+    /// the change at once instead of after the cache TTL.
+    /// Mutation: remove `invalidate_restriction_cache` from either → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn timeout_commands_drop_the_cached_restriction_row() {
+        let host = format!("timeout-cache-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target) = (Keys::generate(), Keys::generate());
+        for (keys, role) in [(&owner, "owner"), (&target, "member")] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .await
+                .expect("seed member");
+        }
+        let key = (tenant.community(), target.public_key().to_bytes().to_vec());
+        let until = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+        let command = |kind: u32, tags: Vec<Tag>| {
+            EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .sign_with_keys(&owner)
+                .expect("sign moderation command")
+        };
+
+        for event in [
+            command(
+                buzz_core::kind::KIND_MODERATION_TIMEOUT,
+                vec![
+                    Tag::public_key(target.public_key()),
+                    Tag::parse(["expiration", &until.to_string()]).expect("expiration tag"),
+                ],
+            ),
+            command(
+                buzz_core::kind::KIND_MODERATION_UNTIMEOUT,
+                vec![Tag::public_key(target.public_key())],
+            ),
+        ] {
+            state.restriction_cache.insert(
+                key.clone(),
+                buzz_db::moderation::RestrictionState::default(),
+            );
+            crate::handlers::moderation_commands::handle_moderation_command(
+                &tenant, &state, &event,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("kind {} must apply: {e}", event.kind.as_u16()));
+            assert_eq!(
+                state.restriction_cache.get(&key),
+                None,
+                "kind {} must drop the cached row",
+                event.kind.as_u16()
+            );
+        }
+    }
 }

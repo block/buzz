@@ -212,19 +212,19 @@ class _ComposeBarLayout extends HookWidget {
                               key: const ValueKey('standard-actions'),
                               children: [
                                 _ComposeAction(
-                                  icon: LucideIcons.atSign,
+                                  icon: BuzzIcons.atSign,
                                   onTap: onMention,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.hash,
+                                  icon: BuzzIcons.hash,
                                   onTap: onChannel,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.smilePlus,
+                                  icon: BuzzIcons.smilePlus,
                                   onTap: onEmoji,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.aLargeSmall,
+                                  icon: BuzzIcons.aLargeSmall,
                                   onTap: onOpenFormatting,
                                 ),
                                 const Spacer(),

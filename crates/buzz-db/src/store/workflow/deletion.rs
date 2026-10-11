@@ -4,9 +4,10 @@ use buzz_core::{kind::KIND_WORKFLOW_DEF, CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::Row;
 use uuid::Uuid;
 
+use crate::AdmittedTx;
 use crate::{Db, DbError, Result};
 
 /// Committed changes made by a workflow-coordinate deletion.
@@ -34,15 +35,10 @@ impl Db {
         d_tag: &str,
         deletion_created_at_secs: i64,
     ) -> Result<WorkflowDeletionOutcome> {
-        let mut tx = self.begin_event_write_transaction().await?;
-        let outcome = delete_workflow_in_transaction(
-            &mut tx,
-            community_id,
-            owner_pubkey,
-            d_tag,
-            deletion_created_at_secs,
-        )
-        .await?;
+        let mut tx = self.begin_event_write_transaction(community_id).await?;
+        let outcome =
+            delete_workflow_in_transaction(&mut tx, owner_pubkey, d_tag, deletion_created_at_secs)
+                .await?;
         tx.commit().await?;
         Ok(outcome)
     }
@@ -60,18 +56,16 @@ impl Db {
         owner_pubkey: &[u8],
         d_tag: &str,
     ) -> Result<(StoredEvent, bool, Option<Uuid>)> {
-        let mut tx = self.begin_event_write_transaction().await?;
+        let mut tx = self.begin_event_write_transaction(community_id).await?;
         let (stored, inserted) =
-            crate::event::insert_event_in_transaction(&mut tx, community_id, event, None).await?;
+            crate::event::insert_event_in_transaction(&mut tx, event, None).await?;
         if inserted {
             // Unlike best-effort indexing for ordinary events, deletion fails
             // closed: its public request and discoverability commit together.
-            crate::runtime::insert_mentions_in_transaction(&mut tx, community_id, event, None)
-                .await?;
+            crate::runtime::insert_mentions_in_transaction(&mut tx, event, None).await?;
         }
         let outcome = delete_workflow_in_transaction(
             &mut tx,
-            community_id,
             owner_pubkey,
             d_tag,
             event.created_at.as_secs() as i64,
@@ -83,12 +77,12 @@ impl Db {
 }
 
 async fn delete_workflow_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     owner_pubkey: &[u8],
     d_tag: &str,
     deletion_created_at_secs: i64,
 ) -> Result<WorkflowDeletionOutcome> {
+    let community_id = tx.community();
     let cutoff = DateTime::from_timestamp(deletion_created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
     let lock_key = crate::store::replaceable::event_replacement_lock_key(
@@ -101,7 +95,7 @@ async fn delete_workflow_in_transaction(
         crate::observability::LockType::Replacement,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
-            .execute(&mut **tx),
+            .execute(tx.conn()),
     )
     .await?;
 
@@ -114,7 +108,7 @@ async fn delete_workflow_in_transaction(
     .bind(KIND_WORKFLOW_DEF as i32)
     .bind(owner_pubkey)
     .bind(d_tag)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.conn())
     .await?;
     if head.is_some_and(|created_at| created_at > cutoff) {
         return Ok(WorkflowDeletionOutcome::default());
@@ -133,7 +127,7 @@ async fn delete_workflow_in_transaction(
     .bind(owner_pubkey)
     .bind(workflow_id)
     .bind(d_tag)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.conn())
     .await?;
     let definitions = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
@@ -144,7 +138,7 @@ async fn delete_workflow_in_transaction(
     .bind(owner_pubkey)
     .bind(d_tag)
     .bind(cutoff)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
     let changed = row.is_some() || definitions.rows_affected() > 0;
     let channel_id = row

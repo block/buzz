@@ -45,6 +45,7 @@ pub(super) async fn fetch_feedback_attachment(
         },
         &routes::AdminQuery::default(),
     );
+    crate::egress_guard::assert_no_key_backup(&url, "admin API request URL")?;
     let http_client = client::ADMIN_CLIENT
         .get()
         .ok_or_else(|| "admin client not initialised".to_string())?;

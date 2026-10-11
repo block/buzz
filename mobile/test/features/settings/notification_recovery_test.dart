@@ -61,7 +61,6 @@ void main() {
       final pending = Completer<BuzzPushLeaseDescriptor?>();
       final snapshots = <List<Community>>[];
       final tombstones = <int?>[];
-      var settingsOpened = 0;
       var relayAvailable = false;
       await tester.pumpWidget(
         ProviderScope(
@@ -90,12 +89,6 @@ void main() {
             buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
               () async => BuzzPushAuthorizationStatus.denied,
             ),
-            buzzPushNotificationSettingsOpenerProvider.overrideWithValue(
-              () async {
-                settingsOpened++;
-                return true;
-              },
-            ),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -117,17 +110,6 @@ void main() {
             '${container.read(activeCommunityProvider)} / ${container.read(communityListProvider)}',
       );
       expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-      expect(
-        find.text(
-          'Push support unavailable; you can still turn notifications off',
-        ),
-        findsOneWidget,
-      );
-      await tester.tap(
-        find.byKey(const ValueKey('push-notifications-open-settings')),
-      );
-      await tester.pump();
-      expect(settingsOpened, 1);
       await tester.tap(find.byType(Switch));
       await tester.pumpAndSettle();
       final stored = (await storage.loadAll()).single;
@@ -135,18 +117,9 @@ void main() {
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
       expect(tombstones, [8]);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      expect(
-        find.text('Waiting for relay confirmation; notifications may continue'),
-        findsOneWidget,
-      );
       final offSwitch = tester.widget<Switch>(find.byType(Switch));
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNull);
-      await tester.tap(
-        find.byKey(const ValueKey('push-notifications-open-settings')),
-      );
-      await tester.pump();
-      expect(settingsOpened, 2);
       relayAvailable = true;
       await container
           .read(communityListProvider.notifier)

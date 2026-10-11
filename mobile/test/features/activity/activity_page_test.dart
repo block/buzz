@@ -26,7 +26,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -966,7 +966,7 @@ void main() {
     final action = find.byKey(const ValueKey('inbox-swipe-read-m1'));
     expect(action, findsOneWidget);
     expect(
-      find.descendant(of: action, matching: find.byIcon(LucideIcons.mail)),
+      find.descendant(of: action, matching: find.byIcon(BuzzIcons.mail)),
       findsOneWidget,
     );
     expect(find.text('Mark unread'), findsNothing);

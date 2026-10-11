@@ -62,23 +62,35 @@ fn classify_relay_membership(
 /// Fails closed: a DB error is `DbError`, never `Clear`. NIP-OA cascade: a ban
 /// on the principal blocks it directly; if the principal is clear, a ban on
 /// its proven owner (extracted from the self-proving auth tag) blocks it too.
+///
+/// `cached` reads the restriction rows through the 30-second ephemeral-path
+/// cache ([`AppState::restriction_state_cached`]); only per-pulse ephemeral
+/// traffic sets it. Socket auth and every other HTTP request read fresh.
 pub(crate) async fn community_ban_outcome(
     state: &AppState,
     community: buzz_core::CommunityId,
     pubkey: nostr::PublicKey,
     auth_tag_json: Option<&str>,
     signed_auth_created_at: Option<u64>,
+    cached: bool,
 ) -> BanOutcome {
     async fn lookup(
         state: &AppState,
         community: buzz_core::CommunityId,
         key: &nostr::PublicKey,
+        cached: bool,
     ) -> BanOutcome {
-        match state
-            .db
-            .moderation_restriction_state(community, key.as_bytes())
-            .await
-        {
+        let restriction = if cached {
+            state
+                .restriction_state_cached(community, key.as_bytes())
+                .await
+        } else {
+            state
+                .db
+                .moderation_restriction_state(community, key.as_bytes())
+                .await
+        };
+        match restriction {
             Ok(restriction) if restriction.banned => BanOutcome::Banned,
             Ok(_) => BanOutcome::Clear,
             Err(e) => {
@@ -87,7 +99,7 @@ pub(crate) async fn community_ban_outcome(
             }
         }
     }
-    let outcome = lookup(state, community, &pubkey).await;
+    let outcome = lookup(state, community, &pubkey, cached).await;
     if outcome != BanOutcome::Clear {
         return outcome;
     }
@@ -96,7 +108,7 @@ pub(crate) async fn community_ban_outcome(
         auth_tag_json,
         signed_auth_created_at,
     ) {
-        Some(owner) => lookup(state, community, &owner).await,
+        Some(owner) => lookup(state, community, &owner, cached).await,
         None => BanOutcome::Clear,
     }
 }
@@ -146,6 +158,7 @@ pub(crate) async fn final_admission_denial(
         pubkey,
         auth_tag_json,
         signed_auth_created_at,
+        false,
     )
     .await;
     if let Some((metric, reason, outcome)) = ban_denial(ban) {
@@ -402,6 +415,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     pubkey,
                     auth_tag_json.as_deref(),
                     Some(signed_auth_created_at),
+                    false,
                 )
                 .await;
 
@@ -877,7 +891,7 @@ mod tests {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1
         config.redis_url = "redis://127.0.0.1:1".to_string();
         // 100ms acquire timeout: a request that falls through to the stub
         // pool still waits, but for 100ms instead of sqlx's 30s default.

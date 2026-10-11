@@ -116,7 +116,7 @@ class _QuickReactionRow extends ConsumerWidget {
                 }
               },
               child: Icon(
-                LucideIcons.plus,
+                BuzzIcons.plus,
                 size: 24,
                 color: context.colors.onSurfaceVariant,
               ),

@@ -3,7 +3,6 @@ part of '../theme_picker_page.dart';
 const _appearanceOrder = [ThemeMode.light, ThemeMode.dark, ThemeMode.system];
 const _appearanceMotionDuration = Duration(milliseconds: 150);
 const _appearanceMotionCurve = Cubic(0.23, 1, 0.32, 1);
-const _iosThemeScrubberWidth = 116.0;
 
 class _ThemePreviewExperience extends HookConsumerWidget {
   const _ThemePreviewExperience();
@@ -231,7 +230,10 @@ class _ThemePreviewExperience extends HookConsumerWidget {
                     ),
                   ),
                   Expanded(
-                    child: _ThemeScrubber(
+                    child: PageIndicator(
+                      semanticLabel: 'Theme',
+                      controlKey: const ValueKey('theme-preview-scrubber'),
+                      dotKeyPrefix: 'theme-pagination-dot-',
                       count: entries.length,
                       selected: currentPage.value.clamp(0, entries.length - 1),
                       animateChanges: animatePaginationChanges,
@@ -435,7 +437,7 @@ class _ThemePreviewCloseButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
         ),
-        icon: const Icon(LucideIcons.x, size: 22),
+        icon: const Icon(BuzzIcons.x, size: 22),
       ),
     );
   }
@@ -556,9 +558,9 @@ class _AppearanceCycleAction extends StatelessWidget {
   final VoidCallback onTap;
 
   IconData get _icon => switch (mode) {
-    ThemeMode.light => LucideIcons.sun,
-    ThemeMode.dark => LucideIcons.moon,
-    ThemeMode.system => LucideIcons.sunMoon,
+    ThemeMode.light => BuzzIcons.sun,
+    ThemeMode.dark => BuzzIcons.moon,
+    ThemeMode.system => BuzzIcons.sunMoon,
   };
 
   IosGlassNavigationIcon get _iosIcon => switch (mode) {
@@ -621,199 +623,6 @@ class _AppearanceCycleAction extends StatelessWidget {
               size: 24,
               color: context.colors.onSurface,
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ThemeScrubber extends StatelessWidget {
-  const _ThemeScrubber({
-    required this.count,
-    required this.selected,
-    required this.animateChanges,
-    required this.onSelected,
-  });
-
-  final int count;
-  final int selected;
-  final bool animateChanges;
-  final ValueChanged<int> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    void selectFromPosition(double dx, double width) {
-      if (width <= 0 || count <= 1) return;
-      final index = ((dx / width) * count).floor().clamp(0, count - 1);
-      onSelected(index);
-    }
-
-    return Semantics(
-      label: 'Theme ${selected + 1} of $count',
-      slider: true,
-      value: '${selected + 1}',
-      increasedValue: selected < count - 1 ? '${selected + 2}' : null,
-      decreasedValue: selected > 0 ? '$selected' : null,
-      onIncrease: selected < count - 1 ? () => onSelected(selected + 1) : null,
-      onDecrease: selected > 0 ? () => onSelected(selected - 1) : null,
-      child: SizedBox(
-        key: const ValueKey('theme-preview-scrubber'),
-        height: 54,
-        child: defaultTargetPlatform == TargetPlatform.iOS
-            ? Center(
-                child: SizedBox(
-                  width: _iosThemeScrubberWidth,
-                  child: IosGlassThemePagination(
-                    count: count,
-                    selected: selected,
-                    animateChanges: animateChanges,
-                    onSelected: onSelected,
-                    activeColor: context.colors.onSurface,
-                    inactiveColor: context.colors.onSurfaceVariant.withValues(
-                      alpha: 0.32,
-                    ),
-                  ),
-                ),
-              )
-            : LayoutBuilder(
-                builder: (context, constraints) => GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) => selectFromPosition(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  onHorizontalDragStart: (details) => selectFromPosition(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  onHorizontalDragUpdate: (details) => selectFromPosition(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  child: Center(
-                    child: SizedBox(
-                      width: _iosThemeScrubberWidth,
-                      child: _WindowedThemePagination(
-                        count: count,
-                        selected: selected,
-                        animateChanges: animateChanges,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-      ),
-    );
-  }
-}
-
-class _WindowedThemePagination extends StatelessWidget {
-  const _WindowedThemePagination({
-    required this.count,
-    required this.selected,
-    required this.animateChanges,
-  });
-
-  static const _maximumVisibleDots = 7;
-  static const _dotSize = 6.0;
-  static const _selectedDotSize = 10.0;
-  static const _spacing = 6.0;
-
-  final int count;
-  final int selected;
-  final bool animateChanges;
-
-  @override
-  Widget build(BuildContext context) {
-    final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final duration = reduceMotion || !animateChanges
-        ? Duration.zero
-        : const Duration(milliseconds: 150);
-    final visibleCount = count.clamp(1, _maximumVisibleDots);
-    final maximumStart = (count - visibleCount).clamp(0, count);
-    final centerSlot = visibleCount ~/ 2;
-    final windowStart = (selected - centerSlot).clamp(0, maximumStart);
-    final windowEnd = windowStart + visibleCount - 1;
-    final hasEarlierDots = windowStart > 0;
-    final hasLaterDots = windowEnd < count - 1;
-
-    return Container(
-      height: 30,
-      padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.full),
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final pitch = _dotSize + _spacing;
-          final trackWidth =
-              visibleCount * _dotSize + (visibleCount - 1) * _spacing;
-          final trackOrigin = (constraints.maxWidth - trackWidth) / 2;
-          return ClipRect(
-            child: Stack(
-              children: [
-                for (var page = 0; page < count; page++)
-                  _buildDot(
-                    context: context,
-                    page: page,
-                    slot: page - windowStart,
-                    visibleCount: visibleCount,
-                    trackOrigin: trackOrigin,
-                    pitch: pitch,
-                    hasEarlierDots: hasEarlierDots,
-                    hasLaterDots: hasLaterDots,
-                    duration: duration,
-                  ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildDot({
-    required BuildContext context,
-    required int page,
-    required int slot,
-    required int visibleCount,
-    required double trackOrigin,
-    required double pitch,
-    required bool hasEarlierDots,
-    required bool hasLaterDots,
-    required Duration duration,
-  }) {
-    final isVisible = slot >= 0 && slot < visibleCount;
-    final diameter = page == selected
-        ? _selectedDotSize
-        : (hasEarlierDots && slot == 0) ||
-              (hasLaterDots && slot == visibleCount - 1)
-        ? 2.0
-        : (hasEarlierDots && slot == 1) ||
-              (hasLaterDots && slot == visibleCount - 2)
-        ? 4.0
-        : _dotSize;
-    final centerX = trackOrigin + _dotSize / 2 + slot * pitch;
-
-    return AnimatedPositioned(
-      key: ValueKey('theme-pagination-dot-$page'),
-      duration: duration,
-      curve: Curves.easeInOutCubic,
-      left: centerX - diameter / 2,
-      top: (30 - diameter) / 2,
-      width: diameter,
-      height: diameter,
-      child: AnimatedOpacity(
-        duration: duration,
-        opacity: isVisible ? 1 : 0,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: page == selected
-                ? context.colors.onSurface
-                : context.colors.onSurfaceVariant.withValues(alpha: 0.32),
-            shape: BoxShape.circle,
           ),
         ),
       ),

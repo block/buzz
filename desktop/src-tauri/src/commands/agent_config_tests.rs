@@ -715,6 +715,31 @@ fn baked_env_thinking_summary_is_unmasked() {
 }
 
 #[test]
+fn baked_env_openai_compat_endpoint_is_unmasked_but_key_stays_masked() {
+    // The OpenAI-compatible endpoint, model id, and API flavor are
+    // non-secret defaults; the API key next to them is a credential.
+    let entries = baked_env_from_map(&[
+        ("OPENAI_COMPAT_BASE_URL", "https://llm.example/v1"),
+        ("OPENAI_COMPAT_MODEL", "balanced"),
+        ("OPENAI_COMPAT_API", "chat"),
+        ("OPENAI_COMPAT_API_KEY", "placeholder"),
+    ]);
+    assert_eq!(entries.len(), 4);
+    let find = |k: &str| entries.iter().find(|e| e.key == k).unwrap();
+    assert_eq!(
+        find("OPENAI_COMPAT_BASE_URL").value,
+        "https://llm.example/v1"
+    );
+    assert!(!find("OPENAI_COMPAT_BASE_URL").masked);
+    assert_eq!(find("OPENAI_COMPAT_MODEL").value, "balanced");
+    assert!(!find("OPENAI_COMPAT_MODEL").masked);
+    assert_eq!(find("OPENAI_COMPAT_API").value, "chat");
+    assert!(!find("OPENAI_COMPAT_API").masked);
+    assert!(find("OPENAI_COMPAT_API_KEY").masked);
+    assert_eq!(find("OPENAI_COMPAT_API_KEY").value, "••••••");
+}
+
+#[test]
 fn baked_env_allowlist_is_case_insensitive() {
     // Known-safe keys — case-insensitive match must allow them.
     assert!(super::is_safe_to_reveal("buzz_agent_provider"));
@@ -729,6 +754,11 @@ fn baked_env_allowlist_is_case_insensitive() {
     assert!(super::is_safe_to_reveal("DATABRICKS_HOST"));
     assert!(super::is_safe_to_reveal("databricks_model"));
     assert!(super::is_safe_to_reveal("DATABRICKS_MODEL"));
+    assert!(super::is_safe_to_reveal("openai_compat_base_url"));
+    assert!(super::is_safe_to_reveal("OPENAI_COMPAT_BASE_URL"));
+    assert!(super::is_safe_to_reveal("OPENAI_COMPAT_MODEL"));
+    assert!(super::is_safe_to_reveal("OPENAI_COMPAT_API"));
+    assert!(!super::is_safe_to_reveal("OPENAI_COMPAT_API_KEY"));
     // Keys NOT in the allowlist — masked regardless of naming pattern.
     assert!(!super::is_safe_to_reveal("my_api_key"));
     assert!(!super::is_safe_to_reveal("GITHUB_TOKEN"));

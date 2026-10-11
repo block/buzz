@@ -98,21 +98,21 @@ impl Db {
         authorized_source: Option<Uuid>,
         relay_keys: &Keys,
     ) -> Result<ArtifactOutcome> {
-        let mut tx = self.begin_event_write_transaction().await?;
+        let mut tx = self.begin_event_write_transaction(community).await?;
         sqlx::query("SET LOCAL statement_timeout='5s'")
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
         // A coordinate lock handles the missing-row create race as well as edits.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!("artifact:{}:{}", community.as_uuid(), env.id))
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
         let duplicate: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND event_id=$2)",
         )
         .bind(community.as_uuid())
         .bind(event.id.as_bytes().as_slice())
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await?;
         if duplicate {
             return Ok(ArtifactOutcome::Duplicate);
@@ -122,7 +122,7 @@ impl Db {
         )
         .bind(community.as_uuid())
         .bind(env.id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(tx.conn())
         .await?;
         let source = head.as_ref().map(|h| h.get::<Uuid, _>("channel_id"));
         let old_root = head
@@ -163,7 +163,7 @@ impl Db {
         if head.is_none() || env.root != old_root || source != Some(env.home) {
             if let Some(root) = &env.root {
                 let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2 AND channel_id=$3 AND deleted_at IS NULL AND kind IN (9,40002,45001,45003))")
-                    .bind(community.as_uuid()).bind(root).bind(env.home).fetch_one(&mut *tx).await?;
+                    .bind(community.as_uuid()).bind(root).bind(env.home).fetch_one(tx.conn()).await?;
                 if !exists {
                     return Ok(ArtifactOutcome::Rejected(
                         "root must be an existing conversation anchor in home",
@@ -177,24 +177,18 @@ impl Db {
         .bind(community.as_uuid())
         .bind(event.id.as_bytes().as_slice())
         .bind(env.id)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
         sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted")
-            .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(&mut *tx).await?;
+            .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(tx.conn()).await?;
         let (stored, _) =
-            crate::event::insert_event_in_transaction(&mut tx, community, event, Some(env.home))
-                .await?;
-        crate::insert_mentions_in_transaction(&mut tx, community, event, Some(env.home)).await?;
+            crate::event::insert_event_in_transaction(&mut tx, event, Some(env.home)).await?;
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(env.home)).await?;
         let mut accepted = vec![stored];
         if let (ArtifactOp::Move, Some(source), Some(prev)) = (env.op, source, &env.prev) {
             let removal = removal_marker(relay_keys, env.id, source, prev)?;
-            let (stored, _) = crate::event::insert_event_in_transaction(
-                &mut tx,
-                community,
-                &removal,
-                Some(source),
-            )
-            .await?;
+            let (stored, _) =
+                crate::event::insert_event_in_transaction(&mut tx, &removal, Some(source)).await?;
             accepted.push(stored);
         }
         tx.commit().await?;

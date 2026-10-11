@@ -9,19 +9,22 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show
+        MatrixUtils,
         RenderParagraph,
         RenderRepaintBoundary,
         ScrollDirection,
-        SemanticsAction;
+        SemanticsAction,
+        SemanticsNode;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -35,7 +38,6 @@ import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart'
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
-import 'package:buzz/features/channels/members_sheet.dart';
 import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
@@ -44,8 +46,10 @@ import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_actions.dart';
+import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -71,14 +75,15 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
-import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
-import 'package:buzz/shared/widgets/lucide_star_icon.dart';
-import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
+import 'package:buzz/shared/widgets/tabler_star_icon.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'thread_title_capsule_cases.dart';
+part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
+part 'channel_detail_page_test/action_row_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -261,6 +266,7 @@ Widget _buildTestable({
   List<NostrEvent> huddleLifecycle = const [],
   String? huddleCurrentPubkey,
   http.Client? mediaClient,
+  VideoPreviewFrameLoader? videoPreviewLoader,
   Widget? home,
 }) {
   final resolvedChannel = channel ?? _testChannel;
@@ -272,6 +278,8 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
+      if (videoPreviewLoader != null)
+        videoPreviewFrameLoaderProvider.overrideWithValue(videoPreviewLoader),
       channelMessagesProvider(
         _channelId,
       ).overrideWith(() => fakeMessagesNotifier),
@@ -493,8 +501,11 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  _loadingReviewTests();
   threadReplyRefreshTests();
+  threadTitleCapsuleTests();
   presenceTests();
+  actionRowTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -569,7 +580,7 @@ void main() {
               };
               final keys = [
                 first,
-                second.toUpperCase(),
+                second,
                 sibling,
                 if (bystander != null) 'd' * 64,
               ];
@@ -708,12 +719,8 @@ void main() {
               label,
             );
             expect(
-              tester
-                  .widget<MaskedAvatarBadge>(
-                    find.byKey(const ValueKey('dm-header-avatar')),
-                  )
-                  .badge,
-              label == 'Unknown' ? isNull : isNotNull,
+              find.byKey(const ValueKey('dm-header-avatar')),
+              findsNothing,
             );
           }
           if (label != 'Offline') expect(find.text('Offline'), findsNothing);
@@ -757,7 +764,7 @@ void main() {
       });
     }
 
-    testWidgets('uses the shared 32px masked presence avatar in DM headers', (
+    testWidgets('centers a tappable DM header without an avatar', (
       tester,
     ) async {
       final dmChannel = Channel(
@@ -786,26 +793,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
-      final avatar = tester.widget<MaskedAvatarBadge>(avatarFinder);
-      expect(tester.getSize(avatarFinder), const Size.square(32));
-      expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
-      expect(avatar.badge, isNotNull);
-      expect(
-        tester
-            .widget<ClipRRect>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(ClipRRect),
-              ),
-            )
-            .borderRadius,
-        BorderRadius.circular(16),
-      );
-      expect(
-        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
       final name = tester.widget<Text>(
         find.byKey(const ValueKey('dm-header-name')),
       );
@@ -813,21 +801,27 @@ void main() {
         find.byKey(const ValueKey('dm-header-presence')),
       );
       expect(name.style?.fontSize, 16);
-      expect(name.style?.fontWeight, FontWeight.w500);
+      expect(name.style?.fontWeight, FontWeight.w600);
       expect(presence.style?.fontSize, 14);
       expect(presence.style?.fontWeight, FontWeight.w400);
-      // Named counterpart: the avatar initial comes from the authored name.
-      expect(_dmHeaderAvatarInitial(tester), 'A');
+      expect(
+        tester.getCenter(find.byKey(const ValueKey('dm-header-text-stack'))).dx,
+        moreOrLessEquals(
+          tester.view.physicalSize.width / tester.view.devicePixelRatio / 2,
+        ),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      Navigator.of(tester.element(find.byType(ChannelDetailsPage))).pop();
+      await tester.pumpAndSettle();
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
     });
 
-    testWidgets('keys unnamed DM header avatars to the hex participant key', (
-      tester,
-    ) async {
-      // A valid unnamed counterpart: the compact-npub label would render `N`
-      // for every unnamed DM, so the header avatar stays keyed to the hex
-      // public key instead.
+    testWidgets('labels unnamed DMs with the participant key', (tester) async {
       const a11ce =
           'a11ce00000000000000000000000000000000000000000000000000000000000';
       final dmChannel = Channel(
@@ -853,19 +847,10 @@ void main() {
         tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
         shortPubkey(a11ce),
       );
-      // The named counterpart in the test above keeps its authored initial
-      // ('A' from 'Alice'); this unnamed one gets the hex-key-derived 'A',
-      // not the `N` its npub label starts with.
-      expect(_dmHeaderAvatarInitial(tester), 'A');
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
     });
 
-    testWidgets('keys DM header fallback avatars to the non-self counterpart', (
-      tester,
-    ) async {
-      // Member order does not guarantee the counterpart is listed first:
-      // the current user (self, from the fake profile) comes FIRST, so an
-      // avatar keyed to the first participant would render the current
-      // user's initial while the header label names the counterpart.
+    testWidgets('labels DMs with the non-self counterpart', (tester) async {
       const b0b =
           'b0b0000000000000000000000000000000000000000000000000000000000000';
       final dmChannel = Channel(
@@ -887,17 +872,14 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Label and avatar agree on the counterpart's key: the compact npub
-      // names the unnamed counterpart, and the avatar initial is keyed to
-      // that same hex key — never the current user's `S`.
       expect(
         tester.widget<Text>(find.byKey(const ValueKey('dm-header-name'))).data,
         shortPubkey(b0b),
       );
-      expect(_dmHeaderAvatarInitial(tester), 'B');
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
     });
 
-    testWidgets('uses a fallback squircle for bot-role DM participants', (
+    testWidgets('omits the header avatar for bot-role DM participants', (
       tester,
     ) async {
       final dmChannel = Channel(
@@ -924,33 +906,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
-      expect(
-        tester
-            .widget<ClipRRect>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(ClipRRect),
-              ),
-            )
-            .borderRadius,
-        BorderRadius.circular(9.6),
-      );
-      expect(
-        tester
-            .widget<AvatarImageContent>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(AvatarImageContent),
-              ),
-            )
-            .imageUrl,
-        isNull,
-      );
-      expect(
-        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
     });
 
     testWidgets('hides the Huddle action in a one-to-one agent DM', (
@@ -985,18 +941,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
-      expect(
-        tester
-            .widget<ClipRRect>(
-              find.descendant(
-                of: avatarFinder,
-                matching: find.byType(ClipRRect),
-              ),
-            )
-            .borderRadius,
-        BorderRadius.circular(9.6),
-      );
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
       expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsNothing);
     });
@@ -1863,7 +1808,9 @@ void main() {
       },
     );
 
-    testWidgets('keeps the Members action for group DMs', (tester) async {
+    testWidgets('opens group DM members from the centered title', (
+      tester,
+    ) async {
       final dmChannel = Channel(
         id: _channelId,
         name: 'DM',
@@ -1882,6 +1829,15 @@ void main() {
         _buildTestable(
           messages: const [],
           channel: dmChannel,
+          members: ['self', 'alice', 'bob']
+              .map(
+                (pubkey) => ChannelMember(
+                  pubkey: pubkey,
+                  role: 'member',
+                  joinedAt: DateTime(2025),
+                ),
+              )
+              .toList(),
           knownAgentPubkeys: const {'alice'},
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
@@ -1891,8 +1847,24 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byTooltip('View members'), findsOneWidget);
+      expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
+      expect(find.byKey(const ValueKey('dm-header-avatar')), findsNothing);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('dm-header-presence')))
+            .data,
+        '3 members',
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('channel-details-members-card')),
+        findsOneWidget,
+      );
     });
 
     testWidgets(
@@ -1992,91 +1964,56 @@ void main() {
       },
     );
 
-    testWidgets('debounces same-slot reconnect skeletons before revealing', (
+    testWidgets('uses known media shapes in the reconnect shimmer', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
       await tester.pumpWidget(
         _buildTestable(
           messages: [
-            _textMsg(id: 'msg1', pubkey: 'alice', content: 'Existing message'),
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content:
+                  'Existing message\n![photo](https://example.com/loading.jpg)',
+              extraTags: [
+                [
+                  'imeta',
+                  'url https://example.com/loading.jpg',
+                  'm image/jpeg',
+                  'dim 1200x2400',
+                ],
+              ],
+            ),
           ],
           relaySessionNotifier: relaySession,
-          readStateNotifier: _SynchronousReadStateNotifier(
-            const ReadStateState(
-              isReady: false,
-              pubkey: 'self',
-              contexts: {},
-              version: 0,
-            ),
-          ),
         ),
       );
       await tester.pump();
-
-      expect(find.text('Existing message'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 3));
       expect(
         tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
-        isFalse,
+        isTrue,
       );
-
-      await tester.pump(const Duration(milliseconds: 1999));
-      expect(
-        tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
-        isFalse,
-      );
-
-      await tester.pump(const Duration(milliseconds: 1));
-      await tester.pump();
-      final skeleton = find.byKey(
-        const Key('channel-detail-connection-skeleton'),
-      );
-      expect(skeleton, findsOneWidget);
-      expect(
-        find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
-        findsWidgets,
-      );
-      expect(find.text('Existing message'), findsOneWidget);
-      expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(
         tester
-            .widget<Opacity>(
-              find.byKey(const Key('skeleton-reveal-placeholder')),
-            )
+            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
             .opacity,
-        1,
+        0,
       );
-
+      expect(
+        find.byKey(
+          const ValueKey(
+            'message-skeleton-image:https://example.com/loading.jpg',
+          ),
+        ),
+        findsOneWidget,
+      );
       relaySession.connect();
-      await tester.pump();
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(
         tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
         isFalse,
-      );
-      await tester.pump(const Duration(milliseconds: 200));
-
-      expect(
-        tester
-            .widget<Opacity>(
-              find.byKey(const Key('skeleton-reveal-placeholder')),
-            )
-            .opacity,
-        closeTo(0.5, 0.01),
-      );
-      expect(
-        tester
-            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
-            .opacity,
-        closeTo(0.5, 0.01),
-      );
-
-      await tester.pump(const Duration(milliseconds: 200));
-      expect(
-        tester
-            .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
-            .opacity,
-        1,
       );
     });
 
@@ -2119,7 +2056,7 @@ void main() {
       );
     });
 
-    testWidgets('keeps forum content visible with reconnect shimmer feedback', (
+    testWidgets('keeps loaded forum content visible during reconnect', (
       tester,
     ) async {
       final relaySession = _ReconnectingRelaySession();
@@ -2152,12 +2089,7 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 1));
       await tester.pump();
-      final skeleton = find.byKey(const Key('forum-connection-skeleton'));
-      expect(skeleton, findsOneWidget);
-      expect(
-        find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
-        findsWidgets,
-      );
+      expect(find.byKey(const Key('forum-connection-skeleton')), findsNothing);
       expect(find.byType(SkeletonReveal), findsNothing);
     });
 
@@ -2345,7 +2277,7 @@ void main() {
         expect(
           find.descendant(
             of: aliceRow,
-            matching: find.byIcon(LucideIcons.chevronRight),
+            matching: find.byIcon(BuzzIcons.chevronRight),
           ),
           findsOneWidget,
         );
@@ -2410,7 +2342,7 @@ void main() {
       expect(find.text('Members unavailable'), findsOneWidget);
     });
 
-    testWidgets('small channel keeps member administration reachable', (
+    testWidgets('small channel shows all members without a See all row', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -2449,7 +2381,16 @@ void main() {
       );
       expect(addRow, findsOneWidget);
       expect(memberRow, findsOneWidget);
-      expect(seeAllRow, findsOneWidget);
+      expect(seeAllRow, findsNothing);
+      await tester.tap(
+        find.byKey(const ValueKey('channel-details-member-alice')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(UserProfileSheet), findsOneWidget);
+      expect(find.text('Make channel admin'), findsOneWidget);
+      expect(find.text('Remove from channel'), findsOneWidget);
+      Navigator.of(tester.element(find.byType(UserProfileSheet))).pop();
+      await tester.pumpAndSettle();
       expect(
         tester.widget<Text>(find.text('Add members')).style,
         Theme.of(tester.element(addRow)).textTheme.bodyLarge,
@@ -2458,17 +2399,6 @@ void main() {
         tester.getTopLeft(addRow).dy,
         lessThan(tester.getTopLeft(memberRow).dy),
       );
-
-      await tester.ensureVisible(seeAllRow);
-      await tester.pumpAndSettle();
-      await tester.tap(seeAllRow);
-      await tester.pumpAndSettle();
-      expect(find.byType(MembersSheet), findsOneWidget);
-
-      await tester.tap(find.byIcon(LucideIcons.ellipsis));
-      await tester.pumpAndSettle();
-      expect(find.text('Role'), findsOneWidget);
-      expect(find.text('Remove from channel'), findsOneWidget);
     });
 
     testWidgets('action tiles expose button and enabled semantics', (
@@ -2529,16 +2459,16 @@ void main() {
           const ValueKey('channel-details-mute-action'),
         );
         expect(find.text('Star'), findsOneWidget);
-        var star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        var star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
         expect(star.filled, isFalse);
         expect(find.text('Mute'), findsOneWidget);
-        expect(find.byIcon(LucideIcons.bellOff), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
 
         await tester.tap(starAction);
         await tester.pump();
 
         expect(find.text('Unstar'), findsOneWidget);
-        star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
         expect(star.filled, isTrue);
         expect(star.color, AppTheme.light().colorScheme.primary);
 
@@ -2546,7 +2476,7 @@ void main() {
         await tester.pump();
 
         expect(find.text('Unmute'), findsOneWidget);
-        final activeBell = tester.widget<Icon>(find.byIcon(LucideIcons.bell));
+        final activeBell = tester.widget<Icon>(find.byIcon(BuzzIcons.bell));
         expect(activeBell.color, AppTheme.light().colorScheme.primary);
 
         await tester.tap(starAction);
@@ -2555,9 +2485,9 @@ void main() {
 
         expect(find.text('Star'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
-        star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
         expect(star.filled, isFalse);
-        expect(find.byIcon(LucideIcons.bellOff), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
       },
     );
 
@@ -2679,10 +2609,7 @@ void main() {
         findsNothing,
       );
       expect(
-        find.descendant(
-          of: seeAllRow,
-          matching: find.byIcon(LucideIcons.users),
-        ),
+        find.descendant(of: seeAllRow, matching: find.byIcon(BuzzIcons.users)),
         findsNothing,
       );
       final firstMemberRow = previews.first;
@@ -2727,11 +2654,24 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(seeAllRow);
       await tester.pumpAndSettle();
+      // Verify each group when it enters the lazy sheet viewport.
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is AppListCard && widget.label == 'People · 6',
+        ),
+        findsOneWidget,
+      );
       await tester.drag(
         find.byKey(const ValueKey('members-sheet-list')),
         const Offset(0, -500),
       );
       await tester.pumpAndSettle();
+      expect(
+        find.byWidgetPredicate(
+          (widget) => widget is AppListCard && widget.label == 'Agents · 1',
+        ),
+        findsOneWidget,
+      );
       expect(find.text('Agent'), findsOneWidget);
       expect(find.text('Bot'), findsNothing);
     });
@@ -3122,7 +3062,7 @@ void main() {
 
       final sheet = find.byType(BottomSheet).last;
       expect(find.byType(BottomSheet), findsOneWidget);
-      expect(tester.getSize(sheet).height, lessThanOrEqualTo(720));
+      expect(tester.getSize(sheet).height, greaterThan(640));
 
       final sheetTop = tester.getTopLeft(sheet).dy;
       await tester.dragFrom(
@@ -3131,7 +3071,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Manage channel'), findsNothing);
+      expect(find.text('Edit channel'), findsNothing);
     });
 
     testWidgets('Edit updates name and description without legacy fields', (
@@ -3173,28 +3113,9 @@ void main() {
       expect(find.text('Leave channel'), findsNothing);
       expect(find.text('Topic'), findsNothing);
       expect(find.text('Purpose'), findsNothing);
-      expect(find.text('Canvas'), findsOneWidget);
+      expect(find.text('Add Canvas'), findsOneWidget);
 
-      final nameField = tester.widget<TextField>(
-        find.byKey(const ValueKey('manage-channel-name')),
-      );
-      final descriptionField = tester.widget<TextField>(
-        find.byKey(const ValueKey('manage-channel-description')),
-      );
-      expect(nameField.decoration?.labelText, isNull);
-      expect(nameField.decoration?.hintText, 'Channel name');
-      expect(nameField.decoration?.border, InputBorder.none);
-      expect(descriptionField.decoration?.labelText, isNull);
-      expect(descriptionField.decoration?.hintText, 'Description');
-      expect(descriptionField.decoration?.border, InputBorder.none);
-      final nameOutline = tester.getRect(
-        find.byKey(const ValueKey('manage-channel-name-outline')),
-      );
-      final descriptionOutline = tester.getRect(
-        find.byKey(const ValueKey('manage-channel-description-outline')),
-      );
-      expect(descriptionOutline.top - nameOutline.bottom, Grid.xs);
-
+      expect(find.text('Edit channel'), findsOneWidget);
       await tester.enterText(
         find.byKey(const ValueKey('manage-channel-name')),
         '  #renamed  ',
@@ -3208,7 +3129,6 @@ void main() {
         find.byKey(const ValueKey('manage-channel-save-details')),
       );
       await tester.pumpAndSettle();
-
       expect(updatedName, 'renamed');
       expect(updatedDescription, 'A new description');
       expect(find.text('renamed'), findsOneWidget);
@@ -4010,7 +3930,7 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(find.byIcon(LucideIcons.chevronRight), findsNothing);
+      expect(find.byIcon(BuzzIcons.chevronRight), findsNothing);
       final replyAvatars = find.byType(SmallAvatar);
       expect(replyAvatars, findsNWidgets(2));
       for (final avatar in replyAvatars.evaluate()) {
@@ -4074,6 +3994,62 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('channel catch-up hides the oldest unread jump', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      // The channel mark is older than msg21, but the web app's catch-up
+      // mark covers it.
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020, 'activity:$_channelId': 1039},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
+    });
+
     testWidgets('jumps to the oldest unread with compact inverse controls', (
       tester,
     ) async {
@@ -4130,7 +4106,7 @@ void main() {
       expect(
         find.descendant(
           of: unreadButton,
-          matching: find.byIcon(LucideIcons.chevronUp),
+          matching: find.byIcon(BuzzIcons.chevronUp),
         ),
         findsOneWidget,
       );
@@ -4158,7 +4134,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Latest'), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowDown), findsOneWidget);
       expect(find.byTooltip('Jump to latest message'), findsOneWidget);
     });
 
@@ -5049,7 +5025,7 @@ void main() {
         ),
       );
       expect(find.text('Latest'), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowDown), findsOneWidget);
       for (final container in tester.widgetList<Container>(
         find.descendant(
           of: find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -6021,7 +5997,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-retry')),
-            matching: find.byIcon(LucideIcons.refreshCw),
+            matching: find.byIcon(BuzzIcons.refreshCw),
           ),
           findsNothing,
         );
@@ -6081,7 +6057,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-retry')),
-            matching: find.byIcon(LucideIcons.settings),
+            matching: find.byIcon(BuzzIcons.settings),
           ),
           findsOneWidget,
         );
@@ -6135,11 +6111,11 @@ void main() {
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('channel-huddle-button')),
-          matching: find.byIcon(LucideIcons.headphones),
+          matching: find.byIcon(BuzzIcons.headphones),
         ),
         findsOneWidget,
       );
-      expect(find.byIcon(LucideIcons.headphoneOff), findsNothing);
+      expect(find.byIcon(BuzzIcons.headphoneOff), findsNothing);
     });
 
     testWidgets('failed admission cannot publish Huddle leave lifecycle', (
@@ -6828,7 +6804,7 @@ void main() {
           tester.getSize(find.byType(CircleAvatar).first),
           const Size.square(104),
         );
-        expect(find.byIcon(LucideIcons.userRound), findsNWidgets(3));
+        expect(find.byIcon(BuzzIcons.userRound), findsNWidgets(3));
         await tester.tap(
           find.byKey(const ValueKey('huddle-participant-avatar-desktop')),
         );
@@ -6998,17 +6974,17 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-speaker-toggle')),
-            matching: find.byIcon(LucideIcons.volume2),
+            matching: find.byIcon(BuzzIcons.volume2),
           ),
           findsOneWidget,
         );
         final speakerIcon = find.descendant(
           of: find.byKey(const ValueKey('huddle-speaker-toggle')),
-          matching: find.byIcon(LucideIcons.volume2),
+          matching: find.byIcon(BuzzIcons.volume2),
         );
         final leaveIcon = find.descendant(
           of: find.byKey(const ValueKey('huddle-leave')),
-          matching: find.byIcon(LucideIcons.phoneOff),
+          matching: find.byIcon(BuzzIcons.phoneOff),
         );
         expect(tester.widget<Icon>(speakerIcon).size, 28);
         expect(tester.widget<Icon>(leaveIcon).size, 28);
@@ -7041,7 +7017,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-speaker-toggle')),
-            matching: find.byIcon(LucideIcons.volume2),
+            matching: find.byIcon(BuzzIcons.volume2),
           ),
           findsOneWidget,
         );
@@ -7075,7 +7051,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-mute-toggle')),
-            matching: find.byIcon(LucideIcons.mic),
+            matching: find.byIcon(BuzzIcons.mic),
           ),
           findsOneWidget,
         );
@@ -7084,7 +7060,7 @@ void main() {
               .widget<Icon>(
                 find.descendant(
                   of: find.byKey(const ValueKey('huddle-mute-toggle')),
-                  matching: find.byIcon(LucideIcons.mic),
+                  matching: find.byIcon(BuzzIcons.mic),
                 ),
               )
               .size,
@@ -7097,7 +7073,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-mute-toggle')),
-            matching: find.byIcon(LucideIcons.micOff),
+            matching: find.byIcon(BuzzIcons.micOff),
           ),
           findsOneWidget,
         );
@@ -7118,7 +7094,7 @@ void main() {
 
         final emojiIcon = find.descendant(
           of: find.byKey(const ValueKey('huddle-emoji-reactions')),
-          matching: find.byIcon(LucideIcons.smilePlus),
+          matching: find.byIcon(BuzzIcons.smilePlus),
         );
         expect(emojiIcon, findsOneWidget);
         expect(tester.widget<Icon>(emojiIcon).size, 28);
@@ -7190,14 +7166,14 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-drawer-expand')),
-            matching: find.byIcon(LucideIcons.chevronUp),
+            matching: find.byIcon(BuzzIcons.chevronUp),
           ),
           findsOneWidget,
         );
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-drawer-mute-toggle')),
-            matching: find.byIcon(LucideIcons.micOff),
+            matching: find.byIcon(BuzzIcons.micOff),
           ),
           findsOneWidget,
         );
@@ -9447,11 +9423,7 @@ void main() {
             messages: [
               _systemMsg(
                 id: 'sys-accessible',
-                payload: {
-                  'type': 'topic_changed',
-                  'actor': 'alice',
-                  'topic': 'Release planning',
-                },
+                payload: {'type': 'member_left', 'actor': 'alice'},
                 createdAt:
                     DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/
                     1000,
@@ -9502,7 +9474,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice removed Bob from the channel'), findsOneWidget);
+      expect(find.text('Alice'), findsOneWidget);
+      expect(findRichText('removed '), findsOneWidget);
+      expect(find.widgetWithText(MessageMentionPill, 'Bob'), findsOneWidget);
     });
 
     testWidgets('renders topic_changed system event', (tester) async {
@@ -9528,7 +9502,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.text('Alice changed the topic to "Release planning"'),
+        findRichText('changed the topic to "Release planning"'),
         findsOneWidget,
       );
     });
@@ -9556,7 +9530,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.text('Alice changed the purpose to "Team standup notes"'),
+        findRichText('changed the purpose to "Team standup notes"'),
         findsOneWidget,
       );
     });
@@ -9624,7 +9598,7 @@ void main() {
       // Only the text message should render, unknown system event is skipped.
       expect(findRichText('Hello'), findsOneWidget);
       // No system message row rendered for unknown type.
-      expect(find.byIcon(LucideIcons.arrowLeftRight), findsNothing);
+      expect(find.byIcon(BuzzIcons.arrowLeftRight), findsNothing);
     });
   });
 
@@ -9878,13 +9852,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
 
       await tester.tap(find.text('Message #general'));
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsOneWidget);
-      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
     });
 
     testWidgets('shows hint text', (tester) async {
@@ -10041,100 +10015,104 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
-    testWidgets('native DM header follows live identity avatar and presence', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      final relay = PresenceTestRelay();
-      final dm = Channel(
-        id: _channelId,
-        name: 'DM',
-        channelType: 'dm',
-        visibility: 'private',
-        description: '',
-        createdBy: 'self',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-        participants: const ['Self', 'Alice'],
-        participantPubkeys: const ['self', 'alice'],
-        isMember: true,
-      );
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: const [],
-          channel: dm,
-          relaySessionNotifier: relay,
-        ),
-      );
-      await tester.pumpAndSettle();
-      final finder = find.byWidgetPredicate(
-        (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
-      );
-      final view = tester.widget<UiKitView>(finder);
-      Map<Object?, Object?> payload = view.creationParams! as Map;
-      expect(payload['subtitle'], 'Unknown');
-      expect(payload['titlePresenceColor'], isNull);
-      expect(payload['titleEnabled'], false);
-      expect(payload['titleAvatar'], containsPair('avatarInitial', 'A'));
-      const channel = MethodChannel('buzz/ios_navigation_bar/197');
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-        call,
-      ) async {
-        if (call.method == 'configure') payload = call.arguments as Map;
-        return null;
-      });
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    testWidgets(
+      'native DM header keeps live name and presence without an avatar',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final relay = PresenceTestRelay();
+        final dm = Channel(
+          id: _channelId,
+          name: 'DM',
+          channelType: 'dm',
+          visibility: 'private',
+          description: '',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 2,
+          participants: const ['Self', 'Alice'],
+          participantPubkeys: const ['self', 'alice'],
+          isMember: true,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: dm,
+            relaySessionNotifier: relay,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final finder = find.byWidgetPredicate(
+          (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
+        );
+        final view = tester.widget<UiKitView>(finder);
+        Map<Object?, Object?> payload = view.creationParams! as Map;
+        expect(payload['subtitle'], 'Unknown');
+        expect(payload['titlePresenceColor'], isNull);
+        expect(payload['titleEnabled'], isTrue);
+        expect(
+          (payload['actions'] as List).where(
+            (action) => (action as Map)['symbol'] == 'ellipsis',
+          ),
+          isEmpty,
+        );
+        expect(payload['titleAvatar'], isNull);
+        const channel = MethodChannel('buzz/ios_navigation_bar/197');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           channel,
-          null,
-        ),
-      );
-      view.onPlatformViewCreated!(197);
-      await tester.pump();
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(ChannelDetailPage)),
-      );
-      final users =
-          container.read(userCacheProvider.notifier) as _FakeUserCacheNotifier;
-      users.replace(
-        const UserProfile(
-          pubkey: 'alice',
-          displayName: 'Alicia',
-          avatarUrl: 'https://example.com/alicia.png',
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(payload['title'], 'Alicia');
-      expect(
-        payload['titleAvatar'],
-        containsPair('imageUrl', 'https://example.com/alicia.png'),
-      );
-      expect(payload['titleAvatar'], containsPair('avatarInitial', 'A'));
-      expect(relay.queries.single.authors, ['alice']);
-      relay.results.removeAt(0).complete([
-        presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
-      ]);
-      await tester.pumpAndSettle();
-      expect(payload['subtitle'], 'Online');
-      final onlineColor = payload['titlePresenceColor'];
-      expect(onlineColor, isNotNull);
-      relay.emit(presenceEvent('alice', 'away', timestamp: 21));
-      await tester.pumpAndSettle();
-      expect(payload['subtitle'], 'Away');
-      expect(payload['titlePresenceColor'], isNot(onlineColor));
-      relay.emit(presenceEvent('alice', 'offline', timestamp: 22));
-      await tester.pumpAndSettle();
-      expect(payload['subtitle'], 'Offline');
-      users.replace(const UserProfile(pubkey: 'alice', displayName: 'Bob'));
-      await tester.pumpAndSettle();
-      expect(payload['title'], 'Bob');
-      expect(payload['titleAvatar'], containsPair('avatarInitial', 'B'));
-      expect(payload['titleAvatar'], containsPair('imageUrl', null));
+          (call) async {
+            if (call.method == 'configure') payload = call.arguments as Map;
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        view.onPlatformViewCreated!(197);
+        await tester.pump();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ChannelDetailPage)),
+        );
+        final users =
+            container.read(userCacheProvider.notifier)
+                as _FakeUserCacheNotifier;
+        users.replace(
+          const UserProfile(
+            pubkey: 'alice',
+            displayName: 'Alicia',
+            avatarUrl: 'https://example.com/alicia.png',
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(payload['title'], 'Alicia');
+        expect(payload['titleAvatar'], isNull);
+        expect(relay.queries.single.authors, ['alice']);
+        relay.results.removeAt(0).complete([
+          presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+        ]);
+        await tester.pumpAndSettle();
+        expect(payload['subtitle'], 'Online');
+        final onlineColor = payload['titlePresenceColor'];
+        expect(onlineColor, isNotNull);
+        relay.emit(presenceEvent('alice', 'away', timestamp: 21));
+        await tester.pumpAndSettle();
+        expect(payload['subtitle'], 'Away');
+        expect(payload['titlePresenceColor'], isNot(onlineColor));
+        relay.emit(presenceEvent('alice', 'offline', timestamp: 22));
+        await tester.pumpAndSettle();
+        expect(payload['subtitle'], 'Offline');
+        users.replace(const UserProfile(pubkey: 'alice', displayName: 'Bob'));
+        await tester.pumpAndSettle();
+        expect(payload['title'], 'Bob');
+        expect(payload['titleAvatar'], isNull);
 
-      await tester.pumpWidget(const SizedBox());
-      debugDefaultTargetPlatformOverride = null;
-    });
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
 
     testWidgets('native DM title disambiguates live participant namesakes', (
       tester,
@@ -10193,7 +10171,7 @@ void main() {
     });
 
     for (final dm in [false, true]) {
-      testWidgets('native ephemeral header retains expiry disclosure dm=$dm', (
+      testWidgets('native temporary title updates retention text dm=$dm', (
         tester,
       ) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -10233,8 +10211,9 @@ void main() {
         Map payload = view.creationParams! as Map;
         expect(
           payload['ephemeralLabel'],
-          'Ephemeral channel. Cleans up after 1 hour of inactivity.',
+          contains('after 1 hour of inactivity'),
         );
+        expect(payload['subtitle'], startsWith('Temporary · 1h TTL'));
         const bridge = MethodChannel('buzz/ios_navigation_bar/297');
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
@@ -10256,92 +10235,141 @@ void main() {
         );
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
-        expect(
-          payload['ephemeralLabel'],
-          'Ephemeral channel. Cleanup is due now.',
-        );
+        expect(payload['ephemeralLabel'], contains('Cleanup is due now'));
+        expect(payload['subtitle'], startsWith('Temporary · Cleanup due'));
         current = conversation();
         container.invalidate(channelDetailsProvider(_channelId));
         await tester.pumpAndSettle();
         expect(payload['ephemeralLabel'], isNull);
+        expect(payload['subtitle'], isNot(contains('Temporary')));
         await tester.pumpWidget(const SizedBox());
         debugDefaultTargetPlatformOverride = null;
       });
     }
 
-    testWidgets('native group DM members follows working-agent activity', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      final typing = _FakeTypingNotifier([]);
-      final dm = Channel(
-        id: _channelId,
-        name: 'Group',
-        channelType: 'dm',
-        visibility: 'private',
-        description: '',
-        createdBy: 'self',
-        createdAt: DateTime(2025),
-        memberCount: 3,
-        participantPubkeys: const ['self', 'alice', 'bot'],
-        isMember: true,
+    for (final participants in [
+      const ['self', 'alice'],
+      const ['self', 'alice', 'bob'],
+    ]) {
+      testWidgets(
+        'native DM title opens conversation details for ${participants.length} members',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          final dm = Channel(
+            id: _channelId,
+            name: 'DM',
+            channelType: 'dm',
+            visibility: 'private',
+            description: '',
+            createdBy: 'self',
+            createdAt: DateTime(2025),
+            memberCount: participants.length,
+            participants: participants,
+            participantPubkeys: participants,
+            isMember: true,
+          );
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: const [],
+              channel: dm,
+              huddleCurrentPubkey: 'self',
+              members: [
+                for (final pubkey in participants)
+                  ChannelMember(
+                    pubkey: pubkey,
+                    role: 'member',
+                    joinedAt: DateTime(2025),
+                  ),
+              ],
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+          final view = tester.widget<UiKitView>(
+            find.byWidgetPredicate(
+              (widget) =>
+                  widget is UiKitView &&
+                  widget.viewType == 'buzz/ios_navigation_bar',
+            ),
+          );
+          expect(view.creationParams, containsPair('titleEnabled', true));
+          final header = view.creationParams! as Map;
+          if (participants.length > 2) {
+            expect(header['subtitle'], '3 members');
+            expect(header['titlePresenceColor'], isNull);
+          } else {
+            expect(header['subtitle'], 'Unknown');
+          }
+          expect(
+            ((view.creationParams! as Map)['actions'] as List)
+                .cast<Map>()
+                .where(
+                  (action) =>
+                      action['symbol'] == 'person.2' ||
+                      action['symbol'] == 'ellipsis',
+                ),
+            isEmpty,
+          );
+          const bridge = MethodChannel('buzz/ios_navigation_bar/497');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            bridge,
+            (_) async => null,
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(bridge, null),
+          );
+          view.onPlatformViewCreated!(497);
+          await tester.pump();
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            bridge.name,
+            bridge.codec.encodeMethodCall(const MethodCall('action', 'title')),
+            (_) {},
+          );
+          await tester.pumpAndSettle();
+          expect(find.byType(ChannelDetailsPage), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('channel-details-edit-action')),
+            findsNothing,
+          );
+          expect(
+            find.byKey(const ValueKey('channel-details-members-row')),
+            findsNothing,
+          );
+          expect(
+            tester
+                .widget<ChannelDetailsPage>(find.byType(ChannelDetailsPage))
+                .channel
+                .id,
+            dm.id,
+          );
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('channel-details-name')),
+              matching: find.text(
+                participants.length == 2 ? 'Alice' : 'Alice, Bob',
+              ),
+            ),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('dm-details-avatar')),
+            participants.length == 2 ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.byKey(const ValueKey('channel-details-members-card')),
+            participants.length == 2 ? findsNothing : findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox());
+          debugDefaultTargetPlatformOverride = null;
+        },
       );
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: const [],
-          channel: dm,
-          typingNotifier: typing,
-          members: [
-            ChannelMember(pubkey: 'bot', role: 'bot', joinedAt: DateTime(2025)),
-          ],
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-      final view = tester.widget<UiKitView>(
-        find.byWidgetPredicate(
-          (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
-        ),
-      );
-      Map payload = view.creationParams! as Map;
-      Map membersAction() => (payload['actions'] as List)
-          .cast<Map>()
-          .singleWhere((a) => a['label'] == 'View members');
-      expect(membersAction()['activityColor'], isNull);
-      const bridge = MethodChannel('buzz/ios_navigation_bar/397');
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
-        call,
-      ) async {
-        if (call.method == 'configure') payload = call.arguments as Map;
-        return null;
-      });
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          bridge,
-          null,
-        ),
-      );
-      view.onPlatformViewCreated!(397);
-      await tester.pump();
-      typing.setEntries([
-        TypingEntry(
-          pubkey: 'bot',
-          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 60000,
-        ),
-      ]);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-      expect(membersAction()['activityColor'], isNotNull);
-      expect(membersAction()['activityLabel'], 'Agent working');
-      typing.setEntries([]);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-      expect(membersAction()['activityColor'], isNull);
-      expect(membersAction()['activityLabel'], isNull);
-      await tester.pumpWidget(const SizedBox());
-      debugDefaultTargetPlatformOverride = null;
-    });
+    }
 
     testWidgets('native channel header preserves members settings and Huddle', (
       tester,
@@ -10513,33 +10541,92 @@ void main() {
             return;
           }
 
-          final backRect = platform == TargetPlatform.iOS
-              ? tester.getRect(
-                  find.byKey(const ValueKey('channel-ios-glass-back')),
-                )
-              : tester.getRect(find.byTooltip('Back'));
-          final avatarRect = tester.getRect(
-            find.byKey(const ValueKey('channel-header-avatar')),
-          );
-          final titleSpacing = avatarRect.left - backRect.right;
           final title = tester.renderObject<RenderParagraph>(
             find.byKey(const ValueKey('channel-header-name')),
           );
           final titleDidExceedMaxLines = title.didExceedMaxLines;
-          debugDefaultTargetPlatformOverride = previousPlatform;
-
           expect(
-            titleSpacing,
-            moreOrLessEquals(
-              platform == TargetPlatform.iOS
-                  ? iosGlassChannelHeaderTitleSpacing
-                  : 0,
-            ),
+            tester
+                .getCenter(
+                  find.byKey(const ValueKey('channel-header-text-stack')),
+                )
+                .dx,
+            moreOrLessEquals(160),
           );
+          debugDefaultTargetPlatformOverride = previousPlatform;
           expect(titleDidExceedMaxLines, isTrue);
           expect(tester.takeException(), isNull);
         },
       );
+    }
+
+    for (final isDm in [false, true]) {
+      testWidgets('Android centered title fits large text dm=$isDm', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(320, 700);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final channel = isDm
+            ? Channel(
+                id: _channelId,
+                name: 'DM',
+                channelType: 'dm',
+                visibility: 'private',
+                description: '',
+                createdBy: 'self',
+                createdAt: DateTime(2025),
+                memberCount: 2,
+                participants: const ['Self', 'A very long counterpart name'],
+                participantPubkeys: const ['self', 'alice'],
+                isMember: true,
+              )
+            : _testChannel.copyWith(name: 'a-very-long-channel-name');
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            channel: channel,
+            textScaler: const TextScaler.linear(2),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChannelDetailPage(channel: channel),
+                    ),
+                  ),
+                  child: const Text('Open conversation'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open conversation'));
+        await tester.pumpAndSettle();
+        final prefix = isDm ? 'dm' : 'channel';
+        final title = tester.getRect(
+          find.byKey(ValueKey('$prefix-header-text-stack')),
+        );
+        expect(title.center.dx, moreOrLessEquals(160));
+        expect(
+          title.left,
+          greaterThanOrEqualTo(tester.getRect(find.byTooltip('Back')).right),
+        );
+        expect(
+          title.right,
+          lessThanOrEqualTo(
+            tester.getRect(find.byTooltip('Start Huddle')).left,
+          ),
+        );
+        expect(tester.takeException(), isNull);
+        await tester.tap(
+          find.byKey(ValueKey('$prefix-header-settings-trigger')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(ChannelDetailsPage), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
     }
 
     testWidgets('shows a tappable channel name and collective member count', (
@@ -10562,90 +10649,14 @@ void main() {
 
       expect(find.text('general'), findsOneWidget);
       expect(find.text('5 members'), findsOneWidget);
-      // The hash icon appears in the app bar and in the compose bar toolbar.
-      expect(find.byIcon(LucideIcons.hash), findsAtLeastNWidgets(1));
-      expect(
-        tester.getSize(find.byKey(const ValueKey('channel-header-avatar'))),
-        const Size.square(40),
-      );
-      final channelHeaderAvatarRect = tester.getRect(
-        find.byKey(const ValueKey('channel-header-avatar')),
-      );
-      final channelHeaderTextStackRect = tester.getRect(
-        find.byKey(const ValueKey('channel-header-text-stack')),
-      );
-      expect(channelHeaderTextStackRect.height, 40);
-      expect(
-        channelHeaderTextStackRect.center.dy,
-        moreOrLessEquals(channelHeaderAvatarRect.center.dy),
-      );
+      expect(find.byKey(const ValueKey('channel-header-avatar')), findsNothing);
       expect(
         tester
-            .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
-            .style
-            ?.fontSize,
-        AppTheme.light().textTheme.titleSmall?.fontSize,
-      );
-      expect(
-        tester
-            .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
-            .style
-            ?.fontWeight,
-        FontWeight.w600,
-      );
-      final channelHeaderAvatar = tester.widget<Container>(
-        find.byKey(const ValueKey('channel-header-avatar')),
-      );
-      expect(
-        (channelHeaderAvatar.decoration as BoxDecoration).color,
-        AppTheme.light().colorScheme.surface,
-      );
-      final channelHeaderAvatarBorder =
-          (channelHeaderAvatar.decoration as BoxDecoration).border! as Border;
-      expect(
-        channelHeaderAvatarBorder.top.color,
-        AppTheme.light().colorScheme.inverseSurface.withValues(alpha: 0.07),
-      );
-      expect(channelHeaderAvatarBorder.top.width, 1);
-      expect(
-        channelHeaderAvatarBorder.top.strokeAlign,
-        BorderSide.strokeAlignOutside,
-      );
-      expect(
-        tester
-            .widget<Icon>(
-              find.descendant(
-                of: find.byKey(const ValueKey('channel-header-avatar')),
-                matching: find.byIcon(LucideIcons.hash),
-              ),
-            )
-            .color,
-        AppTheme.light().colorScheme.primary,
-      );
-      expect(
-        tester.getRect(find.byKey(const ValueKey('channel-header-name'))).left -
-            tester
-                .getRect(find.byKey(const ValueKey('channel-header-avatar')))
-                .right,
-        moreOrLessEquals(Grid.twelve),
-      );
-      expect(
-        tester
-            .widget<Text>(
-              find.byKey(const ValueKey('channel-header-member-count')),
-            )
-            .style
-            ?.fontSize,
-        AppTheme.light().textTheme.bodySmall?.fontSize,
-      );
-      expect(
-        tester
-            .widget<Text>(
-              find.byKey(const ValueKey('channel-header-member-count')),
-            )
-            .style
-            ?.color,
-        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.65),
+            .getCenter(find.byKey(const ValueKey('channel-header-text-stack')))
+            .dx,
+        moreOrLessEquals(
+          tester.view.physicalSize.width / tester.view.devicePixelRatio / 2,
+        ),
       );
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Channel actions'), findsNothing);
@@ -10776,7 +10787,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('secret'), findsOneWidget);
-      expect(find.byIcon(LucideIcons.lock), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.lock), findsOneWidget);
     });
   });
 
@@ -13242,7 +13253,9 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          find
+              .byKey(const ValueKey('thread-message-group-thread-root'))
+              .hitTestable(),
           findsNothing,
         );
         expect(
@@ -13327,7 +13340,9 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          find
+              .byKey(const ValueKey('thread-message-group-thread-root'))
+              .hitTestable(),
           findsNothing,
         );
         expect(
@@ -15032,7 +15047,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('thread-jump-to-latest')),
-            matching: find.byIcon(LucideIcons.arrowDown),
+            matching: find.byIcon(BuzzIcons.arrowDown),
           ),
           findsOneWidget,
         );
@@ -15573,7 +15588,11 @@ class _TrackingRelaySession extends RelaySessionNotifier {
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
+  final SessionStatus initialStatus;
+  void setReconnecting() =>
+      state = const SessionState(status: SessionStatus.reconnecting);
   _ReconnectingRelaySession({
+    this.initialStatus = SessionStatus.reconnecting,
     this.huddleCreatePublishGate,
     this.huddleEndPublishGate,
   });
@@ -15585,8 +15604,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   final List<int> publishedKinds = [];
 
   @override
-  SessionState build() =>
-      const SessionState(status: SessionStatus.reconnecting);
+  SessionState build() => SessionState(status: initialStatus);
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -16416,16 +16434,6 @@ class _TestNavigatorObserver extends NavigatorObserver {
     pushCount += 1;
     super.didPush(route, previousRoute);
   }
-}
-
-/// Avatar fallback initial in the DM header — asserts at the production
-/// seam (the masked `dm-header-avatar` badge), not the label helper.
-String _dmHeaderAvatarInitial(WidgetTester tester) {
-  final avatar = find.byKey(const ValueKey('dm-header-avatar'));
-  final initial = tester.widget<Text>(
-    find.descendant(of: avatar, matching: find.byType(Text)),
-  );
-  return initial.data!;
 }
 
 /// Avatar fallback initial in the channel-details member preview row keyed

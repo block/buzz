@@ -142,8 +142,8 @@ function ProbeStatusBadge({ uiState }: { uiState: ProbeUiState }) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
         <Info className="h-3.5 w-3.5" />
-        Auth is disabled on this relay. The admin console is accessible without
-        a credential.
+        Auth is disabled on this relay. The admin console is read-only; taking
+        action requires BUZZ_ADMIN_AUTH=nip98.
       </span>
     );
   }

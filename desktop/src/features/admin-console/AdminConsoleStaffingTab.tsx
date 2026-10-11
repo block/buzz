@@ -10,8 +10,8 @@
  * names come from `useUsersBatchQuery`; hovering a name cross-fades to the
  * truncated npub so the raw identity is always one interaction away.
  *
- * A "Restrictions" section below the operator list lets operators lift active
- * bans and timeouts for the currently active community.
+ * `RestrictionsSection` (active bans and timeouts, with lifts) is rendered by
+ * the community page for that page's community.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -21,7 +21,6 @@ import { Button } from "@/shared/ui/button";
 import { Badge } from "@/shared/ui/badge";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { useCommunities } from "@/features/communities/useCommunities";
 import { getRelayWsUrl } from "@/shared/api/tauri";
 import type { UserProfileSummary } from "@/shared/api/types";
 import {
@@ -37,15 +36,16 @@ import {
 import {
   deleteAdminOperator,
   listAdminOperators,
+  liftAdminRestriction,
   listAdminRestrictions,
-  liftAdminBan,
-  liftAdminTimeout,
+  type AdminLiftIntent,
   putAdminOperator,
   type AdminMemberRestrictionDto,
   type AdminOperatorDto,
 } from "./api";
 import {
   adminErrorMessage,
+  adminMutationRelayStatus,
   type AsyncState,
   ErrorMessage,
   LoadingSpinner,
@@ -153,85 +153,66 @@ function RestrictionTypeBadge({
 }
 
 /**
- * Active restrictions for the active relay's community. The native commands
- * name the community by the active relay's host, so there is no client-side
- * community id to get wrong; an unresolvable host surfaces as an error.
- * Operators can lift bans and timeouts per member row.
+ * Active restrictions in `communityHost`. The list captures the native relay
+ * it loaded from; each lift freezes that relay, the host and the signer, so a
+ * relay or identity switch fails before sending instead of retargeting.
  */
-function RestrictionsSection({
+export function RestrictionsSection({
+  canMutate,
   origin,
-  relayKey,
+  communityHost,
+  pubkey,
   generation,
 }: {
+  canMutate: boolean;
   origin: string;
-  /** Active relay identity; a change reloads the list. */
-  relayKey: string;
+  communityHost: string;
+  /** Active signer; frozen into each lift. */
+  pubkey: string;
   generation: number;
 }) {
   const [listGen, setListGen] = useState(0);
   const [liftError, setLiftError] = useState<string | null>(null);
   const [workingPubkey, setWorkingPubkey] = useState<string | null>(null);
-  /** Row pending a lift-ban confirmation. */
-  const [pendingLiftBan, setPendingLiftBan] =
-    useState<AdminMemberRestrictionDto | null>(null);
-  /** Row pending a lift-timeout confirmation. */
-  const [pendingLiftTimeout, setPendingLiftTimeout] =
-    useState<AdminMemberRestrictionDto | null>(null);
+  /** The lift awaiting confirmation, frozen from the list its row came from. */
+  const [pendingLift, setPendingLift] = useState<AdminLiftIntent | null>(null);
 
-  // The list captures the native relay it loaded from; every later page and
-  // removal carries it so a relay switch fails loudly instead of retargeting.
   const listState: AsyncState<{
+    origin: string;
+    communityHost: string;
     relay: string;
+    signer: string;
     items: AdminMemberRestrictionDto[];
     nextCursor: string | null;
   }> = useAsyncLoad(
     async () => {
       const relay = await getRelayWsUrl();
-      return { relay, ...(await listAdminRestrictions(origin, relay)) };
+      return {
+        origin,
+        communityHost,
+        relay,
+        signer: pubkey,
+        ...(await listAdminRestrictions(origin, communityHost, relay)),
+      };
     },
-    [origin, relayKey],
+    [origin, communityHost],
     generation + listGen,
   );
-  const loadedRelay = listState.status === "ok" ? listState.data.relay : "";
-
-  const handleConfirmLiftBan = async () => {
-    const row = pendingLiftBan;
-    if (!row) return;
-    setPendingLiftBan(null);
+  const handleConfirmLift = async () => {
+    if (!pendingLift) return;
+    const intent = pendingLift;
+    setPendingLift(null);
     setLiftError(null);
-    setWorkingPubkey(row.pubkey);
+    setWorkingPubkey(intent.pubkey);
     try {
-      await liftAdminBan(origin, row.pubkey, loadedRelay);
+      await liftAdminRestriction(intent);
       setListGen((g) => g + 1);
     } catch (e) {
-      const msg = adminErrorMessage(e);
-      // 409 = no active ban — treat as a soft success (already gone).
-      if (msg.includes("no active ban") || msg.includes("conflict")) {
+      // 409 = nothing active any more — a soft success (already gone).
+      if (adminMutationRelayStatus(e) === 409) {
         setListGen((g) => g + 1);
       } else {
-        setLiftError(msg);
-      }
-    } finally {
-      setWorkingPubkey(null);
-    }
-  };
-
-  const handleConfirmLiftTimeout = async () => {
-    const row = pendingLiftTimeout;
-    if (!row) return;
-    setPendingLiftTimeout(null);
-    setLiftError(null);
-    setWorkingPubkey(row.pubkey);
-    try {
-      await liftAdminTimeout(origin, row.pubkey, loadedRelay);
-      setListGen((g) => g + 1);
-    } catch (e) {
-      const msg = adminErrorMessage(e);
-      // 409 = no active timeout — treat as a soft success (already gone).
-      if (msg.includes("no active timeout") || msg.includes("conflict")) {
-        setListGen((g) => g + 1);
-      } else {
-        setLiftError(msg);
+        setLiftError(adminErrorMessage(e));
       }
     } finally {
       setWorkingPubkey(null);
@@ -269,13 +250,32 @@ function RestrictionsSection({
         ? extra.nextCursor
         : listState.data.nextCursor
       : null;
+  // Rows render only from a loaded list, so its context is always present.
+  const freezeLift = (memberPubkey: string, kind: AdminLiftIntent["kind"]) => {
+    if (listState.status !== "ok") return;
+    const { origin, communityHost, relay, signer } = listState.data;
+    setPendingLift({
+      origin,
+      communityHost,
+      expectedRelay: relay,
+      expectedSigner: signer,
+      kind,
+      pubkey: memberPubkey,
+    });
+  };
 
   const handleLoadMore = async () => {
-    if (!nextCursor) return;
+    if (!nextCursor || listState.status !== "ok") return;
+    const loaded = listState.data;
     const gen = loadGen;
     setMoreRequest({ gen, busy: true, error: null });
     try {
-      const page = await listAdminRestrictions(origin, loadedRelay, nextCursor);
+      const page = await listAdminRestrictions(
+        loaded.origin,
+        loaded.communityHost,
+        loaded.relay,
+        nextCursor,
+      );
       if (loadGenRef.current !== gen) return;
       setMore({
         gen,
@@ -291,76 +291,47 @@ function RestrictionsSection({
 
   return (
     <div className="space-y-2" data-testid="restrictions-section">
-      {/* Lift-ban confirmation dialog */}
       <AlertDialog
-        open={pendingLiftBan !== null}
+        open={pendingLift !== null}
         onOpenChange={(open) => {
-          if (!open) setPendingLiftBan(null);
+          if (!open) setPendingLift(null);
         }}
       >
-        <AlertDialogContent data-testid="restrictions-lift-ban-dialog">
+        <AlertDialogContent
+          data-testid={`restrictions-lift-${pendingLift?.kind}-dialog`}
+        >
           <AlertDialogHeader>
-            <AlertDialogTitle>Lift ban?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {pendingLift?.kind === "ban" ? "Lift ban?" : "Clear timeout?"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This will remove the active ban for{" "}
+              This will{" "}
+              {pendingLift?.kind === "ban"
+                ? "remove the active ban"
+                : "clear the active timeout"}{" "}
+              for{" "}
               <span className="font-mono">
-                {pendingLiftBan ? truncatePubkey(pendingLiftBan.pubkey) : ""}
-              </span>
-              . They will be able to post again.
+                {pendingLift ? truncatePubkey(pendingLift.pubkey) : ""}
+              </span>{" "}
+              in <code>{pendingLift?.communityHost}</code>. They will be able to
+              post again.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel data-testid="restrictions-lift-ban-cancel">
+            <AlertDialogCancel
+              data-testid={`restrictions-lift-${pendingLift?.kind}-cancel`}
+            >
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               asChild
-              data-testid="restrictions-lift-ban-confirm"
+              data-testid={`restrictions-lift-${pendingLift?.kind}-confirm`}
             >
               <Button
-                onClick={() => void handleConfirmLiftBan()}
+                onClick={() => void handleConfirmLift()}
                 variant="default"
               >
-                Lift ban
-              </Button>
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Lift-timeout confirmation dialog */}
-      <AlertDialog
-        open={pendingLiftTimeout !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingLiftTimeout(null);
-        }}
-      >
-        <AlertDialogContent data-testid="restrictions-lift-timeout-dialog">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Clear timeout?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will clear the active timeout for{" "}
-              <span className="font-mono">
-                {pendingLiftTimeout
-                  ? truncatePubkey(pendingLiftTimeout.pubkey)
-                  : ""}
-              </span>
-              . They will be able to post again.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel data-testid="restrictions-lift-timeout-cancel">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              asChild
-              data-testid="restrictions-lift-timeout-confirm"
-            >
-              <Button
-                onClick={() => void handleConfirmLiftTimeout()}
-                variant="default"
-              >
-                Clear timeout
+                {pendingLift?.kind === "ban" ? "Lift ban" : "Clear timeout"}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -411,8 +382,8 @@ function RestrictionsSection({
                 {isBanned && (
                   <Button
                     data-testid={`restrictions-lift-ban-btn-${row.pubkey}`}
-                    disabled={isWorking}
-                    onClick={() => setPendingLiftBan(row)}
+                    disabled={!canMutate || isWorking}
+                    onClick={() => freezeLift(row.pubkey, "ban")}
                     size="sm"
                     type="button"
                     variant="outline"
@@ -427,8 +398,8 @@ function RestrictionsSection({
                 {isTimedOut && (
                   <Button
                     data-testid={`restrictions-lift-timeout-btn-${row.pubkey}`}
-                    disabled={isWorking}
-                    onClick={() => setPendingLiftTimeout(row)}
+                    disabled={!canMutate || isWorking}
+                    onClick={() => freezeLift(row.pubkey, "timeout")}
                     size="sm"
                     type="button"
                     variant="outline"
@@ -472,17 +443,11 @@ export function StaffingTab({
   origin,
   pubkey,
   generation,
-  canMutate,
   onSelfMutation,
 }: {
   origin: string;
   pubkey: string;
   generation: number;
-  /**
-   * When false (disabled-auth probe), all write affordances are hidden.
-   * The operator list is still readable; only add/remove/edit controls are absent.
-   */
-  canMutate: boolean;
   /**
    * Called after a successful mutation that modified the current principal's
    * own operator row (role change or removal of self). The parent re-probes
@@ -491,7 +456,6 @@ export function StaffingTab({
    */
   onSelfMutation?: () => void;
 }) {
-  const { activeCommunity } = useCommunities();
   const [listGen, setListGen] = useState(0);
   const [addPubkey, setAddPubkey] = useState("");
   const [addRole, setAddRole] = useState<"operator" | "moderator">("moderator");
@@ -647,53 +611,51 @@ export function StaffingTab({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Add operator form — hidden in read-only (disabled-auth) mode */}
-      {canMutate && (
-        <div className="rounded-md border border-border/60 px-3 py-2.5 space-y-2">
-          <p className="text-xs font-medium text-muted-foreground">
-            Add operator
-          </p>
-          <div className="flex gap-2">
-            <input
-              className="flex-1 rounded-md border border-border/60 bg-background px-2 py-1 text-xs font-mono"
-              data-testid="staffing-add-pubkey-input"
-              disabled={isAdding}
-              onChange={(e) => setAddPubkey(e.target.value)}
-              placeholder="64-hex pubkey"
-              type="text"
-              value={addPubkey}
-            />
-            <select
-              className="rounded-md border border-border/60 bg-background px-2 py-1 text-xs"
-              data-testid="staffing-add-role-select"
-              disabled={isAdding}
-              onChange={(e) =>
-                setAddRole(e.target.value as "operator" | "moderator")
-              }
-              value={addRole}
-            >
-              <option value="moderator">moderator</option>
-              <option value="operator">operator</option>
-            </select>
-            <Button
-              data-testid="staffing-add-btn"
-              disabled={
-                isAdding || !addPubkey.trim() || listState.status !== "ok"
-              }
-              onClick={() => void handleAdd()}
-              size="sm"
-              type="button"
-            >
-              {isAdding ? (
-                <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                "Add"
-              )}
-            </Button>
-          </div>
-          {addError && <p className="text-xs text-destructive">{addError}</p>}
+      {/* Add operator form */}
+      <div className="rounded-md border border-border/60 px-3 py-2.5 space-y-2">
+        <p className="text-xs font-medium text-muted-foreground">
+          Add operator
+        </p>
+        <div className="flex gap-2">
+          <input
+            className="flex-1 rounded-md border border-border/60 bg-background px-2 py-1 text-xs font-mono"
+            data-testid="staffing-add-pubkey-input"
+            disabled={isAdding}
+            onChange={(e) => setAddPubkey(e.target.value)}
+            placeholder="64-hex pubkey"
+            type="text"
+            value={addPubkey}
+          />
+          <select
+            className="rounded-md border border-border/60 bg-background px-2 py-1 text-xs"
+            data-testid="staffing-add-role-select"
+            disabled={isAdding}
+            onChange={(e) =>
+              setAddRole(e.target.value as "operator" | "moderator")
+            }
+            value={addRole}
+          >
+            <option value="moderator">moderator</option>
+            <option value="operator">operator</option>
+          </select>
+          <Button
+            data-testid="staffing-add-btn"
+            disabled={
+              isAdding || !addPubkey.trim() || listState.status !== "ok"
+            }
+            onClick={() => void handleAdd()}
+            size="sm"
+            type="button"
+          >
+            {isAdding ? (
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              "Add"
+            )}
+          </Button>
         </div>
-      )}
+        {addError && <p className="text-xs text-destructive">{addError}</p>}
+      </div>
 
       {/* Operator list */}
       {listState.status === "loading" && <LoadingSpinner />}
@@ -734,8 +696,8 @@ export function StaffingTab({
                     ))}
                   </div>
                 </div>
-                {/* In-place role selector — hidden in read-only / config-backed mode */}
-                {canMutate && !isConfigBacked && (
+                {/* In-place role selector — hidden for config-backed rows */}
+                {!isConfigBacked && (
                   <select
                     aria-label={`Change role for ${displayName}`}
                     className="rounded-md border border-border/60 bg-background px-1.5 py-0.5 text-xs"
@@ -757,43 +719,32 @@ export function StaffingTab({
                 {isConfigBacked && (
                   <Badge variant="outline">{op.effectiveRole}</Badge>
                 )}
-                {/* Remove button — hidden in read-only (disabled-auth) mode */}
-                {canMutate && (
-                  <Button
-                    aria-label={`Remove ${displayName}`}
-                    data-testid={`staffing-remove-btn-${op.pubkey}`}
-                    disabled={isConfigBacked || isWorking}
-                    onClick={() => setPendingRemove(op)}
-                    size="icon-xs"
-                    title={
-                      isConfigBacked
-                        ? "Config-backed — cannot be removed via API"
-                        : "Remove operator"
-                    }
-                    type="button"
-                    variant="ghost"
-                  >
-                    {isWorking ? (
-                      <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
-                )}
+                {/* Remove button */}
+                <Button
+                  aria-label={`Remove ${displayName}`}
+                  data-testid={`staffing-remove-btn-${op.pubkey}`}
+                  disabled={isConfigBacked || isWorking}
+                  onClick={() => setPendingRemove(op)}
+                  size="icon-xs"
+                  title={
+                    isConfigBacked
+                      ? "Config-backed — cannot be removed via API"
+                      : "Remove operator"
+                  }
+                  type="button"
+                  variant="ghost"
+                >
+                  {isWorking ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" />
+                  )}
+                </Button>
               </li>
             );
           })}
         </ul>
       )}
-
-      {/* Restrictions section — active bans and timeouts for the current community */}
-      <div className="mt-6 rounded-md border border-border/60 px-3 py-2.5">
-        <RestrictionsSection
-          origin={origin}
-          relayKey={activeCommunity?.relayUrl ?? ""}
-          generation={generation}
-        />
-      </div>
     </div>
   );
 }

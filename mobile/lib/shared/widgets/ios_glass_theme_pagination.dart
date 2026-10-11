@@ -11,6 +11,8 @@ class IosGlassThemePagination extends HookWidget {
   /// Creates a native theme-pagination control.
   const IosGlassThemePagination({
     super.key,
+    this.semanticLabel = 'Theme',
+    this.containerHeight = 30,
     required this.count,
     required this.selected,
     required this.animateChanges,
@@ -20,6 +22,12 @@ class IosGlassThemePagination extends HookWidget {
   });
 
   static const viewType = 'buzz/theme_pagination_glass';
+
+  /// The kind of content being paged, announced by VoiceOver.
+  final String semanticLabel;
+
+  /// Height of the glass pill, independent of its dots and hit target.
+  final double containerHeight;
 
   final int count;
   final int selected;
@@ -33,6 +41,7 @@ class IosGlassThemePagination extends HookWidget {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
     final nativeChannel = useState<MethodChannel?>(null);
     final onSelectedRef = useRef(onSelected)..value = onSelected;
+    final isRTL = Directionality.of(context) == TextDirection.rtl;
     final brightness = Theme.of(context).brightness.name;
     final activeColorValue = activeColor.toARGB32();
     final inactiveColorValue = inactiveColor.toARGB32();
@@ -54,6 +63,9 @@ class IosGlassThemePagination extends HookWidget {
         if (channel != null) {
           unawaited(
             channel.invokeMethod<void>('setState', <String, Object>{
+              'accessibilityLabel': semanticLabel,
+              'isRTL': isRTL,
+              'containerHeight': containerHeight,
               'count': count,
               'selected': selected,
               'animateChanges': animateChanges,
@@ -67,6 +79,9 @@ class IosGlassThemePagination extends HookWidget {
       },
       [
         nativeChannel.value,
+        semanticLabel,
+        isRTL,
+        containerHeight,
         count,
         selected,
         animateChanges,
@@ -80,6 +95,9 @@ class IosGlassThemePagination extends HookWidget {
       viewType: viewType,
       hitTestBehavior: PlatformViewHitTestBehavior.opaque,
       creationParams: <String, Object>{
+        'accessibilityLabel': semanticLabel,
+        'isRTL': isRTL,
+        'containerHeight': containerHeight,
         'count': count,
         'selected': selected,
         'animateChanges': animateChanges,

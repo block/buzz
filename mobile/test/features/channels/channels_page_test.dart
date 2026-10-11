@@ -1,3 +1,5 @@
+import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 
 import '../profile/presence_snapshot_test.dart'
@@ -15,7 +17,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
@@ -25,29 +30,34 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
+import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
 part 'channels_page_test/presence_tests.dart';
+part 'channels_page_test/unread_readiness_tests.dart';
 
 void main() {
   setUpAll(() async {
     if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS')) {
       for (final font in {
         'Inter': 'assets/fonts/InterVariable.ttf',
-        'packages/lucide_icons_flutter/Lucide':
-            'packages/lucide_icons_flutter/assets/lucide.ttf',
+        'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
       }.entries) {
         await (FontLoader(
           font.key,
@@ -64,6 +74,7 @@ void main() {
     double bottomPadding = 0,
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
+    Future<String?> Function(String)? loadCommunityIcon,
     TextScaler textScaler = TextScaler.noScaling,
     Gradient? topSectionGradient,
     ValueChanged<double>? onSettingsTransitionProgress,
@@ -79,6 +90,7 @@ void main() {
         presenceProvider.overrideWith(() => _FakePresenceNotifier()),
         communityIconProvider.overrideWith((ref, relayUrl) async {
           onCommunityIconLoad?.call(relayUrl);
+          if (loadCommunityIcon != null) return loadCommunityIcon(relayUrl);
           return communityIcons[relayUrl];
         }),
         dmDirectoryPreviewEnabledProvider.overrideWith(
@@ -127,6 +139,8 @@ void main() {
       ),
     );
   }
+
+  _communityUnreadLandingTests(buildTestable);
 
   final testChannels = [
     Channel(
@@ -275,8 +289,8 @@ void main() {
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
-    expect(find.byIcon(LucideIcons.ellipsisVertical), findsWidgets);
-    expect(find.byIcon(LucideIcons.arrowUpDown), findsNothing);
+    expect(find.byIcon(BuzzIcons.ellipsisVertical), findsWidgets);
+    expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
     expect(find.byTooltip('DMs options'), findsOneWidget);
 
     // DM identity display: the unnamed counterpart tile renders its
@@ -760,10 +774,10 @@ void main() {
       );
     }
     for (final icon in [
-      LucideIcons.pencil,
-      LucideIcons.arrowUp,
-      LucideIcons.arrowDown,
-      LucideIcons.trash2,
+      BuzzIcons.pencil,
+      BuzzIcons.arrowUp,
+      BuzzIcons.arrowDown,
+      BuzzIcons.trash2,
     ]) {
       expect(
         find.descendant(of: popover, matching: find.byIcon(icon)),
@@ -799,7 +813,7 @@ void main() {
     final error = Theme.of(tester.element(popover)).colorScheme.error;
     final deleteText = tester.widget<Text>(find.text('Delete section'));
     final deleteIcon = tester.widget<Icon>(
-      find.descendant(of: popover, matching: find.byIcon(LucideIcons.trash2)),
+      find.descendant(of: popover, matching: find.byIcon(BuzzIcons.trash2)),
     );
     expect(deleteText.style?.color, error);
     expect(deleteIcon.color, error);
@@ -862,7 +876,7 @@ void main() {
     final appBar = find.byType(FrostedAppBar).last;
     final communityAvatar = find.descendant(
       of: appBar,
-      matching: find.byType(AvatarImage),
+      matching: find.byType(ClipRSuperellipse),
     );
     final profileAvatar = find.descendant(
       of: appBar,
@@ -881,7 +895,7 @@ void main() {
     expect(profileRect.center.dy, communityRect.center.dy);
   });
 
-  testWidgets('reveals channel content from same-slot reconnect skeletons', (
+  testWidgets('keeps cached channels visible while reconnecting', (
     tester,
   ) async {
     final relaySession = _ReconnectingRelaySession();
@@ -894,59 +908,53 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.pump(const Duration(seconds: 2));
-    await tester.pump();
-
-    final skeleton = find.byKey(const Key('channels-connection-skeleton'));
-    expect(skeleton, findsOneWidget);
-    expect(
-      find.descendant(of: skeleton, matching: find.byType(SkeletonBar)),
-      findsWidgets,
-    );
-    expect(
-      find.descendant(
-        of: skeleton,
-        matching: find.byType(CircularProgressIndicator),
-      ),
-      findsNothing,
-    );
-    expect(
-      tester
-          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-placeholder')))
-          .opacity,
-      1,
-    );
-    expect(
-      tester
-          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
-          .opacity,
-      0,
-    );
-
-    relaySession.connect();
-    await tester.pump();
-    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
     expect(
       tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
       isFalse,
     );
-    await tester.pump(const Duration(milliseconds: 200));
-
     expect(
       tester
-          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-placeholder')))
+          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
           .opacity,
-      closeTo(0.5, 0.01),
+      1,
+    );
+    expect(find.text('general'), findsOneWidget);
+    relaySession.connect();
+    await tester.pumpAndSettle();
+    expect(find.text('general'), findsOneWidget);
+  });
+
+  testWidgets('keeps a fetched empty channel list visible during reconnect', (
+    tester,
+  ) async {
+    final relaySession = _ReconnectingRelaySession(
+      initialStatus: SessionStatus.connected,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(const [])),
+          relaySessionProvider.overrideWith(() => relaySession),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('No conversations yet'), findsOneWidget);
+    relaySession.setReconnecting();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    expect(
+      tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+      isFalse,
     );
     expect(
       tester
           .widget<Opacity>(find.byKey(const Key('skeleton-reveal-content')))
           .opacity,
-      closeTo(0.5, 0.01),
+      1,
     );
-
-    await tester.pump(const Duration(milliseconds: 200));
-    expect(find.text('general'), findsOneWidget);
+    expect(find.text('No conversations yet'), findsOneWidget);
   });
 
   testWidgets('announces neutral loading outside connection transitions', (
@@ -1141,7 +1149,7 @@ void main() {
     await tester.pumpAndSettle();
     final communityAvatar = find.descendant(
       of: find.byType(FrostedAppBar).last,
-      matching: find.byType(AvatarImage),
+      matching: find.byType(ClipRSuperellipse),
     );
     await tester.tap(communityAvatar);
     await tester.pump();
@@ -1178,31 +1186,27 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final semantics = tester.ensureSemantics();
+      try {
+        await tester.pump();
+        expect(
+          find.bySemanticsLabel(RegExp('Community settings')),
+          findsOneWidget,
+        );
+      } finally {
+        semantics.dispose();
+      }
       await tester.tap(find.text('Alpha'));
       await tester.pumpAndSettle();
       expect(find.byType(BuzzSheetHeader), findsNothing);
       expect(find.text('Community settings'), findsOneWidget);
       expect(find.text('Invite'), findsOneWidget);
       expect(find.text('Appearance'), findsOneWidget);
-      expect(find.text('Remove community'), findsOneWidget);
-      expect(
-        tester.getTopLeft(find.text('Remove community')).dy,
-        greaterThan(tester.getTopLeft(find.text('Appearance')).dy),
-      );
-      expect(
-        tester.getTopLeft(find.text('Remove community')).dy,
-        lessThan(tester.getTopLeft(find.text('Switch communities')).dy),
-      );
-      await tester.tap(find.text('Remove community'));
-      await tester.pumpAndSettle();
-      expect(find.text('Remove community?'), findsOneWidget);
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-      expect(find.text('Community settings'), findsOneWidget);
+      expect(find.text('Remove community'), findsNothing);
 
       expect(
         tester.getTopLeft(find.text('Appearance')).dy,
-        lessThan(tester.getTopLeft(find.text('Switch communities')).dy),
+        lessThan(tester.getTopLeft(find.text('Switch Community')).dy),
       );
       if (Platform.environment['COMMUNITY_SCREENSHOTS'] case final directory?) {
         final boundary = tester
@@ -1233,6 +1237,148 @@ void main() {
     });
   }
 
+  for (final role in [CommunityMemberRole.admin, CommunityMemberRole.member]) {
+    testWidgets('prefetches $role permissions and keeps an open menu stable', (
+      tester,
+    ) async {
+      final ready = Completer<CommunityMemberRole?>();
+      var lookups = 0;
+      final permission = FutureProvider<CommunityMemberRole?>((ref) {
+        lookups++;
+        return ready.future;
+      });
+      final community = Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            communityListProvider.overrideWith(
+              () => _FakeCommunityListNotifier([community]),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => community),
+            currentCommunityRoleProvider.overrideWith(
+              (ref) => ref.watch(permission),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(lookups, 1);
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      final appearanceBefore = tester.getRect(find.text('Appearance'));
+      expect(find.text('Invite'), findsNothing);
+      ready.complete(role);
+      await tester.pumpAndSettle();
+      expect(find.text('Invite'), findsNothing);
+      expect(tester.getRect(find.text('Appearance')), appearanceBefore);
+      Navigator.of(tester.element(find.text('Appearance'))).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Invite'),
+        role == CommunityMemberRole.admin ? findsOneWidget : findsNothing,
+      );
+      expect(lookups, 1);
+    });
+  }
+
+  for (final removingInactive in [false, true]) {
+    for (final confirmed in [false, true]) {
+      testWidgets(
+        'iOS switcher removal uses native confirmation (inactive: $removingInactive, confirmed: $confirmed)',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          const channel = MethodChannel('buzz/confirmation_dialog');
+          final answer = Completer<bool>();
+          final calls = <MethodCall>[];
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            (call) {
+              calls.add(call);
+              return answer.future;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(channel, null),
+          );
+          final communities = [
+            for (final name in ['Alpha', 'Bravo'])
+              Community(
+                id: name.toLowerCase(),
+                name: name,
+                relayUrl: 'wss://${name.toLowerCase()}.example.com',
+                addedAt: DateTime(2025),
+              ),
+          ];
+          final notifier = _FakeCommunityListNotifier(communities);
+          await tester.pumpWidget(
+            buildTestable(
+              overrides: [
+                channelsProvider.overrideWith(
+                  () => _FakeNotifier(testChannels),
+                ),
+                communityListProvider.overrideWith(() => notifier),
+                activeCommunityProvider.overrideWith(
+                  (ref) async => communities.first,
+                ),
+              ],
+            ),
+          );
+          await tester.pumpAndSettle();
+          tester
+              .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+              .nativeLeading!
+              .onPressed!();
+          await tester.pumpAndSettle();
+          expect(find.text('Remove community'), findsNothing);
+          await tester.tap(find.byKey(const Key('community-menu-switch')));
+          await tester.pumpAndSettle();
+          tester
+              .widget<IosNavigationBar>(find.byType(IosNavigationBar).last)
+              .actions
+              .single
+              .onPressed!();
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byTooltip(removingInactive ? 'Remove Bravo' : 'Remove Alpha'),
+          );
+          await tester.pumpAndSettle();
+          expect(calls.single.method, 'present');
+          expect(calls.single.arguments['title'], 'Remove community?');
+          expect(calls.single.arguments['confirmLabel'], 'Remove');
+          expect(calls.single.arguments['cancelLabel'], 'Cancel');
+          expect(
+            calls.single.arguments['message'],
+            contains(removingInactive ? 'Bravo' : 'Alpha'),
+          );
+          expect(find.byType(AlertDialog), findsNothing);
+          expect(notifier.removedIds, isEmpty);
+          answer.complete(confirmed);
+          await tester.pumpAndSettle();
+          expect(
+            notifier.removedIds,
+            confirmed ? [removingInactive ? 'bravo' : 'alpha'] : isEmpty,
+          );
+          expect(
+            find.byKey(const Key('community-switcher-page')),
+            confirmed && !removingInactive ? findsNothing : findsOneWidget,
+          );
+          await tester.pumpWidget(const SizedBox());
+          debugDefaultTargetPlatformOverride = null;
+        },
+      );
+    }
+  }
+
   testWidgets('community settings hides invite for members', (tester) async {
     final community = Community(
       id: 'alpha',
@@ -1259,6 +1405,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Invite'), findsNothing);
     expect(find.text('Appearance'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('community-switcher-sheet')), findsNothing);
+    expect(find.byKey(const Key('community-switcher-page')), findsOneWidget);
+    await tester.tap(find.byTooltip('Close community switcher'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+    expect(find.byKey(const Key('community-switcher-sheet')), findsNothing);
+    expect(find.text('Alpha'), findsOneWidget);
   });
 
   testWidgets('community switcher separates selection from edit removal', (
@@ -1305,37 +1460,41 @@ void main() {
 
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
-
     expect(find.text('Community settings'), findsOneWidget);
+    expect(find.text('Switch communities'), findsNothing);
+    expect(find.text('Edit'), findsNothing);
+    expect(find.byKey(const Key('community-switcher-options')), findsNothing);
+    expect(find.byKey(const Key('community-menu-switch')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('community-switcher-sheet')), findsNothing);
+
+    expect(find.text('Switch Community'), findsOneWidget);
     final options = find.byKey(const Key('community-switcher-options'));
     expect(options, findsOneWidget);
-    final editButton = find.byKey(const Key('community-switcher-edit'));
-    expect(tester.getSize(editButton), const Size(56, 44));
-    expect(find.byTooltip('Close sheet'), findsNothing);
-    expect(
-      tester.getCenter(editButton).dx,
-      greaterThan(tester.getCenter(find.text('Community settings')).dx),
-    );
-    expect(find.text('alpha.example.com'), findsOneWidget);
-    expect(find.text('bravo.example.com'), findsOneWidget);
+
+    expect(find.byTooltip('Close community switcher'), findsOneWidget);
+    expect(find.text('alpha.example.com'), findsNothing);
+    expect(find.text('bravo.example.com'), findsNothing);
+
     expect(find.text('Rename'), findsNothing);
     expect(
       find.descendant(
         of: options,
-        matching: find.byIcon(LucideIcons.ellipsisVertical),
+        matching: find.byIcon(BuzzIcons.ellipsisVertical),
       ),
       findsNothing,
     );
     expect(find.text('Edit'), findsOneWidget);
-    expect(find.byIcon(LucideIcons.trash2), findsNothing);
+    expect(find.byIcon(BuzzIcons.trash2), findsNothing);
     expect(
       tester.getSize(find.byKey(const Key('community-switcher-avatar-alpha'))),
-      const Size.square(36),
+      const Size.square(88),
     );
-    final alphaAvatar = tester.widget<AvatarImage>(
+    final alphaAvatar = tester.widget<AvatarImageContent>(
       find.descendant(
         of: find.byKey(const Key('community-switcher-avatar-alpha')),
-        matching: find.byType(AvatarImage),
+        matching: find.byType(AvatarImageContent),
       ),
     );
     expect(alphaAvatar.imageUrl, startsWith('data:image/png;base64,'));
@@ -1346,72 +1505,49 @@ void main() {
       const Key('community-switcher-selection-bravo'),
     );
     expect(
-      tester.getCenter(editButton).dx,
-      closeTo(tester.getCenter(activeSelection).dx, 0.01),
+      tester
+          .getTopLeft(find.byKey(const Key('community-switcher-row-alpha')))
+          .dy,
+      tester
+          .getTopLeft(find.byKey(const Key('community-switcher-row-bravo')))
+          .dy,
     );
-    expect(tester.getSize(activeSelection), const Size.square(40));
     expect(
-      tester.getSize(find.byKey(const Key('community-switcher-circle-alpha'))),
-      const Size.square(24),
+      tester.getTopLeft(find.byKey(const Key('community-switcher-add'))).dy,
+      greaterThan(
+        tester
+            .getBottomLeft(
+              find.byKey(const Key('community-switcher-row-alpha')),
+            )
+            .dy,
+      ),
     );
     expect(
       find.descendant(
         of: activeSelection,
-        matching: find.byIcon(LucideIcons.check),
+        matching: find.byIcon(BuzzIcons.check),
       ),
       findsOneWidget,
     );
     expect(
       find.descendant(
         of: inactiveSelection,
-        matching: find.byIcon(LucideIcons.check),
+        matching: find.byIcon(BuzzIcons.check),
       ),
       findsNothing,
     );
     expect(
       find.descendant(of: options, matching: find.byType(Divider)),
-      findsNWidgets(2),
+      findsNothing,
     );
 
     await tester.tap(find.text('Edit'));
     await tester.pump();
 
-    final activeAction = find.byKey(
-      const Key('community-switcher-action-alpha'),
-    );
-    final actionSwitcher = tester.widget<AnimatedSwitcher>(
-      find.descendant(
-        of: activeAction,
-        matching: find.byType(AnimatedSwitcher),
-      ),
-    );
-    expect(actionSwitcher.duration, const Duration(milliseconds: 250));
-    expect(activeSelection, findsOneWidget);
-    expect(
-      find.byKey(const Key('community-switcher-remove-alpha')),
-      findsOneWidget,
-    );
-
-    await tester.pump(const Duration(milliseconds: 125));
-
-    final transitioningOpacities = tester
-        .widgetList<Opacity>(
-          find.descendant(of: activeAction, matching: find.byType(Opacity)),
-        )
-        .map((opacity) => opacity.opacity);
-    expect(
-      transitioningOpacities.any((opacity) => opacity > 0 && opacity < 1),
-      isTrue,
-    );
-    expect(
-      find.descendant(of: activeAction, matching: find.byType(ImageFiltered)),
-      findsWidgets,
-    );
-
     await tester.pumpAndSettle();
 
     expect(find.text('Done'), findsOneWidget);
-    expect(find.byIcon(LucideIcons.trash2), findsNWidgets(2));
+    expect(find.byIcon(BuzzIcons.trash2), findsNWidgets(2));
     expect(activeSelection, findsNothing);
     expect(inactiveSelection, findsNothing);
 
@@ -1431,7 +1567,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(communityNotifier.removedIds, ['bravo']);
-    expect(find.text('Community settings'), findsOneWidget);
+    expect(find.text('Switch Community'), findsOneWidget);
     expect(find.text('Bravo'), findsNothing);
     expect(find.text('Done'), findsOneWidget);
 
@@ -1473,6 +1609,8 @@ void main() {
 
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
 
     expect(iconLoads, greaterThan(initialIconLoads));
   });
@@ -1503,13 +1641,89 @@ void main() {
 
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
     expect(
-      tester.getSize(find.text('Community settings')).height,
+      tester.getSize(find.byKey(const Key('community-switcher-title'))).height,
       greaterThan(32),
     );
   });
+
+  testWidgets(
+    'Edit morphs the check in place and fades other actions reversibly',
+    (tester) async {
+      final communities = [
+        for (final id in ['alpha', 'bravo'])
+          Community(
+            id: id,
+            name: id,
+            relayUrl: 'wss://$id.example.com',
+            addedAt: DateTime(2025),
+          ),
+      ];
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            communityListProvider.overrideWith(
+              () => _FakeCommunityListNotifier(communities),
+            ),
+            activeCommunityProvider.overrideWith(
+              (ref) async => communities.first,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('alpha'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-menu-switch')));
+      await tester.pumpAndSettle();
+      final badge = find.byKey(const Key('community-switcher-badge-alpha'));
+      final center = tester.getCenter(badge);
+      final avatar = find.byKey(const Key('community-switcher-avatar-alpha'));
+      final avatarBounds = tester.getRect(avatar);
+      double opacity() => tester
+          .widget<Opacity>(
+            find.byKey(const Key('community-switcher-action-opacity-bravo')),
+          )
+          .opacity;
+      double scale() => tester
+          .widget<Transform>(
+            find.byKey(const Key('community-switcher-action-scale-bravo')),
+          )
+          .transform
+          .storage[0];
+      expect(opacity(), 0);
+      expect(find.byIcon(BuzzIcons.check), findsOneWidget);
+      await tester.tap(find.text('Edit'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.getCenter(badge), center);
+      expect(tester.getRect(avatar), avatarBounds);
+      expect(tester.getSize(badge).width, inExclusiveRange(24, 36));
+      expect(opacity(), inExclusiveRange(0, 1));
+      expect(scale(), inExclusiveRange(.9, 1));
+      final midSize = tester.getSize(badge);
+      await tester.tap(find.text('Done'));
+      await tester.pump();
+      expect(tester.getSize(badge), midSize);
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(badge), center);
+      expect(opacity(), 0);
+      expect(find.byIcon(BuzzIcons.check), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.trash2), findsNothing);
+      await tester.tap(find.text('Edit'));
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(badge), center);
+      expect(opacity(), 1);
+      expect(scale(), 1);
+      expect(find.byIcon(BuzzIcons.trash2), findsNWidgets(2));
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('community switcher disables icon motion when requested', (
     tester,
@@ -1541,16 +1755,16 @@ void main() {
 
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Edit'));
     await tester.pump();
 
-    final actionSwitcher = tester.widget<AnimatedSwitcher>(
-      find.descendant(
-        of: find.byKey(const Key('community-switcher-action-alpha')),
-        matching: find.byType(AnimatedSwitcher),
-      ),
+    expect(find.byIcon(BuzzIcons.trash2), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const Key('community-switcher-badge-alpha'))),
+      const Size.square(36),
     );
-    expect(actionSwitcher.duration, Duration.zero);
     expect(
       find.byKey(const Key('community-switcher-selection-alpha')),
       findsNothing,
@@ -1559,6 +1773,693 @@ void main() {
       find.byKey(const Key('community-switcher-remove-alpha')),
       findsOneWidget,
     );
+  });
+
+  for (final reduceMotion in [false, true]) {
+    testWidgets(
+      'paired community waits then uses the community landing (reduced motion: $reduceMotion)',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final community = Community(
+          id: 'alpha',
+          name: 'Alpha',
+          relayUrl: 'wss://alpha.example.com',
+          addedAt: DateTime(2025),
+        );
+        final notifier = _FakeCommunityListNotifier([community]);
+        final loaded = Completer<List<Channel>>();
+        await tester.pumpWidget(
+          buildTestable(
+            disableAnimations: reduceMotion,
+            overrides: [
+              pairingProvider.overrideWith(_CompletedPairingNotifier.new),
+              channelsProvider.overrideWith(
+                () => _FakeNotifier(testChannels, load: () => loaded.future),
+              ),
+              communityListProvider.overrideWith(() => notifier),
+              activeCommunityProvider.overrideWith((ref) async => community),
+            ],
+          ),
+        );
+        await tester.pump();
+        final context = tester.element(find.byType(ChannelsPage));
+        final container = ProviderScope.containerOf(context);
+        // A successful add-community pairing still has a route to dismiss.
+        final navigator = Navigator.of(context);
+        unawaited(
+          navigator.push<void>(
+            MaterialPageRoute(
+              builder: (_) => const Scaffold(body: Text('Pairing complete')),
+            ),
+          ),
+        );
+        await tester.pump();
+        container
+            .read(pairedCommunityLandingProvider.notifier)
+            .request(community);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byKey(const Key('community-flying-avatar')), findsNothing);
+        navigator.pop();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump();
+        await tester.pump();
+        final avatar = find.byKey(const Key('community-flying-avatar'));
+        expect(avatar, findsOneWidget);
+        expect(tester.getCenter(avatar), const Offset(195, 422));
+        expect(
+          find.byKey(const Key('community-switch-loading')),
+          findsOneWidget,
+        );
+        expect(container.read(pairedCommunityLandingProvider), isNull);
+        expect(notifier.switchedIds, isEmpty);
+        loaded.complete(
+          testChannels.where((channel) => channel.channelType != 'dm').toList(),
+        );
+        for (var i = 0; i < 12; i++) {
+          await tester.pump();
+        }
+        await tester.pump(const Duration(milliseconds: 450));
+        for (var i = 0; i < 6; i++) {
+          await tester.pump();
+        }
+        if (!reduceMotion) {
+          await tester.pump(const Duration(milliseconds: 260));
+          expect(tester.getCenter(avatar).dy, lessThan(422));
+        }
+        await tester.pumpAndSettle();
+        expect(avatar, findsNothing);
+        expect(find.byKey(const Key('community-switch-loading')), findsNothing);
+        expect(notifier.switchedIds, isEmpty);
+        expect(container.read(pairingProvider).status, PairingStatus.idle);
+        expect(tester.takeException(), isNull);
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
+  for (final nativeHeader in [false, true]) {
+    for (final reduceMotion in [false, true]) {
+      testWidgets(
+        'community selection holds enlarged until content loads (native header: $nativeHeader, reduced motion: $reduceMotion)',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = nativeHeader
+              ? TargetPlatform.iOS
+              : TargetPlatform.android;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          final communities = [
+            Community(
+              id: 'alpha',
+              name: 'Alpha',
+              relayUrl: 'wss://alpha.example.com',
+              addedAt: DateTime(2025),
+            ),
+            Community(
+              id: 'bravo',
+              name: 'Bravo',
+              relayUrl: 'wss://bravo.example.com',
+              addedAt: DateTime(2025),
+            ),
+          ];
+          final notifier = _FakeCommunityListNotifier(communities)
+            ..switchCompleter = Completer<void>();
+          final loadedChannels = Completer<List<Channel>>();
+          final unreadCatchUp = Completer<void>();
+          final profiles = _SwitchingUserCache();
+          final progress = <double>[];
+          await tester.pumpWidget(
+            buildTestable(
+              communityIcons: nativeHeader
+                  ? {
+                      'wss://bravo.example.com': emojiAvatarDataUrl(
+                        '🥳',
+                        0xFFFF8652,
+                      ),
+                    }
+                  : const {},
+              disableAnimations: reduceMotion,
+              // An offline cosmetic refresh must not block ready content.
+              loadCommunityIcon: nativeHeader
+                  ? null
+                  : (relayUrl) => relayUrl.contains('bravo')
+                        ? Completer<String?>().future
+                        : Future.value(null),
+              onSettingsTransitionProgress: progress.add,
+              overrides: [
+                userCacheProvider.overrideWith(() => profiles),
+                readStateProvider.overrideWith(
+                  () => _FakeReadStateNotifier(
+                    const ReadStateState(
+                      isReady: true,
+                      pubkey: 'aabb',
+                      contexts: {'1': 100},
+                      version: 0,
+                    ),
+                  ),
+                ),
+                channelsProvider.overrideWith(
+                  () => _FakeNotifier(
+                    testChannels,
+                    load: () => notifier.activeId == 'bravo'
+                        ? loadedChannels.future
+                        : Future.value(testChannels),
+                    unreadCatchUp: unreadCatchUp.future,
+                  ),
+                ),
+                communityListProvider.overrideWith(() => notifier),
+                activeCommunityProvider.overrideWith((ref) async {
+                  await ref.watch(communityListProvider.future);
+                  return communities.firstWhere(
+                    (community) => community.id == notifier.activeId,
+                  );
+                }),
+              ],
+            ),
+          );
+          await tester.pumpAndSettle();
+          final Rect destinationRect;
+          if (nativeHeader) {
+            destinationRect = const Rect.fromLTWH(16, 68, 36, 36);
+            final bar = tester.widget<FrostedAppBar>(
+              find.byType(FrostedAppBar),
+            );
+            bar.nativeLeading!.onAvatarBoundsChanged!(destinationRect);
+            bar.nativeLeading!.onPressed!();
+          } else {
+            final headerAvatar = find.descendant(
+              of: find.byType(FrostedAppBar).last,
+              matching: find.byType(ClipRSuperellipse),
+            );
+            destinationRect = tester.getRect(headerAvatar);
+            await tester.tap(find.text('Alpha'));
+          }
+          final destination = destinationRect.center;
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const Key('community-menu-switch')));
+          await tester.pumpAndSettle();
+          expect(progress.last, 1);
+          if (nativeHeader) {
+            var navigation = tester.widget<IosNavigationBar>(
+              find.byType(IosNavigationBar).last,
+            );
+            expect(navigation.leading!.symbol, 'xmark');
+            expect(navigation.leading!.label, 'Close community switcher');
+            expect(navigation.actions.single.label, 'Edit');
+            navigation.actions.single.onPressed!();
+            await tester.pumpAndSettle();
+            expect(
+              find.byKey(const Key('community-switcher-remove-bravo')),
+              findsOneWidget,
+            );
+            navigation = tester.widget<IosNavigationBar>(
+              find.byType(IosNavigationBar).last,
+            );
+            expect(navigation.actions.single.label, 'Done');
+            navigation.actions.single.onPressed!();
+            await tester.pumpAndSettle();
+          }
+          await tester.tap(
+            find.byKey(const Key('community-switcher-row-bravo')),
+          );
+          await tester.pump();
+          final flyingAvatar = find.byKey(const Key('community-flying-avatar'));
+          expect(notifier.switchedIds, reduceMotion ? ['bravo'] : isEmpty);
+          if (nativeHeader) {
+            expect(
+              tester
+                  .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+                  .nativeLeading!
+                  .avatarHidden,
+              isTrue,
+            );
+          }
+          final origin = tester.getCenter(flyingAvatar);
+          await tester.pump(const Duration(milliseconds: 105));
+          if (!reduceMotion) {
+            expect(notifier.switchedIds, isEmpty);
+            final inFlight = tester.getCenter(flyingAvatar);
+            const center = Offset(195, 422);
+            expect(
+              (inFlight - center).distance,
+              lessThan((origin - center).distance),
+            );
+            expect((inFlight - center).distance, greaterThan(0));
+            final delta = center - origin;
+            final travel = inFlight - origin;
+            // A curved approach differs from the old straight-line tween.
+            expect(
+              (delta.dx * travel.dy - delta.dy * travel.dx).abs(),
+              greaterThan(1),
+            );
+          }
+          await tester.pump(const Duration(milliseconds: 325));
+          await tester.pump();
+          expect(notifier.switchedIds, ['bravo']);
+          final loader = find.byKey(const Key('community-switch-loading'));
+          final loadingIndicator = tester.widget<BuzzLoadingIndicator>(loader);
+          final loaderContext = tester.element(loader);
+          expect(loadingIndicator.size, 18);
+          expect(
+            loadingIndicator.color,
+            loaderContext.colors.onSecondaryContainer,
+          );
+          expect(tester.getSize(loader), const Size.square(18));
+          final spinner = find.descendant(
+            of: loader,
+            matching: find.byType(RotationTransition),
+          );
+          final turns = tester.widget<RotationTransition>(spinner).turns;
+          final before = turns.value;
+          await tester.pump(const Duration(milliseconds: 125));
+          expect(
+            (turns.value - before + 1) % 1,
+            closeTo(reduceMotion ? 0 : 0.25, 0.001),
+          );
+          final initial = tester.widget<RichText>(
+            find.descendant(of: flyingAvatar, matching: find.byType(RichText)),
+          );
+          expect(
+            initial.text.style?.decoration,
+            anyOf(isNull, TextDecoration.none),
+          );
+          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          expect(
+            tester.widget<Transform>(flyingAvatar).transform.storage[0],
+            1.5,
+          );
+          expect(
+            find.byKey(const Key('community-switch-loading')),
+            findsOneWidget,
+          );
+          expect(
+            tester
+                .widget<Opacity>(
+                  find.byKey(const Key('community-loading-backdrop')),
+                )
+                .opacity,
+            1,
+          );
+          // Storage completing does not release the avatar: the new channel list
+          // is still pending, and the old snapshot must not count as ready.
+          notifier.switchCompleter!.complete();
+          await tester.pump();
+          await tester.pump(const Duration(seconds: 3));
+          for (final id in ['alpha', 'bravo']) {
+            expect(
+              find.descendant(
+                of: find.byKey(Key('community-switcher-selection-$id')),
+                matching: find.byIcon(BuzzIcons.check),
+              ),
+              id == 'alpha' ? findsOneWidget : findsNothing,
+            );
+          }
+          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          expect(
+            tester.widget<Transform>(flyingAvatar).transform.storage[0],
+            1.5,
+          );
+          expect(
+            find.byKey(const Key('community-switch-loading')),
+            findsOneWidget,
+          );
+          await tester.binding.handlePopRoute();
+          await tester.tapAt(const Offset(280, 150));
+          expect(notifier.switchedIds, ['bravo']);
+          loadedChannels.complete(testChannels);
+          // Data is ready, but the page is still revealing its content.
+          await tester.pump();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 200));
+          if (!reduceMotion || nativeHeader) {
+            expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+            expect(
+              find.byKey(const Key('community-switch-loading')),
+              findsOneWidget,
+            );
+          }
+          await tester.pump(const Duration(milliseconds: 220));
+          if (nativeHeader) {
+            // Native images/layout may finish after the Flutter body. Keep the
+            // hold, and use fresh bounds rather than the old community's slot.
+            expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+            final header = tester.widget<FrostedAppBar>(
+              find.byType(FrostedAppBar),
+            );
+            header.nativeLeading!.onAvatarBoundsChanged!(
+              const Rect.fromLTWH(24, 76, 36, 36),
+            );
+            header.onNativeReadyChanged!(true);
+          }
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+          // The loaded list and header are ready, but unread history and DM
+          // labels must also settle before the background can be revealed.
+          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(ChannelsPage)),
+          );
+          (container.read(channelsProvider.notifier) as _FakeNotifier)
+              .addUnread('1', _observed(id: 'late-mention', createdAt: 200));
+          unreadCatchUp.complete();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
+          expect(
+            tester
+                .widget<Opacity>(
+                  find.byKey(const Key('community-loading-backdrop')),
+                )
+                .opacity,
+            1,
+          );
+          profiles.finish();
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+          expect(
+            tester.widget<Text>(find.text('general')).style!.fontWeight,
+            FontWeight.w700,
+          );
+          expect(find.text('Alice ready'), findsOneWidget);
+          expect(progress.last, 0);
+          if (!reduceMotion) {
+            await tester.pump(const Duration(milliseconds: 65));
+            expect(tester.getCenter(flyingAvatar).dx, greaterThan(195));
+            await tester.pump(const Duration(milliseconds: 195));
+            expect(tester.getCenter(flyingAvatar).dy, lessThan(422));
+            expect(
+              tester.getCenter(flyingAvatar).dy,
+              greaterThan(destination.dy),
+            );
+            expect(
+              tester.widget<Transform>(flyingAvatar).transform.storage[0],
+              lessThan(1.5),
+            );
+            expect(
+              find.byKey(const Key('community-switch-loading')),
+              findsNothing,
+            );
+            final opacity = tester
+                .widget<Opacity>(
+                  find.byKey(const Key('community-loading-backdrop')),
+                )
+                .opacity;
+            expect(opacity, 1);
+            await tester.pump(const Duration(milliseconds: 259));
+            expect(
+              (tester.getCenter(flyingAvatar) -
+                      (nativeHeader ? const Offset(42, 94) : destination))
+                  .distance,
+              lessThan(0.5),
+            );
+            await tester.pump(const Duration(milliseconds: 11));
+            await tester.pump();
+            final landed = tester.getCenter(flyingAvatar);
+            await tester.pump(const Duration(milliseconds: 80));
+            expect(tester.getCenter(flyingAvatar), landed);
+            expect(
+              tester
+                  .widget<Opacity>(
+                    find.byKey(const Key('community-loading-backdrop')),
+                  )
+                  .opacity,
+              allOf(greaterThan(0), lessThan(1)),
+            );
+          }
+          await tester.pumpAndSettle();
+          expect(notifier.switchedIds, ['bravo']);
+          expect(
+            find.byKey(const Key('community-switcher-page')),
+            findsNothing,
+          );
+          if (nativeHeader) {
+            final bar = tester.widget<FrostedAppBar>(
+              find.byType(FrostedAppBar),
+            );
+            expect(bar.nativeTitle, 'Bravo');
+            expect(bar.nativeLeading!.avatarHidden, isFalse);
+          } else {
+            expect(find.text('Bravo'), findsOneWidget);
+          }
+          expect(progress.last, 0);
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox());
+          debugDefaultTargetPlatformOverride = null;
+        },
+      );
+    }
+  }
+
+  testWidgets('failed community switch restores the picker and allows retry', (
+    tester,
+  ) async {
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+      ),
+    ];
+    final notifier = _FakeCommunityListNotifier(communities)..failSwitch = true;
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(() => notifier),
+          activeCommunityProvider.overrideWith(
+            (ref) async => communities.first,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Could not switch communities. Please try again.'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('community-flying-avatar')), findsNothing);
+    expect(
+      tester
+          .widget<Opacity>(find.byKey(const Key('community-picker-opacity')))
+          .opacity,
+      1,
+    );
+    notifier.failSwitch = false;
+    await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+    await tester.pumpAndSettle();
+    expect(notifier.switchedIds, ['bravo', 'bravo']);
+    expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final timeout in [false, true]) {
+    testWidgets(
+      'community loading failure can retry the active selection (timeout: $timeout)',
+      (tester) async {
+        final communities = [
+          Community(
+            id: 'alpha',
+            name: 'Alpha',
+            relayUrl: 'wss://alpha.example.com',
+            addedAt: DateTime(2025),
+          ),
+          Community(
+            id: 'bravo',
+            name: 'Bravo',
+            relayUrl: 'wss://bravo.example.com',
+            addedAt: DateTime(2025),
+          ),
+        ];
+        final notifier = _FakeCommunityListNotifier(communities);
+        final pending = Completer<List<Channel>>();
+        var retry = false;
+        await tester.pumpWidget(
+          buildTestable(
+            overrides: [
+              channelsProvider.overrideWith(
+                () => _FakeNotifier(
+                  testChannels,
+                  load: () {
+                    if (notifier.activeId == 'alpha' || retry) {
+                      return Future.value(testChannels);
+                    }
+                    return pending.future;
+                  },
+                ),
+              ),
+              communityListProvider.overrideWith(() => notifier),
+              activeCommunityProvider.overrideWith((ref) async {
+                await ref.watch(communityListProvider.future);
+                return communities.firstWhere(
+                  (community) => community.id == notifier.activeId,
+                );
+              }),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Alpha'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('community-menu-switch')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 440));
+        await tester.pump();
+        await tester.pump();
+        expect(
+          find.byKey(const Key('community-switch-loading')),
+          findsOneWidget,
+        );
+        if (timeout) {
+          await tester.pump(const Duration(seconds: 21));
+        } else {
+          pending.completeError(StateError('Relay unavailable'));
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('community-switcher-page')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('community-switch-loading')), findsNothing);
+        expect(
+          find.text(
+            timeout
+                ? 'This community is taking longer to load. Select it to try again, or choose another.'
+                : 'Could not switch communities. Please try again.',
+          ),
+          findsOneWidget,
+        );
+        retry = true;
+        await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+        await tester.pumpAndSettle();
+        expect(notifier.switchedIds, ['bravo', 'bravo']);
+        expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+        expect(find.text('Bravo'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final count in [0, 1, 3, 12]) {
+    testWidgets('community grid fits $count communities with Add last', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 568);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final communities = [
+        for (var i = 0; i < count; i++)
+          Community(
+            id: '$i',
+            name: 'Community $i',
+            relayUrl: 'wss://community-$i.example.com',
+            addedAt: DateTime(2025),
+          ),
+      ];
+      await tester.pumpWidget(
+        buildTestable(
+          textScaler: TextScaler.linear(2),
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier([])),
+            communityListProvider.overrideWith(
+              () => _FakeCommunityListNotifier(communities),
+            ),
+            activeCommunityProvider.overrideWith(
+              (ref) async => communities.firstOrNull,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(count == 0 ? 'Community' : 'Community 0'));
+      await tester.pumpAndSettle();
+      final switchRow = find.byKey(const Key('community-menu-switch'));
+      await tester.ensureVisible(switchRow);
+      await tester.tap(switchRow);
+      await tester.pumpAndSettle();
+      final add = find.byKey(const Key('community-switcher-add'));
+      await tester.ensureVisible(add);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(add).bottom, lessThanOrEqualTo(568));
+      expect(tester.getRect(add).top, greaterThanOrEqualTo(0));
+      if (count > 0) {
+        final last = find.byKey(Key('community-switcher-row-${count - 1}'));
+        final addPosition = tester.getTopLeft(add);
+        final lastPosition = tester.getTopLeft(last);
+        if (count.isOdd) {
+          expect(addPosition.dy, lastPosition.dy);
+          expect(addPosition.dx, greaterThan(lastPosition.dx));
+        } else {
+          expect(addPosition.dy, greaterThan(lastPosition.dy));
+        }
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('Add Community opens the pairing page after the picker exits', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(
+            () => _FakeCommunityListNotifier([]),
+          ),
+          activeCommunityProvider.overrideWith((ref) async => null),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Community'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-switcher-add')));
+    // The pairing welcome bee repeats; advance finite frames instead of settling.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump();
+    expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+    expect(find.byType(PairingPage), findsOneWidget);
+    expect(find.byType(FallbackPairingQrScanner), findsNothing);
+    expect(find.text('Scan a QR code'), findsOneWidget);
+    expect(find.text('Use pairing code'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
   });
 
   testWidgets('quick actions slide behind navigation when leaving home', (
@@ -2191,7 +3092,7 @@ void main() {
       16,
     );
     expect(
-      find.descendant(of: aliceChip, matching: find.byIcon(LucideIcons.x)),
+      find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
       findsNothing,
     );
     expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);
@@ -2570,6 +3471,75 @@ void main() {
     );
   });
 
+  for (final (label, events, bold) in [
+    (
+      'catch-up marks read ordinary messages and thread replies',
+      [
+        _observed(id: 'msg-1', createdAt: 20),
+        _observed(
+          id: 'reply-1',
+          createdAt: 30,
+          rootId: 'root',
+          isThreadedReply: true,
+        ),
+      ],
+      false,
+    ),
+    (
+      'channel catch-up does not read a mention',
+      [_observed(id: 'mention-1', createdAt: 20, highPriority: true)],
+      true,
+    ),
+  ]) {
+    testWidgets(label, (tester) async {
+      final channels = [
+        Channel(
+          id: '1',
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'General discussion',
+          createdBy: 'abc',
+          createdAt: DateTime(2025),
+          memberCount: 10,
+          lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+            30 * 1000,
+            isUtc: true,
+          ),
+          isMember: true,
+        ),
+      ];
+      final readState = _FakeReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'pk',
+          contexts: {'1': 10, 'activity:1': 25, 'thread-activity:root': 30},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                channels,
+                observedEventsByChannel: {'1': events},
+              ),
+            ),
+            readStateProvider.overrideWith(() => readState),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Text>(find.text('general')).style?.fontWeight,
+        bold ? FontWeight.w700 : FontWeight.w400,
+      );
+    });
+  }
+
   testWidgets('seeds first loaded channels as read', (tester) async {
     final channels = [
       Channel(
@@ -2670,10 +3640,14 @@ Widget _buildSettingsPage(BuildContext context) =>
 
 class _FakeNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
+  final Future<List<Channel>> Function()? load;
+  final Future<void>? unreadCatchUp;
   final Map<String, Map<String, ObservedUnreadEvent>> _observedEventsByChannel;
 
   _FakeNotifier(
     this._channels, {
+    this.load,
+    this.unreadCatchUp,
     Map<String, List<ObservedUnreadEvent>> observedEventsByChannel = const {},
   }) : _observedEventsByChannel = {
          for (final entry in observedEventsByChannel.entries)
@@ -2681,7 +3655,16 @@ class _FakeNotifier extends ChannelsNotifier {
        };
 
   @override
-  Future<List<Channel>> build() async => _channels;
+  Future<List<Channel>> build() async =>
+      load == null ? _channels : await load!();
+
+  @override
+  Future<void> waitForUnreadCatchUp() async => await unreadCatchUp;
+
+  void addUnread(String channelId, ObservedUnreadEvent event) {
+    (_observedEventsByChannel[channelId] ??= {})[event.id] = event;
+    state = AsyncData([...state.requireValue]);
+  }
 
   @override
   Future<void> ensureDirectoryLoaded() async {
@@ -2818,6 +3801,19 @@ class _FakeCommunityListNotifier extends CommunityListNotifier {
 
   List<Community> _communities;
   final List<String> removedIds = [];
+  final List<String> switchedIds = [];
+  bool failSwitch = false;
+  String activeId = 'alpha';
+  Completer<void>? switchCompleter;
+
+  @override
+  Future<void> switchCommunity(String id) async {
+    switchedIds.add(id);
+    if (failSwitch) throw StateError('Storage unavailable');
+    await switchCompleter?.future;
+    activeId = id;
+    state = AsyncData([..._communities]);
+  }
 
   @override
   Future<List<Community>> build() async => _communities;
@@ -2969,4 +3965,29 @@ String _dmTileAvatarInitial(WidgetTester tester, String labelText) {
 class _CommunitySettingsLifecycle extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
+}
+
+class _SwitchingUserCache extends UserCacheNotifier {
+  final loaded = Completer<bool>();
+
+  @override
+  Map<String, UserProfile> build() => {};
+
+  @override
+  UserProfile? get(String pubkey) => state[pubkey];
+
+  @override
+  Future<bool> preload(List<String> pubkeys) => loaded.future;
+
+  void finish() {
+    state = {
+      'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice ready'),
+    };
+    loaded.complete(true);
+  }
+}
+
+class _CompletedPairingNotifier extends PairingNotifier {
+  @override
+  PairingState build() => const PairingState(status: PairingStatus.success);
 }

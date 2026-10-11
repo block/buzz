@@ -240,7 +240,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
         _PopoverMessageAction(
           id: 'reply',
           title: 'Reply',
-          icon: LucideIcons.messageSquareReply,
+          icon: BuzzIcons.messageSquareReply,
           group: _PopoverMessageActionGroup.primary,
           onSelected: () {
             if (!context.mounted) return;
@@ -264,7 +264,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
       _PopoverMessageAction(
         id: 'copyLink',
         title: 'Copy link',
-        icon: LucideIcons.link2,
+        icon: BuzzIcons.link2,
         group: _PopoverMessageActionGroup.utility,
         onSelected: () {
           if (!context.mounted) return;
@@ -281,7 +281,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
         _PopoverMessageAction(
           id: 'remind',
           title: 'Remind me',
-          icon: LucideIcons.clock,
+          icon: BuzzIcons.clock,
           group: _PopoverMessageActionGroup.utility,
           onSelected: () {
             if (!context.mounted) return;
@@ -304,18 +304,17 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
 
     final readState = ref.read(readStateProvider);
     if (readState.isReady) {
-      final unread = isMessageUnread(
+      final unread = messageActionShowsUnread(
+        ref,
         readState,
         channelId: channelId,
-        messageId: message.id,
-        createdAt: message.createdAt,
-        threadRootId: message.rootId,
+        message: message,
       );
       actions.add(
         _PopoverMessageAction(
           id: unread ? 'markRead' : 'markUnread',
           title: unread ? 'Mark read' : 'Mark unread',
-          icon: unread ? LucideIcons.mailCheck : LucideIcons.mailOpen,
+          icon: unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen,
           group: _PopoverMessageActionGroup.primary,
           onSelected: () {
             final notifier = ref.read(readStateProvider.notifier);
@@ -341,7 +340,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
       _PopoverMessageAction(
         id: following ? 'unfollowThread' : 'followThread',
         title: following ? 'Unfollow thread' : 'Follow thread',
-        icon: following ? LucideIcons.bellOff : LucideIcons.bellRing,
+        icon: following ? BuzzIcons.bellOff : BuzzIcons.bellRing,
         group: _PopoverMessageActionGroup.utility,
         onSelected: () {
           final notifier = ref.read(threadFollowsProvider.notifier);
@@ -357,7 +356,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
       _PopoverMessageAction(
         id: 'copyText',
         title: 'Copy text',
-        icon: LucideIcons.copy,
+        icon: BuzzIcons.copy,
         group: _PopoverMessageActionGroup.utility,
         onSelected: () =>
             Clipboard.setData(ClipboardData(text: message.content)),
@@ -370,7 +369,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
       _PopoverMessageAction(
         id: 'edit',
         title: 'Edit message',
-        icon: LucideIcons.pencil,
+        icon: BuzzIcons.pencil,
         group: _PopoverMessageActionGroup.primary,
         onSelected: () {
           if (!context.mounted) return;
@@ -387,7 +386,7 @@ List<_PopoverMessageAction> _buildPopoverMessageActions({
       _PopoverMessageAction(
         id: 'delete',
         title: 'Delete message',
-        icon: LucideIcons.trash2,
+        icon: BuzzIcons.trash2,
         group: _PopoverMessageActionGroup.destructive,
         destructive: true,
         onSelected: () {

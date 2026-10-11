@@ -178,7 +178,7 @@ class _InboxRow extends HookConsumerWidget {
                       key: ValueKey('inbox-swipe-read-${item.id}'),
                       color: actionColor,
                       foregroundColor: contrastForeground(actionColor),
-                      icon: isDone ? LucideIcons.mail : LucideIcons.mailOpen,
+                      icon: isDone ? BuzzIcons.mail : BuzzIcons.mailOpen,
                       label: isDone ? 'Mark unread' : 'Mark as read',
                       onTap: toggleReadState,
                     ),
@@ -383,13 +383,10 @@ class _InboxRow extends HookConsumerWidget {
           ),
           child: IconTheme.merge(
             data: const IconThemeData(size: 18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+            child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: Icon(
-                    isDone ? LucideIcons.mail : LucideIcons.mailOpen,
-                  ),
+                  leading: Icon(isDone ? BuzzIcons.mail : BuzzIcons.mailOpen),
                   title: Text(isDone ? 'Mark unread' : 'Mark as read'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -397,7 +394,7 @@ class _InboxRow extends HookConsumerWidget {
                   },
                 ),
                 ListTile(
-                  leading: const Icon(LucideIcons.externalLink),
+                  leading: const Icon(BuzzIcons.externalLink),
                   title: const Text('Open conversation'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();

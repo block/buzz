@@ -186,7 +186,7 @@ class _HuddleButton extends ConsumerWidget {
       color: context.colors.primary,
       onPressed: action.onPressed,
       tooltip: action.label,
-      icon: const Icon(LucideIcons.headphones, size: 22),
+      icon: const Icon(BuzzIcons.headphones, size: 22),
     );
   }
 }
@@ -345,11 +345,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            Icon(
-              LucideIcons.headphones,
-              size: 20,
-              color: context.colors.primary,
-            ),
+            Icon(BuzzIcons.headphones, size: 20, color: context.colors.primary),
             const SizedBox(width: Grid.xxs),
             Expanded(
               child: Column(
@@ -646,7 +642,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final (retryTooltip, retryIcon, onRetry) = switch (true) {
       _ when unavailable => (
         'Start a new Huddle',
-        LucideIcons.headphones,
+        BuzzIcons.headphones,
         () => unawaited(
           _startReplacementHuddle(
             context: context,
@@ -657,12 +653,12 @@ class _MobileHuddleCallPage extends ConsumerWidget {
       ),
       _ when needsMicrophoneSettings => (
         'Open Settings',
-        LucideIcons.settings,
+        BuzzIcons.settings,
         () => unawaited(sessionController.openMicrophoneSettings()),
       ),
       _ => (
         'Try again',
-        LucideIcons.refreshCw,
+        BuzzIcons.refreshCw,
         () => unawaited(
           lifecycleController.join(
             parentChannelId: invite.parentChannelId,
@@ -833,13 +829,13 @@ class _HuddleCallHeader extends StatelessWidget {
               unawaited(HapticFeedback.selectionClick());
               onMinimize();
             },
-            icon: const Icon(LucideIcons.chevronDown, size: 32),
+            icon: const Icon(BuzzIcons.chevronDown, size: 32),
           ),
           const Spacer(),
           _HuddleRoundControl(
             key: const ValueKey('huddle-leave'),
             tooltip: 'Leave Huddle',
-            icon: LucideIcons.phoneOff,
+            icon: BuzzIcons.phoneOff,
             foregroundColor: context.colors.error,
             backgroundColor: context.colors.surfaceContainerHighest,
             useHapticFeedback: true,

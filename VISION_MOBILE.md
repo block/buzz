@@ -38,7 +38,7 @@ The following are preferred architectural approaches in service of the experienc
 
 - We want to minimize the average time elapsed between (a) merging a change and (b) the change appearing in Comp Portal and the app stores.
 - We should always have a release `Waiting for Review` / `In Review` in the iOS App Store. Immediately a release is approved, we submit a new one.
-- We should build and upload release candidates frequently. Every RC should go to Comp Portal and TestFlight. Building and distributing an RC from a commit on main should require only a single click/command. When the time arrives to submit the next release to public app stores, there should already be a suitable RC uploaded and dogfooded.
+- We should build and upload release candidates frequently. Every RC should go to Comp Portal and TestFlight. Building and distributing an RC from a commit on main should require only a single click/command. When the time arrives to submit the next release to public app stores, there should already be a suitable RC uploaded and tested.
 
 ## Critical functionality
 

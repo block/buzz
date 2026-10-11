@@ -2,7 +2,7 @@ import Foundation
 
 /// Errors thrown by the canonical transcript encoder.
 public enum BuzzPushTranscriptError: Error, Equatable {
-    /// A string field contained non-ASCII scalars. NIP-PL admits only ASCII
+    /// A string field contained non-ASCII scalars. Buzz push admits only ASCII
     /// authority-bearing strings; rather than guess at UTF-8-vs-escaping
     /// behavior we fail closed.
     case nonASCIIInput(field: String)
@@ -10,9 +10,9 @@ public enum BuzzPushTranscriptError: Error, Equatable {
     case invalidGatewayOrigin
 }
 
-/// Canonical NIP-PL App Attest transcript encoder.
+/// Canonical Buzz push App Attest transcript encoder.
 ///
-/// NIP-PL ("Exact App Attest transcript construction") pins the exact bytes
+/// Buzz push pins the exact bytes
 /// every App Attest operation signs:
 ///
 ///     <domain> + "\n" + <compact ordered JSON object>
@@ -41,7 +41,7 @@ public enum BuzzPushTranscript {
     public static let revokeDelegationDomain = "buzz.push.revoke-delegation.v1"
     public static let revokeInstallationDomain = "buzz.push.revoke-installation.v1"
 
-    /// Wire version pinned by NIP-PL. Every transcript carries `"v":1`.
+    /// Wire version for buzz-push-v1. Every transcript carries `"v":1`.
     public static let wireVersion: Int64 = 1
 
     /// Origin registered by NIP-PL v1 for every App Attest transcript audience.
@@ -56,7 +56,6 @@ public enum BuzzPushTranscript {
         challengeId: UUID,
         challenge: String,
         keyId: String,
-        appProfile: String,
         endpoint: String,
         endpointEpoch: Int64,
         expiresAt: Int64
@@ -67,7 +66,6 @@ public enum BuzzPushTranscript {
         o.uuid("challenge_id", challengeId)
         try o.string("challenge", challenge, field: "challenge")
         try o.string("key_id", keyId, field: "key_id")
-        try o.string("app_profile", appProfile, field: "app_profile")
         try o.string("endpoint", endpoint, field: "endpoint")
         o.int("endpoint_epoch", endpointEpoch)
         o.int("expires_at", expiresAt)

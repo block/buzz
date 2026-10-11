@@ -738,7 +738,12 @@ pub async fn execute_delete_with_marker(
     parent_event_id: Option<&[u8]>,
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     let owned: bool = sqlx::query_scalar(
         r#"
@@ -753,7 +758,7 @@ pub async fn execute_delete_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     if !owned {
@@ -764,7 +769,7 @@ pub async fn execute_delete_with_marker(
     // Acquire the action-row lock before evaluating the wall-clock expiry check.
     sqlx::query("SELECT id FROM relay_admin_actions WHERE id = $1 FOR UPDATE")
         .bind(action_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(tx.conn())
         .await?;
 
     // Canonical delete + thread_metadata counters, fenced by this transaction.
@@ -772,7 +777,6 @@ pub async fn execute_delete_with_marker(
     // action against an already-deleted target leaves them unchanged.
     crate::event::soft_delete_event_and_update_thread_in_tx(
         &mut tx,
-        community_id,
         target_event_id,
         parent_event_id,
         root_event_id,
@@ -792,7 +796,7 @@ pub async fn execute_delete_with_marker(
     )
     .bind(action_id)
     .bind(lease_token)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     if marker.rows_affected() == 0 {

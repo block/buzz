@@ -22,11 +22,12 @@ use buzz_core::CommunityId;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
-use buzz_pubsub::conn_control::ConnControl;
+use buzz_pubsub::conn_control::{ConnControl, ScopedConnControl};
 use buzz_pubsub::rate_limiter::RedisRateLimiter;
 use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
+use chrono::{DateTime, Utc};
 use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
@@ -38,11 +39,11 @@ pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 
 /// Why a community-bound socket is being asked to stop.
 ///
-/// Only deletion is externally attributed today. Ordinary lifecycle exits keep
-/// using cancellation alone and therefore retain the existing bare-close
-/// behavior.
+/// Ordinary lifecycle exits keep using cancellation alone and therefore retain
+/// the existing bare-close behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommunityDisconnectReason {
+    CommunityArchived,
     CommunityDeleted,
     /// NIP-FI: the connection's proven pubkey was added to the deny set.
     AuthorizationDenied,
@@ -53,6 +54,10 @@ pub(crate) enum CommunityDisconnectReason {
 impl CommunityDisconnectReason {
     pub(crate) fn close_message(self) -> WsMessage {
         match self {
+            Self::CommunityArchived => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("community archived"),
+            })),
             Self::CommunityDeleted => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("community deleted"),
@@ -253,9 +258,8 @@ impl CommunityConnectionControl {
         self.cancel.cancel();
     }
 
-    fn disconnect_community(&self) {
-        self.reason_tx
-            .send_replace(Some(CommunityDisconnectReason::CommunityDeleted));
+    fn disconnect_community(&self, reason: CommunityDisconnectReason) {
+        self.reason_tx.send_replace(Some(reason));
         self.cancel.cancel();
     }
 
@@ -359,13 +363,25 @@ impl CommunityConnectionRegistry {
         }
     }
 
-    /// Disconnects every socket type currently bound to `community_id` and
-    /// attributes the close to community deletion.
-    pub fn disconnect_community(&self, community_id: CommunityId) -> usize {
+    /// Disconnects every socket type currently bound to an archived community.
+    pub fn disconnect_archived_community(&self, community_id: CommunityId) -> usize {
+        self.disconnect_community(community_id, CommunityDisconnectReason::CommunityArchived)
+    }
+
+    /// Disconnects every socket type currently bound to a permanently deleted community.
+    pub fn disconnect_deleted_community(&self, community_id: CommunityId) -> usize {
+        self.disconnect_community(community_id, CommunityDisconnectReason::CommunityDeleted)
+    }
+
+    fn disconnect_community(
+        &self,
+        community_id: CommunityId,
+        reason: CommunityDisconnectReason,
+    ) -> usize {
         let mut closed = 0;
         for entry in self.connections.iter() {
             if entry.value().0 == community_id {
-                entry.value().1.disconnect_community();
+                entry.value().1.disconnect_community(reason);
                 closed += 1;
             }
         }
@@ -626,21 +642,20 @@ pub(crate) async fn run_registered_community_connection<
     cancel.cancel();
 }
 
-async fn revalidate_registered_communities<Check, CheckFuture>(
+async fn revalidate_registered_communities<Revalidate, RevalidateFuture>(
     registry: &CommunityConnectionRegistry,
-    mut check_active: Check,
+    mut revalidate: Revalidate,
 ) -> (usize, Vec<(CommunityId, buzz_db::DbError)>)
 where
-    Check: FnMut(CommunityId) -> CheckFuture,
-    CheckFuture: Future<Output = Result<bool, buzz_db::DbError>>,
+    Revalidate: FnMut(CommunityId) -> RevalidateFuture,
+    RevalidateFuture: Future<Output = Result<usize, buzz_db::DbError>>,
 {
     let communities = registry.bound_communities();
     let mut closed = 0;
     let mut failures = Vec::new();
     for community_id in communities {
-        match check_active(community_id).await {
-            Ok(false) => closed += registry.disconnect_community(community_id),
-            Ok(true) => {}
+        match revalidate(community_id).await {
+            Ok(disconnected) => closed += disconnected,
             Err(error) => failures.push((community_id, error)),
         }
     }
@@ -1178,6 +1193,8 @@ pub struct AppState {
     pub community_connections: Arc<CommunityConnectionRegistry>,
     /// Stops only the periodic lifecycle revalidator during graceful shutdown.
     pub community_revalidator_cancel: CancellationToken,
+    /// Cancels push claims and in-flight delivery on process shutdown.
+    pub push_cancel: CancellationToken,
     /// Test/telemetry counter for archive disconnect publication attempts.
     pub community_disconnect_publish_attempts: Arc<AtomicU64>,
     /// Semaphore limiting total concurrent connections.
@@ -1291,7 +1308,9 @@ pub struct AppState {
     /// Key: (community_id, agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// `agent_owner_pubkey` is immutable inside one community, so a long TTL
     /// (5 min) is safe once the community label is part of the key.
-    /// Prevents repeated DB lookups from bursty observer traffic.
+    /// Prevents repeated DB lookups from bursty observer traffic, and lets
+    /// `materialize_nip_oa_owner` skip its writes for a known mapping. Sized
+    /// for every concurrently active agent so per-request HTTP agents hit.
     #[allow(clippy::type_complexity)]
     pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
     /// Cache for the `author_type` metric label on the ingest path.
@@ -1300,6 +1319,23 @@ pub struct AppState {
     /// first-write-wins and set during auth before an agent's first event,
     /// so a short TTL only bounds staleness for the rare backfill race.
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
+    /// Ephemeral-path cache of `is_serving_active` (community not archived or
+    /// deleted). Key: community. TTL only (10s). Persistent ingest keeps the
+    /// uncached read as its durable write fence; on the ephemeral path archive
+    /// also disconnects the community's live sockets.
+    pub serving_active_cache: Arc<moka::sync::Cache<CommunityId, bool>>,
+    /// Ephemeral-path cache of the raw ban/timeout row, not the verdict, so a
+    /// timeout still lifts the moment `muted_until` passes. (`banned` is
+    /// computed at read time, so an expiring ban can outlive its expiry by up
+    /// to the TTL.) Key: (community, pubkey bytes). The 30s TTL is the only
+    /// staleness bound: on every pod and for every restriction writer, the
+    /// ephemeral path sees a ban/timeout change within 30s. As a best effort,
+    /// signed moderation commands (9040–9043) also drop the target's own entry
+    /// on the pod that handles them; owned agents' entries, other pods, and the
+    /// admin/report paths just age out. Persistent ingest stays uncached.
+    #[allow(clippy::type_complexity)]
+    pub restriction_cache:
+        Arc<moka::sync::Cache<(CommunityId, Vec<u8>), buzz_db::moderation::RestrictionState>>,
 
     /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
     /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
@@ -1464,6 +1500,7 @@ impl AppState {
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
             community_revalidator_cancel: CancellationToken::new(),
+            push_cancel: CancellationToken::new(),
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
@@ -1528,7 +1565,7 @@ impl AppState {
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
-                    .max_capacity(1_000)
+                    .max_capacity(100_000)
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),
@@ -1536,6 +1573,18 @@ impl AppState {
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            serving_active_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(10))
+                    .build(),
+            ),
+            restriction_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(100_000)
+                    .time_to_live(std::time::Duration::from_secs(30))
                     .build(),
             ),
             // Default to NoopTracer: production builds pay zero cost.
@@ -1570,6 +1619,8 @@ impl AppState {
     /// the readiness gauge on its next request.
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.push_cancel.cancel();
+        self.db.cancel_push_enqueue();
     }
 
     #[cfg(test)]
@@ -1635,6 +1686,53 @@ impl AppState {
         let result = self.db.is_member(community_id, channel_id, pubkey).await?;
         self.membership_cache.insert(key, result);
         Ok(result)
+    }
+
+    /// `is_serving_active` with a 10-second cache, for the ephemeral path only.
+    /// Errors are not cached.
+    pub async fn is_serving_active_cached(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<bool, buzz_db::DbError> {
+        if let Some(cached) = self.serving_active_cache.get(&community_id) {
+            metrics::counter!("buzz_serving_active_cache_hits_total").increment(1);
+            return Ok(cached);
+        }
+        metrics::counter!("buzz_serving_active_cache_misses_total").increment(1);
+        let result = buzz_deletion::store(&self.db)
+            .is_serving_active(community_id)
+            .await?;
+        self.serving_active_cache.insert(community_id, result);
+        Ok(result)
+    }
+
+    /// `moderation_restriction_state` with a 30-second cache, for the
+    /// ephemeral path only. Errors are not cached.
+    pub async fn restriction_state_cached(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<buzz_db::moderation::RestrictionState, buzz_db::DbError> {
+        let key = (community_id, pubkey.to_vec());
+        if let Some(cached) = self.restriction_cache.get(&key) {
+            metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
+            return Ok(cached);
+        }
+        metrics::counter!("buzz_restriction_cache_misses_total").increment(1);
+        let result = self
+            .db
+            .moderation_restriction_state(community_id, pubkey)
+            .await?;
+        self.restriction_cache.insert(key, result.clone());
+        Ok(result)
+    }
+
+    /// Best-effort drop of a pubkey's cached restriction row after a signed
+    /// ban, unban, timeout or untimeout. This pod and this key only; the
+    /// 30-second TTL is the actual bound everywhere else.
+    pub fn invalidate_restriction_cache(&self, community_id: CommunityId, pubkey: &[u8]) {
+        self.restriction_cache
+            .invalidate(&(community_id, pubkey.to_vec()));
     }
 
     /// Invalidate caches after a membership change (add/remove member).
@@ -1960,16 +2058,155 @@ impl AppState {
     pub async fn disconnect_community_clusterwide(
         &self,
         tenant: &TenantContext,
-    ) -> Result<usize, buzz_pubsub::PubSubError> {
+        archived_at: DateTime<Utc>,
+    ) -> anyhow::Result<usize> {
         let closed = self
-            .community_connections
-            .disconnect_community(tenant.community());
+            .db
+            .with_community_archive_fence(tenant.community(), archived_at, || {
+                self.community_connections
+                    .disconnect_archived_community(tenant.community())
+            })
+            .await?
+            .unwrap_or(0);
         self.community_disconnect_publish_attempts
             .fetch_add(1, Ordering::Relaxed);
         self.pubsub
-            .publish_conn_control(tenant, &ConnControl::DisconnectCommunity)
+            .publish_conn_control(
+                tenant,
+                &ConnControl::DisconnectCommunity {
+                    archived_at: Some(archived_at),
+                },
+            )
             .await?;
         Ok(closed)
+    }
+
+    /// Consumes cross-pod connection-control commands until the broadcast closes.
+    ///
+    /// Pubkey disconnects are in-memory and run inline. Community disconnects
+    /// wait on a writer connection and the community row lock, so each runs in
+    /// its own task and a ban disconnect never queues behind one. Every
+    /// community disconnect is fenced against the row, so their relative order
+    /// does not matter.
+    pub async fn run_conn_control_consumer(
+        self: Arc<Self>,
+        mut rx: tokio::sync::broadcast::Receiver<ScopedConnControl>,
+    ) {
+        loop {
+            match rx.recv().await {
+                Ok(scoped) => match scoped.command {
+                    ConnControl::DisconnectCommunity { archived_at } => {
+                        let state = Arc::clone(&self);
+                        let community_id = scoped.community_id;
+                        tokio::spawn(async move {
+                            match state
+                                .apply_community_disconnect(community_id, archived_at)
+                                .await
+                            {
+                                Ok(Some(_)) => {}
+                                Ok(None) => tracing::info!(
+                                    community = %community_id,
+                                    ?archived_at,
+                                    "ignored community disconnect for a community that is active or re-archived"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    community = %community_id,
+                                    ?archived_at,
+                                    %error,
+                                    "could not verify archive disconnect; retaining sockets until lifecycle revalidation"
+                                ),
+                            }
+                        });
+                    }
+                    ConnControl::DisconnectPubkey {
+                        pubkey,
+                        event_id,
+                        reason,
+                        unowned_only,
+                    } => {
+                        self.disconnect_pubkey_local(
+                            scoped.community_id,
+                            &pubkey,
+                            &event_id,
+                            &reason,
+                            unowned_only,
+                        );
+                    }
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    metrics::counter!("buzz_conn_control_lag_total").increment(n);
+                    tracing::warn!("Connection-control consumer lagged by {n} messages");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::error!("Connection-control broadcast channel closed");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Applies a cross-pod `DisconnectCommunity` command to local sockets.
+    ///
+    /// Both forms act only under the community row lock, so neither can close
+    /// a community that an unarchive has already restored:
+    /// - `Some(archived_at)` closes only while that exact archive transition is
+    ///   still current.
+    /// - `None` (community deletion, or archive published by a relay that
+    ///   predates the transition timestamp) closes only while the row is
+    ///   inactive, with the close reason taken from the row itself.
+    ///
+    /// The two forms fail in opposite directions when the fence cannot be
+    /// evaluated. `Some` is only ever a reversible archive, so it retains the
+    /// sockets for lifecycle revalidation and returns the error. `None` may be
+    /// a permanent deletion, so it fails closed with `community deleted`.
+    ///
+    /// Returns `None` when the fence found nothing to close.
+    pub async fn apply_community_disconnect(
+        &self,
+        community_id: CommunityId,
+        archived_at: Option<DateTime<Utc>>,
+    ) -> Result<Option<usize>, buzz_db::DbError> {
+        match archived_at {
+            Some(archived_at) => {
+                self.db
+                    .with_community_archive_fence(community_id, archived_at, || {
+                        self.community_connections
+                            .disconnect_archived_community(community_id)
+                    })
+                    .await
+            }
+            None => match self.disconnect_if_inactive(community_id).await {
+                Ok(disconnected) => Ok(disconnected),
+                Err(error) => {
+                    tracing::warn!(
+                        community = %community_id,
+                        %error,
+                        "could not verify bare community disconnect; failing closed as a deletion"
+                    );
+                    Ok(Some(
+                        self.community_connections
+                            .disconnect_deleted_community(community_id),
+                    ))
+                }
+            },
+        }
+    }
+
+    async fn disconnect_if_inactive(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Option<usize>, buzz_db::DbError> {
+        self.db
+            .with_inactive_community_fence(community_id, |archived_at| {
+                if archived_at.is_some() {
+                    self.community_connections
+                        .disconnect_archived_community(community_id)
+                } else {
+                    self.community_connections
+                        .disconnect_deleted_community(community_id)
+                }
+            })
+            .await
     }
 
     /// Revalidate all communities with live sockets and cancel inactive ones.
@@ -1978,11 +2215,21 @@ impl AppState {
     /// semantics: a pod that missed a successful publish eventually observes the
     /// archived row directly.
     pub async fn revalidate_live_communities(&self) -> usize {
-        let (closed, failures) =
-            revalidate_registered_communities(&self.community_connections, |community_id| {
-                self.db.is_community_active_for_maintenance(community_id)
-            })
-            .await;
+        let (closed, failures) = revalidate_registered_communities(
+            &self.community_connections,
+            |community_id| async move {
+                // Nearly every live community is active. An unlocked read keeps
+                // the per-tick row lock off them; the fence re-checks under the
+                // lock before closing anything.
+                if self.db.is_community_active(community_id).await? {
+                    return Ok(0);
+                }
+                self.disconnect_if_inactive(community_id)
+                    .await
+                    .map(|disconnected| disconnected.unwrap_or(0))
+            },
+        )
+        .await;
         for (community_id, error) in failures {
             tracing::warn!(%community_id, %error, "community lifecycle revalidation failed; retaining its sockets until next tick");
         }
@@ -2516,54 +2763,63 @@ pub(crate) mod tests {
 
     #[test]
     fn community_disconnect_then_nip_fi_keeps_community_deleted_reason() {
-        // CommunityDeleted fires first, AuthorizationDenied arrives second.
-        // The slot must retain CommunityDeleted.
-        let cancel = CancellationToken::new();
-        let control = CommunityConnectionControl::new(cancel.clone());
-        let reason_rx = control.disconnect_reason();
+        // A community close fires first, AuthorizationDenied arrives second.
+        // The slot must retain the community reason, archived or deleted.
+        for reason in [
+            CommunityDisconnectReason::CommunityDeleted,
+            CommunityDisconnectReason::CommunityArchived,
+        ] {
+            let cancel = CancellationToken::new();
+            let control = CommunityConnectionControl::new(cancel.clone());
+            let reason_rx = control.disconnect_reason();
 
-        // First writer: CommunityDeleted (via disconnect_community).
-        control.disconnect_community();
-        // Second writer: AuthorizationDenied — must be ignored (via disconnect_nip_fi).
-        control.disconnect_nip_fi();
+            // First writer: the community reason (via disconnect_community).
+            control.disconnect_community(reason);
+            // Second writer: AuthorizationDenied — must be ignored (via disconnect_nip_fi).
+            control.disconnect_nip_fi();
 
-        assert_eq!(
-            *reason_rx.borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted),
-            "CommunityDeleted (first writer) must not be clobbered by AuthorizationDenied"
-        );
+            assert_eq!(
+                *reason_rx.borrow(),
+                Some(reason),
+                "{reason:?} (first writer) must not be clobbered by AuthorizationDenied"
+            );
+        }
     }
 
     #[test]
     fn disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame() {
-        // disconnect_community fires first → wins reason → no payload (community-deleted
-        // path is intentionally payload-less).
+        // disconnect_community fires first → wins reason → no payload (community
+        // closes are intentionally payload-less).
         // disconnect_nip_fi fires second → loses reason → must NOT enqueue a denial
-        // frame against the CommunityDeleted close.
-        let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+        // frame against the community close.
+        for reason in [
+            CommunityDisconnectReason::CommunityDeleted,
+            CommunityDisconnectReason::CommunityArchived,
+        ] {
+            let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
 
-        let cancel = CancellationToken::new();
-        let control = CommunityConnectionControl::new(cancel.clone());
-        control.set_terminal_frame_sender(terminal_tx);
+            let cancel = CancellationToken::new();
+            let control = CommunityConnectionControl::new(cancel.clone());
+            control.set_terminal_frame_sender(terminal_tx);
 
-        // First writer: disconnect_community.
-        control.disconnect_community();
-        // Second writer: disconnect_nip_fi — loses reason slot.
-        control.disconnect_nip_fi();
+            // First writer: disconnect_community.
+            control.disconnect_community(reason);
+            // Second writer: disconnect_nip_fi — loses reason slot.
+            control.disconnect_nip_fi();
 
-        // Reason slot retains CommunityDeleted.
-        assert_eq!(
-            *control.disconnect_reason().borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted),
-            "CommunityDeleted must be retained when community wins reason"
-        );
+            assert_eq!(
+                *control.disconnect_reason().borrow(),
+                Some(reason),
+                "{reason:?} must be retained when community wins reason"
+            );
 
-        // No frame queued — losing deny must not send an authorization_denied payload
-        // against a community-deleted close.
-        assert!(
-            terminal_rx.try_recv().is_err(),
-            "losing disconnect_nip_fi must not enqueue a denial frame when community wins reason"
-        );
+            // No frame queued — losing deny must not send an authorization_denied
+            // payload against a community close.
+            assert!(
+                terminal_rx.try_recv().is_err(),
+                "losing disconnect_nip_fi must not enqueue a denial frame against {reason:?}"
+            );
+        }
     }
 
     #[test]
@@ -3151,17 +3407,17 @@ pub(crate) mod tests {
         let _audio_a_guard = registry.register(Uuid::new_v4(), community_a, audio_a_control);
         let _ordinary_b_guard = registry.register(Uuid::new_v4(), community_b, ordinary_b_control);
 
-        assert_eq!(registry.disconnect_community(community_a), 2);
+        assert_eq!(registry.disconnect_archived_community(community_a), 2);
         assert!(ordinary_a.is_cancelled());
         assert!(audio_a.is_cancelled());
         assert!(!ordinary_b.is_cancelled());
         assert_eq!(
             *ordinary_a_reason.borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted)
+            Some(CommunityDisconnectReason::CommunityArchived)
         );
         assert_eq!(
             *audio_a_reason.borrow(),
-            Some(CommunityDisconnectReason::CommunityDeleted)
+            Some(CommunityDisconnectReason::CommunityArchived)
         );
         assert_eq!(*ordinary_b_reason.borrow(), None);
     }
@@ -3217,7 +3473,7 @@ pub(crate) mod tests {
             _ = registered.notified() => {}
             _ = &mut future => panic!("revalidation should be paused"),
         }
-        assert_eq!(registry.disconnect_community(community), 1);
+        assert_eq!(registry.disconnect_archived_community(community), 1);
         resume.notify_one();
         future.await;
         assert!(cancel_during.is_cancelled());
@@ -3507,17 +3763,20 @@ pub(crate) mod tests {
             CommunityConnectionControl::new(cancel_c.clone()),
         );
 
-        let (closed, failures) =
-            revalidate_registered_communities(&registry, |community| async move {
+        let registry_for_revalidation = &registry;
+        let (closed, failures) = revalidate_registered_communities(&registry, |community| {
+            let registry = registry_for_revalidation;
+            async move {
                 if community == failed {
                     Err(buzz_db::DbError::InvalidData(
                         "injected lookup failure".into(),
                     ))
                 } else {
-                    Ok(false)
+                    Ok(registry.disconnect_archived_community(community))
                 }
-            })
-            .await;
+            }
+        })
+        .await;
 
         assert_eq!(closed, 2);
         assert!(cancel_a.is_cancelled());
@@ -3528,6 +3787,91 @@ pub(crate) mod tests {
         assert_eq!(
             registry.bound_communities(),
             HashSet::from([archived_a, failed, archived_c])
+        );
+    }
+
+    #[tokio::test]
+    async fn periodic_revalidation_disconnects_inside_the_fenced_callback() {
+        let registry = CommunityConnectionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let cancel = CancellationToken::new();
+        let _guard = registry.register(
+            Uuid::new_v4(),
+            community,
+            CommunityConnectionControl::new(cancel.clone()),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+
+        let future = revalidate_registered_communities(&registry, |community_id| {
+            let entered = Arc::clone(&entered);
+            let resume = Arc::clone(&resume);
+            let registry = &registry;
+            async move {
+                entered.notify_one();
+                resume.notified().await;
+                Ok(registry.disconnect_archived_community(community_id))
+            }
+        });
+        tokio::pin!(future);
+        tokio::select! {
+            _ = entered.notified() => {}
+            _ = &mut future => panic!("revalidation should be paused inside the fence"),
+        }
+        assert!(
+            !cancel.is_cancelled(),
+            "the helper must not disconnect outside the fenced callback"
+        );
+
+        resume.notify_one();
+        let (closed, failures) = future.await;
+        assert_eq!(closed, 1);
+        assert!(failures.is_empty());
+        assert!(cancel.is_cancelled());
+    }
+
+    /// A bare `DisconnectCommunity` may be a permanent deletion, so when the
+    /// lifecycle fence cannot be evaluated it must fail closed as deletion did
+    /// before the fence existed. The timestamped form is only ever a reversible
+    /// archive, so it retains sockets for lifecycle revalidation instead.
+    #[tokio::test]
+    async fn bare_community_disconnect_fails_closed_when_the_fence_is_unavailable() {
+        let state = test_state_with_database_url(
+            "postgres://unused:unused@127.0.0.1:1/unused", // sadscan:disable np.postgres.1
+        )
+        .await;
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        let reason = control.disconnect_reason();
+        let _guard = state
+            .community_connections
+            .register(Uuid::new_v4(), community, control);
+
+        state
+            .apply_community_disconnect(community, Some(Utc::now()))
+            .await
+            .expect_err("an unreachable fence must surface for the archive form");
+        assert!(
+            !cancel.is_cancelled(),
+            "a timestamped archive disconnect must retain sockets when its fence fails"
+        );
+        assert_eq!(*reason.borrow(), None);
+
+        assert_eq!(
+            state
+                .apply_community_disconnect(community, None)
+                .await
+                .expect("a bare disconnect fails closed instead of erroring"),
+            Some(1)
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "a bare disconnect must close sockets when its fence fails"
+        );
+        assert_eq!(
+            *reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
         );
     }
 
@@ -3546,7 +3890,7 @@ pub(crate) mod tests {
         drop(guard);
 
         assert!(registry.bound_communities().is_empty());
-        assert_eq!(registry.disconnect_community(community), 0);
+        assert_eq!(registry.disconnect_archived_community(community), 0);
         assert!(!cancel.is_cancelled());
     }
 

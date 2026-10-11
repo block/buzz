@@ -2,7 +2,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
 import 'buzz_navigation_metrics.dart';
@@ -140,9 +140,13 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Whether to apply the translucent blur treatment behind the app bar.
   ///
-  /// A page can leave its painted backdrop exposed at rest, then turn this on
-  /// when scrolling moves content beneath the controls.
+  /// The backdrop stays clear at rest. This enables the treatment when the
+  /// surrounding scroll scope reports content beneath the controls.
   final bool frosted;
+
+  /// Keeps the backdrop stable regardless of scroll state on both platforms.
+  /// Conversation headers use this while their timeline and composer resize.
+  final bool alwaysFrosted;
 
   /// Opacity of the frosted surface above the blurred backdrop.
   final double frostedSurfaceOpacity;
@@ -173,11 +177,17 @@ class FrostedAppBar extends StatelessWidget {
   /// Whether UIKit should expand the title at the top of the page.
   final bool nativeLargeTitle;
 
+  /// Duration for coordinated native header and overlapping control movement.
+  final Duration nativeLayoutDuration;
+
   /// Native replacement for a custom leading widget.
   final IosNavigationAction? nativeLeading;
 
   /// Native replacements for composite Flutter actions, including menus.
   final List<IosNavigationAction>? nativeActions;
+
+  /// Reports when native header images and layout are ready to reveal.
+  final ValueChanged<bool>? onNativeReadyChanged;
 
   /// Uses a composable Flutter header while a backdrop covers the native view.
   final ValueListenable<bool>? nativeViewSuppressed;
@@ -191,8 +201,10 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeTitlePresenceColor,
     this.onNativeTitlePressed,
     this.nativeLargeTitle = false,
+    this.nativeLayoutDuration = Duration.zero,
     this.nativeLeading,
     this.nativeActions,
+    this.onNativeReadyChanged,
     this.nativeViewSuppressed,
     this.leading,
     this.automaticallyImplyLeading = true,
@@ -208,6 +220,7 @@ class FrostedAppBar extends StatelessWidget {
     this.iconColor,
     this.gradient,
     this.frosted = true,
+    this.alwaysFrosted = false,
     this.frostedSurfaceOpacity = 0.5,
     this.frostedBlurSigma = 20,
     this.showBottomDivider = true,
@@ -234,6 +247,11 @@ class FrostedAppBar extends StatelessWidget {
     if (defaultTargetPlatform == TargetPlatform.iOS && !nativeSuppressed) {
       final offset = IosNavigationScrollScope.maybeOf(context);
       Widget buildNative(double scrollOffset) {
+        // Scrolling tracks the finger directly; only the search focus change
+        // uses the coordinated layout transition.
+        final layoutDuration = nativeLargeTitle && scrollOffset > 0
+            ? Duration.zero
+            : nativeLayoutDuration;
         final extra = nativeLargeTitle
             ? (IosNavigationMetrics.of(context).largeTitleHeight - scrollOffset)
                   .clamp(0.0, IosNavigationMetrics.of(context).largeTitleHeight)
@@ -242,16 +260,22 @@ class FrostedAppBar extends StatelessWidget {
             MediaQuery.paddingOf(context).top +
             IosNavigationMetrics.of(context).compactHeight +
             extra;
-        return Positioned(
+        return AnimatedPositioned(
+          duration: layoutDuration,
+          curve: Curves.easeInOutCubic,
           top: 0,
           left: 0,
           right: 0,
           height: barHeight + bottomHeight,
-          child: Column(
+          child: Stack(
             children: [
-              SizedBox(
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
                 height: barHeight,
                 child: IosNavigationBar(
+                  onReadyChanged: onNativeReadyChanged,
                   title:
                       nativeTitle ??
                       (title is Text ? (title as Text).data ?? '' : ''),
@@ -261,6 +285,7 @@ class FrostedAppBar extends StatelessWidget {
                   titlePresenceColor: nativeTitlePresenceColor,
                   onTitlePressed: onNativeTitlePressed,
                   largeTitle: nativeLargeTitle,
+                  alwaysFrosted: alwaysFrosted,
                   foregroundColor: iconColor,
                   leading: nativeLeading ?? _nativeAction(leading),
                   onBack:
@@ -278,10 +303,15 @@ class FrostedAppBar extends StatelessWidget {
                 ),
               ),
               if (bottom != null)
-                SizedBox(
-                  height: bottomHeight,
-                  child: bottom is SizedBox
-                      ? bottom
+                AnimatedPositioned(
+                  duration: layoutDuration,
+                  curve: Curves.easeInOutCubic,
+                  top: barHeight - bottomOverlap,
+                  left: 0,
+                  right: 0,
+                  height: bottomHeight + bottomOverlap,
+                  child: bottomOverlap > 0 || bottom is SizedBox
+                      ? bottom!
                       : ColoredBox(
                           color: context.colors.surface,
                           child: bottom!,
@@ -301,8 +331,10 @@ class FrostedAppBar extends StatelessWidget {
     }
     final topPadding = MediaQuery.paddingOf(context).top;
     final scrollUnder = FrostedScrollUnderScope.maybeOf(context);
-    final paintsBottomDivider =
-        showBottomDivider && (scrollUnder?.isScrolledUnder ?? true);
+    final isScrolledUnder =
+        alwaysFrosted || (scrollUnder?.isScrolledUnder ?? false);
+    final paintsFrost = frosted && isScrolledUnder;
+    final paintsBottomDivider = showBottomDivider && isScrolledUnder;
     final canPop = Navigator.canPop(context);
     final effectiveTitleStyle = _effectiveTitleStyle(context, titleStyle);
     final barContentHeight = _barContentHeight(
@@ -336,7 +368,7 @@ class FrostedAppBar extends StatelessWidget {
                       child: IconButton(
                         onPressed: () => Navigator.of(context).pop(),
                         color: effectiveIconColor,
-                        icon: const Icon(LucideIcons.chevronLeft),
+                        icon: const Icon(BuzzIcons.chevronLeft),
                         tooltip: 'Back',
                       ),
                     )
@@ -421,11 +453,11 @@ class FrostedAppBar extends StatelessWidget {
       key: const ValueKey('frosted-app-bar-background'),
       padding: EdgeInsets.only(top: topPadding),
       decoration: BoxDecoration(
-        color: !frosted
-            ? Colors.transparent
-            : gradient == null
+        color: gradient != null
+            ? null
+            : paintsFrost
             ? context.colors.surface.withValues(alpha: frostedSurfaceOpacity)
-            : null,
+            : Colors.transparent,
         gradient: gradient,
         border: showBottomDivider
             ? Border(
@@ -442,7 +474,7 @@ class FrostedAppBar extends StatelessWidget {
     );
 
     final child = ClipRect(
-      child: frosted
+      child: paintsFrost
           ? BackdropFilter(
               filter: ImageFilter.blur(
                 sigmaX: frostedBlurSigma,
@@ -565,6 +597,8 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   }
   if (widget is IosGlassNavigationButton) {
     final symbol = switch (widget.icon) {
+      IosGlassNavigationIcon.more => 'ellipsis',
+      IosGlassNavigationIcon.reply => 'arrowshape.turn.up.left',
       IosGlassNavigationIcon.back => 'chevron.backward',
       IosGlassNavigationIcon.close => 'xmark',
       IosGlassNavigationIcon.camera => 'camera',
@@ -591,11 +625,11 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   }
   if (widget is IconButton) {
     final icon = widget.icon is Icon ? (widget.icon as Icon).icon : null;
-    final symbol = icon == LucideIcons.x
+    final symbol = icon == BuzzIcons.x
         ? 'xmark'
-        : icon == LucideIcons.chevronLeft || icon == LucideIcons.arrowLeft
+        : icon == BuzzIcons.chevronLeft || icon == BuzzIcons.arrowLeft
         ? 'chevron.backward'
-        : icon == LucideIcons.users
+        : icon == BuzzIcons.users
         ? 'person.2'
         : 'ellipsis';
     return IosNavigationAction(

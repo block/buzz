@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'package:buzz/shared/relay/media_image.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
@@ -9,6 +13,307 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets(
+    'native readiness waits for configuration and layout acknowledgement',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const channel = MethodChannel('buzz/ios_navigation_bar/844');
+      final applied = Completer<void>();
+      final readiness = <bool>[];
+      final calls = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        calls.add(call.method);
+        if (call.method == 'prepareForReveal') await applied.future;
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        _testApp(
+          home: SizedBox(
+            height: 100,
+            child: IosNavigationBar(
+              title: 'Bravo',
+              onReadyChanged: readiness.add,
+            ),
+          ),
+        ),
+      );
+      tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
+        844,
+      );
+      await tester.pumpAndSettle();
+      expect(calls, contains('prepareForReveal'));
+      expect(readiness.last, false);
+      applied.complete();
+      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump();
+      expect(readiness.last, true);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets('native landing ignores pending profile artwork', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final pending = Completer<http.Response>();
+    var requested = false;
+    final client = MockClient((_) {
+      requested = true;
+      return pending.future;
+    });
+    addTearDown(client.close);
+    const channel = MethodChannel('buzz/ios_navigation_bar/846');
+    final readiness = <bool>[];
+    final calls = <String>[];
+    final createdChannels = <MethodChannel>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (call) async {
+        if (call.method == 'create') {
+          final id = (call.arguments as Map)['id'];
+          final native = MethodChannel('${IosNavigationBar.viewType}/$id');
+          createdChannels.add(native);
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            native,
+            (call) async {
+              calls.add(call.method);
+              return null;
+            },
+          );
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      );
+      for (final native in createdChannels) {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          native,
+          null,
+        );
+      }
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call.method);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [mediaHttpClientProvider.overrideWithValue(client)],
+        child: _testApp(
+          home: IosNavigationBar(
+            title: 'Bravo',
+            leading: IosNavigationAction(
+              label: 'Community settings',
+              avatarInitial: 'B',
+              onAvatarBoundsChanged: (_) {},
+            ),
+            actions: const [
+              IosNavigationAction(
+                label: 'Profile',
+                avatarInitial: 'P',
+                imageUrl: 'https://slow.example.com/profile.png',
+              ),
+            ],
+            onReadyChanged: readiness.add,
+          ),
+        ),
+      ),
+    );
+    tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
+      846,
+    );
+    await tester.pumpAndSettle();
+    Map leading() =>
+        (tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                as Map)['leading']
+            as Map;
+    await tester.runAsync(() async {
+      for (
+        var attempt = 0;
+        attempt < 100 && leading()['imageData'] == null;
+        attempt++
+      ) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
+    await tester.pumpAndSettle();
+    expect(requested, isTrue);
+    expect(pending.isCompleted, isFalse);
+    expect(calls, contains('prepareForReveal'));
+    expect(readiness.last, isTrue);
+    expect(leading()['imageData'], isNotNull);
+    pending.complete(http.Response('offline', 503));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+    'native avatar reports global transition bounds and retains a hidden slot',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const channel = MethodChannel('${IosNavigationBar.viewType}/842');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+      Rect? measured;
+      await tester.pumpWidget(
+        _testApp(
+          home: Padding(
+            padding: const EdgeInsets.only(top: 30),
+            child: IosNavigationBar(
+              title: 'Alpha',
+              leading: IosNavigationAction(
+                label: 'Community settings',
+                avatarInitial: 'A',
+                avatarHidden: true,
+                onAvatarBoundsChanged: (bounds) => measured = bounds,
+                onPressed: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      final view = tester.widget<UiKitView>(find.byType(UiKitView));
+      final leading = (view.creationParams as Map)['leading'] as Map;
+      expect(leading['tracksAvatarBounds'], isTrue);
+      expect(leading['avatarHidden'], isTrue);
+      view.onPlatformViewCreated!(842);
+      await tester.pump();
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        channel.name,
+        channel.codec.encodeMethodCall(
+          const MethodCall('avatarBounds', {
+            'id': 'leading',
+            'x': 16.0,
+            'y': 4.0,
+            'width': 36.0,
+            'height': 36.0,
+          }),
+        ),
+        (_) {},
+      );
+      expect(measured, const Rect.fromLTWH(16, 34, 36, 36));
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  for (final reverse in [false, true]) {
+    testWidgets('initial material tracks content above reverse=$reverse', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final controller = ScrollController();
+      addTearDown(controller.dispose);
+      ValueListenable<double>? offset;
+      Widget page(int count) => _testApp(
+        home: FrostedScaffold(
+          appBar: const FrostedAppBar(title: Text('Conversation')),
+          body: Builder(
+            builder: (context) {
+              offset = IosNavigationScrollScope.maybeOf(context);
+              return ListView(
+                controller: controller,
+                reverse: reverse,
+                children: [
+                  for (var i = 0; i < count; i++)
+                    SizedBox(height: 60, child: Text('Message $i')),
+                ],
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpWidget(page(40));
+      await tester.pumpAndSettle();
+      expect(offset!.value, reverse ? greaterThan(0) : 0);
+      controller.jumpTo(controller.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(offset!.value, reverse ? 0 : greaterThan(0));
+      await tester.pumpWidget(page(1));
+      await tester.pumpAndSettle();
+      expect(offset!.value, 0);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  testWidgets('native material follows live theme surface changes', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/ios_navigation_bar/845');
+    final configurations = <Map<Object?, Object?>>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'configure') configurations.add(call.arguments as Map);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    Widget app(Color surface) => ProviderScope(
+      child: MaterialApp(
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: surface,
+          ).copyWith(surface: surface),
+        ),
+        home: const Scaffold(
+          body: IosNavigationBar(title: 'general', subtitle: '3 members'),
+        ),
+      ),
+    );
+    await tester.pumpWidget(app(const Color(0xFFFFEEDD)));
+    final view = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(view.creationParams, containsPair('background', 0xFFFFEEDD));
+    view.onPlatformViewCreated!(845);
+    await tester.pump();
+    await tester.pumpWidget(app(const Color(0xFF223344)));
+    await tester.pumpAndSettle();
+    expect(configurations.last['background'], 0xFF223344);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('larger native metrics keep a deeply scrolled title collapsed', (
     tester,
   ) async {

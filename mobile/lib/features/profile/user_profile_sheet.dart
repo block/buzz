@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/animated_avatar.dart';
 import '../../shared/identity_names/identity_names.dart';
@@ -34,12 +34,17 @@ void showUserProfileSheet(
   BuildContext context,
   String pubkey, {
   ProviderListenable<IdentityNames>? names,
+  WidgetBuilder? contextualActions,
 }) {
   showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
-    builder: (_) => UserProfileSheet(pubkey: pubkey, names: names),
+    builder: (_) => UserProfileSheet(
+      pubkey: pubkey,
+      names: names,
+      contextualActions: contextualActions,
+    ),
   ).then((channel) {
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
@@ -58,7 +63,15 @@ class UserProfileSheet extends HookConsumerWidget {
   /// owns the context, so this sheet depends on no other feature's state.
   final ProviderListenable<IdentityNames>? names;
 
-  const UserProfileSheet({super.key, required this.pubkey, this.names});
+  /// Optional actions supplied by the opening surface, below the profile tiles.
+  final WidgetBuilder? contextualActions;
+
+  const UserProfileSheet({
+    super.key,
+    required this.pubkey,
+    this.names,
+    this.contextualActions,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -104,8 +117,7 @@ class UserProfileSheet extends HookConsumerWidget {
     // never placed on the clipboard.
     final npub = fullNpub(pubkey);
 
-    // The contextual label from the opening surface, so the sheet names the
-    // identity exactly as the row that was tapped.
+    // Keep the opening surface's comparison context and qualified identity.
     final opener = names;
     final displayName =
         (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
@@ -202,8 +214,20 @@ class UserProfileSheet extends HookConsumerWidget {
                         ),
                       ),
                     ),
-                    // Match Settings: status is quiet, centered copy directly
-                    // below the profile name rather than a separate information row.
+                    if (about.trim().isNotEmpty) ...[
+                      const SizedBox(height: Grid.xxs),
+                      SizedBox(
+                        width: double.infinity,
+                        child: Text(
+                          about,
+                          textAlign: TextAlign.center,
+                          style: context.textTheme.bodyMedium?.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                    // Keep the current status centered beneath the profile identity.
                     if (userStatus != null && !userStatus.isEmpty)
                       SizedBox(
                         width: double.infinity,
@@ -249,7 +273,7 @@ class UserProfileSheet extends HookConsumerWidget {
                             child: BuzzActionTile(
                               icon: isOpeningDirectMessage.value
                                   ? null
-                                  : LucideIcons.messageSquare,
+                                  : BuzzIcons.messageSquare,
                               label: isOpeningDirectMessage.value
                                   ? 'Opening…'
                                   : 'Message',
@@ -263,8 +287,8 @@ class UserProfileSheet extends HookConsumerWidget {
                         Expanded(
                           child: BuzzActionTile(
                             icon: copied.value
-                                ? LucideIcons.check
-                                : LucideIcons.key,
+                                ? BuzzIcons.check
+                                : BuzzIcons.key,
                             label: copied.value ? 'Copied' : 'Copy public key',
                             isEnabled: npub != null,
                             onTap: copyPublicKey,
@@ -273,31 +297,8 @@ class UserProfileSheet extends HookConsumerWidget {
                       ],
                     ),
                     const SizedBox(height: Grid.xs),
-
-                    // About / bio section
-                    if (about.isNotEmpty) ...[
-                      const SizedBox(height: Grid.xxs),
-                      Divider(
-                        color: context.colors.outlineVariant.withValues(
-                          alpha: 0.3,
-                        ),
-                      ),
-                      const SizedBox(height: Grid.xxs),
-                      Text(
-                        'About',
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: Grid.half),
-                      Text(
-                        about,
-                        style: context.textTheme.bodyMedium?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
+                    if (contextualActions != null)
+                      Builder(builder: contextualActions!),
                   ],
                 ),
               ),
@@ -335,7 +336,7 @@ void _showProfileCopyToast(BuildContext context) {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(LucideIcons.check, size: 18, color: colors.onInverseSurface),
+              Icon(BuzzIcons.check, size: 18, color: colors.onInverseSurface),
               const SizedBox(width: Grid.xxs),
               Text('Public key copied', style: textStyle),
             ],

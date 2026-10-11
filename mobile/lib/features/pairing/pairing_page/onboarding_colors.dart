@@ -9,8 +9,7 @@ extension _OnboardingColors on BuildContext {
       _onboardingIsDark ? const Color(0xFFAAB8C0) : const Color(0xB3111111);
   Color get _onboardingCtaLabel =>
       _onboardingIsDark ? const Color(0xFF172229) : const Color(0xFFD7E6F0);
-  Color get _onboardingErrorInk =>
-      _onboardingIsDark ? const Color(0xFFFFAAA0) : const Color(0xFF7A1025);
+  Color get _onboardingErrorInk => colors.error;
   Color get _onboardingInputSurface => _onboardingIsDark
       ? const Color(0xFF233039)
       : Colors.white.withValues(alpha: 0.7);

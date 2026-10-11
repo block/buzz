@@ -161,8 +161,9 @@ class IdentityNames {
     });
   }
 
-  /// The display label for [pubkey]. A malformed key is outside the naming
-  /// contract: it keeps its plain known name and is never disambiguated.
+  /// The unambiguous display label for [pubkey], including any qualifier
+  /// needed to distinguish identities with the same name and owner.
+  /// A malformed key keeps its plain known name and is never disambiguated.
   String labelFor(String pubkey) =>
       resolve(pubkey)?.name ?? _plainName(pubkey.toLowerCase());
 

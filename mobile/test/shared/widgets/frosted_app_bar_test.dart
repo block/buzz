@@ -1,5 +1,6 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scroll_under_scope.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:flutter/material.dart';
@@ -9,6 +10,82 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets('iOS conversations request a backdrop before scrolling', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const Stack(
+            children: [
+              FrostedAppBar(
+                title: Text('Alice'),
+                nativeSubtitle: 'Online',
+                alwaysFrosted: true,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    final view = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(view.creationParams, containsPair('alwaysFrosted', true));
+    expect(view.creationParams, containsPair('subtitle', 'Online'));
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+    'conversation backdrop stays mounted across scroll and keyboard changes',
+    (tester) async {
+      final scrolled = ValueNotifier(false);
+      addTearDown(scrolled.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: ValueListenableBuilder<bool>(
+            valueListenable: scrolled,
+            builder: (_, value, _) => FrostedScrollUnderScope(
+              isScrolledUnder: value,
+              child: const Stack(
+                children: [
+                  FrostedAppBar(
+                    title: Text('Conversation'),
+                    alwaysFrosted: true,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      final backdrop = tester.element(find.byType(BackdropFilter));
+      final initial = tester
+          .widget<Container>(
+            find.byKey(const ValueKey('frosted-app-bar-background')),
+          )
+          .decoration;
+      addTearDown(tester.view.reset);
+      for (final under in [true, false, true, false]) {
+        scrolled.value = under;
+        tester.view.viewInsets = FakeViewPadding(bottom: under ? 300 : 0);
+        await tester.pump();
+        expect(tester.element(find.byType(BackdropFilter)), same(backdrop));
+        expect(
+          tester
+              .widget<Container>(
+                find.byKey(const ValueKey('frosted-app-bar-background')),
+              )
+              .decoration,
+          initial,
+        );
+      }
+    },
+  );
+
   testWidgets('title row and reported height grow with accessible text', (
     tester,
   ) async {

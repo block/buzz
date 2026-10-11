@@ -4,9 +4,10 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
@@ -312,7 +313,7 @@ class _AddReactionPill extends StatelessWidget {
           child: Center(
             widthFactor: 1,
             child: Icon(
-              LucideIcons.smilePlus,
+              BuzzIcons.smilePlus,
               size: _pillGlyphSize,
               color: context.colors.onSurfaceVariant,
             ),
@@ -356,17 +357,161 @@ Future<void> showReactionDetailSheet({
     return;
   }
   if (!context.mounted) return;
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: context.colors.surfaceContainerHighest,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(Radii.dialog)),
+      ),
+      builder: (_) => _AndroidReactionDetailSheet(
+        channelId: channelId,
+        reactions: reactions,
+        initialEmoji: initialEmoji,
+      ),
+    );
+    return;
+  }
   showBuzzModalBottomSheet<void>(
     context: context,
+    title: 'Reactions',
     isScrollControlled: true,
     showDragHandle: true,
-    backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) => _ReactionDetailSheet(
       channelId: channelId,
       reactions: reactions,
       initialEmoji: initialEmoji,
     ),
   );
+}
+
+class _AndroidReactionDetailSheet extends HookConsumerWidget {
+  const _AndroidReactionDetailSheet({
+    required this.channelId,
+    required this.reactions,
+    required this.initialEmoji,
+  });
+
+  final String channelId;
+  final List<TimelineReaction> reactions;
+  final String initialEmoji;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cache = ref.watch(userCacheProvider);
+    final names = ref.watch(channelIdentityNamesProvider(channelId));
+    final dataset = ref.watch(emojiDatasetOrEmptyProvider);
+    final pubkeys = reactions
+        .expand((reaction) => reaction.userPubkeys)
+        .toSet()
+        .toList();
+    useEffect(() {
+      if (pubkeys.isNotEmpty) {
+        ref.read(userCacheProvider.notifier).preload(pubkeys);
+      }
+      return null;
+    }, [pubkeys.join(',')]);
+    final total = reactions.fold<int>(
+      0,
+      (sum, reaction) => sum + reaction.count,
+    );
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.65;
+    final desiredHeight =
+        48.0 + pubkeys.length * 56.0 + MediaQuery.viewPaddingOf(context).bottom;
+    return DefaultTabController(
+      length: reactions.length + 1,
+      initialIndex: reactions.indexWhere((r) => r.emoji == initialEmoji) + 1,
+      child: SizedBox(
+        key: const ValueKey('reaction-details-sheet'),
+        height: desiredHeight.clamp(
+          maxHeight < 340 ? maxHeight : 340,
+          maxHeight,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TabBar(
+              isScrollable: true,
+              padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+              tabAlignment: TabAlignment.start,
+              dividerHeight: 0,
+              indicatorSize: TabBarIndicatorSize.tab,
+              indicatorPadding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+              indicator: BoxDecoration(
+                color: context.colors.primary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(Radii.full),
+              ),
+              labelColor: context.colors.onSurface,
+              unselectedLabelColor: context.colors.onSurfaceVariant,
+              tabs: [
+                Tab(
+                  key: const ValueKey('reaction-filter-all'),
+                  text: 'All $total',
+                ),
+                for (final reaction in reactions)
+                  Tab(
+                    key: ValueKey('reaction-filter-${reaction.emoji}'),
+                    child: Tooltip(
+                      message: dataset.displayName(reaction.emoji),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _ReactionEmoji(reaction: reaction, size: 20),
+                          const SizedBox(width: Grid.quarter),
+                          Text('${reaction.count}'),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  for (var tab = 0; tab <= reactions.length; tab++)
+                    Builder(
+                      builder: (context) {
+                        final filtered = tab == 0
+                            ? reactions
+                            : [reactions[tab - 1]];
+                        final rows = [
+                          for (final reaction in filtered)
+                            for (final pubkey in reaction.userPubkeys.toSet())
+                              (pubkey: pubkey, reaction: reaction),
+                        ];
+                        return ListView.builder(
+                          key: PageStorageKey('reaction-page-$tab'),
+                          padding: EdgeInsets.only(
+                            bottom: MediaQuery.viewPaddingOf(context).bottom,
+                          ),
+                          itemCount: rows.length,
+                          itemBuilder: (_, index) {
+                            final row = rows[index];
+                            return _ReactorTile(
+                              profile: cache[row.pubkey.toLowerCase()],
+                              pubkey: row.pubkey,
+                              displayName: names.labelFor(row.pubkey),
+                              reaction: row.reaction,
+                              reactionLabel: dataset.displayName(
+                                row.reaction.emoji,
+                              ),
+                              compact: true,
+                            );
+                          },
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ReactionDetailSheet extends HookConsumerWidget {
@@ -382,106 +527,98 @@ class _ReactionDetailSheet extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final selectedEmoji = useState(initialEmoji);
+    final selectedEmoji = useState<String?>(initialEmoji);
     final userCache = ref.watch(userCacheProvider);
     final identityNames = ref.watch(channelIdentityNamesProvider(channelId));
-
-    final currentReaction = reactions.firstWhere(
-      (r) => r.emoji == selectedEmoji.value,
-      orElse: () => reactions.first,
-    );
-
-    // Preload profiles for reactors.
+    final dataset = ref.watch(emojiDatasetOrEmptyProvider);
+    final rows = [
+      for (final reaction in reactions)
+        if (selectedEmoji.value == null ||
+            reaction.emoji == selectedEmoji.value)
+          for (final pubkey in reaction.userPubkeys.toSet())
+            (pubkey: pubkey, reaction: reaction),
+    ];
+    final pubkeys = rows.map((row) => row.pubkey).toSet().toList();
     useEffect(() {
-      if (currentReaction.userPubkeys.isNotEmpty) {
-        ref
-            .read(userCacheProvider.notifier)
-            .preload(currentReaction.userPubkeys);
+      if (pubkeys.isNotEmpty) {
+        ref.read(userCacheProvider.notifier).preload(pubkeys);
       }
       return null;
-    }, [currentReaction.userPubkeys]);
+    }, [pubkeys.join(',')]);
+    final total = reactions.fold<int>(
+      0,
+      (sum, reaction) => sum + reaction.count,
+    );
 
     return ConstrainedBox(
+      key: const ValueKey('reaction-details-sheet'),
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * 0.5,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Emoji filter chips (if multiple reaction types).
-          if (reactions.length > 1)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    for (final reaction in reactions)
-                      Padding(
-                        padding: const EdgeInsets.only(right: Grid.half),
-                        child: ChoiceChip(
-                          label: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              _ReactionEmoji(reaction: reaction, size: 16),
-                              const SizedBox(width: Grid.quarter),
-                              Text('${reaction.count}'),
-                            ],
-                          ),
-                          selected: reaction.emoji == selectedEmoji.value,
-                          onSelected: (_) {
-                            selectedEmoji.value = reaction.emoji;
-                          },
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-
-          // Header: emoji + shortcode.
           Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: Grid.gutter,
-              vertical: Grid.half,
-            ),
-            child: Row(
-              children: [
-                _ReactionEmoji(reaction: currentReaction, size: 32),
-                const SizedBox(width: Grid.half),
-                Text(
-                  // Resolved from the shared emoji-mart dataset, so this name
-                  // matches desktop's `emojiDisplayName` for the whole set
-                  // rather than the 28 glyphs a hardcoded map used to cover.
-                  ref
-                      .watch(emojiDatasetOrEmptyProvider)
-                      .displayName(currentReaction.emoji),
-                  style: context.textTheme.titleSmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
+            padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(right: Grid.half),
+                    child: ChoiceChip(
+                      key: const ValueKey('reaction-filter-all'),
+                      label: Text('All $total'),
+                      selected: selectedEmoji.value == null,
+                      onSelected: (_) => selectedEmoji.value = null,
+                    ),
                   ),
-                ),
-              ],
+                  for (final reaction in reactions)
+                    Padding(
+                      padding: const EdgeInsets.only(right: Grid.half),
+                      child: ChoiceChip(
+                        key: ValueKey('reaction-filter-${reaction.emoji}'),
+                        tooltip: dataset.displayName(reaction.emoji),
+                        label: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _ReactionEmoji(reaction: reaction, size: 20),
+                            const SizedBox(width: Grid.quarter),
+                            Text('${reaction.count}'),
+                          ],
+                        ),
+                        selected: reaction.emoji == selectedEmoji.value,
+                        onSelected: (_) => selectedEmoji.value = reaction.emoji,
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
 
-          const Divider(height: 1),
-
-          // Reactor list.
           Flexible(
             child: ListView.builder(
               shrinkWrap: true,
               padding: EdgeInsets.only(
-                top: Grid.half,
+                left: Grid.gutter,
+                right: Grid.gutter,
+                top: Grid.xxs,
                 bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.half,
               ),
-              itemCount: currentReaction.userPubkeys.length,
+              itemCount: rows.length,
               itemBuilder: (context, index) {
-                final pubkey = currentReaction.userPubkeys[index];
-                final profile = userCache[pubkey.toLowerCase()];
-                return _ReactorTile(
-                  profile: profile,
-                  pubkey: pubkey,
-                  displayName: identityNames.labelFor(pubkey),
+                final row = rows[index];
+                return AppListCardItem(
+                  index: index,
+                  itemCount: rows.length,
+                  dividerIndent: Grid.xs + 40 + Grid.xs,
+                  child: _ReactorTile(
+                    profile: userCache[row.pubkey.toLowerCase()],
+                    pubkey: row.pubkey,
+                    displayName: identityNames.labelFor(row.pubkey),
+                    reaction: row.reaction,
+                    reactionLabel: dataset.displayName(row.reaction.emoji),
+                  ),
                 );
               },
             ),
@@ -496,11 +633,17 @@ class _ReactorTile extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
   final String displayName;
+  final TimelineReaction reaction;
+  final String reactionLabel;
+  final bool compact;
 
   const _ReactorTile({
     required this.profile,
     required this.pubkey,
     required this.displayName,
+    required this.reaction,
+    required this.reactionLabel,
+    this.compact = false,
   });
 
   @override
@@ -508,7 +651,19 @@ class _ReactorTile extends StatelessWidget {
     final about = profile?.about;
 
     return ListTile(
+      key: ValueKey('reactor-$pubkey-${reaction.emoji}'),
+      minTileHeight: compact ? 52 : null,
+      contentPadding: compact
+          ? const EdgeInsets.symmetric(horizontal: Grid.gutter)
+          : null,
+      trailing: Semantics(
+        label: reactionLabel,
+        child: ExcludeSemantics(
+          child: _ReactionEmoji(reaction: reaction, size: 26),
+        ),
+      ),
       leading: _ReactorAvatar(
+        radius: compact ? 18 : 20,
         avatarUrl: profile?.avatarUrl,
         initial:
             profile?.initial ??
@@ -522,7 +677,7 @@ class _ReactorTile extends StatelessWidget {
         ),
         overflow: TextOverflow.ellipsis,
       ),
-      subtitle: about != null && about.isNotEmpty
+      subtitle: !compact && about != null && about.isNotEmpty
           ? Text(
               about,
               maxLines: 1,
@@ -541,18 +696,20 @@ class _ReactorAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
   final bool isAgent;
+  final double radius;
 
   const _ReactorAvatar({
     required this.avatarUrl,
     required this.initial,
     required this.isAgent,
+    required this.radius,
   });
 
   @override
   Widget build(BuildContext context) {
     return AvatarImage(
       imageUrl: avatarUrl,
-      radius: 20,
+      radius: radius,
       fallback: Text(initial),
       isAgent: isAgent,
     );

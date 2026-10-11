@@ -295,12 +295,22 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/commands/teams/pending/tests/gate.rs", 1, 0),
     // Accepting stub relay in the starter-channel creation tests.
     ("src/commands/channels/starter_tests.rs", 1, 0),
-    // Admin API mutations: every JSON body passes the guard in
-    // `helpers::send_admin_mutation` (injection tests in admin `direct_action_tests.rs`).
+    // Admin API: every JSON body passes the guard in
+    // `helpers::send_admin_mutation` (injection tests in admin `direct_action_tests.rs`),
+    // and every admin API request URL passes it before signing or sending:
+    // `build_admin_mutation_request` and `fetch_admin_json` (injection test in
+    // admin `reads_tests.rs`), the connection probe before its first, unsigned
+    // request, and the feedback-attachment fetch before its sign-and-retry loop
+    // (injection tests in admin `mod_tests.rs`).
     // The `/events/{id}/delete` route + its path test and the native delete
-    // test only construct URLs that flow into that guarded boundary.
-    ("src/commands/admin/helpers.rs", 0, 1),
-    ("src/commands/admin/routes.rs", 2, 0),
+    // test only construct URLs that flow into that guarded boundary. The
+    // bodyless `GET /events/{id}` preview read and its mock-relay test carry
+    // no key material.
+    ("src/commands/admin/helpers.rs", 0, 3), // boundaries 9, 10, 11
+    ("src/commands/admin/mod.rs", 0, 1),     // boundary 12
+    ("src/commands/admin/attachment.rs", 0, 1), // boundary 13
+    ("src/commands/admin/routes.rs", 3, 0),
+    ("src/commands/admin/reads_tests.rs", 1, 0),
     ("src/commands/admin/direct_action_tests.rs", 1, 0),
 ];
 
@@ -468,6 +478,10 @@ fn ncryptsec_handling_is_confined_to_allowlisted_files() {
         "src/native_websocket.rs",
         "src/commands/admin/helpers.rs",
         "src/commands/admin/direct_action_tests.rs",
+        "src/commands/admin/reads_tests.rs",
+        "src/commands/admin/mod.rs",
+        "src/commands/admin/mod_tests.rs",
+        "src/commands/admin/attachment.rs",
     ];
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

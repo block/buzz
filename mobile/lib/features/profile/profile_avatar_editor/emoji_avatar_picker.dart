@@ -133,7 +133,7 @@ class _EmojiMode extends HookConsumerWidget {
                                         borderSide: BorderSide.none,
                                       ),
                                       prefixIcon: const Icon(
-                                        LucideIcons.search,
+                                        BuzzIcons.search,
                                         size: 20,
                                       ),
                                       suffixIcon: searchController.text.isEmpty
@@ -142,7 +142,7 @@ class _EmojiMode extends HookConsumerWidget {
                                               tooltip: 'Clear search',
                                               onPressed: searchController.clear,
                                               icon: const Icon(
-                                                LucideIcons.x,
+                                                BuzzIcons.x,
                                                 size: 18,
                                               ),
                                             ),
@@ -227,7 +227,7 @@ class _EmojiMode extends HookConsumerWidget {
                     Expanded(
                       child: AvatarEditorOptionButton(
                         key: const ValueKey('emoji-editor-background'),
-                        icon: LucideIcons.palette,
+                        icon: BuzzIcons.palette,
                         iosIcon: IosGlassNavigationIcon.palette,
                         label: 'Background',
                         selected:
@@ -241,7 +241,7 @@ class _EmojiMode extends HookConsumerWidget {
                     Expanded(
                       child: AvatarEditorOptionButton(
                         key: const ValueKey('emoji-editor-emoji'),
-                        icon: LucideIcons.smile,
+                        icon: BuzzIcons.smile,
                         iosIcon: IosGlassNavigationIcon.emoji,
                         label: 'Emoji',
                         selected: activeSection == _EmojiEditorSection.emoji,
@@ -340,7 +340,7 @@ class _AvatarSkinToneSelector extends StatelessWidget {
                 Expanded(child: Text(tone.label)),
                 if (index == value)
                   Icon(
-                    LucideIcons.check,
+                    BuzzIcons.check,
                     size: 18,
                     color: context.colors.primary,
                   ),

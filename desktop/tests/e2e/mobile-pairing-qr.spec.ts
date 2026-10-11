@@ -69,7 +69,7 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   await expect(startButton).toHaveText("Start pairing");
   await expect(steps.getByText("Scan QR code", { exact: true })).toBeVisible();
   await expect(
-    steps.getByText("Confirm mobile code", { exact: true }),
+    steps.getByText("Enter code on your phone", { exact: true }),
   ).toBeVisible();
   await expect(
     finalStep.getByText("Pair your mobile app", { exact: true }),
@@ -412,12 +412,11 @@ test("late pairing events are ignored after canceling", async ({ page }) => {
   await confirmation.getByTestId("deny-sas").click();
 
   await expect(confirmation).toHaveCount(0);
-  await expect(
-    card.getByText("The codes didn't match. Pairing was canceled."),
-  ).toBeVisible();
+  await expect(card.getByText("Pairing was canceled.")).toBeVisible();
 
   await emitPairingEvent(page, "pairing-complete");
   await emitPairingEvent(page, "pairing-sas-received", { sas: "654321" });
+  await emitPairingEvent(page, "pairing-code-entered");
 
   await expect(confirmation).toHaveCount(0);
   await expect(
@@ -425,9 +424,7 @@ test("late pairing events are ignored after canceling", async ({ page }) => {
       .getByTestId("mobile-pairing-final-step")
       .getByText("Paired", { exact: true }),
   ).toHaveCount(0);
-  await expect(
-    card.getByText("The codes didn't match. Pairing was canceled."),
-  ).toBeVisible();
+  await expect(card.getByText("Pairing was canceled.")).toBeVisible();
 });
 
 test("step completion respects reduced motion", async ({ page }) => {
@@ -451,4 +448,45 @@ test("step completion respects reduced motion", async ({ page }) => {
   const completedContent = scanStepIndicator.locator('[data-state="complete"]');
   await expect(completedContent).toHaveCSS("opacity", "1");
   await expect(completedContent).toHaveCSS("transform", "none");
+});
+
+test("code-entry phones advance without desktop confirmation", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-mobile").click();
+  const card = page.getByTestId("mobile-pairing-card");
+  await card.getByTestId("start-pairing-button").click();
+  await expect(page.getByTestId("mobile-pairing-qr")).toBeVisible();
+  await emitPairingEvent(page, "pairing-sas-received", {
+    sas: "012345",
+    code_entry: true,
+  });
+  await expect(card.getByTestId("pairing-sas-title")).toHaveText(
+    "Enter code on your phone",
+  );
+  await expect(card.getByTestId("confirm-sas")).toHaveCount(0);
+  await expect(card.getByTestId("deny-sas")).toBeVisible();
+  await expect(card.getByTestId("pairing-status")).toContainText(
+    "Enter this code in the Buzz app on your phone.",
+  );
+  await waitForAnimations(page);
+  mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  await card.screenshot({ path: `${SCREENSHOT_DIR}/pairing-code-entry.png` });
+  await emitPairingEvent(page, "pairing-code-entered");
+  await expect(card.getByTestId("pairing-transfer-spinner")).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) => entry.command === "confirm_pairing_sas",
+        ).length,
+    ),
+  ).toBe(0);
+  await emitPairingEvent(page, "pairing-complete");
+  await expect(
+    card.getByTestId("mobile-pairing-final-step-indicator"),
+  ).toHaveAttribute("data-completed", "true");
 });

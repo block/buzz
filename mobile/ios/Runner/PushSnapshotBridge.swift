@@ -227,8 +227,7 @@ final class BuzzPushSnapshotBridge {
       return nil
     }
     return grants.filter {
-      $0.appProfile == BuzzDevPushEnrollmentDriver.appProfile
-        && BuzzPushPresentationCacheStore.canonicalRelayOrigin($0.relayOrigin) == origin
+      BuzzPushPresentationCacheStore.canonicalRelayOrigin($0.relayOrigin) == origin
     }.max {
       $0.generation < $1.generation
     }?.relayMetadataPubkey

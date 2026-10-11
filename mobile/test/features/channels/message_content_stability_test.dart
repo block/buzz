@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 class _Fixture {
   final revision = ValueNotifier(0);
@@ -197,7 +197,7 @@ void main() {
       fixture.agents.add('alice-key');
       await fixture.refresh(tester);
       expect(_components(tester), isNot(same(before)));
-      expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
       before = _components(tester);
       fixture.mentionHandler = false;
       fixture.tappedId = null;
@@ -210,7 +210,7 @@ void main() {
       await fixture.refresh(tester);
       await tester.tap(find.text('ALICE'));
       expect(fixture.tappedId, 'second-key');
-      expect(find.byIcon(LucideIcons.bot), findsNothing);
+      expect(find.byIcon(BuzzIcons.bot), findsNothing);
     },
   );
 

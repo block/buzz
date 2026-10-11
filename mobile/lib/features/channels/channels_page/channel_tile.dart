@@ -91,7 +91,7 @@ class _ChannelTile extends ConsumerWidget {
             if (isMuted) ...[
               const SizedBox(width: Grid.xxs),
               Icon(
-                LucideIcons.bellOff,
+                BuzzIcons.bellOff,
                 size: 12,
                 color: context.colors.onSurface.withValues(alpha: 0.4),
               ),

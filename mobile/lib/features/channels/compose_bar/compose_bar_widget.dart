@@ -218,6 +218,13 @@ class ComposeBar extends HookConsumerWidget {
     // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
     final mentionStartIdx = useState(-1);
+    // Counts chooser openings: a new `@` starts fresh rows and searches.
+    final mentionOpening = useRef(0);
+    final shownMentions = useRef<_MentionRows>((
+      rows: const [],
+      unavailable: const {},
+      searchFailed: false,
+    ));
     // Map of displayName → selected mention candidate built as the user selects
     // mentions. Used to pass resolved pubkeys directly to onSend and to attach
     // selected non-member agents before the message is published.
@@ -288,6 +295,34 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
+    // Insert a selected mention into the text field.
+    void insertMention(MentionCandidate candidate) {
+      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
+        for (final entry in mentionMap.value.entries)
+          entry.key: entry.value.pubkey,
+      });
+      // Track the resolved candidate so we can pass its pubkey and prepare
+      // selected non-member agents at send time.
+      mentionMap.value[name] = candidate;
+      ref
+          .read(mentionHistoryProvider.notifier)
+          .remember(channelId, candidate.pubkey);
+
+      final start = mentionStartIdx.value.clamp(0, controller.text.length);
+      isModifyingText.value = true;
+      try {
+        spliceAndMoveCursor(
+          controller,
+          focusNode,
+          start: start,
+          replacement: '@$name ',
+        );
+      } finally {
+        isModifyingText.value = false;
+      }
+      mentionQuery.value = null;
+    }
+
     // Detect @mention query and broadcast typing on text / selection change.
     useEffect(() {
       lastObservedEditingValue.value = controller.value;
@@ -326,13 +361,45 @@ class ComposeBar extends HookConsumerWidget {
           return;
         }
 
-        // Walk backward from cursor looking for trigger characters.
-        // stopAtSpace: false — @mentions support multi-word display names.
-        final atPos = findTrigger(text, cursor, '@', stopAtSpace: false);
+        var open = findMentionQuery(text, cursor);
+        if (open != null &&
+            _insideSelectedMention(
+              text,
+              open.start,
+              cursor,
+              mentionMap.value.keys,
+            )) {
+          open = null;
+        }
 
-        if (atPos != null) {
-          mentionQuery.value = text.substring(atPos + 1, cursor).toLowerCase();
-          mentionStartIdx.value = atPos;
+        // Space after an exact, unique name selects it (section 5).
+        final previousQuery = mentionQuery.value;
+        if (open != null &&
+            previousQuery != null &&
+            previousQuery.trim().isNotEmpty &&
+            open.start == mentionStartIdx.value &&
+            open.query == '$previousQuery ' &&
+            text.length == previousValue.text.length + 1) {
+          final chosen = _spaceMention(
+            ref,
+            channelId: channelId,
+            query: previousQuery,
+            opening: mentionOpening.value,
+            shown: shownMentions.value,
+            viewer: currentPubkey,
+          );
+          if (chosen != null) {
+            insertMention(chosen);
+            return;
+          }
+        }
+
+        if (open != null) {
+          if (previousQuery == null || mentionStartIdx.value != open.start) {
+            mentionOpening.value++;
+          }
+          mentionQuery.value = open.query;
+          mentionStartIdx.value = open.start;
           channelQuery.value = null;
         } else {
           mentionQuery.value = null;
@@ -358,18 +425,15 @@ class ComposeBar extends HookConsumerWidget {
       return () => controller.removeListener(listener);
     }, [controller]);
 
-    // Ranked mention candidates (desktop-parity ordering + eligibility).
-    final suggestions = mentionQuery.value == null
-        ? const <MentionCandidate>[]
-        : ref
-              .watch(
-                mentionCandidatesProvider((
-                  channelId: channelId,
-                  query: mentionQuery.value!,
-                )),
-              )
-              .take(_mentionSuggestionLimit)
-              .toList();
+    // Ranked mention rows; shown rows hold still while the query stays.
+    final mentionRows = _useMentionRows(
+      ref,
+      channelId: channelId,
+      query: mentionQuery.value,
+      opening: mentionOpening.value,
+    );
+    shownMentions.value = mentionRows;
+    final suggestions = mentionRows.rows;
 
     // Resolve owner names for the visible "managed by …" subtitles.
     useEffect(() {
@@ -383,31 +447,6 @@ class ComposeBar extends HookConsumerWidget {
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
-
-    // Insert a selected mention into the text field.
-    void insertMention(MentionCandidate candidate) {
-      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
-        for (final entry in mentionMap.value.entries)
-          entry.key: entry.value.pubkey,
-      });
-      // Track the resolved candidate so we can pass its pubkey and prepare
-      // selected non-member agents at send time.
-      mentionMap.value[name] = candidate;
-
-      final start = mentionStartIdx.value.clamp(0, controller.text.length);
-      isModifyingText.value = true;
-      try {
-        spliceAndMoveCursor(
-          controller,
-          focusNode,
-          start: start,
-          replacement: '@$name ',
-        );
-      } finally {
-        isModifyingText.value = false;
-      }
-      mentionQuery.value = null;
-    }
 
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {
@@ -517,29 +556,54 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
-      final scan = await _scanNonMemberMentions(
-        ref,
-        channelId: channelId,
-        selectedMentions: selectedMentions,
-        currentPubkey: currentPubkey,
-      );
+      // Read before any await. These actions belong to this community and
+      // refuse to run after a switch, so an Invite answered after a switch
+      // cannot add people in the new community.
+      final channelActions = ref.read(channelActionsProvider);
+      final _NonMemberMentionScan scan;
+      try {
+        scan = await _scanNonMemberMentions(
+          ref,
+          channelId: channelId,
+          selectedMentions: selectedMentions,
+          currentPubkey: currentPubkey,
+        );
+      } catch (_) {
+        // Nothing was sent and the draft is untouched, so Retry sends it again.
+        messenger?.showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Message not sent: could not check who is in this channel',
+            ),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: () => unawaited(send()),
+            ),
+          ),
+        );
+        return;
+      }
 
-      // Mentioning humans outside the channel prompts "Invite" / "Do
-      // nothing" (send without inviting) — mirrors desktop's
-      // NonMemberMentionDialog. Agents keep the existing silent auto-add.
-      if (scan.humans.isNotEmpty) {
+      // Mentioning anyone outside the channel, person or agent, prompts
+      // "Invite" / "Do nothing" (portable mention rules, section 7). Nobody
+      // can be added to a DM, so a DM sends them as references without asking.
+      if (scan.outside.isNotEmpty && scan.isDm) {
+        outgoing.resolveOutsideChoice(
+          _NonMemberMentionChoice.sendWithoutInviting,
+          scan.outside,
+        );
+      } else if (scan.outside.isNotEmpty) {
         if (!context.mounted) return;
         final choice = await _promptNonMemberMention(
           context,
-          names: [for (final candidate in scan.humans) candidate.label],
+          names: [for (final candidate in scan.outside) candidate.label],
           canInvite: scan.canAddMembers,
         );
         if (choice == null) return; // Dismissed — keep the draft, send nothing.
-        outgoing.resolveHumanChoice(choice, scan.humans);
+        outgoing.resolveOutsideChoice(choice, scan.outside);
       }
 
       final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
-      final channelActions = ref.read(channelActionsProvider);
 
       // An add that was refused doesn't block the message: it is reported and
       // the un-added mentions are demoted to reference tags so the send lands.
@@ -910,6 +974,12 @@ class ComposeBar extends HookConsumerWidget {
     final suggestionPanel = _composerSuggestionPanel(
       channelSuggestions: channelSuggestions,
       mentionSuggestions: suggestions,
+      unavailableMentions: mentionRows.unavailable,
+      mentionSearchFailed: mentionRows.searchFailed,
+      onMentionSearchRetry: () {
+        final query = mentionQuery.value;
+        if (query != null) ref.invalidate(mentionUserSearchProvider(query));
+      },
       userCache: userCache,
       currentPubkey: currentPubkey,
       isDmChannel: isDmChannel,

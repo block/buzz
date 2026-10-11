@@ -35,7 +35,7 @@ cd mobile && flutter run --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.exampl
 
 Debug builds produced from a git worktree get a unique app identifier keyed
 to the **worktree directory name**
-(`xyz.block.buzz.dogfood.mobile.<slug>` on iOS,
+(`xyz.block.buzz.dev.mobile.<slug>` on iOS,
 `xyz.block.buzz.mobile.<slug>` on Android) plus a display-only branch label
 in the app name (`Buzz (my-branch)`, or a short SHA when the worktree is
 detached). Because the identifier follows the directory rather than the
@@ -105,7 +105,7 @@ installs are never touched.
 
 Every iOS artifact builds and embeds the Notification Service Extension and
 native push bridge. Runtime activation is fail-closed and scoped to the current
-relay. After authenticated connectivity and a fully valid NIP-11 `nip-pl` push
+relay. After authenticated connectivity and a fully valid NIP-11 `buzz-push-v1` push
 descriptor, Buzz independently requests display permission and registers with
 APNs. Display denial or request failure does not gate the device token, gateway
 enrollment, or lease publication, so a later user opt-in can display pushes
@@ -153,15 +153,14 @@ App Attest application ID, APNs topic and sandbox certificate. Development
 attestation requires the explicit `personal-dev-app-attest` gateway build feature
 and `BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`; ordinary gateway builds accept
 production attestation only. See `docs/push-gateway-deployment.md`.
-This validates the personal client/relay/gateway integration, not the internally
-distributed dogfood artifact. Validate dogfood separately using the signed
-internal release and its production gateway configuration.
+Validate distributed builds separately using a signed release candidate and
+its matching gateway configuration.
 
 Parent app identifiers require Apple's Communication
 Notifications capability and a regenerated app provisioning profile. The
 Notification Service Extension profile does not require that capability.
 Enable it on the personal development App ID for local rich-presentation
-validation. Enabling it on the Block dogfood and eventual App Store App IDs is
+validation. Enabling it on distribution App IDs is
 a release follow-up and is not performed by this repository change. Without a
 matching parent profile, source and unit validation still work, but the app
 cannot be signed for a physical device.

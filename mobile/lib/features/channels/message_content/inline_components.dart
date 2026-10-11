@@ -66,7 +66,9 @@ List<MarkdownComponent> _useMessageInlineComponents({
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
       ),
-      ...MarkdownComponent.inlineComponents,
+      _MarkdownLabelEntityMd(),
+      for (final component in MarkdownComponent.inlineComponents)
+        component is ATagMd ? _MessageLinkMd() : component,
     ],
     [inputs],
   );
@@ -140,4 +142,28 @@ class _InlineComponentInputs {
   @override
   int get hashCode =>
       Object.hash(content, finalContent, emojiSize, hasMentionHandler);
+}
+
+// Encoded label punctuation must remain literal even inside nested formatting.
+class _MarkdownLabelEntityMd extends InlineMd {
+  @override
+  RegExp get exp => RegExp(r'&#(?:91|92|93);');
+
+  @override
+  Set<MarkdownScope> get scopes => const {MarkdownScope.linkLabel};
+
+  @override
+  InlineSpan span(
+    BuildContext context,
+    String text,
+    GptMarkdownConfig config,
+  ) => TextSpan(text: decodeMarkdownLabelSyntax(text), style: config.style);
+}
+
+// Labels are already normalized, including literal/nested brackets. The
+// package's permissive .*? label matcher can otherwise start at a prose '['
+// and swallow a later image or link before its own component gets to render.
+class _MessageLinkMd extends ATagMd {
+  @override
+  RegExp get exp => RegExp(r'(?<!!)\[[^\[\]\n]*\]\([^\s]*\)');
 }

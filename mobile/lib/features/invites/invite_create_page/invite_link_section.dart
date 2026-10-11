@@ -74,7 +74,7 @@ class _InviteLinkSection extends HookConsumerWidget {
                 child: Builder(
                   builder: (buttonContext) => BuzzActionTile(
                     key: const Key('community-invite-share-link'),
-                    icon: LucideIcons.share2,
+                    icon: BuzzIcons.share2,
                     label: 'Share',
                     isEnabled: invite.value != null,
                     onTap: () => share(buttonContext),
@@ -85,7 +85,7 @@ class _InviteLinkSection extends HookConsumerWidget {
               Expanded(
                 child: BuzzActionTile(
                   key: const Key('community-invite-copy-link'),
-                  icon: LucideIcons.copy,
+                  icon: BuzzIcons.copy,
                   label: 'Copy',
                   isEnabled: invite.value != null,
                   onTap: () => copyToClipboard(
@@ -207,22 +207,29 @@ class _InviteOptionSheet<T> extends StatelessWidget {
             ),
             child: Text(title, style: context.textTheme.titleMedium),
           ),
-          for (final option in options)
-            AppListRow(
-              key: Key('community-invite-option-${_optionKey(option.label)}'),
-              title: option.label,
-              trailing: option.value == value
-                  ? Icon(
-                      LucideIcons.check,
-                      size: 18,
-                      color: context.colors.primary,
-                    )
-                  : null,
-              onTap: () {
-                onSelected(option.value);
-                Navigator.of(context).pop();
-              },
-            ),
+          AppListCard(
+            dividerIndent: Grid.xs,
+            children: [
+              for (final option in options)
+                AppListRow(
+                  key: Key(
+                    'community-invite-option-${_optionKey(option.label)}',
+                  ),
+                  title: option.label,
+                  trailing: option.value == value
+                      ? Icon(
+                          BuzzIcons.check,
+                          size: 18,
+                          color: context.colors.primary,
+                        )
+                      : null,
+                  onTap: () {
+                    onSelected(option.value);
+                    Navigator.of(context).pop();
+                  },
+                ),
+            ],
+          ),
           const SizedBox(height: Grid.xxs),
         ],
       ),
@@ -236,7 +243,7 @@ class _InviteRowChevron extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Icon(
-      LucideIcons.chevronRight,
+      BuzzIcons.chevronRight,
       size: 18,
       color: context.colors.onSurfaceVariant,
     );

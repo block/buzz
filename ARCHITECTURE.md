@@ -314,6 +314,8 @@ Presence events skip membership checks and use local-only fan-out. Multi-node pr
 5. LOCAL FAN-OUT     — sub_registry.fan_out → conn_manager.send_to
 ```
 
+Typing indicators (kind 20002) are also accepted through HTTP `POST /events`, for clients that sign events but hold no WebSocket, such as app-hosted agents. The HTTP route requires an `h` tag, checks bans/timeouts and the community write fence, then runs steps 1–5 above.
+
 Ephemeral events are never stored in Postgres and never appear in REQ historical queries.
 
 ### Handler Semaphore
@@ -462,7 +464,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `channel.rs` | Channel CRUD, membership management, role enforcement (transactional) |
 | `feed.rs` | `query_mentions` (INNER JOIN event_mentions), `query_needs_action`, `query_activity` |
 | `workflow.rs` | Full workflow/run/approval CRUD; SHA-256 hashed approval tokens |
-| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables |
+| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
 | `dm.rs` | DM channel management |
 | `reaction.rs` | Reaction storage and retrieval |
 | `thread.rs` | Thread/reply tracking |
@@ -900,7 +902,7 @@ Docker Compose provides the full local development stack. All services include h
 | Postgres | `postgres:17-alpine` | 5432 | Primary event store — events, channels, tokens, workflows, audit; full-text search (`search_tsv` GIN) |
 | Redis | `redis:7-alpine` | 6379 | Pub/sub fan-out, presence (SET EX), typing (sorted sets) |
 | Adminer | `adminer` | 8082 | DB web UI (dev only) |
-| MinIO | `quay.io/minio/minio` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
+| Silo (MinIO fork) | `pgsty/silo` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
 | Prometheus | `prom/prometheus` | 9090 | Metrics collection |
 
 ### Postgres Schema (key tables)

@@ -2,6 +2,13 @@ part of '../compose_bar.dart';
 
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
+
+  /// Shown rows that can no longer be chosen. They stay in place, disabled.
+  final Set<String> unavailable;
+
+  /// The directory search failed: show its error and a retry below the rows.
+  final bool searchFailed;
+  final VoidCallback? onRetry;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
   final bool isDmChannel;
@@ -9,6 +16,9 @@ class _MentionSuggestions extends StatelessWidget {
 
   const _MentionSuggestions({
     required this.suggestions,
+    this.unavailable = const {},
+    this.searchFailed = false,
+    this.onRetry,
     required this.userCache,
     required this.currentPubkey,
     required this.isDmChannel,
@@ -31,15 +41,36 @@ class _MentionSuggestions extends StatelessWidget {
         child: ListView.separated(
           shrinkWrap: true,
           padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          itemCount: suggestions.length,
+          itemCount: suggestions.length + (searchFailed ? 1 : 0),
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
+            if (index == suggestions.length) {
+              return ListTile(
+                key: const ValueKey('mention-search-error'),
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                title: Text(
+                  'Could not search community people.',
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.error,
+                  ),
+                ),
+                trailing: TextButton(
+                  onPressed: onRetry == null
+                      ? null
+                      : () => _runComposerAction(onRetry!),
+                  child: const Text('Retry'),
+                ),
+              );
+            }
             final candidate = suggestions[index];
             final name = candidate.pickerLabel;
             final avatarUrl =
                 candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
+            final available = !unavailable.contains(candidate.pubkey);
             return ListTile(
+              enabled: available,
               dense: true,
               visualDensity: VisualDensity.compact,
               leading: AvatarImage(
@@ -66,7 +97,9 @@ class _MentionSuggestions extends StatelessWidget {
                 isDmChannel: isDmChannel,
                 userCache: userCache,
               ),
-              onTap: () => _runComposerAction(() => onSelect(candidate)),
+              onTap: available
+                  ? () => _runComposerAction(() => onSelect(candidate))
+                  : null,
             );
           },
         ),
@@ -77,7 +110,7 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "managed by …" / "not in channel".
+/// for human admins), then "managed by …" / "not in channel" (or "not in DM").
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
@@ -89,16 +122,17 @@ abstract final class _MentionSuggestionInfo {
     final ownerLabel = candidate.isAgent
         ? formatOwnerLabel(candidate.ownerPubkey, currentPubkey, userCache)
         : null;
-    final notInChannel = !isDmChannel && !candidate.isMember;
+    final notInChannel = !candidate.isMember;
+    final outside = isDmChannel ? 'not in DM' : 'not in channel';
     final isAdmin = !candidate.isAgent && candidate.role == 'admin';
 
     final String? detail;
     if (ownerLabel != null && notInChannel) {
-      detail = 'managed by $ownerLabel \u00b7 not in channel';
+      detail = 'managed by $ownerLabel \u00b7 $outside';
     } else if (ownerLabel != null) {
       detail = 'managed by $ownerLabel';
     } else if (notInChannel) {
-      detail = 'not in channel';
+      detail = outside;
     } else {
       detail = null;
     }
@@ -112,11 +146,7 @@ abstract final class _MentionSuggestionInfo {
     return Row(
       children: [
         if (candidate.isAgent) ...[
-          Icon(
-            LucideIcons.bot,
-            size: 12,
-            color: context.colors.onSurfaceVariant,
-          ),
+          Icon(BuzzIcons.bot, size: 12, color: context.colors.onSurfaceVariant),
           const SizedBox(width: Grid.half),
           Text('agent', style: style),
         ] else if (isAdmin)
@@ -197,7 +227,7 @@ class _ChannelSuggestions extends StatelessWidget {
               leading: SizedBox.square(
                 dimension: 36,
                 child: Icon(
-                  LucideIcons.hash,
+                  BuzzIcons.hash,
                   size: 20,
                   color: context.colors.onSurfaceVariant,
                 ),

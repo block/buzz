@@ -4,12 +4,12 @@
 //! roster snapshots hold that same lock through replacement publication.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::channel::{row_to_channel_record, ChannelRecord};
 use crate::error::{DbError, Result};
-use crate::Db;
+use crate::{AdmittedTx, Db};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
@@ -179,7 +179,7 @@ pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result
 /// transaction that then reads roles/owner counts and writes membership, so the
 /// whole check-then-write sequence is atomic against a concurrent one.
 async fn acquire_channel_membership_lock(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
@@ -191,7 +191,7 @@ async fn acquire_channel_membership_lock(
                 community_id.as_uuid(),
                 channel_id
             ))
-            .execute(&mut **tx),
+            .execute(&mut *tx),
     )
     .await?;
     Ok(())
@@ -205,11 +205,39 @@ async fn acquire_channel_membership_lock(
 /// for callers that need to compose multiple operations in one transaction
 /// (e.g., `commit_participant_join` in `audio/handler.rs`).
 pub async fn acquire_channel_membership_lock_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     channel_id: Uuid,
 ) -> Result<()> {
-    acquire_channel_membership_lock(tx, community_id, channel_id).await
+    let community_id = tx.community();
+    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await
+}
+
+/// Lock the live channel row on a caller-owned transaction and return its
+/// `archived_at` (`None` when the channel is missing, deleted, or not archived).
+///
+/// The `FOR NO KEY UPDATE` row lock makes `archive_channel`'s
+/// `UPDATE channels SET archived_at = NOW()` wait until the caller commits or
+/// rolls back, so a join cannot commit into a channel archived concurrently.
+/// `FOR UPDATE` would invert the lock order against `add_member`, whose
+/// membership INSERT needs `KEY SHARE` on `channels` for its foreign key
+/// after taking the advisory membership lock; `FOR NO KEY UPDATE` still blocks
+/// archive (a non-key update) but is compatible with `KEY SHARE`. Re-reading
+/// under the lock is safe: the caller already holds it.
+pub async fn lock_channel_archived_at_in_transaction(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+) -> Result<Option<DateTime<Utc>>> {
+    let community_id = tx.community();
+    let archived_at: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+        "SELECT archived_at FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         FOR NO KEY UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    Ok(archived_at.flatten())
 }
 
 /// Check whether a pubkey is an active channel member on a caller-owned transaction.
@@ -217,11 +245,11 @@ pub async fn acquire_channel_membership_lock_in_transaction(
 /// Runs the same query as `is_member` but within the caller's transaction so
 /// the read is serialized with any concurrent membership writes on the same lock.
 pub async fn is_member_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<bool> {
+    let community_id = tx.community();
     let row = sqlx::query(
         "SELECT COUNT(*) as cnt FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
@@ -230,7 +258,7 @@ pub async fn is_member_in_transaction(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.conn())
     .await?;
     let cnt: i64 = row.try_get("cnt")?;
     Ok(cnt > 0)
@@ -246,12 +274,12 @@ pub async fn is_member_in_transaction(
 /// Used by `commit_participant_join` to atomically add membership and the
 /// `48101` event in a single transaction under a session effect permit.
 pub async fn insert_auto_membership_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     channel_id: Uuid,
     pubkey: &[u8],
     invited_by: &[u8],
 ) -> Result<()> {
+    let community_id = tx.community();
     sqlx::query(
         r#"
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -266,7 +294,7 @@ pub async fn insert_auto_membership_in_transaction(
     .bind(channel_id)
     .bind(pubkey)
     .bind(invited_by)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
     Ok(())
 }
@@ -278,28 +306,27 @@ pub async fn insert_auto_membership_in_transaction(
 pub struct LockedMemberSnapshot {
     /// Canonical active members captured behind the lock.
     pub members: Vec<MemberRecord>,
-    community_id: CommunityId,
     channel_id: Uuid,
     relay_pubkey: Vec<u8>,
-    tx: Transaction<'static, Postgres>,
+    tx: AdmittedTx,
 }
 
 impl LockedMemberSnapshot {
-    /// Return the newest relay-authored member snapshot timestamp using this
-    /// guard's existing connection.
-    pub async fn latest_member_event_timestamp(
-        &mut self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        relay_pubkey: &[u8],
-    ) -> Result<Option<u64>> {
+    /// The channel whose membership lock this guard holds.
+    pub fn channel_id(&self) -> Uuid {
+        self.channel_id
+    }
+
+    /// Return the newest relay-authored member snapshot timestamp for the
+    /// locked coordinate, using this guard's existing connection.
+    pub async fn latest_member_event_timestamp(&mut self) -> Result<Option<u64>> {
         let value: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
             "SELECT created_at FROM events WHERE community_id = $1 AND kind = 39002 AND pubkey = $2 AND channel_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
         )
-        .bind(community_id.as_uuid())
-        .bind(relay_pubkey)
-        .bind(channel_id)
-        .fetch_optional(&mut *self.tx)
+        .bind(self.tx.community().as_uuid())
+        .bind(self.relay_pubkey.as_slice())
+        .bind(self.channel_id)
+        .fetch_optional(self.tx.conn())
         .await?;
         Ok(value.map(|timestamp| timestamp.timestamp() as u64))
     }
@@ -309,13 +336,12 @@ impl LockedMemberSnapshot {
     /// without a nested pool checkout.
     pub async fn replace_member_event(
         &mut self,
-        community_id: CommunityId,
-        channel_id: Uuid,
         event: &nostr::Event,
     ) -> Result<(buzz_core::StoredEvent, bool)> {
-        if community_id != self.community_id
-            || channel_id != self.channel_id
-            || event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
+        let community_id = self.tx.community();
+        let channel_id = self.channel_id;
+        if event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
+            || crate::event::extract_d_tag(event) != Some(channel_id.to_string())
         {
             return Err(DbError::InvalidData(
                 "member snapshot replacement does not match its locked coordinate".into(),
@@ -338,7 +364,7 @@ impl LockedMemberSnapshot {
         .bind(kind)
         .bind(pubkey.as_slice())
         .bind(channel_id)
-        .fetch_optional(&mut *self.tx)
+        .fetch_optional(self.tx.conn())
         .await?;
         let incoming_id = event.id.as_bytes().as_slice();
         if let Some((existing_ts, existing_id)) = existing {
@@ -358,7 +384,7 @@ impl LockedMemberSnapshot {
         }
         sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL")
             .bind(community_id.as_uuid()).bind(kind).bind(pubkey.as_slice()).bind(channel_id)
-            .execute(&mut *self.tx).await?;
+            .execute(self.tx.conn()).await?;
         let received_at = Utc::now();
         let tags = serde_json::to_value(&event.tags)?;
         let sig = event.sig.serialize();
@@ -366,14 +392,20 @@ impl LockedMemberSnapshot {
             .bind(community_id.as_uuid()).bind(event.id.as_bytes().as_slice())
             .bind(pubkey.as_slice()).bind(created_at).bind(kind).bind(tags)
             .bind(&event.content).bind(sig.as_slice()).bind(received_at).bind(channel_id)
-            .bind(crate::event::extract_d_tag(event)).execute(&mut *self.tx).await?;
+            .bind(crate::event::extract_d_tag(event)).execute(self.tx.conn()).await?;
         if inserted.rows_affected() == 0 {
             return Err(DbError::InvalidData(
                 "member snapshot event id already exists".into(),
             ));
         }
-        crate::insert_mentions_in_transaction(&mut self.tx, community_id, event, Some(channel_id))
-            .await?;
+        crate::store::event_follow_up::after_admitted_insert(
+            &mut self.tx,
+            event.id.as_bytes().as_slice(),
+            kind,
+            Some(channel_id),
+        )
+        .await?;
+        crate::insert_mentions_in_transaction(&mut self.tx, event, Some(channel_id)).await?;
         Ok((
             buzz_core::StoredEvent::with_received_at(
                 event.clone(),
@@ -404,12 +436,12 @@ pub async fn lock_member_snapshot(
     channel_id: Uuid,
     relay_pubkey: &[u8],
 ) -> Result<LockedMemberSnapshot> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
     // Match the canonical replacement writer's lock order. Old binaries take
     // this key before INSERT; migration 0032 then takes the membership key in
     // the INSERT trigger. Taking both in that order avoids mixed-version
@@ -424,10 +456,10 @@ pub async fn lock_member_snapshot(
         crate::observability::LockType::Replacement,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(replacement_lock)
-            .execute(&mut *tx),
+            .execute(tx.conn()),
     )
     .await?;
-    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
@@ -439,7 +471,7 @@ pub async fn lock_member_snapshot(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.conn())
     .await?;
     let members = rows
         .into_iter()
@@ -447,7 +479,6 @@ pub async fn lock_member_snapshot(
         .collect::<Result<Vec<_>>>()?;
     Ok(LockedMemberSnapshot {
         members,
-        community_id,
         channel_id,
         relay_pubkey: relay_pubkey.to_vec(),
         tx,
@@ -1098,6 +1129,10 @@ pub struct LargeChannelRoster {
 
 /// Returns active channels whose canonical roster exceeds `minimum_members`.
 ///
+/// Only active communities are scanned: archived communities must not have
+/// their discovery state rewritten, and deleting or tombstoned communities
+/// would only produce fenced-write failures.
+///
 /// This is an internal cross-community maintenance read. Callers must preserve
 /// the returned community id when reading or rewriting discovery state.
 pub async fn list_large_channel_rosters_needing_reconciliation(
@@ -1125,7 +1160,11 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
         )
         SELECT lr.community_id, community.host, lr.channel_id, lr.member_count
         FROM large_rosters lr
-        JOIN communities community ON community.id = lr.community_id
+        JOIN communities community
+          ON community.id = lr.community_id
+         AND community.archived_at IS NULL
+         AND community.deleted_at IS NULL
+         AND community.deletion_state = 'active'
         JOIN LATERAL (
             SELECT roster.tags
             FROM events roster
@@ -1164,7 +1203,7 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
 
 /// Transaction-aware variant of [`get_active_role_tx`].
 async fn get_active_role_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
     pubkey: &[u8],
@@ -1176,14 +1215,14 @@ async fn get_active_role_tx(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await?;
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }
 
 /// Transaction-aware variant of [`get_channel`].
 async fn get_channel_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<ChannelRecord> {
@@ -1201,7 +1240,7 @@ async fn get_channel_tx(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(DbError::ChannelNotFound(channel_id))?;
     row_to_channel_record(row)
@@ -2334,6 +2373,99 @@ mod postgres_tests {
         assert!(converged.is_empty());
     }
 
+    /// Seed a channel whose roster (owner + one member) has diverged from its
+    /// live relay-authored kind-39002 snapshot (owner only).
+    async fn seed_divergent_roster(pool: &PgPool, community_id: Uuid, relay_pubkey: &[u8]) -> Uuid {
+        let creator = random_pubkey();
+        let channel = create_test_channel(
+            pool,
+            community_id,
+            "divergent-roster",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create test channel");
+        let tags = serde_json::json!([
+            ["d", channel.id.to_string()],
+            ["p", hex::encode(&creator), "", "owner"]
+        ]);
+        sqlx::query(
+            r#"
+            INSERT INTO events
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag)
+            VALUES ($1, $2, $3, NOW(), 39002, $4, '', $5, $6, $7)
+            "#,
+        )
+        .bind(community_id)
+        .bind(random_pubkey())
+        .bind(relay_pubkey)
+        .bind(tags)
+        .bind(vec![0u8; 64])
+        .bind(channel.id)
+        .bind(channel.id.to_string())
+        .execute(pool)
+        .await
+        .expect("insert roster snapshot");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at) \
+             VALUES ($1, $2, $3, 'member', NOW())",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(random_pubkey())
+        .execute(pool)
+        .await
+        .expect("diverge roster");
+        channel.id
+    }
+
+    /// Startup roster reconciliation must not rewrite discovery state for
+    /// archived communities, nor attempt fenced writes for deleting or
+    /// tombstoned ones. Same active-community predicate as #7558.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn large_roster_reconciliation_skips_archived_and_deleted_communities() {
+        let pool = setup_pool().await;
+        let relay_pubkey = random_pubkey();
+        let mut fixtures = Vec::new();
+        for label in ["active", "archived", "quiescing", "fenced", "tombstone"] {
+            let community_id = make_test_community(&pool).await;
+            let channel_id = seed_divergent_roster(&pool, community_id, &relay_pubkey).await;
+            fixtures.push((label, community_id, channel_id));
+        }
+        for (label, community_id, _) in &fixtures {
+            match *label {
+                "active" => {}
+                "archived" => {
+                    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+                        .bind(community_id)
+                        .execute(&pool)
+                        .await
+                        .expect("archive fixture");
+                }
+                state => crate::test_support::set_deletion_state(&pool, *community_id, state).await,
+            }
+        }
+
+        let candidates = list_large_channel_rosters_needing_reconciliation(&pool, 1, &relay_pubkey)
+            .await
+            .expect("list candidates");
+        let found: Vec<(CommunityId, Uuid)> = candidates
+            .iter()
+            .map(|c| (c.community_id, c.channel_id))
+            .collect();
+        let (_, active_community, active_channel) = fixtures[0];
+        assert_eq!(
+            found,
+            vec![(CommunityId::from_uuid(active_community), active_channel)],
+            "only the active community's divergent roster may be reconciled"
+        );
+    }
+
     /// A random non-admin, non-owner user cannot remove someone else's bot.
     #[tokio::test]
     #[ignore = "requires Postgres"]
@@ -2864,8 +2996,22 @@ mod postgres_tests {
             ])
             .sign_with_keys(&relay_keys)
             .expect("sign roster");
+        let other_channel = nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
+            .tags(vec![
+                nostr::Tag::parse(["d", &Uuid::new_v4().to_string()]).expect("d tag"),
+                nostr::Tag::parse(["p", &hex::encode(&owner), "", "owner"]).expect("p tag"),
+            ])
+            .sign_with_keys(&relay_keys)
+            .expect("sign roster for another channel");
+        assert!(
+            matches!(
+                snapshot.replace_member_event(&other_channel).await,
+                Err(DbError::InvalidData(_))
+            ),
+            "a roster whose d tag names another channel must not replace the locked one"
+        );
         let (_, inserted) = snapshot
-            .replace_member_event(community, channel.id, &event)
+            .replace_member_event(&event)
             .await
             .expect("replace roster on held connection");
         assert!(inserted);
@@ -2905,6 +3051,60 @@ mod postgres_tests {
                 .len(),
             2
         );
+    }
+
+    /// Captured roster publication must hold the same shared community-deletion
+    /// lock as serving event writes so deletion fencing can serialize against it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn locked_member_snapshot_holds_shared_community_fence_lock() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "snapshot-community-fence-lock",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let snapshot_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("connect one-connection pool");
+        let relay_keys = Keys::generate();
+        let snapshot = lock_member_snapshot(
+            &snapshot_pool,
+            community,
+            channel.id,
+            &relay_keys.public_key().to_bytes(),
+        )
+        .await
+        .expect("capture locked roster");
+
+        let mut contender = pool.begin().await.expect("begin deletion contender");
+        let exclusive_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
+                .bind(community.as_uuid())
+                .fetch_one(&mut *contender)
+                .await
+                .expect("try exclusive community deletion lock");
+        assert!(
+            !exclusive_taken,
+            "snapshot publication must hold a shared community deletion lock"
+        );
+        contender.rollback().await.expect("rollback contender");
+
+        snapshot.release().await.expect("release snapshot fence");
     }
 
     /// The lock must be shared with `remove_member`: a demotion racing an owner
@@ -3421,10 +3621,12 @@ mod postgres_tests {
             .connect(&scratch_url)
             .await
             .expect("connect desired-schema scratch db");
-        sqlx::raw_sql(include_str!("../../../../schema/schema.sql"))
-            .execute(&pool)
-            .await
-            .expect("apply desired-state schema");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            crate::test_support::desired_state_schema_sql(),
+        ))
+        .execute(&pool)
+        .await
+        .expect("apply desired-state schema");
 
         let db = Db::from_pool(pool.clone());
         let community_uuid = Uuid::new_v4();

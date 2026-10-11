@@ -13,12 +13,13 @@
 # tree, not the pushed commit — the always-on `push-head-scope` lane warns when
 # they diverge and CI remains the authoritative gate for that ref.
 # Deliberate deviations:
-# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
-#   is omitted; a CI-workflow-only edit doesn't need a local test run.
-# - `desktop-check`/`desktop-typecheck`/`desktop-test` don't trigger on `rust`
-#   changes, though CI's Desktop Core job does. Those commands are pure TS
-#   (biome + tsc + node:test) with no Rust dependency, so the extra trigger
-#   would be spurious locally.
+# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`desktop`/`mobile`
+#   filters, and `scripts/ci-apt-retry.sh` in `rust`/`desktop`, are omitted;
+#   a CI-plumbing-only edit doesn't need a local test run.
+# - `desktop-test` doesn't trigger on `crates/**` changes, though CI's Desktop
+#   JS job does: a few node:test cases read relay/DB crate sources to pin shared
+#   constants. Running the full desktop suite on every crate push would be
+#   expensive locally, so CI is the authoritative check for that coupling.
 # - The repository-wide `file-size-check` is deliberately unfiltered. Its own
 #   merge-base diff is the path filter; duplicating its governed roots here is
 #   the coverage drift this gate is intended to prevent.
@@ -108,7 +109,7 @@ pre-push:
       run: ./scripts/without-git-env.sh just test-unit
     desktop-check:
       files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
       exclude: ["desktop/src-tauri/**"]
       env: &pnpm-verify-deps
         # Warn when node_modules looks stale against the workspace (pnpm uses
@@ -120,18 +121,18 @@ pre-push:
       run: ./scripts/without-git-env.sh just desktop-check
     desktop-typecheck:
       files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
       exclude: ["desktop/src-tauri/**"]
       env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-typecheck
     desktop-test:
       files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
       exclude: ["desktop/src-tauri/**"]
       env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-test
     desktop-tauri-checks:
-      # Keep local lint parity with Desktop Core CI for every path that can
+      # Keep local lint parity with Desktop Tauri CI for every path that can
       # affect the Tauri crate or its path dependencies. Run clippy and tests
       # serially so parallel pre-push hooks do not contend for Cargo's lock.
       files: git diff --name-only origin/main...HEAD

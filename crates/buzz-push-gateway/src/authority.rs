@@ -4,7 +4,6 @@
 //! does not prove an Apple-issued binding between that key and the APNs token;
 //! accepting the directly submitted token is the protocol's explicit bootstrap
 //! assumption.
-use crate::model::AppProfile;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,7 +30,6 @@ pub struct NewInstallation {
     pub app_attest_key_id: Vec<u8>,
     pub app_attest_public_key: Vec<u8>,
     pub assertion_counter: u32,
-    pub profile: AppProfile,
     pub token_ciphertext: Vec<u8>,
     pub token_fingerprint: [u8; 32],
     pub endpoint_epoch: i64,
@@ -44,7 +42,6 @@ pub struct Installation {
     pub app_attest_key_id: Vec<u8>,
     pub app_attest_public_key: Vec<u8>,
     pub assertion_counter: u32,
-    pub profile: AppProfile,
     pub token_ciphertext: Vec<u8>,
     pub token_fingerprint: [u8; 32],
     pub endpoint_epoch: i64,
@@ -69,7 +66,6 @@ pub struct DeliveryAuthority {
     pub delegation_id: Uuid,
     pub installation_id: Uuid,
     pub relay_pubkey: String,
-    pub profile: AppProfile,
     pub token_ciphertext: Vec<u8>,
     pub endpoint_epoch: i64,
     pub generation: i64,
@@ -135,7 +131,6 @@ pub trait AuthorityStore: Send + Sync {
     async fn matching_installation(
         &self,
         app_attest_key_id: &[u8],
-        profile: AppProfile,
         token_fingerprint: [u8; 32],
         endpoint_epoch: i64,
         expires_at: i64,
@@ -211,7 +206,7 @@ pub trait AuthorityStore: Send + Sync {
 struct MemoryState {
     challenges: HashMap<Uuid, Challenge>,
     installations: HashMap<Uuid, Installation>,
-    token_owners: HashMap<(AppProfile, [u8; 32]), Uuid>,
+    token_owners: HashMap<[u8; 32], Uuid>,
     delegations: HashMap<(Uuid, String), Delegation>,
     delegation_ids: HashMap<Uuid, (Uuid, String)>,
     delivery_auth_replays: HashMap<(String, String), i64>,
@@ -273,7 +268,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         now: i64,
     ) -> Result<(), AuthorityError> {
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        let token_key = (n.profile, n.token_fingerprint);
+        let token_key = n.token_fingerprint;
         if s.installations.contains_key(&n.id) {
             return Err(AuthorityError::Rejected);
         }
@@ -282,8 +277,7 @@ impl AuthorityStore for MemoryAuthorityStore {
             .values()
             .filter(|installation| {
                 installation.app_attest_key_id == n.app_attest_key_id
-                    || (installation.profile == n.profile
-                        && installation.token_fingerprint == n.token_fingerprint)
+                    || installation.token_fingerprint == n.token_fingerprint
             })
             .map(|installation| installation.id)
             .collect::<Vec<_>>();
@@ -305,7 +299,7 @@ impl AuthorityStore for MemoryAuthorityStore {
             .collect::<Vec<_>>();
         for id in replaced {
             if let Some(old) = s.installations.remove(&id) {
-                s.token_owners.remove(&(old.profile, old.token_fingerprint));
+                s.token_owners.remove(&old.token_fingerprint);
             }
             s.delegations
                 .retain(|(installation_id, _), _| *installation_id != id);
@@ -320,7 +314,7 @@ impl AuthorityStore for MemoryAuthorityStore {
                 app_attest_key_id: n.app_attest_key_id,
                 app_attest_public_key: n.app_attest_public_key,
                 assertion_counter: n.assertion_counter,
-                profile: n.profile,
+
                 token_ciphertext: n.token_ciphertext,
                 token_fingerprint: n.token_fingerprint,
                 endpoint_epoch: n.endpoint_epoch,
@@ -358,7 +352,6 @@ impl AuthorityStore for MemoryAuthorityStore {
     async fn matching_installation(
         &self,
         key_id: &[u8],
-        profile: AppProfile,
         fingerprint: [u8; 32],
         epoch: i64,
         expires_at: i64,
@@ -371,7 +364,6 @@ impl AuthorityStore for MemoryAuthorityStore {
                 !installation.revoked
                     && installation.expires_at >= now
                     && installation.app_attest_key_id == key_id
-                    && installation.profile == profile
                     && installation.token_fingerprint == fingerprint
                     && installation.endpoint_epoch == epoch
                     && installation.expires_at == expires_at
@@ -443,21 +435,21 @@ impl AuthorityStore for MemoryAuthorityStore {
             return Err(AuthorityError::Rejected);
         }
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        let (profile, old_fingerprint) = {
+        let old_fingerprint = {
             let i = s.installations.get(&id).ok_or(AuthorityError::Rejected)?;
             if i.revoked || i.endpoint_epoch != expected {
                 return Err(AuthorityError::Rejected);
             }
-            (i.profile, i.token_fingerprint)
+            i.token_fingerprint
         };
-        let token_key = (profile, fingerprint);
+        let token_key = fingerprint;
         if s.token_owners
             .get(&token_key)
             .is_some_and(|owner| *owner != id)
         {
             return Err(AuthorityError::Rejected);
         }
-        s.token_owners.remove(&(profile, old_fingerprint));
+        s.token_owners.remove(&old_fingerprint);
         s.token_owners.insert(token_key, id);
         let i = s
             .installations
@@ -559,7 +551,7 @@ impl AuthorityStore for MemoryAuthorityStore {
             delegation_id,
             installation_id: i.id,
             relay_pubkey: relay.to_owned(),
-            profile: i.profile,
+
             token_ciphertext: i.token_ciphertext.clone(),
             endpoint_epoch: epoch,
             generation,
@@ -650,7 +642,7 @@ mod tests {
                     app_attest_key_id: vec![1],
                     app_attest_public_key: vec![2; 33],
                     assertion_counter: 0,
-                    profile: AppProfile::BuzzIosDogfood,
+
                     token_ciphertext: vec![3],
                     token_fingerprint: [4; 32],
                     endpoint_epoch: 1,
@@ -681,14 +673,14 @@ mod tests {
         let store = store().await;
 
         let recovered = store
-            .matching_installation(&[1], AppProfile::BuzzIosDogfood, [4; 32], 1, 2_000, 1_001)
+            .matching_installation(&[1], [4; 32], 1, 2_000, 1_001)
             .await
             .unwrap()
             .expect("exact replay finds the committed installation");
 
         assert_eq!(recovered.id, Uuid::from_u128(1));
         assert!(store
-            .matching_installation(&[1], AppProfile::BuzzIosDogfood, [5; 32], 1, 2_000, 1_001,)
+            .matching_installation(&[1], [5; 32], 1, 2_000, 1_001,)
             .await
             .unwrap()
             .is_none());
@@ -785,7 +777,7 @@ mod tests {
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![5; 33],
             assertion_counter: 0,
-            profile: AppProfile::BuzzIosDogfood,
+
             token_ciphertext: vec![6],
             token_fingerprint: [4; 32],
             endpoint_epoch: 1,
@@ -951,7 +943,7 @@ mod tests {
                     app_attest_key_id: vec![1],
                     app_attest_public_key: vec![5; 33],
                     assertion_counter: 0,
-                    profile: AppProfile::BuzzIosDogfood,
+
                     token_ciphertext: vec![6],
                     token_fingerprint: [4; 32],
                     endpoint_epoch: 1,

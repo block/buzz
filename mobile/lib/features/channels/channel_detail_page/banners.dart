@@ -45,7 +45,7 @@ class _HeaderEphemeralBadge extends StatelessWidget {
     return Tooltip(
       message: display.tooltipLabel,
       child: Icon(
-        LucideIcons.clockFading,
+        BuzzIcons.clockFading,
         key: const Key('chat-ephemeral-badge'),
         size: 16,
         color: context.colors.onSurfaceVariant,
@@ -55,41 +55,37 @@ class _HeaderEphemeralBadge extends StatelessWidget {
 }
 
 class _MessageTimelineSkeleton extends StatelessWidget {
+  final List<TimelineMessage> messages;
   final double appBarTitleContentHeight;
-  final SessionStatus status;
 
   const _MessageTimelineSkeleton({
+    required this.messages,
     required this.appBarTitleContentHeight,
-    required this.status,
   });
 
   @override
   Widget build(BuildContext context) {
-    final semanticsLabel = switch (status) {
-      SessionStatus.connecting => 'Connecting',
-      SessionStatus.reconnecting => 'Reconnecting',
-      SessionStatus.connected || SessionStatus.disconnected => 'Loading',
-    };
-    return Semantics(
-      key: const Key('channel-detail-connection-skeleton'),
-      liveRegion: true,
-      label: semanticsLabel,
-      child: ExcludeSemantics(
-        child: ListView.separated(
-          physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.fromLTRB(
-            Grid.gutter,
-            frostedAppBarHeight(
-                  context,
-                  titleContentHeight: appBarTitleContentHeight,
-                ) +
-                Grid.xs,
-            Grid.gutter,
+    return ListView.builder(
+      cacheExtent: 0,
+      reverse: true,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: EdgeInsets.fromLTRB(
+        Grid.gutter,
+        frostedAppBarHeight(
+              context,
+              titleContentHeight: appBarTitleContentHeight,
+            ) +
             Grid.xs,
-          ),
-          itemCount: 4,
-          separatorBuilder: (_, _) => const SizedBox(height: Grid.xs),
-          itemBuilder: (_, index) => _MessageSkeletonRow(index: index),
+        Grid.gutter,
+        Grid.xs,
+      ),
+      itemBuilder: (_, index) => Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xs),
+        child: _MessageSkeletonRow(
+          index: index % 4,
+          message: index < messages.length
+              ? messages[messages.length - 1 - index]
+              : null,
         ),
       ),
     );
@@ -98,8 +94,9 @@ class _MessageTimelineSkeleton extends StatelessWidget {
 
 class _MessageSkeletonRow extends StatelessWidget {
   final int index;
+  final TimelineMessage? message;
 
-  const _MessageSkeletonRow({required this.index});
+  const _MessageSkeletonRow({required this.index, this.message});
 
   @override
   Widget build(BuildContext context) {
@@ -133,10 +130,16 @@ class _MessageSkeletonRow extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: Grid.half),
-              for (final width in lineWidths[index]) ...[
-                SkeletonBar(width: min(width, availableWidth), height: 16),
-                const SizedBox(height: Grid.half),
-              ],
+              if (message != null)
+                MessageSkeletonBody(
+                  content: message!.content,
+                  tags: message!.tags,
+                )
+              else
+                for (final width in lineWidths[index]) ...[
+                  SkeletonBar(width: min(width, availableWidth), height: 16),
+                  const SizedBox(height: Grid.half),
+                ],
               const Row(
                 children: [
                   SkeletonBar(width: 32, height: 16),
@@ -173,39 +176,59 @@ class _ForumConnectionSkeleton extends StatelessWidget {
       child: ExcludeSemantics(
         child: IgnorePointer(
           child: ExcludeFocus(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: context.colors.surface,
-                borderRadius: BorderRadius.circular(Radii.lg),
-                border: Border.all(color: context.colors.outlineVariant),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(Grid.twelve),
-                child: SkeletonShimmer(
-                  child: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        children: [
-                          SkeletonBar(
-                            width: 28,
-                            height: 28,
-                            borderRadius: BorderRadius.all(
-                              Radius.circular(Radii.full),
-                            ),
-                          ),
-                          SizedBox(width: Grid.xxs),
-                          SkeletonBar(width: 112, height: 14),
-                        ],
-                      ),
-                      SizedBox(height: Grid.xxs),
-                      SkeletonBar(width: 240, height: 14),
-                    ],
-                  ),
+            child: ListView.builder(
+              cacheExtent: 0,
+              padding: EdgeInsets.zero,
+              physics: const NeverScrollableScrollPhysics(),
+              itemBuilder: (_, _) => Padding(
+                padding: const EdgeInsets.only(bottom: Grid.xs),
+                child: _ForumSkeletonCard(
+                  shimmerEnabled: status != SessionStatus.disconnected,
                 ),
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ForumSkeletonCard extends StatelessWidget {
+  final bool shimmerEnabled;
+
+  const _ForumSkeletonCard({required this.shimmerEnabled});
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: context.colors.surface,
+        borderRadius: BorderRadius.circular(Radii.lg),
+        border: Border.all(color: context.colors.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(Grid.twelve),
+        child: SkeletonShimmer(
+          enabled: shimmerEnabled,
+          child: const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  SkeletonBar(
+                    width: 28,
+                    height: 28,
+                    borderRadius: BorderRadius.all(Radius.circular(Radii.full)),
+                  ),
+                  SizedBox(width: Grid.xxs),
+                  SkeletonBar(width: 112, height: 14),
+                ],
+              ),
+              SizedBox(height: Grid.xxs),
+              SkeletonBar(width: 240, height: 14),
+            ],
           ),
         ),
       ),

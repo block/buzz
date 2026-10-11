@@ -246,7 +246,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 backgroundColor:
                                     context.colors.primaryContainer,
                                 fallback: Icon(
-                                  LucideIcons.userRound,
+                                  BuzzIcons.userRound,
                                   size: fallbackIconSize,
                                   color: context.colors.onPrimaryContainer,
                                 ),

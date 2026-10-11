@@ -82,7 +82,7 @@ enum PersistResult {
     /// Event was already processed — return idempotent success.
     Duplicate,
     /// Event inserted — transaction is open, handler must commit after mutations.
-    Inserted(sqlx::Transaction<'static, sqlx::Postgres>),
+    Inserted(buzz_db::AdmittedTx),
 }
 
 /// Persist a command event inside a transaction. Returns the OPEN transaction
@@ -109,14 +109,13 @@ async fn persist_command_event(
 
     let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
     let mut tx = db
-        .begin_event_write_transaction()
+        .begin_event_write_transaction(tenant.community())
         .await
-        .map_err(|e| IngestError::Internal(format!("error: begin transaction: {e}")))?;
-    buzz_deletion::store(db)
-        .guard_transaction(&mut tx, tenant.community())
-        .await
-        .map_err(|error| {
-            IngestError::Rejected(format!("restricted: community writes are fenced: {error}"))
+        .map_err(|error| match error {
+            buzz_db::DbError::AccessDenied(_) => {
+                IngestError::Rejected(format!("restricted: community writes are fenced: {error}"))
+            }
+            error => IngestError::Internal(format!("error: begin transaction: {error}")),
         })?;
 
     let d_tag = buzz_db::event::extract_d_tag(event);
@@ -147,7 +146,6 @@ async fn persist_command_event(
         let result = db
             .replace_parameterized_event_in_transaction(
                 &mut tx,
-                tenant.community(),
                 event,
                 d_tag,
                 channel_id,
@@ -184,10 +182,9 @@ async fn persist_command_event(
         };
     }
 
-    let (_, was_inserted) =
-        buzz_db::event::insert_event_in_transaction(&mut tx, tenant.community(), event, channel_id)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
+    let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(&mut tx, event, channel_id)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
     if was_inserted {
         Ok(PersistResult::Inserted(tx))
     } else {
@@ -1599,12 +1596,11 @@ mod postgres_tests {
         );
 
         let mut tx = db
-            .begin_event_write_transaction()
+            .begin_event_write_transaction(tenant.community())
             .await
             .expect("begin legacy seed");
         let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(
             &mut tx,
-            tenant.community(),
             &legacy,
             extract_channel_id(&legacy),
         )

@@ -7,9 +7,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 
 part 'channels_provider_live_cases.dart';
 part 'channels_provider_terminal_cases.dart';
+part 'channels_provider_readiness_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -24,6 +26,7 @@ part 'channels_provider_terminal_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _unreadReadinessCases();
   const myPk = 'me';
 
   test(
@@ -876,6 +879,117 @@ void main() {
       reason: 'the newer request\'s member snapshot was clobbered',
     );
   });
+
+  test(
+    'presentation waits for unread catch-up without delaying the channel list',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: const [
+          NostrEvent(
+            id: 'initial-mention',
+            pubkey: 'alice',
+            createdAt: 50,
+            kind: 9,
+            tags: [
+              ['h', _channelA],
+              ['p', myPk],
+            ],
+            content: 'hello',
+            sig: 'sig',
+          ),
+        ],
+      )..pauseNextUnreadCatchUpQuery();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      final channels = await container.read(channelsProvider.future);
+      expect(channels.single.name, 'general');
+      final notifier = container.read(channelsProvider.notifier);
+      var ready = false;
+      final presentation = notifier.waitForUnreadCatchUp().then(
+        (_) => ready = true,
+      );
+      await session.nextUnreadCatchUpQueryStarted;
+      await _settle();
+      expect(ready, isFalse);
+      expect(notifier.observedUnreadEventsByChannel, isEmpty);
+
+      session.resumePausedUnreadCatchUpQuery();
+      await presentation;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelA],
+        contains('initial-mention'),
+      );
+      expect(ready, isTrue);
+    },
+  );
+
+  test(
+    'landing waits for destination unread generation after disconnect',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'Alpha')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+
+      session.memberships = [_membership(_channelB, myPk)];
+      session.metadata = [_meta(id: _channelB, name: 'Bravo')];
+      session.pauseNextSubscribe();
+      final subscribing = session.nextSubscribeStarted;
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://bravo.example');
+      expect(
+        (await container.read(channelsProvider.future)).single.id,
+        _channelB,
+      );
+      await subscribing;
+      var ready = false;
+      final landing = notifier.waitForUnreadCatchUp().then((_) => ready = true);
+      session.setStatus(SessionStatus.disconnected);
+      session.resumePausedSubscribe();
+      await _settle();
+      expect(
+        ready,
+        isFalse,
+        reason: 'Alpha history cannot satisfy Bravo readiness',
+      );
+
+      session.recentMessages = const [
+        NostrEvent(
+          id: 'bravo-mention',
+          pubkey: 'alice',
+          createdAt: 50,
+          kind: 9,
+          tags: [
+            ['h', _channelB],
+            ['p', myPk],
+          ],
+          content: 'Bravo mention',
+          sig: 'sig',
+        ),
+      ];
+      session.pauseNextUnreadCatchUpQuery();
+      final catchingUp = session.nextUnreadCatchUpQueryStarted;
+      session.setStatus(SessionStatus.connected);
+      await catchingUp;
+      await _settle();
+      expect(ready, isFalse);
+      session.resumePausedUnreadCatchUpQuery();
+      await landing;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelB],
+        contains('bravo-mention'),
+      );
+      expect(ready, isTrue);
+    },
+  );
 
   test('community switch discards a parked unread catch-up', () async {
     final session = _FakeRelaySession(
@@ -2201,7 +2315,7 @@ void main() {
   );
 
   test(
-    'refreshes cached channels after a disconnected community switch',
+    'waits for destination channels after a disconnected community switch',
     () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
@@ -2222,12 +2336,21 @@ void main() {
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://new-community.example');
       await Future<void>.delayed(Duration.zero);
-      expect(container.read(channelsProvider).value?.single.name, 'general');
+      expect(container.read(channelsProvider).isLoading, isTrue);
+      expect(container.read(channelsProvider.notifier).hasLoaded, isFalse);
+      var destinationReady = false;
+      final destination = container.read(channelsProvider.future).then((value) {
+        destinationReady = true;
+        return value;
+      });
+      await _settle();
+      expect(destinationReady, isFalse);
 
       session.setStatus(SessionStatus.connected);
       await Future<void>.delayed(Duration.zero);
 
-      expect(container.read(channelsProvider).value?.single.name, 'random');
+      expect((await destination).single.name, 'random');
+      expect(container.read(channelsProvider).isLoading, isFalse);
     },
   );
 

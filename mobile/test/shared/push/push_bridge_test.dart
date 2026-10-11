@@ -203,7 +203,6 @@ void main() {
     expect(grants.single.installationId, 'c' * 32);
     expect(grants.single.endpointGrant, 'opaque-grant');
     expect(grants.single.endpointHash, 'b' * 64);
-    expect(grants.single.appProfile, 'buzz-ios-dogfood');
     expect(grants.single.endpointEpoch, 1);
     expect(grants.single.generation, 1);
     expect(grants.single.expiresAt, 1752624000);
@@ -457,7 +456,6 @@ Map<String, Object> _grantMap(String endpointGrant) => {
   'installationId': 'c' * 32,
   'endpointGrant': endpointGrant,
   'endpointHash': 'b' * 64,
-  'appProfile': 'buzz-ios-dogfood',
   'endpointEpoch': 1,
   'generation': 1,
   'expiresAt': 1752624000,

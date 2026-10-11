@@ -76,7 +76,8 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
 
     updateColors(
       colorValue: colorValue,
-      backdropColorValue: backdropColorValue
+      backdropColorValue: backdropColorValue,
+      glassTintColorValue: (arguments?["glassTintColor"] as? NSNumber)?.uint32Value
     )
     applyInterfaceStyle(from: arguments?["brightness"])
     applyCornerConfiguration(minimumRadius: minimumRadius)
@@ -104,7 +105,8 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
 
         self.updateColors(
           colorValue: colorValue.uint32Value,
-          backdropColorValue: (arguments["backdropColor"] as? NSNumber)?.uint32Value
+          backdropColorValue: (arguments["backdropColor"] as? NSNumber)?.uint32Value,
+          glassTintColorValue: (arguments["glassTintColor"] as? NSNumber)?.uint32Value
         )
         result(nil)
       case "updateGeometry":
@@ -140,9 +142,17 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     rootView
   }
 
-  private func updateColors(colorValue: UInt32, backdropColorValue: UInt32?) {
+  private func updateColors(
+    colorValue: UInt32,
+    backdropColorValue: UInt32?,
+    glassTintColorValue: UInt32?
+  ) {
     let surfaceColor = Self.color(from: colorValue)
     if let glassView = surfaceView as? UIVisualEffectView {
+      if #available(iOS 26.0, *), let effect = glassView.effect as? UIGlassEffect {
+        effect.tintColor = glassTintColorValue.map { Self.color(from: $0) }
+        glassView.effect = effect
+      }
       glassView.backgroundColor = .clear
       glassView.contentView.backgroundColor = surfaceColor.withAlphaComponent(0.12)
     } else {

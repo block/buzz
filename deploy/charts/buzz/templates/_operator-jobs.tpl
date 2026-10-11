@@ -30,9 +30,7 @@ spec:
           labels:
             {{- include "buzz.selectorLabels" $root | nindent 12 }}
             app.kubernetes.io/component: deletion-drain
-            {{- with $job.podLabels }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
+            {{- include "buzz.podLabelsWithVersion" (dict "root" $root "labels" $job.podLabels) | nindent 12 }}
           annotations:
             {{- toYaml $job.podAnnotations | nindent 12 }}
         spec:

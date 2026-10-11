@@ -8,13 +8,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/widgets/media_loading_placeholder.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
@@ -31,15 +32,16 @@ import 'channels_provider.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
+import 'message_mention_pill.dart';
+import 'message_gallery.dart';
+import 'message_gallery_frame.dart';
+import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
-
-const _messageMediaMaxInlineWidth = 320.0;
-const _messageMediaMaxImageHeight = 240.0;
 
 typedef OpenDownloadedFile =
     Future<void> Function(
@@ -218,11 +220,17 @@ class MessageContent extends HookConsumerWidget {
             ..sort((a, b) => a.key.compareTo(b.key))))
         '${entry.key}\u0000${entry.value}',
     ].join('\u0001');
-    final imetaByUrl = parseImetaTags(tags);
+    final imetaByUrl = {
+      for (final entry in parseImetaTags(tags).entries)
+        normalizeMarkdownDestination(entry.key): entry.value,
+    };
+    final normalizedContent = useMemoized(() => normalizeBareLinks(content), [
+      content,
+    ]);
     final trailingGallery = maxLines == null
-        ? _extractTrailingImageGallery(content, imetaByUrl)
+        ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
-    final markdownContent = trailingGallery?.content ?? content;
+    final markdownContent = trailingGallery?.content ?? normalizedContent;
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
@@ -256,17 +264,12 @@ class MessageContent extends HookConsumerWidget {
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
 
-    final linkNormalizedContent = useMemoized(
-      () => normalizeBareLinks(markdownContent),
-      [markdownContent],
-    );
-
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = linkNormalizedContent.split('`');
+      final mentionParts = markdownContent.split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
@@ -294,7 +297,7 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [linkNormalizedContent, mentionPresentationKey]);
+    }, [markdownContent, mentionPresentationKey]);
 
     final inlineComponents = _useMessageInlineComponents(
       content: content,
@@ -440,7 +443,7 @@ class MessageContent extends HookConsumerWidget {
     final isCanonicalBuzzLabel = isBuzzLink && text == url;
     final buzzPresentation = switch (buzzLink) {
       ChannelDeepLink(:final channelId) => (
-        icon: LucideIcons.hash,
+        icon: BuzzIcons.hash,
         label:
             _channelNameForId(resolvedChannelNames, channelId) ??
             channelId.substring(0, math.min(8, channelId.length)),
@@ -449,7 +452,7 @@ class MessageContent extends HookConsumerWidget {
         interactive: true,
       ),
       MessageDeepLink(:final channelId, :final messageId) => (
-        icon: LucideIcons.messageSquare,
+        icon: BuzzIcons.messageSquare,
         label:
             '${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))} · ${messageId.substring(0, math.min(8, messageId.length))}',
         semanticLabel:
@@ -458,9 +461,9 @@ class MessageContent extends HookConsumerWidget {
       ),
       EntityDeepLink(:final type, :final repository, :final eventId) => (
         icon: switch (type) {
-          'repo' => LucideIcons.folderGit2,
-          'pr' => LucideIcons.gitPullRequest,
-          _ => LucideIcons.circleDot,
+          'repo' => BuzzIcons.folderGit2,
+          'pr' => BuzzIcons.gitPullRequest,
+          _ => BuzzIcons.circleDot,
         },
         label: type == 'repo'
             ? repository
@@ -586,7 +589,7 @@ class _MessageImagePreview extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final heroTag = useMemoized(() => Object());
     final layout = _resolveImagePreviewLayout(context, imeta?.aspectRatio);
-    final previewDecodeWidth = layout.width ?? _messageMediaMaxWidth(context);
+    final previewDecodeWidth = layout.width ?? messageMediaMaxWidth(context);
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
@@ -606,7 +609,6 @@ class _MessageImagePreview extends HookConsumerWidget {
           backgroundColor: context.colors.surfaceContainerHighest,
           width: layout.width,
           height: layout.height,
-          constraints: layout.constraints,
           child: MediaViewerHero(
             tag: heroTag,
             child: ClipRRect(
@@ -616,8 +618,12 @@ class _MessageImagePreview extends HookConsumerWidget {
                 decodeWidth: previewDecodeWidth,
                 fit: layout.fit,
                 semanticLabel: semanticLabel,
+                frameBuilder: (context, child, frame, synchronous) =>
+                    frame != null || synchronous
+                    ? child
+                    : const MediaLoadingPlaceholder(label: 'Loading image'),
                 errorBuilder: (_, _, _) => _MediaPreviewFallback(
-                  icon: LucideIcons.imageOff,
+                  icon: BuzzIcons.imageOff,
                   label: 'Image unavailable',
                 ),
               ),
@@ -634,7 +640,6 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
   final Color backgroundColor;
   final double? width;
   final double? height;
-  final BoxConstraints? constraints;
   final Widget child;
 
   const _MessageMediaPreviewFrame({
@@ -642,21 +647,17 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
     required this.backgroundColor,
     this.width,
     this.height,
-    this.constraints,
     required this.child,
   });
 
   @override
   Widget build(BuildContext context) {
-    final resolvedWidth = constraints == null
-        ? (width ?? _messageMediaMaxWidth(context))
-        : width;
+    final resolvedWidth = width ?? messageMediaMaxWidth(context);
 
     return Container(
       key: previewKey,
       width: resolvedWidth,
       height: height,
-      constraints: constraints,
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: backgroundColor,
@@ -668,60 +669,24 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
   }
 }
 
-double _messageMediaMaxWidth(BuildContext context) {
-  return math
-      .min(MediaQuery.sizeOf(context).width * 0.72, _messageMediaMaxInlineWidth)
-      .toDouble();
-}
-
 _ImagePreviewLayout _resolveImagePreviewLayout(
   BuildContext context,
   double? aspectRatio,
 ) {
-  if (aspectRatio == null) {
-    return _ImagePreviewLayout(
-      constraints: BoxConstraints(
-        maxWidth: _messageMediaMaxWidth(context),
-        maxHeight: _messageMediaMaxImageHeight,
-      ),
-      fit: BoxFit.contain,
-    );
-  }
-
-  final previewSize = _imagePreviewSize(context, aspectRatio);
+  final previewSize = messageImagePreviewSize(context, aspectRatio);
   return _ImagePreviewLayout(
     width: previewSize.width,
     height: previewSize.height,
-    fit: BoxFit.cover,
+    fit: aspectRatio == null ? BoxFit.contain : BoxFit.cover,
   );
-}
-
-Size _imagePreviewSize(BuildContext context, double? aspectRatio) {
-  final maxWidth = _messageMediaMaxWidth(context);
-  final safeAspectRatio = (aspectRatio ?? 1.0).clamp(0.2, 4.0).toDouble();
-
-  var width = maxWidth;
-  var height = width / safeAspectRatio;
-  if (height > _messageMediaMaxImageHeight) {
-    height = _messageMediaMaxImageHeight;
-    width = height * safeAspectRatio;
-  }
-
-  return Size(width, height);
 }
 
 class _ImagePreviewLayout {
   final double? width;
   final double? height;
-  final BoxConstraints? constraints;
   final BoxFit fit;
 
-  const _ImagePreviewLayout({
-    this.width,
-    this.height,
-    this.constraints,
-    required this.fit,
-  });
+  const _ImagePreviewLayout({this.width, this.height, required this.fit});
 }
 
 class _MediaPreviewFallback extends StatelessWidget {
@@ -840,7 +805,7 @@ class _MessageCodeBlock extends HookWidget {
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                     icon: Icon(
-                      isCopied.value ? LucideIcons.check : LucideIcons.copy,
+                      isCopied.value ? BuzzIcons.check : BuzzIcons.copy,
                       size: 14,
                       color: isCopied.value
                           ? context.colors.primary
@@ -910,7 +875,7 @@ class _MentionMd extends InlineMd {
       RegExp(r'\(([0-9a-f]{64})\)'),
       (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
     );
-    final pill = _MentionPill(
+    final pill = MessageMentionPill(
       label: visibleLabel,
       semanticsLabel: fullLabel,
       isAgent: isAgent,
@@ -923,70 +888,6 @@ class _MentionMd extends InlineMd {
       child: pubkey != null && onMentionTap != null
           ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
           : pill,
-    );
-  }
-}
-
-class _MentionPill extends StatelessWidget {
-  final String label;
-  final String? semanticsLabel;
-  final bool isAgent;
-  final TextStyle? textStyle;
-
-  const _MentionPill({
-    required this.label,
-    this.semanticsLabel,
-    required this.isAgent,
-    this.textStyle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final style =
-        (textStyle ?? context.textTheme.bodyMedium)?.copyWith(
-          color: context.colors.primary,
-          fontWeight: FontWeight.w500,
-          height: 1,
-        ) ??
-        TextStyle(
-          color: context.colors.primary,
-          fontWeight: FontWeight.w500,
-          height: 1,
-        );
-    final fontSize = style.fontSize ?? 16;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(
-        Grid.half,
-        Grid.quarter + 1,
-        Grid.half,
-        Grid.quarter,
-      ),
-      decoration: BoxDecoration(
-        color: context.colors.primary.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(Radii.sm),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          if (isAgent) ...[
-            Icon(
-              LucideIcons.bot,
-              size: fontSize * 0.95,
-              color: context.colors.primary,
-            ),
-            const SizedBox(width: Grid.quarter + 1),
-          ] else
-            Transform.translate(
-              offset: const Offset(0, -Grid.quarter),
-              child: Text('@', style: style),
-            ),
-          Flexible(
-            child: Text(label, style: style, semanticsLabel: semanticsLabel),
-          ),
-        ],
-      ),
     );
   }
 }

@@ -38,6 +38,20 @@ image:
   digest: sha256:<64-lowercase-hex-characters>
 ```
 
+Bundled object storage uses [Silo](https://silo.pgsty.com/download/), a maintained
+MinIO fork, with matching `pgsty/silo` and `pgsty/mc` release images pinned by
+multi-platform digest. Both images allow anonymous pulls and support Linux
+amd64 and arm64; the upstream Quay MinIO images no longer allow anonymous pulls.
+The existing `minio` names and `MINIO_*` settings remain compatible. Keep the
+Helm and Compose pins aligned when upgrading, and run Buzz's
+[object-store conformance probe](../../../docs/git-on-object-storage.md#conformance-admitting-a-backend-for-a3)
+against the new release before deploying it.
+
+For an existing MinIO data volume, follow Silo's
+[migration guide](https://silo.pgsty.com/compatibility/migration/) and take a
+backup before upgrading. Replacing the container image upgrades the storage
+server as well as changing its registry.
+
 ## Production (GitOps)
 
 The chart is designed for ArgoCD and Flux. Both render charts with `helm template`, in which mode Helm's `lookup` function returns empty — any chart-side `randAlphaNum` call would regenerate secrets on every sync. The chart-managed Secret path is **only** safe for `helm install` / `helm upgrade`.
@@ -147,6 +161,30 @@ status/reason values and never contain raw configuration, keys, URLs, or errors.
 These phases intentionally do not emit metrics. Most run before the Prometheus
 exporter exists, and one uniform log-only contract preserves every phase's real
 event time and failure without assigning an eventual scrape time to earlier work.
+
+Startup work **after** `metrics_bind` (database connect through public listener
+bind) runs with a live recorder, so each step logs `Startup phase started` and
+`Startup phase finished` (`phase`, `elapsed_ms`, and `status` =
+`succeeded`/`degraded`/`failed`, the same values lifecycle records use) and sets
+two gauges labelled `phase`:
+
+- `buzz_startup_phase_current` is `1` while the step runs and `0` once it ends.
+  A pod that has not opened its health port shows the step it is stuck on.
+- `buzz_startup_phase_seconds` is the finished step's duration.
+
+`degraded` means the step hit a non-fatal error and startup continued — for
+example, some communities failed NIP-43 reconciliation or a NIP-FI issuer did
+not warm. `failed` means startup aborted inside the step.
+
+These are gauges, not counters, because each value is written once per boot
+and a monotonic-counter scrape drops a series' first sample. Each is written
+once, so it ages out after the gauge idle timeout: the `idle_timeout_secs`
+field of the `Prometheus metrics exporter started` log (2700 s with default
+intervals). A step that runs longer than that timeout loses its `_current`
+series, so a pod stuck that long shows no current step. The `phase` values are
+the closed `StartupStep` vocabulary in `crates/buzz-relay/src/startup_steps.rs`;
+they never reuse an early lifecycle phase name. The NIP-43 startup reconcile
+also logs `NIP-43 startup reconciliation progress` every 5,000 communities.
 
 ### Readiness contract
 
@@ -281,7 +319,7 @@ maximum gauges when diagnosing total capacity pressure.
 Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
 `bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
 `authorization`, `subscription_history`, `event_write`, and `maintenance`.
-Only the following eleven pairs are valid:
+Only the following twelve pairs are valid:
 
 ```text
 writer/bootstrap                 reader/bootstrap
@@ -291,12 +329,12 @@ writer/authentication
 writer/authorization             reader/authorization
 writer/subscription_history      reader/subscription_history
 writer/event_write
-writer/maintenance
+writer/maintenance               reader/maintenance
 ```
 
 Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
-series per valid pair. The new contract therefore has a hard ceiling of 198
-raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
+series per valid pair. The new contract therefore has a hard ceiling of 216
+raw Prometheus series per pod: `12 × (1 + 12 + 4 + 1)`. The two legacy acquisition
 families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.
@@ -421,6 +459,85 @@ collide with chart-owned containers or volumes, mounts must reference existing
 volumes, and each init container must define an appropriate security context
 and resources. Empty `relay.command` and `relay.args` arrays preserve the image
 defaults; non-empty values override its entrypoint and arguments respectively.
+
+## Storage accounting worker
+
+`storageAccounting.enabled=true` adds a CronJob that runs
+`buzz-admin storage-snapshot` against the relay's S3 bucket and writes a
+durable snapshot row, keeping the expensive object walk off the relay Pods.
+
+### Snapshot identity contract
+
+Every snapshot row records the code that produced it in `code_sha`, taken from
+the `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` environment variable the chart derives
+from the deployed image identity (`image.digest` when set, otherwise
+`image.tag`, otherwise `Chart.AppVersion`). The value is never hashed or
+sanitized.
+
+## Datadog version label
+
+Every Pod the chart renders — relay, pairing relay, storage accounting, and the
+deletion drain operator job — carries a chart-owned
+`tags.datadoghq.com/version` label derived from the deployed image:
+`image.tag` when set, otherwise `image.digest`, otherwise `Chart.AppVersion`.
+The tag is preferred because it is the readable build name (`sha-<commit>`)
+dashboards already use; promotion tooling writes it together with the digest
+that actually pins the image.
+
+```yaml
+relay:
+  podLabels:
+    tags.datadoghq.com/env: production
+    tags.datadoghq.com/service: buzz
+    # tags.datadoghq.com/version: NOT set here — the chart owns it.
+```
+
+Precedence is explicit: a `tags.datadoghq.com/version` supplied under any
+workload's `podLabels` is ignored. Every other label — including
+`tags.datadoghq.com/env` and `tags.datadoghq.com/service`, which describe the
+deployment rather than the image — passes through unchanged. Remove any
+wrapper-maintained version pins when upgrading; a pin equal to `image.tag`
+renders identically, so the upgrade does not roll Pods for that label.
+
+A Kubernetes label value is capped at 63 bytes, must begin and end with an
+alphanumeric, and may otherwise contain only `[-._a-zA-Z0-9]` — a far narrower
+grammar than an OCI tag. `image.tag` is deliberately left unconstrained, so the
+label is derived through a total mapping rather than a check that could reject
+a tag the chart used to accept:
+
+| Revision | Label |
+|---|---|
+| `sha256:<64 hex>` digest | the hex without `sha256:`, first 63 characters |
+| already a valid label value, lowercase, no `__`, and not exactly 63 lowercase hex characters | emitted byte for byte (e.g. `1.2.3-rc.4`, `sha-1a2b3c4`) |
+| anything else | the first 63 hex characters of the revision's SHA-256 |
+
+The passthrough row requires Datadog's normal form because Datadog lowercases
+tag values and collapses `__`: passing `ReleaseA` and `releasea` through
+unchanged would report one version for two revisions. Every emitted label is
+therefore already normalized, so distinct labels stay distinct in Datadog.
+
+When both `image.tag` and `image.digest` are set, the label names the tag —
+even if the tag and digest disagree. The digest still pins what actually runs
+(`repository@digest`), so keep the two in step when promoting.
+
+Exactly 63 lowercase hex characters is a **reserved shape** — it is what the
+first and third rows emit, so the passthrough row must not be able to emit it
+too. A tag of that shape is hashed rather than preserved. Shorter hex tags and
+ordinary 40-character git SHAs are unaffected.
+
+Arbitrary OCI revisions outnumber 63-byte label values, so **no mapping onto
+this grammar can be injective** and the chart does not claim one. What it does
+claim is collision *resistance*: every case retains 252 bits of SHA-256, the
+same margin the digest case has always relied on, and the reserved shape keeps
+that margin across cases rather than only within one. Two earlier iterations
+fell short of this — one kept a readable prefix with only 40 bits of hash (a
+colliding tag pair was brute-forced in about a second), and one let a
+passthrough tag reproduce a hashed label with no hash work at all, by copying a
+rendered label into `image.tag`.
+
+The image reference in the Pod spec and `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` always
+keep the exact revision; the label is the joinable telemetry key. See
+`docs/deployment-identity.md`.
 
 ## Device pairing relay
 

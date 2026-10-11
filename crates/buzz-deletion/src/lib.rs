@@ -547,13 +547,16 @@ fn resolve_submit_host(host: Option<&str>, relay_url: Option<&str>) -> Result<St
 
 async fn connect_store() -> Result<DeletionStore> {
     let database_url = required_env("DATABASE_URL")?;
-    let db = Db::new(
-        &DbConfig {
+    // The scheduled drain starts in a fresh pod whose first connection can
+    // outlast the relay's three-second budget.
+    let db = Db::connect_cold_start(
+        DbConfig {
             database_url,
             max_connections: env_parse("BUZZ_DB_POOL_SIZE", 20),
             ..DbConfig::default()
         }
         .with_session_timeouts_from_env(),
+        "deletion",
     )
     .await?;
     Ok(store(&db))

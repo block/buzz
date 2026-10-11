@@ -34,6 +34,9 @@ pub struct RelayInfo {
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
+    /// Opt-in, host-bound private accessory API; separate from legacy NIP-RS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buzz_v1: Option<BuzzV1Descriptor>,
     /// NIP-AR artifact query transport and enforced resource limits.
     pub artifacts: serde_json::Value,
     /// Relay operator's public key (hex), if published.
@@ -76,6 +79,24 @@ pub struct RelayInfo {
     /// Absent when the relay is in `Off` mode. [FI-TRACE-DISCOVERY-PRIVATE]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub federated_identity: Option<serde_json::Value>,
+}
+
+/// Private read-state accessory contract and enforced client request limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuzzV1Descriptor {
+    /// Accessory contract version, not a Nostr protocol number.
+    pub version: u32,
+    /// Relay-relative API prefix; callers retain the requesting origin.
+    pub base_path: String,
+    /// Author-time unread horizon; does not expire messages or frontiers.
+    pub retention_seconds: u32,
+    /// Maximum joined channels per sidebar page.
+    pub max_channels: usize,
+    /// Maximum independent write intents per request.
+    pub max_intents: usize,
+    /// Message kinds that count as unread and as latest activity. Clients
+    /// classify live arrivals with this set instead of keeping a copy.
+    pub eligible_kinds: [i32; 4],
 }
 
 /// Public capability descriptor for relay-proxied GIF search.
@@ -250,6 +271,7 @@ impl RelayInfo {
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
+            buzz_v1: None,
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
                 "query": "/query", "count": "/count",
@@ -314,7 +336,6 @@ fn push_descriptor(
             "pubkey": relay_keypair.public_key().to_hex(),
             "current": true
         }],
-        "app_profiles": [{"id": "buzz-ios-dogfood", "transport": "apns"}],
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
         "h_grammar": "uuid-v4-lowercase",
         "class_support": {"apns": ["default"]},
@@ -360,6 +381,17 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        if state.config.buzz_v1_enabled {
+            use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
+            info.buzz_v1 = Some(BuzzV1Descriptor {
+                version: 1,
+                base_path: crate::api::buzz_v1::BASE_PATH.to_owned(),
+                retention_seconds: state.config.buzz_v1_retention_seconds,
+                max_channels: MAX_CHANNELS,
+                max_intents: MAX_INTENTS,
+                eligible_kinds: ELIGIBLE_KINDS,
+            });
+        }
         info.read_state_snapshot = Some(serde_json::json!({
             "version": 1,
             "community_id": tenant.community().as_uuid(),
@@ -384,7 +416,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     ) {
         info.supported_extensions
             .get_or_insert_default()
-            .push("nip-pl".to_string());
+            .push("buzz-push-v1".to_string());
         info.push = Some(push);
     }
     info

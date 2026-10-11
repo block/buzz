@@ -19,7 +19,7 @@ class Radii {
   /// Shared strong radius for grouped rows, fields, and utility containers.
   static const double container = 22.0;
   static const double card = container; // Backwards-compatible card alias.
-  static const double popover = 20.0;
+  static const double popover = container;
   static const double dialog = 24.0; // desktop uses rounded-3xl for dialogs
 
   /// Fully rounds pills, circles, and other capsule shapes.
@@ -290,7 +290,7 @@ class AppTheme {
         labelPadding: EdgeInsets.zero,
       ),
 
-      // Popups/menus share the elevated 20px mobile popover treatment.
+      // Popup menus use the same corner radius as grouped utility rows.
       popupMenuTheme: PopupMenuThemeData(
         color: scheme.surface.withValues(alpha: 0.98),
         elevation: 8,

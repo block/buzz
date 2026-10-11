@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'shared/widgets/ios_navigation_metrics.dart';
+import 'shared/community/paired_community_landing.dart';
+import 'shared/community/community_loading_surface.dart';
 
 import 'package:app_badge_plus/app_badge_plus.dart';
 import 'package:flutter/material.dart';
@@ -315,6 +317,7 @@ class App extends HookConsumerWidget {
     );
     final schemeName = communityTheme.theme;
     final authState = ref.watch(authProvider);
+    final pairedCommunity = ref.watch(pairedCommunityLandingProvider);
 
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -408,7 +411,27 @@ class App extends HookConsumerWidget {
           child: AppMarkdownTheme(
             child: MobileHuddleShell(
               navigatorKey: _mobileRootNavigatorKey,
-              child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+              child: EmojiBurstOverlay(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ExcludeSemantics(
+                      excluding: pairedCommunity != null,
+                      child: AbsorbPointer(
+                        absorbing: pairedCommunity != null,
+                        child: child ?? const SizedBox.shrink(),
+                      ),
+                    ),
+                    // Cover the navigator while onboarding is removed and the
+                    // destination installs the matching avatar-flight route.
+                    if (pairedCommunity != null)
+                      CommunityLoadingSurface(
+                        name: pairedCommunity.name,
+                        relayUrl: pairedCommunity.relayUrl,
+                      ),
+                  ],
+                ),
+              ),
             ),
           ),
         ),

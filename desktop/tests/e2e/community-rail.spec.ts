@@ -1682,8 +1682,13 @@ test.describe("community rail", () => {
         }),
       );
     }, `community-rail-button-${COMMUNITY_B.id}`);
+    // Wait for the sensor to activate and publish the move before dropping.
+    await expect(buttonB).toHaveAttribute("aria-pressed", "true");
     // ArrowUp moves the active item one slot up.
     await page.keyboard.press("ArrowUp");
+    await expect(
+      page.getByRole("status").filter({ hasText: COMMUNITY_B.id }),
+    ).toContainText(`was moved over droppable area ${COMMUNITY_A.id}`);
     // Space drops the item — same synthetic dispatch for consistency.
     await page.evaluate((testId) => {
       const el = document.querySelector(`[data-testid="${testId}"]`);

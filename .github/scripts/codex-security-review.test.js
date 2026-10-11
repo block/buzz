@@ -203,7 +203,7 @@ const NO_FINDINGS_REVIEW = {
 
 async function postReview(state, review = NO_FINDINGS_REVIEW) {
   const environment = {
-    CODEX_MODEL: "gpt-5.6-sol",
+    CODEX_MODEL: "gpt-6.1-sol",
     GITHUB_REPOSITORY: "block/buzz",
     GITHUB_RUN_ID: "1234",
     GITHUB_SERVER_URL: "https://github.com",

@@ -413,14 +413,13 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     wait(for: [completed], timeout: 1)
   }
 
-  func testMetadataAuthorityUsesCurrentAppProfileForMatchingRelay() {
-    let correctProfile = grant(
-      appProfile: BuzzDevPushEnrollmentDriver.appProfile,
+  func testMetadataAuthorityUsesNewestGrantForMatchingRelay() {
+    let correctRelay = grant(
       generation: 2,
       metadataPubkey: String(repeating: "a", count: 64)
     )
-    let wrongProfile = grant(
-      appProfile: "other-profile",
+    let wrongRelay = grant(
+      relayOrigin: "https://other.example",
       generation: 99,
       metadataPubkey: String(repeating: "b", count: 64)
     )
@@ -428,27 +427,28 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     XCTAssertEqual(
       BuzzPushSnapshotBridge.relayMetadataPubkey(
         relayURL: "wss://relay.example/",
-        grants: [wrongProfile, correctProfile]
+        grants: [wrongRelay, correctRelay, grant(
+          generation: 1, metadataPubkey: String(repeating: "d", count: 64)
+        )]
       ),
-      correctProfile.relayMetadataPubkey
+      correctRelay.relayMetadataPubkey
     )
   }
 
   private func grant(
-    appProfile: String,
+    relayOrigin: String = "https://relay.example",
     generation: Int64,
     metadataPubkey: String
   ) -> BuzzPushEndpointGrantRecord {
     BuzzPushEndpointGrantRecord(
       gatewayOrigin: "https://push.example",
-      relayOrigin: "https://relay.example",
+      relayOrigin: relayOrigin,
       relayPubkey: String(repeating: "c", count: 64),
       relayMetadataPubkey: metadataPubkey,
       appAttestKeyId: Data(repeating: 0xAA, count: 32).base64EncodedString(),
       installationId: "installation",
       endpointGrant: "opaque-grant",
       endpointHash: String(repeating: "d", count: 64),
-      appProfile: appProfile,
       endpointEpoch: 1,
       generation: generation,
       expiresAt: 1_900_000_000

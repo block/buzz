@@ -12,16 +12,14 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri},
     Json,
 };
 use buzz_db::relay_admin_actions::{AdminActionRecord, DirectActionInput, DirectClaim};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::auth::{
-    admin_role_str, authorize, lookup_admin_principal, require_mutation_principal, AdminRole,
-};
+use super::auth::{admin_role_str, authorize_write, lookup_admin_principal, AdminRole};
 use super::error::ApiError;
 use super::{compute_timeout_until, decode_hex_pubkey, CommunityQuery};
 use crate::handlers::report_resolution::{drive_direct_action, ResolutionError};
@@ -44,35 +42,38 @@ enum Kind {
 
 pub(super) async fn ban(
     State(state): State<Arc<AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(target): Path<String>,
     Query(q): Query<CommunityQuery>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    direct_action(state, uri, headers, Kind::Ban, target, q, body).await
+    direct_action(state, method, uri, headers, Kind::Ban, target, q, body).await
 }
 
 pub(super) async fn timeout(
     State(state): State<Arc<AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(target): Path<String>,
     Query(q): Query<CommunityQuery>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    direct_action(state, uri, headers, Kind::Timeout, target, q, body).await
+    direct_action(state, method, uri, headers, Kind::Timeout, target, q, body).await
 }
 
 pub(super) async fn delete_event(
     State(state): State<Arc<AppState>>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(target): Path<String>,
     Query(q): Query<CommunityQuery>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    direct_action(state, uri, headers, Kind::Delete, target, q, body).await
+    direct_action(state, method, uri, headers, Kind::Delete, target, q, body).await
 }
 
 /// 409 `target_is_staff` when `target` is on the effective staff roster
@@ -101,6 +102,7 @@ pub(super) fn enforcement_failed(action_id: Uuid, error: &str) -> ApiError {
 #[allow(clippy::too_many_arguments)]
 async fn direct_action(
     state: Arc<AppState>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     kind: Kind,
@@ -108,12 +110,9 @@ async fn direct_action(
     q: CommunityQuery,
     body_bytes: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let path = uri
-        .path_and_query()
-        .map_or_else(|| uri.path(), |pq| pq.as_str());
-    let principal = require_mutation_principal(
-        authorize(&state, &headers, path, "POST", Some(&body_bytes)).await?,
-    )?;
+    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+        .await?
+        .act()?;
     let body: DirectBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
     let target = decode_hex_pubkey(&target_hex)?;

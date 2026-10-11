@@ -147,7 +147,7 @@ class _PairingWelcomeView extends StatelessWidget {
                                                   context._onboardingMutedInk,
                                             ),
                                         prefixIcon: Icon(
-                                          LucideIcons.link,
+                                          BuzzIcons.link,
                                           color: context._onboardingInk,
                                         ),
                                         enabledBorder: context._inputBorder,
@@ -208,7 +208,7 @@ class _PairingWelcomeView extends StatelessWidget {
                             child: Row(
                               children: [
                                 Icon(
-                                  LucideIcons.triangleAlert,
+                                  BuzzIcons.triangleAlert,
                                   size: 16,
                                   color: context.colors.onErrorContainer,
                                 ),

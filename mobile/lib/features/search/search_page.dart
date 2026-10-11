@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
@@ -13,6 +13,7 @@ import '../../shared/widgets/buzz_search_field.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/ios_navigation_metrics.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
@@ -58,7 +59,8 @@ double _searchActiveFieldRightInset(BuildContext context) {
     textScaler: MediaQuery.textScalerOf(context),
     textDirection: Directionality.of(context),
   )..layout();
-  final cancelWidth = textPainter.width + Grid.half * 2 + Grid.twelve;
+  final cancelWidth =
+      textPainter.width + Grid.half * 2 + Grid.gutter + Grid.xxs;
   return cancelWidth > _searchActiveFieldRightInsetMin
       ? cancelWidth
       : _searchActiveFieldRightInsetMin;
@@ -131,17 +133,33 @@ class SearchPage extends HookConsumerWidget {
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
     final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
     final searchActiveFieldRightInset = _searchActiveFieldRightInset(context);
-    final searchBottomOverlap =
-        _searchIdleFieldTopInset +
-        compactSearchFieldHeight +
-        _searchControlsToFiltersGap;
+    final nativeIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final searchBottomOverlap = nativeIos
+        ? IosNavigationMetrics.of(context).compactHeight
+        : _searchIdleFieldTopInset +
+              compactSearchFieldHeight +
+              _searchControlsToFiltersGap;
+    final activeFieldTop = nativeIos
+        ? ((searchBottomOverlap - compactSearchFieldHeight) / 2).clamp(
+            0.0,
+            double.infinity,
+          )
+        : _searchIdleFieldTopInset;
+    final filtersTop = nativeIos
+        ? activeFieldTop +
+              compactSearchFieldHeight +
+              _searchControlsToFiltersGap
+        : searchBottomOverlap;
     // Cancel remains an accessible target without giving the text action a
     // visual button treatment.
     final searchControlHeight = compactSearchFieldHeight > Grid.xl
         ? compactSearchFieldHeight
         : Grid.xl;
     final searchHeaderBottomHeight = isSearchEditing.value
-        ? searchHeaderFiltersHeight + _searchControlsToFiltersGap
+        ? filtersTop -
+              searchBottomOverlap +
+              searchHeaderFiltersHeight +
+              _searchControlsToFiltersGap
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
@@ -215,20 +233,12 @@ class SearchPage extends HookConsumerWidget {
       // above the keyboard.
       resizeToAvoidBottomInset: false,
       appBar: FrostedAppBar(
-        nativeTitle: 'Search',
+        nativeTitle: isSearchEditing.value ? '' : 'Search',
+        nativeLayoutDuration: reduceMotion
+            ? Duration.zero
+            : _searchFieldMoveDuration,
         nativeLargeTitle: !isSearchEditing.value,
-        nativeActions: [
-          if (isSearchEditing.value)
-            IosNavigationAction(
-              label: 'Cancel',
-              onPressed: () {
-                textController.clear();
-                ref.read(searchProvider.notifier).clear();
-                deactivateSearch();
-                focusNode.unfocus();
-              },
-            ),
-        ],
+        nativeActions: const [],
         automaticallyImplyLeading: false,
         horizontalInset: Grid.twelve,
         showBottomDivider: true,
@@ -321,15 +331,11 @@ class SearchPage extends HookConsumerWidget {
               duration: reduceMotion ? Duration.zero : _searchFieldMoveDuration,
               curve: Curves.easeInOutCubic,
               left: Grid.gutter,
-              right: defaultTargetPlatform == TargetPlatform.iOS
-                  ? Grid.gutter
-                  : isSearchEditing.value
+              right: isSearchEditing.value
                   ? searchActiveFieldRightInset
                   : Grid.gutter,
-              top: defaultTargetPlatform == TargetPlatform.iOS
-                  ? _searchIdleFieldTopInset
-                  : isSearchEditing.value
-                  ? _searchIdleFieldTopInset
+              top: isSearchEditing.value
+                  ? activeFieldTop
                   : searchBottomOverlap + _searchIdleFieldTopInset,
               height: isSearchEditing.value
                   ? compactSearchFieldHeight
@@ -361,6 +367,43 @@ class SearchPage extends HookConsumerWidget {
                 ),
               ),
             ),
+            if (nativeIos && isSearchEditing.value)
+              Positioned(
+                top: activeFieldTop,
+                right: Grid.gutter,
+                width: searchActiveFieldRightInset - Grid.gutter - Grid.xxs,
+                height: searchControlHeight,
+                child: Semantics(
+                  button: true,
+                  label: 'Cancel search',
+                  child: GestureDetector(
+                    key: const Key('search-ios-cancel'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      textController.clear();
+                      ref.read(searchProvider.notifier).clear();
+                      deactivateSearch();
+                      focusNode.unfocus();
+                    },
+                    child: Align(
+                      alignment: Alignment.topRight,
+                      child: SizedBox(
+                        height: compactSearchFieldHeight,
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: Text(
+                            'Cancel',
+                            style: filterChipTextStyle.copyWith(
+                              color: context.colors.primary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             Positioned.fill(
               child: AnimatedSwitcher(
                 duration: reduceMotion
@@ -382,12 +425,7 @@ class SearchPage extends HookConsumerWidget {
                     ? Align(
                         alignment: Alignment.topCenter,
                         child: Padding(
-                          padding: EdgeInsets.only(
-                            top: defaultTargetPlatform == TargetPlatform.iOS
-                                ? _searchIdleFieldTopInset +
-                                      compactSearchFieldHeight
-                                : searchBottomOverlap,
-                          ),
+                          padding: EdgeInsets.only(top: filtersTop),
                           child: SizedBox(
                             key: const ValueKey('search-header-filters'),
                             height: searchHeaderFiltersHeight,
@@ -427,7 +465,7 @@ class SearchPage extends HookConsumerWidget {
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(Radii.dialog),
               ),
-              child: ColoredBox(
+              child: Material(
                 color: context.colors.surface,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -484,7 +522,7 @@ class _SearchBody extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                LucideIcons.search,
+                BuzzIcons.search,
                 size: 64,
                 color: context.colors.onSurfaceVariant,
               ),
@@ -640,7 +678,7 @@ class _RecentSearches extends StatelessWidget {
                 child: Row(
                   children: [
                     Icon(
-                      LucideIcons.clock,
+                      BuzzIcons.clock,
                       size: 18,
                       color: context.colors.onSurfaceVariant,
                     ),
@@ -654,7 +692,7 @@ class _RecentSearches extends StatelessWidget {
                       ),
                     ),
                     Icon(
-                      LucideIcons.chevronRight,
+                      BuzzIcons.chevronRight,
                       size: 16,
                       color: context.colors.onSurfaceVariant,
                     ),

@@ -280,6 +280,8 @@ class MediaVideoViewerPage extends HookConsumerWidget {
       callback();
     }
 
+    final controls = _useVideoControlsVisibility(context, controller.value);
+
     final viewportHeight = MediaQuery.sizeOf(context).height;
     final dragProgress = (dragOffset.value / viewportHeight).clamp(0.0, 1.0);
     final videoScale = 1 - (dragProgress * 0.1);
@@ -299,22 +301,24 @@ class MediaVideoViewerPage extends HookConsumerWidget {
               offset: Offset(0, dragOffset.value),
               child: Transform.scale(
                 scale: videoScale,
-                child: GestureDetector(
-                  key: const ValueKey('message-media-video-viewer-gesture'),
-                  behavior: HitTestBehavior.opaque,
-                  onVerticalDragStart: (_) {
+                child: _VideoZoomSurface(
+                  key: ValueKey(videoUrl),
+                  onTap: controls.toggle,
+                  controlsVisible: controls.visible,
+                  onInteractionStart: controls.beginInteraction,
+                  onInteractionEnd: controls.endInteraction,
+                  onDismissStart: () {
                     snapBackController.stop();
                     isDragging.value = true;
                   },
-                  onVerticalDragUpdate: (details) {
+                  onDismissUpdate: (delta) {
                     if (!isDragging.value) return;
-                    dragOffset.value = (dragOffset.value + details.delta.dy)
+                    dragOffset.value = (dragOffset.value + delta)
                         .clamp(0.0, viewportHeight)
                         .toDouble();
                   },
-                  onVerticalDragEnd: (details) {
+                  onDismissEnd: (velocity) {
                     isDragging.value = false;
-                    final velocity = details.primaryVelocity ?? 0;
                     if (dragOffset.value > _dismissThreshold ||
                         velocity > _dismissVelocity) {
                       controller.value?.pause();
@@ -323,8 +327,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                     }
                     animateSnapBack();
                   },
-                  onVerticalDragCancel: animateSnapBack,
-                  child: SafeArea(
+                  onDismissCancel: () {
+                    snapBackController.stop();
+                    isDragging.value = false;
+                    dragOffset.value = 0;
+                  },
+                  child: Padding(
+                    padding: _mediaViewerPadding(context),
                     child: Center(
                       child: FutureBuilder<void>(
                         future: initializeFuture.value,
@@ -332,7 +341,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                           if (error.value != null || snapshot.hasError) {
                             return const _MediaLoadFailure(
                               message: 'Failed to load video',
-                              icon: LucideIcons.videoOff,
+                              icon: BuzzIcons.videoOff,
                             );
                           }
 
@@ -362,8 +371,9 @@ class MediaVideoViewerPage extends HookConsumerWidget {
               height:
                   MediaQuery.paddingOf(context).top +
                   IosNavigationMetrics.of(context).compactHeight,
-              child: Opacity(
-                opacity: chromeOpacity,
+              child: _VideoViewerChrome(
+                visible: controls.visible,
+                dragOpacity: chromeOpacity,
                 child: Theme(
                   data: ThemeData.dark(),
                   child: IosNavigationBar(
@@ -383,8 +393,9 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             PositionedDirectional(
               top: Grid.sm,
               end: Grid.sm,
-              child: Opacity(
-                opacity: chromeOpacity,
+              child: _VideoViewerChrome(
+                visible: controls.visible,
+                dragOpacity: chromeOpacity,
                 child: SafeArea(
                   child: _MediaViewerCloseButton(
                     key: const ValueKey('message-media-video-viewer-close'),
@@ -398,11 +409,15 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             bottom: 0,
             start: 0,
             end: 0,
-            child: Opacity(
-              opacity: chromeOpacity,
+            child: _VideoViewerChrome(
+              key: const ValueKey('message-media-video-viewer-controls'),
+              visible: controls.visible,
+              dragOpacity: chromeOpacity,
               child: SafeArea(
                 child: _VideoViewerBottomControls(
                   controller: controller.value,
+                  onInteractionStart: controls.beginInteraction,
+                  onInteractionEnd: controls.endInteraction,
                   onReply: onReply == null
                       ? null
                       : () => unawaited(replyInThread()),
@@ -467,7 +482,7 @@ class _VideoLoadingPoster extends StatelessWidget {
     return ColoredBox(
       color: context.colors.surfaceContainerHighest,
       child: Icon(
-        LucideIcons.video,
+        BuzzIcons.video,
         size: 40,
         color: context.colors.onSurfaceVariant,
       ),

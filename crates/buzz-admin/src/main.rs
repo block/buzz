@@ -20,8 +20,8 @@
 //! newest timestamp and collide on the bumped second. run.sh serialization is
 //! the guard against parallel adds (e.g. `xargs -P`).
 
+mod communities;
 mod deletions;
-mod storage_snapshot_startup;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,13 +94,18 @@ enum Command {
     /// Run the partition catalog audit using a read-only database session.
     PartitionAudit {
         /// Future months to include in the coverage check.
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = buzz_db::partition::PARTITION_MANAGER_MONTHS_AHEAD)]
         months_ahead: u32,
     },
     /// Inspect deployment-wide Buzz product feedback.
     ProductFeedback {
         #[command(subcommand)]
         command: ProductFeedbackCommand,
+    },
+    /// Reversible whole-community lifecycle controls.
+    Communities {
+        #[command(subcommand)]
+        command: communities::CommunitiesCommand,
     },
     /// Durable CLI-only whole-community deletion control plane.
     Deletions {
@@ -181,11 +186,21 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
+        Command::Communities { command } => communities::run(command).await,
         Command::Deletions { command } => deletions::run(command).await,
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)
         }
+    }
+}
+
+/// One session: the worker detaches its lock-owning connection, and the
+/// cold-start pool opens no idle replacements while it scans S3.
+fn storage_snapshot_db_config(base: DbConfig) -> DbConfig {
+    DbConfig {
+        max_connections: 1,
+        ..base
     }
 }
 
@@ -196,7 +211,11 @@ async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
         return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
     }
 
-    let db = storage_snapshot_startup::connect_db().await?;
+    let db = Db::connect_cold_start(
+        storage_snapshot_db_config(db_config_from_env()),
+        "storage_snapshot",
+    )
+    .await?;
     let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
         anyhow::anyhow!("another storage-snapshot worker already holds the lease")
     })?;
@@ -880,6 +899,17 @@ mod storage_snapshot_tests {
 
     use super::*;
 
+    #[test]
+    fn storage_snapshot_holds_a_single_database_session() {
+        let config = storage_snapshot_db_config(DbConfig {
+            max_connections: 20,
+            lock_timeout_ms: 123,
+            ..DbConfig::default()
+        });
+        assert_eq!(config.max_connections, 1);
+        assert_eq!(config.lock_timeout_ms, 123);
+    }
+
     #[tokio::test]
     async fn failed_fold_never_invokes_snapshot_persistence() {
         let persist_calls = Arc::new(AtomicUsize::new(0));
@@ -910,5 +940,154 @@ mod tests {
             cli.command,
             Command::PartitionAudit { months_ahead: 6 }
         ));
+    }
+
+    const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn communities_command_parses_archive() {
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "archive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "requested deletion",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Communities {
+                command:
+                    communities::CommunitiesCommand::Archive {
+                        host,
+                        owner_pubkey,
+                        operator_id,
+                        reason,
+                    },
+            } => {
+                assert_eq!(host, "example.communities.buzz.xyz");
+                assert_eq!(owner_pubkey, OWNER);
+                assert_eq!(operator_id, "codex");
+                assert_eq!(reason, "requested deletion");
+            }
+            _ => panic!("expected communities archive command"),
+        }
+    }
+
+    #[test]
+    fn communities_command_parses_unarchive() {
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "unarchive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "rollback",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Communities {
+                command:
+                    communities::CommunitiesCommand::Unarchive {
+                        host,
+                        owner_pubkey,
+                        operator_id,
+                        reason,
+                    },
+            } => {
+                assert_eq!(host, "example.communities.buzz.xyz");
+                assert_eq!(owner_pubkey, OWNER);
+                assert_eq!(operator_id, "codex");
+                assert_eq!(reason, "rollback");
+            }
+            _ => panic!("expected communities unarchive command"),
+        }
+    }
+
+    #[test]
+    fn communities_commands_require_all_safety_and_audit_arguments() {
+        let missing_argument_cases = [
+            vec![
+                "buzz-admin",
+                "communities",
+                "archive",
+                "--owner-pubkey",
+                OWNER,
+                "--operator-id",
+                "codex",
+                "--reason",
+                "requested deletion",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "archive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--operator-id",
+                "codex",
+                "--reason",
+                "requested deletion",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "unarchive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--owner-pubkey",
+                OWNER,
+                "--reason",
+                "rollback",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "unarchive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--owner-pubkey",
+                OWNER,
+                "--operator-id",
+                "codex",
+            ],
+        ];
+
+        for args in missing_argument_cases {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn communities_commands_do_not_expose_deletion_approval_arguments() {
+        let command = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "archive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "requested deletion",
+            "--approved-by",
+            "second-operator",
+        ]);
+
+        assert!(command.is_err());
     }
 }

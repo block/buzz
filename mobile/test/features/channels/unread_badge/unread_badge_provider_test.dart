@@ -119,6 +119,86 @@ void main() {
     },
   );
 
+  group('catch-up marks from the web and desktop app', () {
+    ObservedUnreadEvent event(
+      String id, {
+      String? rootId,
+      bool highPriority = false,
+      String channelType = 'stream',
+    }) => makeObservedUnreadEvent(
+      id: id,
+      createdAt: t20,
+      rootId: rootId,
+      highPriority: highPriority,
+      channelType: channelType,
+      isThreadedReply: rootId != null,
+    );
+
+    Future<UnreadBadgeState> badge(
+      Channel channel,
+      ObservedUnreadEvent observed,
+      Map<String, int> readContexts,
+    ) async {
+      final container = buildContainer(
+        channels: [channel],
+        readContexts: readContexts,
+        observedEventsByChannel: {
+          channel.id: [observed],
+        },
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      return container.read(unreadBadgeProvider);
+    }
+
+    final stream = makeChannel(id: 'ch-a', lastMessageAtSeconds: t20);
+
+    test('activity: reads an ordinary top-level message', () async {
+      final result = await badge(stream, event('m'), {'activity:ch-a': t20});
+      expect(result.generalUnreadCount, 0);
+      expect(result.highPriorityCount, 0);
+    });
+
+    test('activity: does not read a mention', () async {
+      final result = await badge(stream, event('m', highPriority: true), {
+        'activity:ch-a': t30,
+      });
+      expect(result.highPriorityCount, 1);
+    });
+
+    test('activity: does not read a thread reply', () async {
+      final result = await badge(stream, event('m', rootId: 'root'), {
+        'activity:ch-a': t30,
+      });
+      expect(result.generalUnreadCount, 1);
+    });
+
+    test('activity: does not read a DM', () async {
+      final dm = makeChannel(
+        id: 'dm-a',
+        channelType: 'dm',
+        lastMessageAtSeconds: t20,
+      );
+      final result = await badge(
+        dm,
+        event('m', channelType: 'dm', highPriority: true),
+        {'activity:dm-a': t30},
+      );
+      expect(result.highPriorityCount, 1);
+    });
+
+    test('thread-activity: reads replies in its thread only', () async {
+      final read = await badge(stream, event('m', rootId: 'root'), {
+        'thread-activity:root': t20,
+      });
+      expect(read.generalUnreadCount, 0);
+      final other = await badge(stream, event('m', rootId: 'root'), {
+        'thread-activity:other': t30,
+      });
+      expect(other.generalUnreadCount, 1);
+    });
+  });
+
   test('one unread DM channel → (1, 0) high priority', () async {
     final container = buildContainer(
       channels: [

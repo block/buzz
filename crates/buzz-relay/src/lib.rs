@@ -62,6 +62,8 @@ pub mod push_runtime;
 pub mod readiness;
 /// Axum router construction.
 pub mod router;
+/// Timing for startup work between metrics bind and serving.
+pub mod startup_steps;
 /// Shared application state.
 pub mod state;
 pub mod storage_sweep;
