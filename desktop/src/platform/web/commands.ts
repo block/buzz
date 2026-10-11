@@ -9,6 +9,8 @@ import {
   setAppliedRelay,
 } from "./relayConfig";
 import {
+  getRelayMediaBlobUrl,
+  isRelayMediaUrl,
   pickFilesFromBrowser,
   uploadRelayMedia,
 } from "./relayMedia";
@@ -168,6 +170,15 @@ export const handlers: Record<string, Handler> = {
         })
       : null;
   },
+  // composer image editor: source bytes for the canvas (signed relay fetch -> blob: -> bytes)
+  fetch_media_bytes: async (a) => {
+    const url = String(a?.url ?? "");
+    const src = isRelayMediaUrl(url) ? await getRelayMediaBlobUrl(url) : url;
+    const res = await fetch(src);
+    if (!res.ok) throw new Error(`Could not load image (${res.status})`);
+    return res.arrayBuffer();
+  },
+  cancel_media_fetch: () => undefined,
   cancel_media_upload: () => undefined,
   release_media_upload: () => undefined,
   get_legacy_workspace_storage: () => ({

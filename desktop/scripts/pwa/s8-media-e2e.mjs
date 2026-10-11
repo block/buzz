@@ -136,6 +136,36 @@ const draftOk = thumb ? await thumb.evaluate((i) => i.complete && i.naturalWidth
 check("pasted image: draft thumbnail loads (naturalWidth > 0) before send", draftOk);
 await page.screenshot({ path: "/tmp/s8-media-draft.png" });
 
+// Editor path: annotate the pasted image in the composer's image editor and Save -> draft attachment replaced by an uploaded PNG
+{
+  const before = await page.evaluate(() => document.querySelector('[data-testid="composer-attachment-thumb"]')?.src ?? "");
+  await page.waitForSelector('[data-testid="composer-attachment-annotate"]:not([disabled])', { timeout: 20000 }).catch(() => {});
+  await page.click('[data-testid="composer-attachment-annotate"]', { force: true, timeout: 8000 }).catch((e) => console.log("annotate click:", e.message.split("\n")[0]));
+  const editBtn = page.locator('[data-testid="composer-attachment-edit"]');
+  const hasEdit = (await editBtn.waitFor({ timeout: 8000 }).then(() => true).catch(() => false));
+  check("composer attachment has an edit/draw button", hasEdit);
+  if (hasEdit) {
+    await editBtn.click();
+    const canvas = await page.waitForSelector('[role="dialog"] canvas', { timeout: 10000 }).catch(() => null);
+    check("editor opens with canvas", !!canvas);
+    if (canvas) {
+      await page.waitForFunction(() => { const c = document.querySelector('[role="dialog"] canvas'); const r = c?.getBoundingClientRect(); return r && r.width > 40; }, null, { timeout: 10000 }).catch(() => {});
+      const box = await canvas.boundingBox();
+      console.log('canvas box', JSON.stringify(box));
+      await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.8, { steps: 8 });
+      await page.mouse.up();
+      await page.getByRole("button", { name: /^save$/i }).click();
+      const errShown = await page.getByText("Could not save the drawing").waitFor({ timeout: 8000 }).then(() => true).catch(() => false);
+      check("Save does not show 'Could not save the drawing'", !errShown);
+      const after = await page.waitForFunction((b) => { const i = document.querySelector('[data-testid="composer-attachment-thumb"]'); return i && i.src && i.src !== b && i.complete && i.naturalWidth > 0; }, before, { timeout: 15000 }).then(() => true).catch(() => false);
+      check("draft attachment replaced by the edited image", after);
+      await page.screenshot({ path: "/tmp/s8-media-edit.png" });
+    }
+  }
+}
+
 // Component path: a message image renders (not a broken icon) and shows placeholder -> image
 await page.route("**/__relay/**/media/**", async (route) => route.fulfill({ status: 401, body: '{"error":"authentication failed"}' }));
 const err = await page.evaluate(async (u) => {
