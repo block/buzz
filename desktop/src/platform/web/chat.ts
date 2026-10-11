@@ -512,6 +512,35 @@ async function deleteMessage(a: Args) {
   await publishNow(5, [["h", channelId], ["e", eventIdArg(a?.eventId)]]);
 }
 
+// open_dm: mirror of src-tauri open_dm. Kind 41010 with one ["p", pubkey] per participant; the relay finds the
+// existing DM for that participant set or creates it and replies "response:{"channel_id":...}". Then re-read kind 39000.
+async function openDm(a: Args) {
+  const pubkeys = (a?.pubkeys as string[] | undefined) ?? [];
+  if (!pubkeys.length) throw new Error("dm_open requires at least one pubkey");
+  const tags = pubkeys.map((pk) => {
+    if (!HEX64.test(String(pk))) throw new Error(`invalid pubkey: ${pk}`);
+    return ["p", String(pk).toLowerCase()];
+  });
+  let res = await publishNow(41010, tags);
+  if (res.message.startsWith("duplicate:")) {
+    // Identical event (same participants, same second) already ingested: no channel id in the ack.
+    // Re-sign one second later so the id differs; the relay then returns the existing DM's id.
+    await new Promise((r) => setTimeout(r, 1100));
+    res = await publishNow(41010, tags);
+  }
+  const raw = res.message.startsWith("response:") ? res.message.slice(9) : res.message;
+  let channelId: string;
+  try {
+    channelId = JSON.parse(raw).channel_id;
+  } catch (e) {
+    throw new Error(`response parse failed: ${e instanceof Error ? e.message : e}`);
+  }
+  const evs = await queryRelay([{ kinds: [39000], "#d": [channelId], limit: 1 }]);
+  const info = evs[0] ? channelInfoFromEvent(evs[0], true) : null;
+  if (!info) throw new Error("DM channel created but metadata not yet available");
+  return info;
+}
+
 export const chatHandlers: Record<
   string,
   (a: Args) => unknown | Promise<unknown>
@@ -675,6 +704,7 @@ export const chatHandlers: Record<
     };
   },
   send_channel_message: sendChannelMessage,
+  open_dm: openDm,
   add_reaction: addReaction,
   remove_reaction: removeReaction,
   delete_message: deleteMessage,
