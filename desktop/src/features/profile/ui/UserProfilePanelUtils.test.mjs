@@ -61,6 +61,8 @@ function persona(overrides = {}) {
     respondTo: "owner-only",
     respondToAllowlist: [],
     envVars: { NEW_KEY: "2" },
+    respondTo: null,
+    respondToAllowlist: [],
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -188,6 +190,82 @@ test("personaManagedAgentUpdate leaves runtime fields alone when runtime is unch
       },
     ),
     null,
+  );
+});
+
+test("personaManagedAgentUpdate syncs respond_to mode from persona to linked agent", () => {
+  // Persona changes from owner-only (null defaults to owner-only) to anyone;
+  // the agent's instance must be updated.
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({ respondTo: "owner-only" }),
+      persona({ respondTo: "anyone" }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      respondTo: "anyone",
+    },
+  );
+});
+
+test("personaManagedAgentUpdate syncs respond_to allowlist when mode is allowlist", () => {
+  const allowlist = ["a".repeat(64), "b".repeat(64)];
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({ respondTo: "owner-only", respondToAllowlist: [] }),
+      persona({ respondTo: "allowlist", respondToAllowlist: allowlist }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      respondTo: "allowlist",
+      respondToAllowlist: allowlist,
+    },
+  );
+});
+
+test("personaManagedAgentUpdate clears allowlist when mode switches away from allowlist", () => {
+  // Agent was allowlist with entries; persona switches to anyone — the
+  // instance's stale allowlist must be cleared.
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({ respondTo: "allowlist", respondToAllowlist: ["a".repeat(64)] }),
+      persona({ respondTo: "anyone" }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      respondTo: "anyone",
+      respondToAllowlist: [],
+    },
+  );
+});
+
+test("personaManagedAgentUpdate treats null persona respondTo as owner-only", () => {
+  // Persona has null (unset) = owner-only; agent is currently anyone.
+  assert.deepEqual(
+    personaManagedAgentUpdate(
+      agent({ respondTo: "anyone" }),
+      persona({ respondTo: null }),
+    ),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      respondTo: "owner-only",
+    },
   );
 });
 
