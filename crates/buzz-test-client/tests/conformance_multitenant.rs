@@ -1747,14 +1747,17 @@ mod workflows {
     /// only resolves under A.
     async fn define_workflow(http_base: &str, keys: &Keys, channel_id: &str, name: &str) -> String {
         // `h` binds the channel; `name` is required by `handle_workflow_def`
-        // (it rejects "missing workflow name" before parsing YAML). We use the
-        // `name` tag, not `d`: the server *generates* the workflow id, and that
-        // generated id — not any client-supplied `d` — is the handle this row
-        // confines. A `d` tag here would falsely imply the trigger resolves by
-        // client key.
+        // (it rejects "missing workflow name" before parsing YAML). The relay
+        // also requires the canonical workflow id as a NIP-33 `d` tag — it
+        // parses that UUID and upserts by it (command_executor.rs), so the
+        // client supplies the id rather than the server minting one. Generate a
+        // fresh UUID per definition; the relay echoes it back in the
+        // `response:{json}` payload.
+        let workflow_id = uuid::Uuid::new_v4().to_string();
         let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), workflow_yaml(name))
             .tags(vec![
                 Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["d", &workflow_id]).unwrap(),
                 Tag::parse(["name", name]).unwrap(),
             ])
             .sign_with_keys(keys)
