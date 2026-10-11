@@ -1,11 +1,11 @@
 # Slices B and C — design (nothing built)
 
-Status: design for review. Revised Oct 11, 2026 with JM's decisions (slice B reworked, file viewer/watching dropped, dev-server preview deferred, new "remote browser" slice R added); slice C unchanged. Both slices reuse the slice-A envelope (`docs/pwa-bridge-protocol.md` §4, §6, §8): same `{v,type,id,re,seq,ts,exp,body}`, same command/ack/result semantics, same allow-list and replay rules, same session key `K` for end-to-end encryption. Transport changes, trust does not.
+Status: design for review. Revised Oct 11, 2026 with JM's decisions (slice B reworked, file viewer/watching dropped, dev-server preview deferred, new view-only "Open on desktop / See screenshot" slice R added; revised again for slice R scope); slice C unchanged. Both slices reuse the slice-A envelope (`docs/pwa-bridge-protocol.md` §4, §6, §8): same `{v,type,id,re,seq,ts,exp,body}`, same command/ack/result semantics, same allow-list and replay rules, same session key `K` for end-to-end encryption. Transport changes, trust does not.
 
 ## 0. What B and C add over A
-Live terminals (keystroke latency) and, later, smoother remote-browser video. **Dropped (JM, Oct 11): file viewer, file watching, file allow-list** (terminal access plus OpenClaw cover it). **Deferred: dev-server preview.** Slice A stays the fallback and control plane.
+Live terminals (keystroke latency). **Dropped (JM, Oct 11): file viewer, file watching, file allow-list** (terminal access plus OpenClaw cover it). **Deferred: dev-server preview.** Slice A stays the fallback and control plane.
 
-Desktop facts the design builds on: terminals already run on the desktop through `portable-pty` (`src-tauri/src/commands/term_session.rs`); `axum` and `tokio-tungstenite` are already dependencies; a loopback media proxy already exists (`media_proxy.rs`), so a local listener is an established pattern. No Rust change is needed for A; B and R need new Rust.
+Desktop facts the design builds on: terminals already run on the desktop through `portable-pty` (`src-tauri/src/commands/term_session.rs`); `axum` and `tokio-tungstenite` are already dependencies; a loopback media proxy already exists (`media_proxy.rs`), so a local listener is an established pattern. No Rust change is needed for A; B needs new Rust; R needs small desktop changes.
 
 ## 1. Slice B (revised) — direct connection over the user's own Tailscale
 ### Principles (JM)
@@ -55,27 +55,31 @@ Rust: loopback listener + WS framing, Tailscale detection/serve lifecycle (incl.
 - Remote terminals at all (off by default, per-launch signed challenge).
 - Shelling out to the `tailscale` CLI for detect + serve (read-only detect; `serve` only on user enabling).
 
-## 1b. New slice R — remote browser ("Open browser" from the web app)
-### Goal
-From the web app, JM sends an **Open browser {url}** command; the desktop opens a browser session with its existing browser features; agents can drive it with the existing desktop browser tools; the web shows what the session looks like.
+## 1b. Slice R — desktop built-in browser: "Open on desktop" + "See screenshot" (view-only)
+### Scope (JM, Oct 11)
+- **Preview sites built on OpenClaw are ordinary links**: the web app opens them in a normal new browser tab, fully interactive there. Nothing special, nothing in this slice.
+- Slice R is only about the **desktop client's built-in deep browser** (console, network, agent driving). From the web/mobile app there are exactly two actions, and the web side is **strictly view-only**:
+  1. **Open on desktop** — a confirmed command that adds a link as a browser session in the desktop client.
+  2. **See screenshot** — like the AWS console's button: an on-demand request that shows **one fresh screenshot** of that session; press again for another.
+- **Not in scope, by decision:** periodic refresh, streaming, any frame-rate target, and any click/type/scroll/take-control from web or mobile.
+- Agents drive the browser on the desktop side with its console/network tools and post screenshots to chat in the normal way, visible to anyone with access to that chat. That path is unchanged and unrelated to the bridge.
 
 ### Design
-- **Command path:** the existing slice-A command path — signed by the member key, destructive-class so the web asks for explicit confirmation, validated by the desktop (own key, unexpired, not replayed, known device). New types `browser.open {url}` and `browser.close {sessionId}`; the result carries a `sessionId`. URL policy: `https`/`http` only, no `file:`/`javascript:`/credentials-in-URL; the desktop may refuse private/loopback targets unless the user allows it.
-- **Desktop:** opens the session through the app's existing browser capability (see unknowns). Agents drive it with the existing browser tools, unchanged.
-- **Frames:** the desktop captures screenshots and publishes them over slice A as **compressed, encrypted chunks** (`browser.frame`, JPEG/WebP, downscaled, target ~1 frame per 1–2 s, only when the page changed, hard size cap per chunk with multi-chunk frames if needed, same global relay-event budget as transcripts). The web shows the latest frame; no history is kept.
-- **Phase 1:** view-only plus agent-driven (the agent clicks/types; the web watches). **Later:** web-sent click/type/scroll commands (each a validated command; coordinates mapped from the frame).
-- **Safety:** a visible, non-dismissible **"this session is remotely visible"** indicator on the desktop for as long as frames are published; a limit on concurrent remote sessions (default 1–2); idle timeout; closing on the desktop stops frames immediately. Frame content is page pixels, so slice A's text redaction doesn't apply — the confirmation + indicator + per-session opt-in are the controls; a per-site block list is a possible addition.
-- **Smooth video:** ~1 fps over relay events is a slideshow. Smooth video needs slice B's direct connection (WebSocket frames or WebRTC) and is a later enhancement.
+- **`browser.open {url}`** uses the existing slice-A command path unchanged: signed by the member key, treated as destructive-class (explicit web confirmation, like Stop/Send), validated by the desktop (own key, unexpired, not replayed, id claimed once). The result carries a `sessionId`. URL policy: `http`/`https` only; no `file:`, `javascript:` or credentials in the URL; the desktop may refuse private/loopback targets unless the user allows them.
+- **`browser.screenshot {sessionId}`** — one request, one image. The desktop validates (own key, known `sessionId`, rate limit) and replies with one `browser.shot` result: a single compressed (JPEG/WebP), downscaled image published as an encrypted chunk(s) under the slice-A session key, shown once on the web. No state is kept beyond the latest shot per session (replaceable event), and it expires. Rate limit: at most one screenshot per session per ~3 s and a small per-minute cap; one image size cap (value to be set after measuring, see unknowns).
+- The web lists the member's open desktop browser sessions (id, title, URL host) via a slice-A snapshot topic (`snap/browser`), read-only.
+- **Safety:** while any session is open to remote screenshots the desktop shows the visible **"this session is remotely visible"** indicator; a **limit on concurrent sessions** (default 1–2); idle timeout closes remote exposure; closing the session on the desktop makes screenshot requests fail with a clear message. Command results never include page text, only the image.
+- **Privacy notes (page pixels):** a screenshot can contain anything on the page, including logged-in content and secrets, and text redaction does not apply to pixels. Controls are the confirmation, the per-request nature (nothing is sent unless the user asks), the indicator, the rate limit, and the desktop being able to refuse (per-site block list is a possible addition). Anyone holding the member key can request shots, the same trust boundary as the rest of the bridge.
 
-### Unknowns to resolve before building (not yet read)
-- How **pinned sites / Stage sessions** actually work (which webview/engine, how agents' browser tools attach, whether a session can exist headlessly or needs a visible window, how screenshots are captured today and at what cost).
-- Whether capture works for a hidden/occluded window on macOS and whether it triggers the OS screen-recording permission prompt.
-- Relay event budget and chunk-size limits at 1 frame/1–2 s per session (bandwidth, retention, relay rate limits) — needs measurement.
-- Privacy: whether pages may contain secrets (logged-in sessions); the confirmation and indicator are required but may not be sufficient.
-- How click/type coordinates map reliably through scaled frames (phase 2).
+### Remaining unknowns (not yet investigated)
+- **How desktop browser sessions / Stage / pinned sites work**: which webview/engine, how a session is created from a URL programmatically, how agents' console/network tools attach, whether a session can exist without a visible window.
+- **How the desktop captures a screenshot** today (API, cost, resolution), and whether capture works for hidden/occluded windows on macOS or triggers the OS screen-recording permission prompt.
+- **Screenshot size cap** over relay events (relay event size limits, chunking, encryption overhead) — to be measured; the cap and compression settings are undecided.
+- Whether "Open on desktop" should focus the app/window or open silently, and where the new session appears in the desktop UI.
+- Whether a per-site block list or per-session opt-in is wanted for the privacy controls.
 
 ### Needs JM's approval before build
-Reading/adopting the Stage/pinned-site machinery (read-only investigation first), publishing page pixels over the relay (privacy), and the default concurrent-session limit.
+A read-only investigation of the Stage/pinned-site machinery first; publishing page pixels over the relay (privacy); the default concurrent-session limit.
 
 ## 2. Slice C — hosted tunnel through buzz.huladesk.com
 ### Shape
@@ -97,13 +101,13 @@ Desktop: outbound tunnel client (reconnect with backoff, same frame handler as B
 - The security review owner and sign-off.
 
 ## 3. Transport selection and failure behaviour
-Order B → C → A for live features (terminals). The web probes B (reachability of the advertised tailnet address) and falls back silently, showing the error states in §1. Remote-browser frames use A first (slideshow) and B/C later for smooth video. Any transport failure never loses commands: they are re-sent over A with the same id (idempotent).
+Order B → C → A for live features (terminals). The web probes B (reachability of the advertised tailnet address) and falls back silently, showing the error states in §1. Slice R uses slice A only (single on-demand screenshots). Any transport failure never loses commands: they are re-sent over A with the same id (idempotent).
 
 ## 4. Open questions and unknowns (honest list)
 1. **herdr**: multi-attach behaviour and a non-interactive session-list API are unverified.
 2. **Tailscale detection**: the exact CLI/JSON fields and macOS App Store vs standalone client differences (CLI path, `serve` syntax, sandboxing) are unverified; behaviour under Tailscale "serve" ACLs/HTTPS-cert settings not enabled on the tailnet is unknown.
 3. **Challenge via remote signer**: assumed Primal can show a Face ID prompt for a signing request; NIP-46 signer latency (seconds) makes terminal launch slow; whether the signer will sign a kind-22242 challenge from a web origin is untested.
-4. **Remote browser (slice R)**: Stage/pinned-site internals, capture cost and permissions, relay budget at ~1 fps, privacy of page content — all unknown (see §1b).
+4. **Slice R (desktop browser)**: how desktop browser sessions/Stage work, how screenshots are captured, and the screenshot size cap — all unknown (see §1b).
 5. **Slice C**: all server-side questions in §2 remain open; no production changes without approval and a security review.
 6. Multi-desktop selection UX and per-desktop naming rules.
 7. Whether the per-launch terminal challenge is too heavy for frequent use (a short-lived "terminal session grant" per connection is a possible relaxation, not adopted).
