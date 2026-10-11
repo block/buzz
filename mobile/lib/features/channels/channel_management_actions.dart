@@ -53,6 +53,14 @@ class ChannelActions {
     _ensureCommunityValid();
     await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
     _ensureCommunityValid();
+    // The relay provisions the creator's kind:39002 membership asynchronously
+    // after kind:9007. Overlay this identity's ownership now so the refresh
+    // below cannot race that write and drop the channel from the list (#7780,
+    // mirrors Desktop's `mark_pending_owned_channel`). The overlay clears
+    // itself once real membership is observed.
+    _ref
+        .read(channelsProvider.notifier)
+        .markPendingOwnedChannel(resolvedChannelId);
     return _refreshChannelsAndRead(resolvedChannelId);
   }
 
