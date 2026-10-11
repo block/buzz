@@ -537,6 +537,28 @@ check("7j. no answer from the desktop -> 'didn't respond' error with Retry/Cance
 handlerPaused = false;
 await page.locator('[data-testid="browser-job-retry"]').click();
 check("7k. Retry sends a fresh command that completes", await page.waitForFunction(() => document.querySelector('[data-testid="browser-job"]')?.getAttribute("data-phase") === "done", null, { timeout: 60000 }).then(() => true, () => false));
+// 7n. thumbnail opens a large viewer with New screenshot (in place), Close, Esc and tap-outside
+const vis = (id) => page.locator(`[data-testid="${id}"]`);
+await page.locator('[data-testid="browser-row-preview-pin-e2e"]').click();
+await vis("shot-viewer").waitFor({ timeout: 10000 }).catch(() => {});
+check("7n. clicking the thumbnail opens the viewer with title, address, 'Screenshot taken' and the big image", (await vis("shot-viewer-title").count()) === 1 && /example\.com/.test(await vis("shot-viewer-title").innerText()) && /^Screenshot taken/.test(await vis("shot-viewer-time").innerText()) && /^data:image\/jpeg/.test((await vis("shot-viewer-img").getAttribute("src").catch(() => "")) || ""));
+await sleep(3500); // per-session screenshot spacing
+await vis("shot-viewer-new").click();
+check("7o. New screenshot in the viewer shows progress and finishes (image updated in place)", await page.waitForFunction(() => /done/.test(document.querySelector('[data-testid="shot-viewer-status"]')?.textContent || ""), null, { timeout: 60000 }).then(() => true, () => false) && (await vis("shot-viewer-img").count()) === 1);
+await page.setViewportSize({ width: 390, height: 844 });
+await sleep(400);
+const box = await vis("shot-viewer-panel").boundingBox();
+check("7p. phone width: the viewer fits the screen", !!box && box.x >= 0 && box.y >= 0 && box.x + box.width <= 390.5 && box.y + box.height <= 844.5, JSON.stringify(box));
+await page.setViewportSize({ width: 1280, height: 800 });
+await page.keyboard.press("Escape");
+check("7q. Esc closes the viewer", await page.waitForFunction(() => !document.querySelector('[data-testid="shot-viewer"]'), null, { timeout: 5000 }).then(() => true, () => false));
+await page.locator('[data-testid="browser-row-preview-pin-e2e"]').click();
+await vis("shot-viewer").waitFor();
+await page.mouse.click(5, 5);
+check("7r. tapping outside closes the viewer", await page.waitForFunction(() => !document.querySelector('[data-testid="shot-viewer"]'), null, { timeout: 5000 }).then(() => true, () => false));
+await page.locator('[data-testid="browser-row-preview-pin-e2e"]').click();
+await vis("shot-viewer-close").click();
+check("7s. Close button closes the viewer", await page.waitForFunction(() => !document.querySelector('[data-testid="shot-viewer"]'), null, { timeout: 5000 }).then(() => true, () => false));
 // 7l. parity: same structure as the desktop Browsers screen at desktop and phone widths
 const structure = () => page.evaluate(() => ({
   content: !!document.querySelector('[data-testid="browsers-page-content"]'),
