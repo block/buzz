@@ -97,7 +97,7 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
         </p>
       )}
       {info.status === "on" && !info.terminals && (
-        <p data-testid="remote-terminals-off" style={{ fontSize: 12 }}>Remote terminals are off on {info.name}.</p>
+        <p data-testid="remote-terminals-off" style={{ fontSize: 12 }}>"Allow remote terminal" is off on {info.name}.</p>
       )}
       {usable && info.status === "on" && info.terminals && !open && (
         <div style={{ display: "grid", gap: 6 }}>

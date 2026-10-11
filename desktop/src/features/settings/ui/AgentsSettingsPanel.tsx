@@ -11,7 +11,7 @@ import {
 import { Switch } from "@/shared/ui/switch";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
-import { RemoteAccessSettingsCard } from "./RemoteAccessSettingsCard";
+import { RemoteAgentManagementCard } from "./RemoteAccessSettingsCard";
 import {
   SettingsOptionGroup,
   SettingsOptionGroupList,
@@ -82,7 +82,7 @@ export function AgentsSettingsPanel() {
           </SettingsOptionRow>
         </SettingsOptionGroup>
         <PreventSleepSettingsCard />
-        <RemoteAccessSettingsCard />
+        <RemoteAgentManagementCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
       </SettingsOptionGroupList>

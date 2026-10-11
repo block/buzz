@@ -2,7 +2,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { getTermPreferences } from "@/features/terminal/termPreferences";
-import type { RemoteInfo } from "./protocol";
+import { SIG_TTL_DEFAULT_S, SIG_TTL_OPTIONS_S, type RemoteInfo } from "./protocol";
 
 export type RemoteAccessStatus = {
   tailscaleUp: boolean;
@@ -13,6 +13,23 @@ export type RemoteAccessStatus = {
   url: string | null;
   openTerminals: number;
 };
+
+// Desktop-side preferences for "Allow remote agent management" (frontend-persisted; relay commands are gated on it).
+const PREF_AGENTS = "buzz-remote-agent-mgmt";
+const PREF_TTL = "buzz-remote-sig-ttl";
+export type RemotePrefs = { agentManagement: boolean; sigTtlS: number };
+export function getRemotePrefs(): RemotePrefs {
+  try {
+    const ttl = Number(localStorage.getItem(PREF_TTL));
+    return {
+      agentManagement: localStorage.getItem(PREF_AGENTS) === "1",
+      sigTtlS: (SIG_TTL_OPTIONS_S as readonly number[]).includes(ttl) ? ttl : SIG_TTL_DEFAULT_S,
+    };
+  } catch {
+    return { agentManagement: false, sigTtlS: SIG_TTL_DEFAULT_S };
+  }
+}
+export const isAgentManagementAllowed = () => getRemotePrefs().agentManagement;
 
 const DEVICE_KEY = "buzz-bridge-device-id";
 const POLL_MS = 10_000;
@@ -71,6 +88,32 @@ export function subscribeRemoteAccess(fn: () => void): () => void {
   };
 }
 
+/** The tailnet listener runs when either feature wants it and Tailscale is up; agent management alone still works via the relay. */
+async function syncListener(): Promise<void> {
+  const p = getRemotePrefs();
+  const s = status;
+  if (!s) return;
+  const want = s.tailscaleUp && (p.agentManagement || s.terminals);
+  if (want !== s.enabled) await setRemoteAccessEnabled(want);
+  else emit();
+}
+export async function setAgentManagement(on: boolean): Promise<void> {
+  localStorage.setItem(PREF_AGENTS, on ? "1" : "0");
+  await syncListener();
+  emit();
+}
+export function setSignatureTtl(seconds: number): void {
+  if ((SIG_TTL_OPTIONS_S as readonly number[]).includes(seconds)) localStorage.setItem(PREF_TTL, String(seconds));
+  emit();
+}
+/** Turn terminals on/off; terminals need the tailnet listener, which this starts if needed. */
+export async function setTerminalsAllowed(on: boolean): Promise<void> {
+  if (on && !status?.tailscaleUp) throw new Error(status?.reason ?? "Remote terminals need Tailscale running on this computer.");
+  if (on && !status?.enabled) await setRemoteAccessEnabled(true);
+  await setRemoteTerminals(on);
+  if (!on) await syncListener();
+}
+
 export async function setRemoteAccessEnabled(enabled: boolean): Promise<void> {
   set(await invoke<RemoteAccessStatus>("remote_access_set_enabled", { enabled, desktopId: desktopId(), herdr: herdr() }));
 }
@@ -84,6 +127,7 @@ export function remoteInfoForHeartbeat(): RemoteInfo | undefined {
   const s = status;
   if (!s) return undefined;
   const label = s.dnsName?.split(".")[0] ?? "this Mac";
+  const prefs = getRemotePrefs();
   return {
     desktopId: desktopId(),
     name: label,
@@ -91,5 +135,7 @@ export function remoteInfoForHeartbeat(): RemoteInfo | undefined {
     status: s.enabled && s.url ? "on" : "off",
     ...(s.enabled ? {} : { reason: s.tailscaleUp ? undefined : (s.reason ?? "Tailscale isn't running on this Mac.") }),
     terminals: s.terminals,
+    agents: prefs.agentManagement,
+    sigTtlS: prefs.sigTtlS,
   };
 }

@@ -181,3 +181,14 @@ test("commander: destructive commands require explicit confirmation; offline/uns
   const id2 = await L.commander.send("agent.stop", body, { confirmed: true });
   assert.equal(L.commander.statusOf(id2, nowS() + 500), "timeout");
 });
+
+test("remote agent management switch off: agent.* commands are refused with remote_disabled and nothing runs", async () => {
+  let allowed = false;
+  const { h, calls, results } = setup({ deps: { agentManagementAllowed: () => allowed } });
+  await h.handle(cmdEvent("agent.stop", { agentPubkey: AG }));
+  assert.deepEqual(calls, []);
+  assert.deepEqual(results.map((r) => [r[1], r[2]]), [["error", "remote_disabled"]]);
+  allowed = true;
+  await h.handle(cmdEvent("agent.stop", { agentPubkey: AG }));
+  assert.deepEqual(calls, [["stop", AG]]);
+});

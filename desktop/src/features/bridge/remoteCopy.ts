@@ -17,12 +17,12 @@ export function describeRemote(
   if (!info || info.status === "off")
     return {
       problem: "remote_off",
-      message: `Remote access is off on ${name}. Turn it on in Settings on that Mac.${info?.reason ? ` ${info.reason}` : ""}`,
+      message: `Remote access isn't available on ${name}: the direct connection is off. Turn on "Allow remote agent management" (Settings → Agents) or "Allow remote terminal" (Settings → Buzz Term) on that computer.${info?.reason ? ` ${info.reason}` : ""}`,
     };
   if (failure === "terminals_disabled")
-    return { problem: "terminals_off", message: `Remote terminals are off on ${name}.` };
+    return { problem: "terminals_off", message: `"Allow remote terminal" is off on ${name} (Settings → Buzz Term on that computer).` };
   if (failure === "unreachable" || failure === "timeout")
-    return { problem: "tailscale_device", message: "Connect to Tailscale on this device to reach your desktop." };
+    return { problem: "tailscale_device", message: "Terminals need a direct connection over your tailnet. Connect to Tailscale on this device (no host is reachable right now)." };
   if (failure && failure !== "closed")
     return { problem: "other", message: `The desktop refused the request (${failure}).` };
   if (failure === "closed") return { problem: "desktop_unreachable", message: "The connection to your desktop was closed." };

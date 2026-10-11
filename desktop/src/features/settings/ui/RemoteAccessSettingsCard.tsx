@@ -2,15 +2,29 @@ import * as React from "react";
 
 import {
   getRemoteAccess,
-  setRemoteAccessEnabled,
-  setRemoteTerminals,
+  getRemotePrefs,
+  setAgentManagement,
+  setSignatureTtl,
+  setTerminalsAllowed,
   subscribeRemoteAccess,
 } from "@/features/bridge/remoteAccessStore";
+import { SIG_TTL_OPTIONS_S } from "@/features/bridge/protocol";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
-export function RemoteAccessSettingsCard() {
+export const REMOTE_AGENT_MGMT_LABEL = "Allow remote agent management";
+export const REMOTE_AGENT_MGMT_DESC =
+  "Lets your signed-in devices list your agents and start, stop, message and create agents on this computer, over your tailnet when reachable or via the relay otherwise. On a direct (tailnet) connection it also allows full agent management: create, rename, change provider, model, persona and working directory, and delete. Does not allow terminals or file access. A signed connection stays valid for the duration you choose below, then your signer is asked again.";
+export const REMOTE_TERMINAL_LABEL = "Allow remote terminal";
+export const REMOTE_TERMINAL_DESC =
+  "Lets your signed-in devices open a shell, or attach to a herdr session, on this computer over your tailnet only. Each launch requires a fresh signature from your signer. Off by default. Turning off closes open terminals.";
+
+export const ttlLabel = (s: number) => (s < 3600 ? `${s / 60} minutes` : s === 3600 ? "1 hour" : `${s / 3600} hours`);
+
+function useRemote() {
   const status = React.useSyncExternalStore(subscribeRemoteAccess, getRemoteAccess);
+  const [, bump] = React.useReducer((x: number) => x + 1, 0);
+  React.useEffect(() => subscribeRemoteAccess(bump), []);
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
   const run = async (fn: () => Promise<void>) => {
@@ -23,52 +37,94 @@ export function RemoteAccessSettingsCard() {
     }
     setBusy(false);
   };
+  return { status, error, busy, run, prefs: getRemotePrefs() };
+}
+
+/** Settings → Agents. */
+export function RemoteAgentManagementCard() {
+  const { status, error, busy, run, prefs } = useRemote();
   if (!status) return null;
-  const canEnable = status.tailscaleUp || status.enabled;
   return (
     <div className="min-w-0 space-y-3">
-      <SettingsOptionGroup data-testid="remote-access-card" title="Remote access">
+      <SettingsOptionGroup data-testid="remote-access-card" title="Remote agent management">
         <SettingsOptionRow>
           <div className="min-w-0">
             <label className="text-sm font-medium" htmlFor="remote-access-switch">
-              Allow remote access
+              {REMOTE_AGENT_MGMT_LABEL}
             </label>
             <p className="text-sm font-normal text-muted-foreground/70" data-settings-subcopy>
-              Lets your own web app reach this Mac through your Tailscale network. Nothing is exposed to the LAN or the internet, and Tailscale itself is never started or changed.
-              {!status.tailscaleUp && !status.enabled ? ` ${status.reason ?? "Tailscale isn't running on this Mac."}` : ""}
+              {REMOTE_AGENT_MGMT_DESC}
+              {prefs.agentManagement && !status.tailscaleUp ? " Tailscale isn't running here, so only the relay path is available." : ""}
             </p>
           </div>
           <Switch
-            checked={status.enabled}
+            checked={prefs.agentManagement}
             data-testid="remote-access-toggle"
-            disabled={busy || !canEnable}
+            disabled={busy}
             id="remote-access-switch"
-            onCheckedChange={(on) => void run(() => setRemoteAccessEnabled(on))}
+            onCheckedChange={(on) => void run(() => setAgentManagement(on))}
           />
         </SettingsOptionRow>
         <SettingsOptionRow>
           <div className="min-w-0">
-            <label className="text-sm font-medium" htmlFor="remote-terminals-switch">
-              Allow remote terminals
+            <label className="text-sm font-medium" htmlFor="remote-sig-ttl">
+              Signed connection lasts
             </label>
             <p className="text-sm font-normal text-muted-foreground/70" data-settings-subcopy>
-              Lets your web app open a shell on this Mac. Every terminal needs a fresh approval in your signer. Turning this off closes open remote terminals.
-              {status.enabled ? ` ${status.openTerminals} open now.` : " Requires remote access."}
+              After this, a device must sign a fresh challenge with your signer before it can manage agents on a direct connection.
+            </p>
+          </div>
+          <select
+            className="rounded-md border bg-background px-2 py-1 text-sm"
+            data-testid="remote-sig-ttl"
+            disabled={!prefs.agentManagement}
+            id="remote-sig-ttl"
+            onChange={(e) => setSignatureTtl(Number(e.target.value))}
+            value={prefs.sigTtlS}
+          >
+            {SIG_TTL_OPTIONS_S.map((s) => (
+              <option key={s} value={s}>
+                {ttlLabel(s)}
+              </option>
+            ))}
+          </select>
+        </SettingsOptionRow>
+      </SettingsOptionGroup>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      {status.enabled && status.url && <p className="text-xs text-muted-foreground/70">Direct connection on {status.url}</p>}
+    </div>
+  );
+}
+
+/** Settings → Buzz Term. */
+export function RemoteTerminalCard() {
+  const { status, error, busy, run } = useRemote();
+  if (!status) return null;
+  const canEnable = status.tailscaleUp || status.terminals;
+  return (
+    <div className="min-w-0 space-y-3">
+      <SettingsOptionGroup data-testid="remote-terminal-card" title="Remote terminal">
+        <SettingsOptionRow>
+          <div className="min-w-0">
+            <label className="text-sm font-medium" htmlFor="remote-terminals-switch">
+              {REMOTE_TERMINAL_LABEL}
+            </label>
+            <p className="text-sm font-normal text-muted-foreground/70" data-settings-subcopy>
+              {REMOTE_TERMINAL_DESC}
+              {status.terminals ? ` ${status.openTerminals} open now.` : ""}
+              {!canEnable ? ` ${status.reason ?? "Tailscale isn't running on this computer."}` : ""}
             </p>
           </div>
           <Switch
             checked={status.terminals}
             data-testid="remote-terminals-toggle"
-            disabled={busy || !status.enabled}
+            disabled={busy || !canEnable}
             id="remote-terminals-switch"
-            onCheckedChange={(on) => void run(() => setRemoteTerminals(on))}
+            onCheckedChange={(on) => void run(() => setTerminalsAllowed(on))}
           />
         </SettingsOptionRow>
       </SettingsOptionGroup>
       {error && <p className="text-sm text-destructive">{error}</p>}
-      {status.enabled && status.url && (
-        <p className="text-xs text-muted-foreground/70">Serving on {status.url}</p>
-      )}
     </div>
   );
 }

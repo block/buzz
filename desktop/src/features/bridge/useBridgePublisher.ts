@@ -16,7 +16,7 @@ import {
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
 import type { RelayEvent } from "@/shared/api/types";
-import { remoteInfoForHeartbeat, subscribeRemoteAccess } from "./remoteAccessStore";
+import { isAgentManagementAllowed, remoteInfoForHeartbeat, subscribeRemoteAccess } from "./remoteAccessStore";
 import { type BrowserHost, makeBrowserDeps, remoteBrowserManager } from "./browserHost";
 import { BridgeCommandHandler, makeSeenSet } from "./commandHandler";
 import { BRIDGE_KIND, BRIDGE_TAG, CMD_MAX_TTL_S, nowS } from "./protocol";
@@ -145,6 +145,7 @@ export function useBridgePublisher(
         },
       },
       publishResult: (id, body) => p.publishResult(id, body),
+      agentManagementAllowed: isAgentManagementAllowed,
       browser: hostRef.current
         ? makeBrowserDeps(
             () => hostRef.current as BrowserHost,

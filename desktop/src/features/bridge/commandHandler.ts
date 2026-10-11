@@ -51,6 +51,8 @@ export type CommandDeps = {
   };
   publishResult(cmdId: string, body: CommandResultBody): Promise<void>;
   browser?: BrowserDeps;
+  /** "Allow remote agent management" on this desktop. Absent = allowed (tests); when false agent.* commands are refused. */
+  agentManagementAllowed?(): boolean;
   onDrop?(reason: string, eventId: string): void;
   now?(): number; // unix seconds
   /** Overridable for tests; defaults to nostr-tools verifyEvent (id hash + schnorr signature). */
@@ -213,6 +215,13 @@ export class BridgeCommandHandler {
     // 6. body validation + known agent
     const body = (env.body ?? {}) as Record<string, unknown>;
     if (type.startsWith("browser.")) return this.handleBrowser(type, cmdId, body);
+    if (type.startsWith("agent.") && d.agentManagementAllowed && !d.agentManagementAllowed()) {
+      d.seen.add(cmdId);
+      const res: CommandResultBody = { status: "error", code: "remote_disabled", message: "Remote agent management is off on this computer. Turn on \"Allow remote agent management\" in its Settings → Agents." };
+      this.results.set(cmdId, res);
+      await d.publishResult(cmdId, res);
+      return "dropped";
+    }
     const agentPubkey = typeof body.agentPubkey === "string" ? body.agentPubkey.toLowerCase() : "";
     const agent = HEX64.test(agentPubkey) ? d.agents().get(agentPubkey) : undefined;
     d.seen.add(cmdId); // claim the id before any await so a concurrent duplicate can't double-run

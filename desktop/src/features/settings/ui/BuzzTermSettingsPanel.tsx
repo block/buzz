@@ -36,6 +36,7 @@ import {
   SettingsOptionGroupList,
   SettingsOptionRow,
 } from "./SettingsOptionGroup";
+import { RemoteTerminalCard } from "./RemoteAccessSettingsCard";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 const SESSION_HOST_OPTIONS = [
@@ -125,6 +126,7 @@ export function BuzzTermSettingsPanel() {
         title="Buzz Term"
       />
       <SettingsOptionGroupList>
+        <RemoteTerminalCard />
         <SettingsOptionGroup
           data-testid="buzz-term-session-card"
           title="Sessions"

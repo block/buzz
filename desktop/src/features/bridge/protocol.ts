@@ -184,9 +184,20 @@ export type RemoteInfo = {
   status: "on" | "off";
   /** Why it's off (e.g. "Tailscale isn't running on this Mac."). */
   reason?: string;
-  /** Second, separate toggle. */
+  /** Second, separate toggle: "Allow remote terminal" (tailnet only). */
   terminals: boolean;
+  /** "Allow remote agent management" is on (list/start/stop/message over relay; full management on a direct connection). */
+  agents?: boolean;
+  /** How long one signed connection challenge stays valid on this desktop (seconds). */
+  sigTtlS?: number;
 };
+
+/** Connection-signature lifetimes offered on the desktop (max 24 h, default 1 h). */
+export const SIG_TTL_OPTIONS_S = [15 * 60, 60 * 60, 4 * 3600, 12 * 3600, 24 * 3600] as const;
+export const SIG_TTL_DEFAULT_S = 3600;
+export const SIG_TTL_MAX_S = 24 * 3600;
+/** A host not heard from for this long is shown greyed out (not hidden). */
+export const HOST_STALE_S = 24 * 3600;
 
 export type HeartbeatBody = {
   remote?: RemoteInfo;
