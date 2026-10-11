@@ -161,10 +161,7 @@ export function ChannelRouteScreen({
     enumeratedProjectHome ?? projectHomeLookupQuery.data ?? null;
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
-  >(() => {
-    const cachedTarget = getCachedSearchHitEvent(targetMessageId);
-    return cachedTarget ? [cachedTarget] : [];
-  });
+  >([]);
   const [activeSearchHighlight, setActiveSearchHighlight] =
     React.useState<SearchHighlightNavigation | null>(searchHighlight ?? null);
   const appliedSearchActivationIdRef = React.useRef<string | null>(
@@ -211,13 +208,8 @@ export function ChannelRouteScreen({
     targetReplyId,
     targetThreadRootId,
   ]);
-
-  // Reset spliced target events when the channel changes. Tied to channel
-  // identity rather than the route target so clearing the `messageId` param
-  // mid-channel keeps the deep-linked row in view. Seeded with the mount key so
-  // the initial cache-seeded events survive first commit; only a genuine
-  // channel change clears them. Declared before the fetch effect so a channel
-  // switch clears stale events before the new target is fetched.
+  // Keep spliced events after the route target clears so a deep-linked row
+  // remains visible, but discard them when switching channels.
   const previousResetKeyRef = React.useRef<string>(channelId);
   React.useEffect(() => {
     if (previousResetKeyRef.current === channelId) return;
@@ -243,13 +235,9 @@ export function ChannelRouteScreen({
     }
 
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
-    if (cachedTarget) {
-      setTargetMessageEvents((currentEvents) =>
-        currentEvents.some((event) => event.id === cachedTarget.id)
-          ? currentEvents
-          : [...currentEvents, cachedTarget],
-      );
-    }
+    // Search/notification projections have no reply tags. Inserting one before
+    // hydration can select the reply as a root and consume the route target.
+    // Retain it only as a fallback after the authoritative lookup completes.
 
     const eventIds = [
       targetMessageId,
@@ -268,6 +256,9 @@ export function ChannelRouteScreen({
           const eventsById = new Map<string, RelayEvent>();
           for (const event of [...currentEvents, ...events]) {
             eventsById.set(event.id, event);
+          }
+          if (cachedTarget && !eventsById.has(cachedTarget.id)) {
+            eventsById.set(cachedTarget.id, cachedTarget);
           }
           return Array.from(eventsById.values());
         });
