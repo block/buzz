@@ -3,10 +3,25 @@ import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
-import { nip44DecryptFromSelf } from "@/shared/api/tauri";
+import { nip44DecryptFromSelf, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 import { BRIDGE_KIND, BRIDGE_TAG } from "./protocol";
+import { BridgeCommander } from "./commander";
 import { BridgeWebClient, type BridgeState } from "./webClient";
+
+const WEB_DEVICE_KEY = "buzz-bridge-web-device-id";
+function webDeviceId(): string {
+  try {
+    let id = sessionStorage.getItem(WEB_DEVICE_KEY);
+    if (!id) {
+      id = crypto.randomUUID().slice(0, 8);
+      sessionStorage.setItem(WEB_DEVICE_KEY, id);
+    }
+    return id;
+  } catch {
+    return "tab";
+  }
+}
 
 const CACHE_PREFIX = "buzz-bridge-key:";
 
@@ -33,9 +48,10 @@ const sessionCache = {
 
 export function useBridgeAgents(
   pubkey: string | undefined,
-): BridgeState & { available: boolean } {
+): BridgeState & { available: boolean; commander: BridgeCommander | null } {
   const enabled = !isTauri() && !!pubkey;
   const [client, setClient] = React.useState<BridgeWebClient | null>(null);
+  const [commander, setCommander] = React.useState<BridgeCommander | null>(null);
 
   React.useEffect(() => {
     if (!enabled || !pubkey) return;
@@ -44,6 +60,22 @@ export function useBridgeAgents(
       ...sessionCache,
     });
     setClient(c);
+    setCommander(
+      new BridgeCommander(
+        c,
+        {
+          signEvent: (e) => signRelayEvent(e),
+          publish: async (signed) => {
+            await relayClient.publishEvent(
+              signed as RelayEvent,
+              "Timed out sending the command.",
+              "Failed to send the command.",
+            );
+          },
+        },
+        webDeviceId(),
+      ),
+    );
     (window as unknown as { __buzzBridgeStats?: unknown }).__buzzBridgeStats =
       c.stats; // e2e/debug counters
     const filter = {
@@ -105,6 +137,7 @@ export function useBridgeAgents(
       window.clearInterval(t);
       void unsub?.();
       setClient(null);
+      setCommander(null);
     };
   }, [enabled, pubkey]);
 
@@ -114,7 +147,7 @@ export function useBridgeAgents(
   );
   const getSnap = React.useCallback(() => client?.state ?? EMPTY, [client]);
   const state = React.useSyncExternalStore(subscribe, getSnap);
-  return { ...state, available: enabled };
+  return { ...state, available: enabled, commander };
 }
 
 const EMPTY: BridgeState = {

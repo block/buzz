@@ -1,6 +1,7 @@
 // Desktop side of the bridge: publishes the key wrap, agent snapshots (on change + forced refresh) and heartbeats.
 // IO is injected so it is testable and so the web build (which never runs it) pulls in nothing native.
 import type {
+  AgentSummary,
   AgentsSnapshotBody,
   CommandResultBody,
   HeartbeatBody,
@@ -36,6 +37,8 @@ import {
 } from "./protocol";
 import { snapshotSignature } from "./snapshot";
 import { packChunks, TranscriptTracker } from "./transcript";
+
+export const DEFAULT_CAPS = ["agents.snapshot", "transcript.chunk"];
 
 export type PublisherIO = {
   encryptToSelf(plaintext: string): Promise<string>;
@@ -76,6 +79,11 @@ export class BridgePublisher {
   private startedAt: number;
   private destroyed = false;
   private knownAgents = new Set<string>();
+  private agentStatus = new Map<string, { status: AgentSummary["status"] }>();
+  /** Latest known agents and status (for command validation). */
+  agents(): ReadonlyMap<string, { status: AgentSummary["status"] }> {
+    return this.agentStatus;
+  }
   private tx = new Map<
     string,
     {
@@ -138,6 +146,9 @@ export class BridgePublisher {
   update(body: AgentsSnapshotBody) {
     if (this.destroyed) return;
     this.knownAgents = new Set(body.agents.map((a) => a.pubkey.toLowerCase()));
+    this.agentStatus = new Map(
+      body.agents.map((a) => [a.pubkey.toLowerCase(), { status: a.status }]),
+    );
     this.agentsRunning = body.agents.filter(
       (a) => a.status === "running",
     ).length;
@@ -200,7 +211,7 @@ export class BridgePublisher {
         platform: this.opts.platform,
         agentsRunning: this.agentsRunning,
         uptimeSec: Math.floor((this.nowMs() - this.startedAt) / 1000),
-        caps: ["agents.snapshot"],
+        caps: this.opts.caps ?? DEFAULT_CAPS,
       };
       const env = buildEnvelope({
         type: "presence.heartbeat",

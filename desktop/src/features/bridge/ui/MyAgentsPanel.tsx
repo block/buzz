@@ -4,6 +4,7 @@ import * as React from "react";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { nowS } from "../protocol";
 import { useBridgeAgents } from "../useBridgeAgents";
+import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
 
 function ago(s: number): string {
@@ -35,6 +36,11 @@ export function MyAgentsPanel() {
         entries={b.transcripts.get(selectedAgent.pubkey.toLowerCase()) ?? []}
         offline={offline}
         onBack={() => setSelected(null)}
+        controls={
+          b.commander ? (
+            <AgentControls agent={selectedAgent} commander={b.commander} bridge={b} />
+          ) : null
+        }
       />
     );
   return (

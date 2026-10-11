@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { finalizeEvent, getPublicKey, nip44 } from "nostr-tools";
 import { startMockSigner } from "./mock-nip46-signer.mjs";
 import { BridgePublisher } from "../../src/features/bridge/publisher.ts";
+import { BridgeCommandHandler, makeSeenSet } from "../../src/features/bridge/commandHandler.ts";
 import {
   BRIDGE_KIND,
   D_AGENTS,
@@ -226,7 +227,7 @@ const pub = new BridgePublisher(
     signEvent: async (e) => signNode(e),
     publish: postEvent,
   },
-  { deviceId: "e2e-desktop", platform: "e2e", onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
+  { deviceId: "e2e-desktop", platform: "e2e", caps: ["agents.snapshot", "transcript.chunk", "agent.start", "agent.stop", "agent.message"], onError: (e) => console.log("PUBLISHER ERROR", String(e).slice(0, 300)) },
 );
 pub.start();
 pub.update({
@@ -386,6 +387,58 @@ check(
   /Opus v4/.test(await panel.innerText().catch(() => "")),
   `${Date.now() - tLive} ms`,
 );
+
+// 6. controls: web confirmation + desktop-side validation, over the real relay
+const execCalls = [];
+const handler = new BridgeCommandHandler({
+  memberPubkey: myPk,
+  sessionKey: () => ({ kid: pub.kid, key: pub.sessionKey }),
+  agents: () => pub.agents(),
+  seen: makeSeenSet(() => [], () => {}),
+  executors: {
+    start: async (a) => void execCalls.push(["start", a]),
+    stop: async (a) => void execCalls.push(["stop", a]),
+    message: async (a, c, t) => void execCalls.push(["message", a, c, t]),
+  },
+  publishResult: async (id, b) => {
+    await pub.publishResult(id, b);
+  },
+});
+const seenEv = new Set();
+let wireCmds = 0;
+const queryCmds = async () => {
+  const url = `${RELAY_HTTP}/query`;
+  const bytes = Buffer.from(JSON.stringify([{ kinds: [30078], authors: [myPk], "#t": ["buzz-bridge"], since: nowS() - 120, limit: 100 }]));
+  const auth = finalizeEvent({ kind: 27235, content: "", created_at: nowS(), tags: [["u", url], ["method", "POST"], ["payload", createHash("sha256").update(bytes).digest("hex")], ["nonce", randomUUID()]] }, sk);
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Nostr " + Buffer.from(JSON.stringify(auth)).toString("base64") }, body: bytes });
+  for (const ev of await r.json()) {
+    if (seenEv.has(ev.id)) continue;
+    seenEv.add(ev.id);
+    if (ev.tags.some((t) => t[1]?.startsWith("buzz.bridge.v1/cmd/"))) wireCmds++;
+    await handler.handle(ev);
+  }
+};
+const pollTimer = setInterval(() => void queryCmds().catch(() => {}), 1000);
+await page.locator('[data-testid="my-agent-row"]').filter({ hasText: "Opus v4" }).first().click();
+await page.locator('[data-testid="agent-controls"]').waitFor({ timeout: 20000 });
+await page.locator('[data-testid="ctl-stop"]').click();
+await page.locator('[data-testid="ctl-confirm"]').waitFor();
+await page.locator('[data-testid="ctl-confirm-no"]').click();
+await sleep(4000);
+check("6a. Stop asks for confirmation; Cancel sends nothing", wireCmds === 0 && execCalls.length === 0, `wire=${wireCmds} exec=${execCalls.length}`);
+await page.locator('[data-testid="ctl-stop"]').click();
+await page.locator('[data-testid="ctl-confirm-yes"]').click();
+await page
+  .waitForFunction(() => /done/.test(document.querySelector('[data-testid="ctl-status"]')?.textContent || ""), null, { timeout: 60000 })
+  .catch(() => {});
+check(
+  "6b. Confirm -> desktop validates and executes once -> web shows done",
+  execCalls.length === 1 && execCalls[0][0] === "stop" && /done/.test(await page.locator('[data-testid="ctl-status"]').innerText().catch(() => "")),
+  `${JSON.stringify(execCalls)} ${await page.locator('[data-testid="ctl-status"]').innerText().catch(() => "")}`,
+);
+await sleep(3500);
+check("6c. replayed relay events never re-execute", execCalls.length === 1, `${execCalls.length}`);
+clearInterval(pollTimer);
 
 // 5. no plaintext on the relay, no prod traffic, no page errors
 check(
