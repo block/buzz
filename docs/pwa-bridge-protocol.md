@@ -117,3 +117,9 @@ The web subscribes with `limit: 150` (relay replay + live atomically) instead of
 - Sessions list: replaceable `buzz.bridge.v1/snap/browser` (`browser.sessions`). Screenshot: the desktop captures the pin webview (`pin_webview_screenshot`), downscales to <=1000 px wide JPEG (quality/width stepped down until <=120 KiB), splits into <=24 KiB chunks, and publishes encrypted `buzz.bridge.v1/shot/<cmdId>/<i>` events (`browser.shot`, TTL 5 min). The web assembles chunks into one data URL and keeps only the latest image per session.
 - Desktop shows a "remotely visible" banner with a Stop sharing button while any session is open.
 - Known limits: the pin webview only exists while its screen is showing, so a screenshot request navigates the desktop to that pin first; sessions are not persisted across desktop restarts (the pin itself remains until closed).
+
+### 10.5 Browser sync (supersedes the pin-based sessions of 10.4)
+
+- A bridge "session" is now any browser on the desktop's Browsers page (playground session id of its main tab). `buzz.bridge.v1/snap/browser` carries `{sessions:[{sessionId,title,host,openedAt,url?,status?:"live"|"cold",origin?:"web"|"desktop",restricted?,agent?:{pubkey,name,mode}}]}`, republished on every change (debounced) and every 20 s. `url` has query and fragment removed and is omitted (with `restricted:true`) for private/local/tailnet pages. New fields are optional; the web client keeps only known, typed fields.
+- `browser.open` creates a normal Browsers-page browser; `browser.close` and `browser.screenshot` accept any listed browser (not only remotely opened ones). Limits from 10.4 still apply to `browser.open`.
+- New `browser.agent {sessionId, mode:"off"|"observe"|"drive", agentPubkey?, channelId?}` (confirmed; cap `browser.agent`): sets/clears the Observe/Drive grant. Refused with `remote_disabled` when "Allow remote agent management" is off; the agent must be one of the snapshot's agents.

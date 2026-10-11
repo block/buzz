@@ -1,6 +1,6 @@
 # Web vs desktop: JM's decisions (running list)
 
-1. **Pinned sites do not exist on web/mobile.** Removed from Settings, the left-nav group and the `/pins/*` route (gated with `isTauri()`); desktop unchanged. The bridge "Desktop browser" panel (slice R) stays. *(built)*
+1. **Pinned sites do not exist on web/mobile.** Removed from Settings, the left-nav group and the `/pins/*` route (gated with `isTauri()`); desktop unchanged. The Browsers page stays (see 6). *(built)*
 2. **Mobile split panes (queued).** One shared stacked-split component with a single breakpoint: below it, list only → detail pushed full-screen on selection, with a visible Back button in the header at each layer plus swipe-back; list keeps scroll position and selection; deep links open the detail directly and Back returns to the list; above it, the existing two-pane layout (tablets/landscape stay two-pane if wide enough). First users: Inbox and Projects; more views to come.
 3. **Permanent user bar on mobile (queued).** Below the breakpoint the user row (avatar, name…) becomes a bar fixed at the bottom of every screen, including stacked detail views and settings; respects `env(safe-area-inset-bottom)`, never covers composers/inputs, handles the iOS keyboard; same component, same tap behavior. Desktop-style web layout unchanged.
 4. **Remote access model (phases A–C built; D–E need the Rust go).**
@@ -8,7 +8,22 @@
    - Desktop switch **Allow remote terminal** (moved to Settings → Buzz Term): "Lets your signed-in devices open a shell, or attach to a herdr session, on this computer over your tailnet only. Each launch requires a fresh signature from your signer. Off by default. Turning off closes open terminals."
    - Transport: terminals tailnet only; agent management direct when a tailnet host answers, else relay, always labelled **Direct** / **Via relay**. Relay keeps list/start/stop/message only; create/edit/delete need Direct.
    - Web Settings shows the same two switches plus a host list per switch (only hosts with that feature on; hosts not seen for over a day are greyed out, not hidden). Tailnet reachability is probed by connecting to each host's advertised tailnet address; the terminal switch is off and greyed when no host is reachable.
-   - Mobile nav: Agents entry only with remote agent management on and a host selected; Terminal entry only with a reachable terminal-capable host selected.
+   - Mobile/web nav: the **Agents** and **Terminal** rows are always shown. When unavailable (switch off, or no host selected) the row is greyed out and crossed out, and tapping it shows what is needed: "Turn on Settings → Agents → Allow remote agent management on your desktop, and make sure the desktop is online" / "Turn on Settings → Buzz Term → Allow remote terminal on your desktop, and connect your phone and Mac to your tailnet". Available rows work normally. *(supersedes the earlier "hide the row" idea)* TODO(difference 4): derive the exact missing requirement per row from tailnet reachability / last-seen once that gating lands (`useWebRemoteNav` in `features/bridge/ui/WebRemoteSettings.tsx`).
    - Relay commands are now refused on the desktop (`remote_disabled`) unless "Allow remote agent management" is on.
    - Known limit: the bridge currently has ONE heartbeat per member, so the host list holds one host until the heartbeat becomes per-device (phase D protocol change).
+6. **Browsers are paired between desktop and web (built; needs a desktop restart to take effect).**
+   - The web **Browsers** page is the single place for browsers on web. It lists the browsers on the desktop's Browsers page (including ones added on the desktop), with title, address (query/fragment stripped), Live/Cold, "added from web / on desktop", and the agent on it if any. My agents only points to it.
+   - **Add browser** on web sends a confirmed `browser.open`; the desktop adds a normal Browsers-page browser (a playground session, not a pinned site) and opens it. **Remove** on either side removes it on both (web removal is confirmed and works for any listed browser). **See screenshot** is per browser, one press = one image; a Cold browser is started first.
+   - The desktop republishes its full list (replaceable `snap/browser` event) whenever the Browsers page, an agent grant or liveness changes (also every 20 s). Private/local/tailnet pages are listed as "Private address (not shared)" with no URL.
+   - Web-added links keep the old limits (http/https only, no localhost/private/tailnet/`.local`, max 2 added from the web at once); browsers added on the desktop have no such limit. These may be relaxed once the direct connection exists (e.g. dev-server preview) – open question for JM.
+   - **Robot (Observe/Drive)** shows on web only while the host advertises "Allow remote agent management"; it sends a confirmed `browser.agent {sessionId, mode: off|observe|drive, agentPubkey, channelId}`. The desktop refuses it (`remote_disabled`) when that switch is off, only accepts one of its own agents, and Observe stays view-only. Screenshots are view-only and not gated by that switch.
 5. **My agents must look the same at desktop and mobile widths (queued).**
+
+## Signer health
+
+- Health banner/screens are per signer type. **Remote signer (NIP-46)**: "Your signer isn't responding", with Retry / Reconnect signer / Sign out. **Browser extension (NIP-07)**: "Your browser extension isn't responding. Check that it's unlocked and approve any prompts." with Retry only.
+- NIP-07 uses longer limits (request timeouts x4, "unresponsive" only after 120 s with no answer at all), because the extension may be waiting for a popup click. Any answer resets health, and an unresponsive extension is re-probed every 10 s, so the app recovers without a reload.
+
+## Bots directory on web
+
+- `/#/bots` shows the relay's kind:30624 catalog (published only by a community owner/admin) merged with a per-browser local list. A bot installed on the desktop is only on the relay if the catalog was published; otherwise it exists only in that desktop's local storage and the web Bots page is empty.
