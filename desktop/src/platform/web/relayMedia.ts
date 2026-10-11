@@ -8,6 +8,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { relayHttpBase } from "./relayConfig";
+import { stripImageMetadata } from "./mediaSanitize";
 import { getSigner } from "./signer";
 
 const TOKEN_TTL_SECS = 60; // relay freshness window (NIP-FI)
@@ -212,9 +213,11 @@ export function sniffMime(b: Uint8Array, fallback = ""): string {
 }
 
 export async function uploadRelayMedia(
-  bytes: Uint8Array,
+  rawBytes: Uint8Array,
   opts: { filename?: string; mime?: string } = {},
 ): Promise<BlobDescriptor> {
+  // The relay rejects EXIF/ICC/text chunks etc.; strip them first and hash the final bytes.
+  const bytes = stripImageMetadata(rawBytes);
   const base = relayHttpBase();
   const hash = bytesToHex(sha256(bytes));
   const mime = sniffMime(bytes, opts.mime);

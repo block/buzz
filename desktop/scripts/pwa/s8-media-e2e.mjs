@@ -69,6 +69,41 @@ const raw = await page.evaluate(async (pngB64) => {
 }, PNG);
 check("upload_media_bytes_raw (composer paste/drop path) works, filename kept", raw?.url && raw.filename === "shot é.png", raw?.filename);
 
+// Metadata path: images carrying EXIF/ICC/text/pHYs (phone photos, macOS screenshots) are rejected by the relay unless stripped
+const dirty = await page.evaluate(async (pngB64) => {
+  const m = await import("/src/platform/web/relayMedia.ts");
+  const { stripImageMetadata } = await import("/src/platform/web/mediaSanitize.ts");
+  const base = Uint8Array.from(atob(pngB64), (c) => c.charCodeAt(0));
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (u) => { let c = 0xffffffff; for (const x of u) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const o = new Uint8Array(12 + data.length); const dv = new DataView(o.buffer); dv.setUint32(0, data.length); o.set([...type].map((c) => c.charCodeAt(0)), 4); o.set(data, 8); dv.setUint32(8 + data.length, crc(o.subarray(4, 8 + data.length))); return o; };
+  const enc = (s) => new TextEncoder().encode(s);
+  const cat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let p = 0; for (const x of a) (o.set(x, p), (p += x.length)); return o; };
+  const ihdrEnd = 8 + 25;
+  const dirtyPng = cat(base.subarray(0, ihdrEnd), chunk("pHYs", new Uint8Array(9)), chunk("eXIf", enc("MM\0*GPS-secret")), chunk("tEXt", enc("Author\0JM")), chunk("iTXt", enc("XML:com.adobe.xmp\0\0\0\0\0<x/>")), base.subarray(ihdrEnd));
+  const r = { pngDirtyLen: dirtyPng.length, pngCleanLen: stripImageMetadata(dirtyPng).length };
+  // the relay must reject the dirty bytes as-is (proves the fixture is really dirty) ...
+  // ... and accept them through the web upload path
+  try { r.png = await m.uploadRelayMedia(dirtyPng, { filename: "dirty.png" }); } catch (e) { r.pngErr = String(e.message); }
+  // JPEG: canvas JPEG + injected EXIF (APP1) + XMP + comment
+  const cv = document.createElement("canvas"); cv.width = cv.height = 8; cv.getContext("2d").fillStyle = "#c33"; cv.getContext("2d").fillRect(0, 0, 8, 8);
+  const jpg = new Uint8Array(await (await new Promise((res) => cv.toBlob(res, "image/jpeg"))).arrayBuffer());
+  const seg = (mk, payload) => { const o = new Uint8Array(4 + payload.length); o.set([0xff, mk, (payload.length + 2) >> 8, (payload.length + 2) & 255]); o.set(payload, 4); return o; };
+  const dirtyJpg = cat(jpg.subarray(0, 2), seg(0xe1, enc("Exif\0\0MM\0*lat=33.4,lon=-112")), seg(0xe1, enc("http://ns.adobe.com/xap/1.0/\0<x/>")), seg(0xfe, enc("comment")), jpg.subarray(2));
+  r.jpgDirtyLen = dirtyJpg.length; r.jpgCleanLen = stripImageMetadata(dirtyJpg).length;
+  try { r.jpg = await m.uploadRelayMedia(dirtyJpg, { filename: "dirty.jpg" }); } catch (e) { r.jpgErr = String(e.message); }
+  if (r.jpg) {
+    const u = await m.getRelayMediaBlobUrl(r.jpg.url);
+    const bmp = await createImageBitmap(await (await fetch(u)).blob());
+    r.jpgDims = [bmp.width, bmp.height];
+  }
+  return r;
+}, PNG);
+console.log(JSON.stringify(dirty));
+check("PNG with pHYs/eXIf/tEXt/iTXt is stripped and accepted", dirty.png?.url && dirty.pngCleanLen < dirty.pngDirtyLen, dirty.pngErr ?? `${dirty.pngDirtyLen}->${dirty.pngCleanLen}`);
+check("descriptor sha256/size match the stripped bytes", dirty.png?.size === dirty.pngCleanLen);
+check("JPEG with EXIF/XMP/COM is stripped and accepted and decodes", dirty.jpg?.url && dirty.jpgDims?.[0] === 8, dirty.jpgErr ?? `${dirty.jpgDirtyLen}->${dirty.jpgCleanLen}`);
+
 // Render path: a posted message with this image shows a real <img> (blob:) in the channel, not a broken icon
 const render = await page.evaluate(async (d) => {
   const res = await window.__buzzWebInvoke("get_channels");
