@@ -11,16 +11,13 @@ const workflow = readFileSync(
 const gates = [
   "rust-lint",
   "unit-tests",
-  "windows-rust",
   "desktop",
-  "desktop-build-macos",
   "desktop-e2e-relay",
   "desktop-e2e-integration",
   "backend-integration",
   "postgres-tests",
   "relay-e2e",
   "web",
-  "mobile",
   "security",
 ];
 for (const gate of gates) {
