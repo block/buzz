@@ -5150,9 +5150,10 @@ fn dispatch_pending(
 ///
 /// # Classification rationale
 ///
-/// Auth failures arrive as [`acp::AcpError::AgentError`] with a message
-/// surfaced from the upstream CLI. Two narrow patterns reliably identify
-/// non-transient auth failures observed in the field:
+/// Buzz Agent maps `AgentError::LlmAuth` to ACP code `-32001`. Honor that
+/// structured signal regardless of provider wording (including missing
+/// Databricks credentials). For adapters using generic error codes, retain
+/// two narrow message fallbacks observed in the field:
 ///
 /// - `"Re-authenticate"` — emitted by the Claude CLI when an OAuth token has
 ///   expired ("OAuth access token has expired. Re-authenticate to continue.").
@@ -5164,10 +5165,10 @@ fn dispatch_pending(
 /// drop a user message, which is worse than a false negative (extra retries on
 /// an auth error). Both patterns are therefore chosen for high precision.
 fn is_auth_error(error: &acp::AcpError) -> bool {
-    let acp::AcpError::AgentError { message, .. } = error else {
+    let acp::AcpError::AgentError { code, message } = error else {
         return false;
     };
-    message.contains("Re-authenticate") || message.contains("API Error: 401")
+    *code == -32001 || message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
 /// Thread placement for a batch's terminal failure notice.
@@ -5366,15 +5367,16 @@ fn handle_prompt_result(
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
                 // delays the visible failure. Dead-letter immediately and tell
-                // the user to re-authenticate the CLI.
+                // the user to restore provider credentials before re-sending.
                 tracing::warn!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
                     "dead-lettering batch immediately — non-retryable auth error"
                 );
                 let content = "⚠️ I couldn't process the last request: authentication failed. \
-                    Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
-                    and then re-send."
+                    Open the agent's settings in Buzz and sign in to its provider or update \
+                    its credentials. For CLI-based agents, re-authenticate the CLI (e.g. run \
+                    `claude /login` or `codex login`). Restart the agent, then re-send your request."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
@@ -11161,18 +11163,9 @@ mod edit_native_steer_tests {
 
 #[cfg(test)]
 mod error_outcome_emission_tests {
-    //! Pins the policy that error-class outcomes surface to the activity feed
-    //! and never to the channel:
-    //!
-    //! - Channel silence is enforced *structurally* — `handle_prompt_result`
-    //!   takes no relay handle, so it has no way to post a channel message. A
-    //!   future re-introduction of channel notices would have to add the relay
-    //!   parameter back, which these tests' construction would then refuse to
-    //!   compile against.
-    //! - Feed coverage is the regression-prone half and is asserted at runtime:
-    //!   each error outcome must emit exactly one `turn_error` observer event.
-    //!   If any branch drops its `emit_turn_error` call, the matching test goes
-    //!   red.
+    //! Error outcomes emit `turn_error` when an observer is present. Terminal
+    //! failures also post recovery notices through the relay independently of
+    //! observer publishing; retryable failures retain their queued batch.
 
     use super::*;
     use crate::acp::{AcpClient, AcpError};
@@ -12705,6 +12698,26 @@ mod error_outcome_emission_tests {
     // ── is_auth_error classification ───────────────────────────────────────
 
     #[test]
+    fn is_auth_error_recognizes_structured_code_independently_of_wording() {
+        for message in [
+            "",
+            "Databricks authentication required",
+            "opaque provider diagnostic",
+        ] {
+            for code in [-32001, -32000, -32002, -32601] {
+                assert_eq!(
+                    is_auth_error(&acp::AcpError::AgentError {
+                        code,
+                        message: message.into(),
+                    }),
+                    code == -32001,
+                    "code {code}, message {message:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn is_auth_error_matches_reauthenticate_message() {
         let e = acp::AcpError::AgentError {
             code: -32000,
@@ -12762,8 +12775,51 @@ mod error_outcome_emission_tests {
     /// rather than after 10 futile retries.
     #[tokio::test]
     async fn auth_error_dead_letters_immediately_without_requeueing() {
+        for (code, message) in [
+            (
+                -32001,
+                "llm auth: no cached Databricks token; run `buzz-agent auth databricks` first",
+            ),
+            (-32001, "llm auth: Databricks authentication required"),
+            (-32001, "opaque provider diagnostic: secret-token"),
+            (
+                -32000,
+                "OAuth access token has expired. Re-authenticate to continue.",
+            ),
+            (-32000, "Internal error: API Error: 401"),
+        ] {
+            assert_auth_error_posts_notice(code, message).await;
+        }
+    }
+
+    async fn assert_auth_error_posts_notice(code: i64, message: &str) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let (notice_tx, mut notice_rx) = mpsc::channel(1);
+        let app = axum::Router::new().route(
+            "/events",
+            axum::routing::post(
+                move |axum::Json(notice): axum::Json<nostr::Event>| async move {
+                    notice_tx.send(notice).await.unwrap();
+                    axum::Json(serde_json::json!({}))
+                },
+            ),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
         let keys = nostr::Keys::generate();
+        let root = nostr::EventId::from_byte_array([0xaa; 32]);
+        let parent = nostr::EventId::from_byte_array([0xbb; 32]);
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .tags([
+                nostr::Tag::parse(["e", &root.to_hex(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["e", &parent.to_hex(), "", "reply"]).unwrap(),
+            ])
             .sign_with_keys(&keys)
             .unwrap();
         let channel_id = uuid::Uuid::new_v4();
@@ -12781,9 +12837,8 @@ mod error_outcome_emission_tests {
         };
 
         let auth_error = acp::AcpError::AgentError {
-            code: -32000,
-            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
-                .to_string(),
+            code,
+            message: message.into(),
         };
 
         let agent = dummy_agent(0).await;
@@ -12804,6 +12859,7 @@ mod error_outcome_emission_tests {
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
         let config = test_config();
+        assert!(!config.relay_observer);
         let mut heartbeat_in_flight = false;
         let removed_channels = std::collections::HashSet::new();
         let mut crash_history = vec![SlotCircuit {
@@ -12831,7 +12887,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             None,
-            None,
+            Some(&rest),
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -12845,6 +12901,36 @@ mod error_outcome_emission_tests {
             0,
             "auth error must dead-letter immediately — no events should be pending"
         );
+        assert!(
+            pool.agents_mut()[0].is_some(),
+            "healthy process remains reusable"
+        );
+        assert!(
+            respawn_tasks.is_empty(),
+            "authentication must not cause respawn"
+        );
+
+        // Exercise the production signed-message path with no Activity observer.
+        let received = tokio::time::timeout(Duration::from_secs(3), notice_rx.recv()).await;
+        server.abort();
+        let _ = server.await;
+        let notice = received.expect("notice posted on first failure").unwrap();
+        notice.verify().unwrap();
+        assert_eq!(notice.pubkey, rest.keys.public_key());
+        assert_eq!(notice.kind, Kind::Custom(9));
+        assert_eq!(
+            notice.content,
+            "⚠️ I couldn't process the last request: authentication failed. Open the agent's settings in Buzz and sign in to its provider or update its credentials. For CLI-based agents, re-authenticate the CLI (e.g. run `claude /login` or `codex login`). Restart the agent, then re-send your request."
+        );
+        let tags = serde_json::to_value(&notice.tags).unwrap();
+        assert!(tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tag| { tag[0] == "h" && tag[1] == channel_id.to_string() }));
+        let threading = queue::parse_thread_tags(&notice);
+        assert_eq!(threading.root_event_id, Some(root.to_hex()));
+        assert_eq!(threading.parent_event_id, Some(parent.to_hex()));
     }
 
     /// Run a model-not-found turn failure for `event` through
@@ -13134,6 +13220,19 @@ mod error_outcome_emission_tests {
             code: -32000,
             message: "Usage credits required for 1M context".to_string(),
         })
+        .await;
+        assert_application_error_is_requeued(acp::AcpError::AgentError {
+            code: -32000,
+            message: "Temporary provider failure".into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn non_auth_transport_error_is_requeued() {
+        assert_application_error_is_requeued(acp::AcpError::Io(std::io::Error::other(
+            "connection reset",
+        )))
         .await;
     }
 
