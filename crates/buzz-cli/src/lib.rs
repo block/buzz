@@ -434,6 +434,11 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// Publish even when the message content is empty or whitespace-only.
+        /// Without this, empty content is rejected to catch upstream pipeline
+        /// failures that would otherwise publish a ghost message.
+        #[arg(long, default_value_t = false)]
+        allow_empty: bool,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
