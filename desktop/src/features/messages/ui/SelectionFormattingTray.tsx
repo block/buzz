@@ -65,6 +65,12 @@ function getTrayPosition(
   const { selection } = editor.state;
   if (selection.empty || selection.from === selection.to) return null;
 
+  // IME composition (Korean/Hangul, Japanese, Chinese preedit) marks the
+  // composing span as a non-empty selection, which popped this tray on every
+  // keystroke and caused per-key re-rendering overhead. Hide while composing.
+  if (editor.isDestroyed) return null;
+  if ((editor.view as { composing?: boolean }).composing) return null;
+
   const selectedText = editor.state.doc.textBetween(
     selection.from,
     selection.to,
