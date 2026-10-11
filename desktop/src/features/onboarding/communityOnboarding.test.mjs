@@ -83,6 +83,32 @@ test("same-relay ingress resumes rather than replacing progress", () => {
   assert.equal(resumed.inviteCode, "new-code");
 });
 
+test("same-relay membership recovery restarts at invite claim", () => {
+  const storage = createMemoryStorage();
+  const deniedConnect = startCommunityOnboarding(
+    { source: "first-community", relayUrl: "wss://relay.example" },
+    storage,
+    new Date("2026-07-16T00:00:00Z"),
+  );
+  assert.equal(deniedConnect.stage, "connecting");
+
+  const recovered = startCommunityOnboarding(
+    {
+      source: "membership-recovery",
+      relayUrl: "wss://relay.example/",
+      inviteCode: "  same-relay-code  ",
+      policyReceipt: "policy-receipt",
+    },
+    storage,
+    new Date("2026-07-16T00:01:00Z"),
+  );
+
+  assert.equal(recovered.id, deniedConnect.id);
+  assert.equal(recovered.stage, "claiming");
+  assert.equal(recovered.inviteCode, "same-relay-code");
+  assert.equal(recovered.policyReceipt, "policy-receipt");
+});
+
 test("stale asynchronous updates cannot mutate a replacement transaction", () => {
   const storage = createMemoryStorage();
   const original = startCommunityOnboarding(
