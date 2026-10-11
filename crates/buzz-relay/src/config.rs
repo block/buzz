@@ -339,6 +339,10 @@ pub struct Config {
     /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
     /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
+    /// Interpreter for the git pre-receive hook's shebang (`BUZZ_BASH_PATH`).
+    /// `None` keeps `#!/usr/bin/env bash`; set an absolute path to bash on
+    /// hosts without `/usr/bin/env`, such as minimal containers.
+    pub git_hook_interpreter: Option<String>,
     /// Parent directory for process-isolated immutable pack cache sessions.
     pub git_pack_cache_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
@@ -577,6 +581,26 @@ fn ensure_git_repo_path(
     raw: impl Into<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, ConfigError> {
     ensure_git_path("BUZZ_GIT_REPO_PATH", raw)
+}
+
+/// Parse `BUZZ_BASH_PATH`. Unset or blank means "use `/usr/bin/env bash`".
+///
+/// The value becomes the hook's shebang line, so it must be an absolute path
+/// and must not contain a line break (which would inject script lines).
+fn parse_git_hook_interpreter(raw: Option<String>) -> Result<Option<String>, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let interpreter = raw.trim();
+    if interpreter.is_empty() {
+        return Ok(None);
+    }
+    if !interpreter.starts_with('/') || interpreter.contains(['\n', '\r']) {
+        return Err(ConfigError::InvalidValue(format!(
+            "BUZZ_BASH_PATH must be an absolute path on a single line, got {raw:?}"
+        )));
+    }
+    Ok(Some(interpreter.to_string()))
 }
 
 fn ensure_git_path(
@@ -1045,6 +1069,8 @@ impl Config {
         let git_repo_path = ensure_git_repo_path(
             std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
         )?;
+        let git_hook_interpreter =
+            parse_git_hook_interpreter(std::env::var("BUZZ_BASH_PATH").ok())?;
         let git_pack_cache_path = ensure_git_path(
             "BUZZ_GIT_PACK_CACHE_PATH",
             std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
@@ -1419,6 +1445,7 @@ impl Config {
             audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
+            git_hook_interpreter,
             git_pack_cache_path,
             git_max_pack_bytes,
             git_max_repo_bytes,
@@ -1471,6 +1498,33 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_hook_interpreter_unset_or_blank_keeps_default() {
+        assert_eq!(parse_git_hook_interpreter(None).unwrap(), None);
+        assert_eq!(parse_git_hook_interpreter(Some("  ".into())).unwrap(), None);
+    }
+
+    #[test]
+    fn git_hook_interpreter_accepts_absolute_path() {
+        assert_eq!(
+            parse_git_hook_interpreter(Some(" /run/current-system/sw/bin/bash ".into())).unwrap(),
+            Some("/run/current-system/sw/bin/bash".to_string())
+        );
+    }
+
+    #[test]
+    fn git_hook_interpreter_rejects_relative_or_multiline_values() {
+        for raw in ["bash", "/bin/bash\necho injected", "/bin/bash\r\nexit 0"] {
+            assert!(
+                matches!(
+                    parse_git_hook_interpreter(Some(raw.into())),
+                    Err(ConfigError::InvalidValue(_))
+                ),
+                "{raw:?} must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn klipy_config_debug_redacts_the_api_key() {

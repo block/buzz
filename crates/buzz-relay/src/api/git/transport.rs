@@ -1202,7 +1202,7 @@ pub async fn upload_pack(
 ///    was hydrated from; it's the CAS predicate at step 7 below, which
 ///    is what makes `Inv_RefDerivedFromParent` structural rather than a
 ///    code-review property.
-/// 3. `install_hook(repo.path())` — drop the pre-receive script + chmod.
+/// 3. `install_hook(repo.path(), ..)` — drop the pre-receive script + chmod.
 ///    Same script, same env contract, same policy callback as today;
 ///    only the on-disk path is ephemeral.
 /// 4. Run `receive-pack --stateless-rpc` against the tempdir. The hook
@@ -1259,10 +1259,12 @@ pub async fn receive_pack(
     // Install the pre-receive hook into the ephemeral workspace. The
     // hook script is fixed per-deployment; per-push state (callback URL,
     // HMAC secret, pusher pubkey) rides in env at exec time.
-    install_hook(repo.path()).await.map_err(|e| {
-        error!(error = %e, "install pre-receive hook into hydrated workspace");
-        (StatusCode::INTERNAL_SERVER_ERROR, "git hook install failed").into_response()
-    })?;
+    install_hook(repo.path(), state.config.git_hook_interpreter.as_deref())
+        .await
+        .map_err(|e| {
+            error!(error = %e, "install pre-receive hook into hydrated workspace");
+            (StatusCode::INTERNAL_SERVER_ERROR, "git hook install failed").into_response()
+        })?;
 
     // Build hook env vars for the pre-receive hook.
     let hook_url = format!(
