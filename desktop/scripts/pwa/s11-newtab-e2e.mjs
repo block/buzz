@@ -48,14 +48,18 @@ check("a new tab opened", !!tab);
 if (tab) {
   await tab.waitForLoadState();
   const u = tab.url();
-  check("new tab url is same origin + #/channels/<id>", u.startsWith(new URL(APP).origin) && u.includes(`#/channels/${info.channelId}`), u);
+  check("new tab url is same origin + ?popout=<label> + #/channels/<id>", u.startsWith(new URL(APP).origin) && u.includes(`#/channels/${info.channelId}`) && /[?&]popout=popout-thread-/.test(u), u);
   const unlock = await tab.locator('[data-testid="web-unlock-nip07"]').count().catch(() => 0);
   await tab.waitForTimeout(500);
   const needsUnlock = await tab.locator('[data-testid="web-unlock-nip07"]').count();
   if (needsUnlock) await tab.click('[data-testid="web-unlock-nip07"]');
   console.log("new tab showed unlock screen:", needsUnlock > 0);
-  await tab.waitForSelector('[data-testid="sidebar-channel-content"] >> text=general', { timeout: 30000 });
-  check("new tab reaches the channel list", true);
+  await tab.waitForSelector('[data-testid="message-composer"], textarea, [contenteditable="true"]', { timeout: 30000 });
+  check("new tab shows the channel composer", true);
+  await tab.waitForTimeout(1500);
+  check("new tab has NO sidebar (channel list)", (await tab.locator('[data-testid="sidebar-channel-content"]').count()) === 0);
+  check("new tab has no sidebar element at all", (await tab.locator('[data-sidebar="sidebar"]').count()) === 0);
+  check("new tab shows channel header", (await tab.locator('text=general').count()) > 0);
   check("new tab no error boundary", (await tab.getByText("Something went wrong").count()) === 0);
   // thread route builder
   const href = await tab.evaluate(async (id) => {
