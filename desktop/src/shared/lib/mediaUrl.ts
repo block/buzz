@@ -310,6 +310,9 @@ export function mediaProxyUrl(port: number, mediaPath: string): string {
  * Falls back to buzz-media:// if the proxy port isn't available yet.
  */
 export function rewriteRelayUrl(url: string): string {
+  // Web build: there is no localhost proxy (and no buzz-media:// scheme). Relay media needs an Authorization header, so the
+  // URL is left as-is and loaded via fetch() + blob URL by `useRelayMediaSrc`.
+  if (import.meta.env?.VITE_BUZZ_PLATFORM === "web") return url;
   const m = RELAY_MEDIA_RE.exec(url);
   if (!m) return url;
 
@@ -336,4 +339,9 @@ export function rewriteRelayUrl(url: string): string {
   }
 
   return `buzz-media://localhost/media/${m[1]}`;
+}
+
+/** True when `url` has the relay media shape (`/media/{64-hex}.{ext}`), regardless of host. */
+export function looksLikeRelayMediaUrl(url: string | undefined): boolean {
+  return !!url && RELAY_MEDIA_RE.test(url);
 }

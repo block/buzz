@@ -26,27 +26,43 @@ export default defineConfig(({ command }) => ({
       name: "buzz-web-html",
       configureServer(server) {
         // DEV-only same-origin proxy for cross-origin relays: /__relay/<encoded http(s) base>/<path> (POST /query, /events).
+        // Also GET/HEAD /media/<sha>.<ext> (auth-gated images) and PUT /upload | /media/upload (attachments).
         server.middlewares.use(async (req, res, next) => {
-          const m = req.url?.match(/^\/__relay\/([^/]+)(\/(?:query|events))$/);
-          if (!m || req.method !== "POST") return next();
+          const m = req.url?.match(
+            /^\/__relay\/([^/]+)(\/(?:query|events|upload|media\/upload|media\/[\da-f]{64}(?:\.thumb)?\.[a-z0-9]{2,5}))(?:\?.*)?$/i,
+          );
+          const method = req.method ?? "";
+          const allowed = m
+            ? m[2] === "/query" || m[2] === "/events"
+              ? method === "POST"
+              : /upload$/.test(m[2])
+                ? method === "PUT"
+                : method === "GET" || method === "HEAD"
+            : false;
+          if (!m || !allowed) return next();
           try {
             const base = decodeURIComponent(m[1]);
             if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error("bad relay base");
+            const hasBody = method === "POST" || method === "PUT";
             const chunks: Buffer[] = [];
-            for await (const c of req) chunks.push(c as Buffer);
-            const headers: Record<string, string> = {
-              "content-type": String(req.headers["content-type"] ?? "application/json"),
-            };
-            if (req.headers.authorization)
-              headers.authorization = String(req.headers.authorization);
+            if (hasBody) for await (const c of req) chunks.push(c as Buffer);
+            const headers: Record<string, string> = {};
+            for (const h of ["content-type", "authorization", "x-sha-256", "range"])
+              if (req.headers[h]) headers[h] = String(req.headers[h]);
+            if (hasBody && !headers["content-type"])
+              headers["content-type"] = "application/json";
             const r = await fetch(base + m[2], {
-              method: "POST",
+              method,
               headers,
-              body: Buffer.concat(chunks),
+              body: hasBody ? Buffer.concat(chunks) : undefined,
             });
             res.statusCode = r.status;
             res.setHeader("content-type", r.headers.get("content-type") ?? "application/json");
-            res.end(Buffer.from(await r.arrayBuffer()));
+            for (const h of ["content-range", "accept-ranges", "cache-control", "etag"]) {
+              const v = r.headers.get(h);
+              if (v) res.setHeader(h, v);
+            }
+            res.end(method === "HEAD" ? undefined : Buffer.from(await r.arrayBuffer()));
           } catch (e) {
             res.statusCode = 502;
             res.end(JSON.stringify({ error: `dev proxy: ${e instanceof Error ? e.message : e}` }));

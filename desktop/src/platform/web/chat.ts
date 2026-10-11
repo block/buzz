@@ -367,14 +367,12 @@ async function sendChannelMessage(a: Args) {
       tags.push(["p", l]);
     }
   }
-  // S1: media (imeta), custom-emoji, mention-ref, link-preview and sent-from-thread tags are not ported yet (text/mentions/threads only).
-  if (
-    a?.mediaTags?.length ||
-    a?.emojiTags?.length ||
-    a?.linkPreviewTags?.length
-  )
+  // imeta (attachments) pass through so uploaded images carry dim/blurhash/thumb; emoji and link-preview tags are still dropped on web.
+  for (const t of a?.mediaTags ?? [])
+    if (Array.isArray(t) && t[0] === "imeta") tags.push(t);
+  if (a?.emojiTags?.length || a?.linkPreviewTags?.length)
     console.warn(
-      "[web] send_channel_message: media/emoji/link-preview tags not supported in S1; dropped",
+      "[web] send_channel_message: emoji/link-preview tags not supported yet; dropped",
     );
   for (const t of a?.mentionTags ?? []) tags.push(t);
   if (a?.sentFromThreadTag) tags.push(a.sentFromThreadTag);

@@ -8,10 +8,17 @@ import {
   relayWsUrl,
   setAppliedRelay,
 } from "./relayConfig";
+import {
+  pickFilesFromBrowser,
+  uploadRelayMedia,
+} from "./relayMedia";
 import { getSigner, signOutSigner, signerPubkey } from "./signer";
 
 type Args = Record<string, any> | undefined;
-type Handler = (args: Args) => unknown | Promise<unknown>;
+type Handler = (
+  args: Args,
+  options?: { headers?: Record<string, string> },
+) => unknown | Promise<unknown>;
 
 function identityInfo() {
   const pubkey = signerPubkey();
@@ -127,6 +134,42 @@ export const handlers: Record<string, Handler> = {
   get_baked_build_env: () => [],
   get_baked_build_env_keys: () => [],
   get_media_proxy_port: () => 0,
+  // media upload (PUT /upload with a Blossom t=upload token via the signer; no native dialogs/IPC)
+  upload_media_bytes: (a) =>
+    uploadRelayMedia(Uint8Array.from(a?.data ?? []), { filename: a?.filename }),
+  upload_media_bytes_raw: (a, o) => {
+    const h = o?.headers?.["x-buzz-filename"];
+    let filename: string | undefined;
+    try {
+      if (h) filename = new TextDecoder().decode(Uint8Array.from(atob(h.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0)));
+    } catch {
+      /* ignore bad header */
+    }
+    return uploadRelayMedia(a as unknown as Uint8Array, { filename });
+  },
+  pick_and_upload_media: async () => {
+    const files = await pickFilesFromBrowser();
+    const out = [];
+    for (const f of files)
+      out.push(
+        await uploadRelayMedia(new Uint8Array(await f.arrayBuffer()), {
+          filename: f.name,
+          mime: f.type,
+        }),
+      );
+    return out;
+  },
+  pick_and_upload_image: async () => {
+    const [f] = await pickFilesFromBrowser("image/*");
+    return f
+      ? uploadRelayMedia(new Uint8Array(await f.arrayBuffer()), {
+          filename: f.name,
+          mime: f.type,
+        })
+      : null;
+  },
+  cancel_media_upload: () => undefined,
+  release_media_upload: () => undefined,
   get_legacy_workspace_storage: () => ({
     workspaces: null,
     activeWorkspaceId: null,

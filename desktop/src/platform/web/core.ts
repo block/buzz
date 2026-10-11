@@ -14,6 +14,7 @@ export const convertFileSrc = (p: string) => p;
 export async function invoke<T = unknown>(
   cmd: string,
   args?: Record<string, any>,
+  options?: { headers?: Record<string, string> },
 ): Promise<T> {
   if (import.meta.env.DEV) console.info(`[invoke] ${cmd}`);
   switch (cmd) {
@@ -32,7 +33,7 @@ export async function invoke<T = unknown>(
     throw nativeOnly(cmd);
   }
   try {
-    return (await h(args)) as T;
+    return (await h(args, options)) as T;
   } catch (e) {
     if (import.meta.env.DEV)
       console.warn(

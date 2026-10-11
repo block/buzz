@@ -23,6 +23,11 @@ import { cn } from "@/shared/lib/cn";
 import { parseEntityLink } from "@/shared/lib/entityLink";
 import { parseSupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import {
+  useNearViewport,
+  useRelayMediaSrc,
+} from "@/shared/lib/useRelayMediaSrc";
+import { RelayMediaPlaceholder } from "@/shared/ui/markdown/RelayMediaPlaceholder";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
@@ -1439,12 +1444,32 @@ export function createMarkdownComponents(
       const { imetaByUrl } = useMarkdownRuntime();
       const entry = src ? imetaByUrl?.get(src) : undefined;
       const isVideo = src ? isVideoMedia(src, entry?.m) : false;
+      const rewrittenSrc = src ? rewriteRelayUrl(src) : src;
+      // Web: auth-gated relay images are fetched with a signed token and shown as blob: URLs (identity on desktop / videos).
+      const { near, ref: nearRef } = useNearViewport();
+      const relayMedia = useRelayMediaSrc(
+        isVideo ? undefined : rewrittenSrc,
+        near,
+      );
       if (!interactive) {
         const fallbackLabel = isVideo ? "Video attachment" : "Image attachment";
         return <span>{alt?.trim() || fallbackLabel}</span>;
       }
 
-      const resolvedSrc = src ? rewriteRelayUrl(src) : src;
+      const resolvedSrc = isVideo ? rewrittenSrc : relayMedia.src;
+      if (!isVideo && relayMedia.state !== "ready") {
+        return (
+          <span data-block-media="" className="block min-w-0 max-w-full">
+            <RelayMediaPlaceholder
+              dim={entry?.dim}
+              error={relayMedia.state === "error" ? relayMedia.error : null}
+              label="Image attachment"
+              onRetry={relayMedia.retry}
+              placeholderRef={nearRef}
+            />
+          </span>
+        );
+      }
       if (isVideo && src && resolvedSrc) {
         return (
           <span
@@ -1470,7 +1495,11 @@ export function createMarkdownComponents(
             dim={entry?.dim}
             resolvedSrc={resolvedSrc}
             src={src}
-            thumbSrc={entry?.thumb ? rewriteRelayUrl(entry.thumb) : undefined}
+            thumbSrc={
+              entry?.thumb && relayMedia.src === rewrittenSrc
+                ? rewriteRelayUrl(entry.thumb)
+                : undefined
+            }
           />
         </span>
       );
