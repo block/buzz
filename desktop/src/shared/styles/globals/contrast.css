@@ -1,0 +1,83 @@
+/*
+ * Interface contrast — how loudly the app's chrome announces itself.
+ *
+ * Every rule here derives from tokens the palette already defines
+ * (`--background`, `--secondary`, `--muted-foreground`) rather than hardcoding
+ * colors, so a contrast step behaves the same in every theme — including the
+ * Shiki-derived palettes built at runtime. Nothing here knows a hue.
+ *
+ * WHY `!important`:
+ *
+ * ThemeProvider applies the active palette as ~49 INLINE custom properties on
+ * <html> (see adaptive-theme.ts building the var map and `root.style
+ * .setProperty` in ThemeProvider). A normal inline declaration outranks every
+ * author rule no matter its specificity or layer, so the usual escape hatch
+ * used elsewhere in this codebase — an unlayered rule beating a layered one —
+ * cannot reach these tokens. Author `!important` is the only step above a
+ * normal inline declaration in the cascade, and that is exactly the intent
+ * here: contrast is a deliberate user override applied on top of whatever
+ * palette the theme computed.
+ *
+ * `data-interface-contrast` is set on <html> by contrastPreference.ts before
+ * React mounts.
+ */
+
+/*
+ * Low — the quiet mode. Borders dissolve into the surface behind them, the
+ * sidebar stops reading as a separate panel, and row states become
+ * suggestions rather than filled blocks. Text color is deliberately
+ * untouched: this removes chrome, never legibility.
+ */
+:root[data-interface-contrast="low"] {
+  --border: var(--background) !important;
+  --sidebar-border: var(--background) !important;
+  --sidebar: var(--background) !important;
+  --sidebar-background: var(--background) !important;
+  --card: var(--background) !important;
+
+  /* A neutral lift replaces the saturated active pill. */
+  --sidebar-active: var(--secondary) !important;
+  --sidebar-active-foreground: var(--secondary-foreground) !important;
+
+  --sidebar-row-subtle-active-surface: rgb(0 0 0 / 4%) !important;
+  --buzz-hover-surface: rgb(0 0 0 / 2.5%) !important;
+}
+
+:root[data-interface-contrast="low"].dark {
+  --sidebar-row-subtle-active-surface: rgb(255 255 255 / 8%) !important;
+  --buzz-hover-surface: rgb(255 255 255 / 4%) !important;
+}
+
+:root[data-interface-contrast="low"][data-buzz-sidebar] {
+  --sidebar-row-active-surface: rgb(0 0 0 / 6%) !important;
+}
+
+:root[data-interface-contrast="low"][data-buzz-sidebar].dark {
+  --sidebar-row-active-surface: rgb(255 255 255 / 10%) !important;
+}
+
+/*
+ * High — separators and row states become unambiguous. `--muted-foreground`
+ * is the palette's "legible but secondary" token, which as a border reads as
+ * a clear line in both light and dark without inventing a color.
+ */
+:root[data-interface-contrast="high"] {
+  --border: var(--muted-foreground) !important;
+  --sidebar-border: var(--muted-foreground) !important;
+
+  --sidebar-row-subtle-active-surface: rgb(0 0 0 / 12%) !important;
+  --buzz-hover-surface: rgb(0 0 0 / 8%) !important;
+}
+
+:root[data-interface-contrast="high"].dark {
+  --sidebar-row-subtle-active-surface: rgb(255 255 255 / 24%) !important;
+  --buzz-hover-surface: rgb(255 255 255 / 12%) !important;
+}
+
+:root[data-interface-contrast="high"][data-buzz-sidebar] {
+  --sidebar-row-active-surface: rgb(255 255 255 / 92%) !important;
+}
+
+:root[data-interface-contrast="high"][data-buzz-sidebar].dark {
+  --sidebar-row-active-surface: rgb(255 255 255 / 28%) !important;
+}
