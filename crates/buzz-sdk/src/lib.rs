@@ -19,6 +19,8 @@ pub mod nip_oa;
 
 pub use builders::*;
 
+/// Re-export the structured agent job result contract.
+pub use buzz_core::job;
 /// Re-export kind constants so consumers don't need buzz-core directly.
 pub use buzz_core::kind;
 
