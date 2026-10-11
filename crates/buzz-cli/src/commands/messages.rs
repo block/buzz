@@ -134,12 +134,11 @@ fn resolve_names_to_pubkeys(
             .unwrap_or_default()
         {
             [pubkey] => resolved.push(pubkey.clone()),
-            [] if has_explicit_mentions => {}
-            [] => {
-                return Err(CliError::Usage(format!(
-                    "mention '@{name}' does not match a current channel member; retry with --mention <pubkey>"
-                )))
-            }
+            // A bare `@token` in prose is not necessarily a mention. Failing the
+            // whole send over one dropped the entire message (#7054), so leave it
+            // as the literal text it already is. Ambiguity below still hard-fails:
+            // there a real member was meant and we cannot tell which one.
+            [] => {}
             _ if has_explicit_mentions => {}
             candidates => {
                 return Err(CliError::Usage(format!(
@@ -155,8 +154,8 @@ fn resolve_names_to_pubkeys(
 /// Resolve mention text against the channel membership snapshot.
 ///
 /// Returns both the current member set and uniquely name-resolved pubkeys.
-/// Lookup failures are fatal when mention processing is requested: publishing
-/// visible mention text without its intended `p` tag is worse than not sending.
+/// Names that match no member are left as plain text; an ambiguous name is
+/// fatal unless the caller supplied an explicit identity.
 async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
@@ -1471,7 +1470,21 @@ mod tests {
             resolve_names_to_pubkeys(&names, &profiles, true).unwrap(),
             Vec::<String>::new()
         );
-        assert!(resolve_names_to_pubkeys(&names, &profiles, false).is_err());
+    }
+
+    #[test]
+    fn unmatched_at_token_in_prose_does_not_abort_the_send() {
+        // Regression for #7054: a bare `@token` in ordinary prose used to fail
+        // the whole send, so nothing was delivered at all.
+        let profiles = std::collections::HashMap::from([("alice".into(), vec![PK_VALID_A.into()])]);
+        let names = extract_at_mentions_with_known(
+            "@alice this mentions @-mention which is not a member",
+            &["alice"],
+        );
+        assert_eq!(
+            resolve_names_to_pubkeys(&names, &profiles, false).unwrap(),
+            vec![PK_VALID_A]
+        );
     }
 
     #[test]
@@ -1498,7 +1511,6 @@ mod tests {
             resolve_names_to_pubkeys(&names, &profiles, true).unwrap(),
             vec![PK_VALID_A]
         );
-        assert!(resolve_names_to_pubkeys(&names, &profiles, false).is_err());
     }
 
     #[test]
