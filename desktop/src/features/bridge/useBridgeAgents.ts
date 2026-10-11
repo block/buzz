@@ -2,10 +2,11 @@
 import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 
+import { prioritizeDecrypt } from "@/platform/web/signer/instrument";
 import { relayClient } from "@/shared/api/relayClient";
 import { nip44DecryptFromSelf, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
-import { BRIDGE_KIND, BRIDGE_TAG } from "./protocol";
+import { BRIDGE_KIND, BRIDGE_TAG, D_AGENTS, D_BROWSER_SESSIONS, D_HEARTBEAT, D_KEY, nowS } from "./protocol";
 import { BridgeCommander } from "./commander";
 import { BridgeWebClient, type BridgeState } from "./webClient";
 
@@ -46,6 +47,25 @@ const sessionCache = {
   },
 };
 
+const SNAP_PREFIX = "buzz-bridge-lastlist:";
+const snapCache = (pubkey: string) => ({
+  snapGet() {
+    try {
+      const v = JSON.parse(localStorage.getItem(SNAP_PREFIX + pubkey) || "null");
+      return v && Array.isArray(v.snapshot?.agents) && typeof v.ts === "number" ? v : null;
+    } catch {
+      return null;
+    }
+  },
+  snapPut(snapshot: unknown, ts: number) {
+    try {
+      localStorage.setItem(SNAP_PREFIX + pubkey, JSON.stringify({ snapshot, ts }));
+    } catch {
+      /* storage denied */
+    }
+  },
+});
+
 export function useBridgeAgents(
   pubkey: string | undefined,
 ): BridgeState & {
@@ -61,8 +81,12 @@ export function useBridgeAgents(
   React.useEffect(() => {
     if (!enabled || !pubkey) return;
     const c = new BridgeWebClient(pubkey, {
-      decryptFromSelf: nip44DecryptFromSelf,
+      decryptFromSelf: (ct: string) => {
+        prioritizeDecrypt(ct); // the key wrap gates the whole list: don't queue it behind settings decrypts
+        return nip44DecryptFromSelf(ct);
+      },
       ...sessionCache,
+      ...snapCache(pubkey),
     });
     setClient(c);
     setCommander(
@@ -83,43 +107,56 @@ export function useBridgeAgents(
     );
     (window as unknown as { __buzzBridgeStats?: unknown }).__buzzBridgeStats =
       c.stats; // e2e/debug counters
-    const filter = {
-      kinds: [BRIDGE_KIND],
-      authors: [pubkey],
-      "#t": [BRIDGE_TAG],
-    };
+    const base = { kinds: [BRIDGE_KIND], authors: [pubkey], "#t": [BRIDGE_TAG] };
+    // CORE = the four replaceable heads (key wrap, agent snapshot, heartbeat, browser sessions): fetched by d-tag so they can
+    // never be pushed out of a `limit` window by the flood of transcript/result events, and they are all that's needed to draw the list.
+    const core = { ...base, "#d": [D_KEY, D_AGENTS, D_HEARTBEAT, D_BROWSER_SESSIONS] };
+    // EXTRA = transcript chunks, results, shots: decrypted locally (no signer cost) but only needed after the list is up.
+    // Bounded to the last 15 minutes and 60 events so a busy desktop can't make a reload replay hundreds of chunks.
+    const extra = () => ({ ...base, since: nowS() - 15 * 60, limit: 60 });
     let unsub: (() => Promise<void>) | null = null;
+    let unsubExtra: (() => Promise<void>) | null = null;
     let cancelled = false;
     let retry: number | null = null;
     let attempt = 0;
     const onEvent = (e: RelayEvent) => void c.ingest(e);
-    // Backfill (key first so payloads decrypt locally), then go live. Both are retried: a swallowed failure here
-    // used to leave the panel frozen after a reload until the next full refresh.
-    const backfill = () =>
+    const keyFirst = (evs: RelayEvent[]) =>
+      [...evs].sort(
+        (a, b) =>
+          (b.tags.some((t) => t[1]?.endsWith("/key")) ? 1 : 0) -
+          (a.tags.some((t) => t[1]?.endsWith("/key")) ? 1 : 0),
+      );
+    // Backfill is retried/redone on reconnect: a swallowed failure used to leave the panel frozen after a reload.
+    const backfillCore = () =>
       relayClient
-        .fetchEvents({ ...filter, limit: 150 })
+        .fetchEvents({ ...core, limit: 10 })
         .then((evs) => {
-          const sorted = [...evs].sort(
-            (a, b) =>
-              (a.tags.some((t) => t[1]?.endsWith("/key")) ? -1 : 0) -
-              (b.tags.some((t) => t[1]?.endsWith("/key")) ? -1 : 0),
-          );
-          for (const e of sorted) void c.ingest(e);
+          for (const e of keyFirst(evs)) void c.ingest(e);
         })
         .catch((e) => console.warn("[bridge] backfill failed:", e));
+    const backfillExtra = () =>
+      relayClient
+        .fetchEvents(extra())
+        .then((evs) => {
+          for (const e of evs) void c.ingest(e);
+        })
+        .catch((e) => console.warn("[bridge] extra backfill failed:", e));
+    const backfill = () => backfillCore().then(backfillExtra);
     const goLive = () => {
       if (cancelled) return;
       relayClient
         // limit>0: the relay replays recent events at subscribe time, atomically with going live (no gap).
-        .subscribeLive({ ...filter, limit: 150 }, onEvent)
+        .subscribeLive({ ...core, limit: 10 }, onEvent)
         .then((u) => {
           attempt = 0;
           if (cancelled) void u();
           else {
             unsub = u;
-            // Events published between the first backfill and the subscription going live (slow signer/AUTH after a
-            // reload can take many seconds) would otherwise be missed: backfill again now that live is on.
-            void backfill();
+            void backfillCore(); // close the gap between the first backfill and live going on
+            relayClient
+              .subscribeLive({ ...base, since: nowS() - 60, limit: 60 }, onEvent)
+              .then((u2) => (cancelled ? void u2() : (unsubExtra = u2)))
+              .catch(() => {});
           }
         })
         .catch((e) => {
@@ -141,6 +178,7 @@ export function useBridgeAgents(
       if (retry !== null) window.clearTimeout(retry);
       window.clearInterval(t);
       void unsub?.();
+      void unsubExtra?.();
       setClient(null);
       setCommander(null);
     };
@@ -172,4 +210,5 @@ const EMPTY: BridgeState = {
   results: new Map(),
   browserSessions: [],
   shots: new Map(),
+  refreshing: false,
 };

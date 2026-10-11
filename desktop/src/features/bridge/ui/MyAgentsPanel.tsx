@@ -50,6 +50,7 @@ export function MyAgentsPanel() {
       data-testid="my-agents"
       data-presence={b.presence}
       data-key-state={b.keyState}
+      data-refreshing={b.refreshing ? "1" : "0"}
       style={{ padding: 16 }}
     >
       <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>My agents</h2>
@@ -65,6 +66,7 @@ export function MyAgentsPanel() {
           (b.keyState === "decrypting"
             ? "Connecting to your desktop…"
             : "Waiting for your desktop…")}
+        {b.refreshing && b.presence !== "unknown" && " · refreshing…"}
         {b.keyState === "failed" &&
           " · couldn't unlock the bridge key (approve the request in your signer)"}
       </p>

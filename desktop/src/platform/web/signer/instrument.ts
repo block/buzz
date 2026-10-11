@@ -375,6 +375,16 @@ function pump() {
   for (const q of queues) for (const j of q) if (j.gateUntil !== null && !bootReady) next = Math.min(next, j.gateUntil);
   if (next !== Infinity) pumpTimer = setTimeout(pump, Math.max(50, next - Date.now()));
 }
+/**
+ * Ciphertexts whose decrypt is on the critical path of a visible screen (e.g. the bridge key wrap for My agents): they run at
+ * priority 1 (like relay AUTH), skip the boot hold and the crypto in-flight cap, instead of queueing behind settings decrypts.
+ */
+const urgentDecrypts = new Set<string>();
+export function prioritizeDecrypt(ciphertext: string) {
+  urgentDecrypts.add(ciphertext);
+  if (urgentDecrypts.size > 20) urgentDecrypts.delete(urgentDecrypts.values().next().value as string);
+}
+
 function schedule<T>(
   rec: CallRecord,
   crypto: boolean,
@@ -711,13 +721,14 @@ export function instrumentSigner<S extends Signer>(inner: S): S {
         instantRec(method, "error", 2, undefined, "skipped: signer isn't responding");
         return Promise.reject(new Error("Your signer isn't responding (skipped)."));
       }
-      if (method === "nip44_decrypt" && Date.now() < breakerUntil) {
+      const urgent = method === "nip44_decrypt" && urgentDecrypts.has(text);
+      if (!urgent && method === "nip44_decrypt" && Date.now() < breakerUntil) {
         instantRec(method, "error", 2, undefined, "skipped: signer not answering decrypt requests");
         return Promise.reject(new Error("Signer is not answering decrypt requests (skipped)."));
       }
-      const rec = newRec(method, 2);
+      const rec = newRec(method, urgent ? 1 : 2);
       // Decrypts (settings, reminders, mutes…) are not needed to draw the first screen: hold them until it is up (12s cap).
-      const p = schedule(rec, true, call, CRYPTO_TIMEOUT_MS, method === "nip44_decrypt").then(
+      const p = schedule(rec, !urgent, call, CRYPTO_TIMEOUT_MS, method === "nip44_decrypt" && !urgent).then(
         (out) => {
           cryptoTimeouts = 0;
           cachePut(key, out);

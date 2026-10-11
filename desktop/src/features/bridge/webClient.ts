@@ -49,12 +49,17 @@ export type BridgeState = {
   browserSessions: readonly BrowserSessionInfo[];
   /** sessionId -> latest assembled screenshot (data URL) with the command that produced it. */
   shots: ReadonlyMap<string, { cmdId: string; src: string; w: number; h: number; ts: number }>;
+  /** True while showing the cached last-known agent list and no live snapshot has arrived yet. */
+  refreshing: boolean;
 };
 
 export type WebClientIO = {
   decryptFromSelf(ciphertext: string): Promise<string>;
   cacheGet(eventId: string): string | null;
   cachePut(eventId: string, wrappedJson: string): void;
+  /** Last known agent list (survives reloads) so the panel can draw instantly while the live data refreshes. */
+  snapGet?(): { snapshot: AgentsSnapshotBody; ts: number } | null;
+  snapPut?(snapshot: AgentsSnapshotBody, ts: number): void;
 };
 
 export class BridgeWebClient {
@@ -70,6 +75,7 @@ export class BridgeWebClient {
     results: new Map(),
     browserSessions: [],
     shots: new Map(),
+    refreshing: false,
   };
   readonly stats = {
     signerDecrypts: 0,
@@ -95,6 +101,9 @@ export class BridgeWebClient {
   constructor(pubkey: string, io: WebClientIO) {
     this.pubkey = pubkey;
     this.io = io;
+    const cached = io.snapGet?.();
+    if (cached)
+      this.state = { ...this.state, snapshot: cached.snapshot, snapshotTs: cached.ts, lastHeardTs: cached.ts, presence: presenceOf(cached.ts), refreshing: true };
   }
 
   subscribe(fn: () => void) {
@@ -206,7 +215,9 @@ export class BridgeWebClient {
     }
     if (d === D_AGENTS && env.type === "agents.snapshot") {
       const snapshotTs = env.ts;
+      this.io.snapPut?.(env.body as AgentsSnapshotBody, snapshotTs);
       this.set({
+        refreshing: false,
         snapshot: env.body as AgentsSnapshotBody,
         snapshotTs,
         lastHeardTs: Math.max(this.state.lastHeardTs ?? 0, env.ts),
