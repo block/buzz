@@ -5,15 +5,19 @@ let st: St = { pending: 0, authUrl: null, queued: 0, labels: [] };
 const listeners = new Set<() => void>();
 let el: HTMLDivElement | null = null;
 let showTimer: ReturnType<typeof setTimeout> | undefined;
+/** The user hid the toast: stay hidden until nothing is pending (the next wait shows it again). */
+let dismissed = false;
 
 function render() {
   if (st.pending === 0 && st.queued === 0) {
+    dismissed = false;
     clearTimeout(showTimer);
     showTimer = undefined;
     el?.remove();
     el = null;
     return;
   }
+  if (dismissed) return;
   if (el || showTimer) return update();
   // Only show if the signer takes noticeably long (>1.5s), to avoid flicker; then stay up until nothing is pending.
   showTimer = setTimeout(() => {
@@ -46,6 +50,17 @@ function update() {
     a.style.cssText = "color:#fff;font-weight:600;text-decoration:underline";
     el.appendChild(a);
   }
+  const x = document.createElement("button");
+  x.type = "button";
+  x.textContent = "Hide";
+  x.setAttribute("data-testid", "signer-waiting-hide");
+  x.style.cssText = "background:none;border:0;color:#bbb;font:inherit;cursor:pointer;text-decoration:underline;padding:0";
+  x.onclick = () => {
+    dismissed = true;
+    el?.remove();
+    el = null;
+  };
+  el.appendChild(x);
 }
 let escalateTimer: ReturnType<typeof setTimeout> | undefined;
 let waitStart = 0;

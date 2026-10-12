@@ -1,3 +1,5 @@
+import type * as React from "react";
+import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import { AgentDefaultsEditor } from "@/features/agents/ui/AgentDefaultsEditor";
 import { useAcpRuntimesQueryForced } from "@/features/agents/acpRuntimesQuery";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
@@ -9,10 +11,15 @@ function WebAgentDefaults() {
   const { globalConfig, isLoading } = useGlobalAgentConfig();
   const runtimes = useAcpRuntimesQueryForced().data ?? [];
   const rt = globalConfig.preferred_runtime;
-  const harness = rt ? (runtimes.find((r) => r.id === rt)?.label ?? rt) : null;
-  const rows: [string, string | null, string][] = [
+  const entry = rt ? runtimes.find((r) => r.id === rt) : undefined;
+  const harness: React.ReactNode = rt ? (
+    <span className="inline-flex items-center gap-2">
+      {entry ? <RuntimeIcon className="h-5 w-5" runtime={entry} /> : null}
+      {entry?.label ?? rt}
+    </span>
+  ) : null;
+  const rows: [string, React.ReactNode, string][] = [
     ["Default harness", harness, "agent-defaults-harness"],
-    ["Provider", globalConfig.provider, "agent-defaults-provider"],
     ["Model", globalConfig.model, "agent-defaults-model"],
   ];
   return (

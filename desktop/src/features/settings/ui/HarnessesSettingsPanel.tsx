@@ -1,4 +1,5 @@
 import * as React from "react";
+import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import { ExternalLink, Plus, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -122,8 +123,13 @@ export function HarnessesSettingsPanel() {
             <p className="py-2 text-muted-foreground">No agent runtimes are ready on your desktop yet. Add one there.</p>
           ) : (
             rows.map((r) => (
-              <div key={r.id} className="flex items-center justify-between py-2" data-testid="web-runtime-row">
-                <span>{r.label}{r.source === "custom" ? " (custom)" : ""}</span>
+              <div key={r.id} className="flex min-h-16 items-center justify-between gap-4 py-3.5" data-testid="web-runtime-row">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center" data-testid={`web-runtime-logo-${r.id}`}>
+                    <RuntimeIcon className="h-9 w-9" runtime={r} />
+                  </span>
+                  <p className="min-w-0 text-sm font-medium">{r.label}{r.source === "custom" ? " (custom)" : ""}</p>
+                </div>
                 {r.availability === "available" ? (
                   <span
                     className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"

@@ -159,7 +159,7 @@ function labelFor(method: string, kind?: number, ev?: UnsignedEvent): string {
         return `signing event (kind ${kind})`;
     }
   }
-  if (method === "nip44_decrypt") return "decrypting settings";
+  if (method === "nip44_decrypt") return "decrypting"; // key wraps, DMs and synced settings alike
   if (method === "nip44_encrypt") return "encrypting settings";
   if (method === "get_public_key") return "reading public key";
   return method;
