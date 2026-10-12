@@ -202,7 +202,7 @@ impl PendingNostrBindDeepLinks {
             payload,
         };
         if queue.len() == MAX_PENDING_NOSTR_BIND_LINKS {
-            queue.pop_front();
+            return None;
         }
         queue.push_back(pending.clone());
         Some(pending)

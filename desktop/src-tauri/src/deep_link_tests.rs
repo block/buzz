@@ -313,11 +313,14 @@ fn pending_nostr_bind_links_drop_expired_requests_and_cap_the_queue() {
     let mut ids = Vec::new();
     for index in 0..33 {
         payload.challenge_id = format!("550e8400-e29b-41d4-a716-{index:012}");
-        ids.push(queue.enqueue(payload.clone()).unwrap().id);
+        if index < 32 {
+            ids.push(queue.enqueue(payload.clone()).unwrap().id);
+        } else {
+            assert!(queue.enqueue(payload.clone()).is_none());
+        }
     }
-    assert_eq!(queue.first().unwrap().id, ids[1], "oldest item is evicted");
-    assert!(!queue.acknowledge(&ids[0]));
-    assert!(queue.acknowledge(&ids[1]));
+    assert_eq!(queue.first().unwrap().id, ids[0], "first item is retained");
+    assert!(queue.acknowledge(&ids[0]));
 }
 
 #[test]

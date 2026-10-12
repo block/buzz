@@ -67,7 +67,7 @@ const NOSTR_BIND_PREVIEW_SIGNED_RESPONSE = JSON.stringify({
 });
 
 function isNostrBindPreviewEnabled(): boolean {
-  if (!import.meta.env.DEV) {
+  if (!import.meta.env?.DEV) {
     return false;
   }
 
