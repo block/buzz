@@ -59,23 +59,29 @@ export function BuzzTermPage() {
   // The backend is registered app-wide (WebRemoteWatcher → useWebTermBackend) so the in-channel Term works too; leaving this
   // page closes the left-nav-style panel (sessions stay alive in the hub).
   React.useLayoutEffect(() => {
-    if (!usable) return;
-    setTerminalBackend(hub); // already registered by the watcher; harmless, and covers a first render before it runs
-    return () => setTerminalPanelMode("closed");
+    if (usable) setTerminalBackend(hub); // already registered by the watcher; harmless, and covers a first render before it runs
   }, [usable, hub]);
+  // Close the left-nav-style panel only when leaving the page (not on every usable/hub flap, which used to strand the launcher).
+  React.useLayoutEffect(() => () => setTerminalPanelMode("closed"), []);
 
-  // Open the terminal by itself on arrival (like the desktop's left-nav Buzz Term).
+  // Terminals offered by the desktop and Direct up → open maximized immediately (like the desktop's left-nav Buzz Term).
+  const termsOff = !!info && info.status === "on" && !info.terminals;
+  const termReady = usable && !!info && info.status === "on" && info.terminals;
   const openedRef = React.useRef(false);
   React.useEffect(() => {
-    if (!usable || openedRef.current) return;
+    if (!termReady) {
+      openedRef.current = false; // re-arm: when Direct comes back, auto-open again
+      return;
+    }
+    if (openedRef.current) return;
     openedRef.current = true;
     // a pending handoff opens the panel itself with its own session; a second blank one would sit next to it
     if (peekPendingTermHandoff()) return;
     openTerminalPanel("maximized", "all");
-  }, [usable]);
+  }, [termReady]);
 
   // A "Pass thread context to Buzz Term" handoff from the web: start its session in the terminal (a plain shell on the desktop).
-  const handoffReady = usable && !!info && info.status === "on" && info.terminals;
+  const handoffReady = termReady;
   React.useEffect(() => {
     if (!handoffReady || !peekPendingTermHandoff()) return;
     const t = window.setTimeout(() => {
@@ -106,14 +112,16 @@ export function BuzzTermPage() {
     <div className="flex-1 overflow-y-auto" data-testid="buzz-term-page">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 p-6">
         <h1 className="text-xl font-semibold" data-testid="buzz-term-title">
-          {usable ? "Buzz term" : c.title}
+          {usable && !termsOff ? "Buzz term" : c.title}
         </h1>
-        {usable ? (
+        {usable && !termsOff ? (
           <div data-testid="buzz-term-launcher" className="flex flex-col gap-3">
             <p className="text-sm text-muted-foreground">
-              {panel.mode === "closed"
-                ? `Buzz Term running on ${deviceName}.`
-                : `Opening Buzz Term on ${deviceName}…`}
+              {!termReady
+                ? `Connecting to ${deviceName}…`
+                : panel.mode === "closed"
+                  ? `Buzz Term running on ${deviceName}.`
+                  : `Opening Buzz Term on ${deviceName}…`}
             </p>
             {status.state === "connecting" && <p className="text-sm">Waiting for approval in your signer…</p>}
             {failure && (
@@ -121,12 +129,7 @@ export function BuzzTermPage() {
                 {failure}
               </p>
             )}
-            {info && info.status === "on" && !info.terminals && (
-              <p className="text-sm" data-testid="remote-terminals-off">
-                "Allow remote terminal" is off on {deviceName}.
-              </p>
-            )}
-            <div>
+            {(termReady || failure) && <div>
               <button
                 type="button"
                 data-testid="buzz-term-open"
@@ -136,11 +139,16 @@ export function BuzzTermPage() {
               >
                 {status.state === "lost" || status.code ? "Reconnect" : "Open Buzz Term"}
               </button>
-            </div>
+            </div>}
           </div>
         ) : (
           <div data-testid="remote-unavailable-page" data-feature="term">
             <p className="text-sm text-muted-foreground">{c.summary}</p>
+            {termsOff && (
+              <p className="mt-2 text-sm font-medium" data-testid="remote-terminals-off">
+                "Allow remote terminal" is off on {deviceName}. Turn it on there in Settings → Buzz Term → Allow remote terminal.
+              </p>
+            )}
             {why && (
               <p className="mt-2 text-sm font-medium" data-testid="buzz-term-why">
                 {why}
