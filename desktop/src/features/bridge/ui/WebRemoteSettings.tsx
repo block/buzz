@@ -14,36 +14,40 @@ import {
   type Feature,
   type Reach,
   type RemoteHost,
+  getReachMap,
   getWebRemotePrefs,
   hostsFrom,
   probeHost,
   setWebRemotePrefs,
+  subscribeReach,
   subscribeWebRemotePrefs,
+  updateReach,
   transportFor,
 } from "../remoteHosts";
 import { useBridgeAgents } from "../useBridgeAgents";
 
-export function useRemoteHosts() {
+export function useRemoteHosts(opts?: { sync?: boolean }) {
   const pubkey = useIdentityQuery().data?.pubkey;
-  return useRemoteHostsFor(useBridgeAgents(pubkey));
+  return useRemoteHostsFor(useBridgeAgents(pubkey), opts);
 }
 
 /** Same as useRemoteHosts, for a caller that already holds the bridge state (avoids a second relay subscription). */
-export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>) {
+export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>, opts?: { sync?: boolean }) {
   const prefs = React.useSyncExternalStore(subscribeWebRemotePrefs, getWebRemotePrefs);
   const hosts = React.useMemo(() => hostsFrom(b), [b.heartbeat, b.lastHeardTs]); // eslint-disable-line react-hooks/exhaustive-deps
-  const [reach, setReach] = React.useState<Record<string, Reach>>({});
+  const reachKey = (h: RemoteHost) => `${h.id}|${h.url}`;
+  const reach = React.useSyncExternalStore(subscribeReach, getReachMap);
   React.useEffect(() => {
     let dead = false;
     const run = async () => {
       for (const h of hosts) {
         if (!h.hasDirect || h.stale) {
-          setReach((r) => ({ ...r, [h.id]: "unreachable" }));
+          updateReach(reachKey(h), () => "unreachable");
           continue;
         }
-        setReach((r) => ({ ...r, [h.id]: r[h.id] === "reachable" ? "reachable" : "checking" }));
+        updateReach(reachKey(h), (r) => (r === "reachable" ? "reachable" : "checking"));
         const ok = await probeHost(h.url);
-        if (!dead) setReach((r) => ({ ...r, [h.id]: ok ? "reachable" : "unreachable" }));
+        if (!dead) updateReach(reachKey(h), () => (ok ? "reachable" : "unreachable"));
       }
     };
     void run();
@@ -53,15 +57,17 @@ export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>) {
       window.clearInterval(t);
     };
   }, [hosts]);
-  const reachOf = (h: RemoteHost): Reach => reach[h.id] ?? "unknown";
+  const reachOf = (h: RemoteHost): Reach => reach[reachKey(h)] ?? "unknown";
   const selected = (f: Feature) => {
     const id = f === "agents" ? prefs.agentsHost : prefs.terminalHost;
     return hosts.find((h) => h.id === id && h.supports[f]);
   };
   // Keep prefs honest once the heartbeat is known (not while loading): terminal can't stay on without a reachable terminal host,
   // agent management can't stay on without a host that supports it.
+  // Only the one always-mounted watcher mirrors reachability into the prefs: several copies (each with its own view of the
+  // heartbeat) would fight over the same two switches.
   React.useEffect(() => {
-    if (hosts.length === 0) return;
+    if (!opts?.sync || hosts.length === 0) return;
     if (prefs.terminalOn) {
       const h = selected("terminal");
       if (!h || reachOf(h) === "unreachable") setWebRemotePrefs({ terminalOn: false });
@@ -198,7 +204,7 @@ export function WebRemoteTerminal() {
 
 /** Mounted in the left nav on web: keeps the switches consistent with what hosts offer, and exposes what the nav may show. */
 export function WebRemoteWatcher() {
-  useRemoteHosts();
+  useRemoteHosts({ sync: true });
   return null;
 }
 /** Content of the page a greyed-out nav row opens on web/mobile: what is needed, and the exact settings to turn on. */

@@ -40,6 +40,22 @@ export function hostsFrom(b: Pick<BridgeState, "heartbeat" | "lastHeardTs">, now
 
 export type Reach = "unknown" | "checking" | "reachable" | "unreachable";
 
+// Reachability is shared by everything on the page that asks (nav entry, Buzz term page, Settings): separate copies could
+// disagree about the same desktop and the effect that mirrors it into the prefs would then flip them back and forth forever.
+let reachMap: Record<string, Reach> = {};
+const reachSubs = new Set<() => void>();
+export const getReachMap = () => reachMap;
+export const subscribeReach = (f: () => void) => {
+  reachSubs.add(f);
+  return () => void reachSubs.delete(f);
+};
+export function updateReach(id: string, next: (prev: Reach | undefined) => Reach) {
+  const v = next(reachMap[id]);
+  if (reachMap[id] === v) return;
+  reachMap = { ...reachMap, [id]: v };
+  for (const f of reachSubs) f();
+}
+
 /** A browser can't read Tailscale state: try to open the host's tailnet address. Resolves true if the socket opens in time. */
 export function probeHost(
   url: string,
@@ -101,7 +117,10 @@ export function getWebRemotePrefs(): WebRemotePrefs {
   return cached as WebRemotePrefs;
 }
 export function setWebRemotePrefs(p: Partial<WebRemotePrefs>) {
-  cached = { ...getWebRemotePrefs(), ...p };
+  const cur = getWebRemotePrefs();
+  // no change, no notification: effects that "keep prefs honest" must not be able to spin on themselves
+  if ((Object.keys(p) as (keyof WebRemotePrefs)[]).every((k) => cur[k] === p[k])) return;
+  cached = { ...cur, ...p };
   try {
     localStorage.setItem(KEY, JSON.stringify(cached));
   } catch {}

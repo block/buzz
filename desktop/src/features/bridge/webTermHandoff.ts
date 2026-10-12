@@ -75,14 +75,15 @@ export function parseHandoffResult(r: Record<string, unknown> | undefined): Pend
 }
 
 /**
- * Where the real desktop Buzz Term renderer will plug in: the Buzz term page calls this with the opened remote terminal
- * and the handoff. Today the terminal is the basic text view, so it types the launch line into the new shell; when the
- * renderer is swapped in, replace the body with "attach to session `sid`" on the same TerminalHandle.
+ * Types the launch line into a freshly opened remote shell. The Buzz term page no longer calls this directly: it hands the
+ * handoff to the real Buzz Term (`requestTermSessionOpen`), whose bootstrap opens a plain-shell session on the desktop and
+ * types the same line with `connection.input`. Kept for any caller that holds a bare terminal handle (`write`) or a
+ * session connection (`input`).
  */
 export function attachHandoffToTerminal(
-  term: { write(s: string): void },
+  term: { write(s: string): unknown } | { input(s: string): unknown },
   h: PendingTermHandoff,
   schedule: (fn: () => void, ms: number) => unknown = setTimeout,
 ) {
-  schedule(() => term.write(`${h.launchCommand}\r`), 700); // let the shell print its prompt first
+  schedule(() => ("write" in term ? term.write(`${h.launchCommand}\r`) : term.input(`${h.launchCommand}\r`)), 700); // let the shell print its prompt first
 }

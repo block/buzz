@@ -35,3 +35,22 @@ test("probe: true on open, false on error/timeout", async () => {
   assert.equal(await probeHost("x", 200, mk((w) => w.onerror())), false);
   assert.equal(await probeHost("x", 50, mk(() => {})), false);
 });
+
+test("setWebRemotePrefs with unchanged values doesn't notify (the keep-honest effect can't spin), shared reachability notifies once per change", async () => {
+  const m = await import("./remoteHosts.ts");
+  let n = 0;
+  const off = m.subscribeWebRemotePrefs(() => n++);
+  m.setWebRemotePrefs({ terminalOn: true });
+  m.setWebRemotePrefs({ terminalOn: true });
+  assert.equal(n, 1);
+  m.setWebRemotePrefs({ terminalOn: false });
+  assert.equal(n, 2);
+  off();
+  let r = 0;
+  const offR = m.subscribeReach(() => r++);
+  m.updateReach("a|u", () => "reachable");
+  m.updateReach("a|u", () => "reachable");
+  assert.equal(r, 1);
+  assert.equal(m.getReachMap()["a|u"], "reachable");
+  offR();
+});

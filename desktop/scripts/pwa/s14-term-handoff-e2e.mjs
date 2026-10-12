@@ -157,10 +157,11 @@ await page.click('[data-testid="thread-term-session-go"]');
 await page.waitForFunction(() => location.hash.includes("buzz-term"), null, { timeout: 90000 }).catch(() => {});
 check("d. after the desktop's ack the web navigates to #/buzz-term", page.url().includes("buzz-term"), page.url());
 check("d2. the desktop got exactly one handoff for the chosen agent/thread/harness", handoffCalls.length === 1 && handoffCalls[0].agentPubkey === AG && handoffCalls[0].threadId === seeded.rootId && handoffCalls[0].channelId === seeded.channelId && handoffCalls[0].harness === "claude", JSON.stringify(handoffCalls));
-const screen = page.locator('[data-testid="remote-screen"]');
-await screen.waitFor({ timeout: 90000 }).catch(() => {});
-await page.waitForFunction(() => /HANDOFF_E2E_42/.test(document.querySelector('[data-testid="remote-screen"]')?.textContent || ""), null, { timeout: 30000 }).catch(() => {});
-check("e. Buzz term opened by itself and ran the session's launch line", /HANDOFF_E2E_42/.test(await screen.innerText().catch(() => "")), (await screen.innerText().catch(() => "")).slice(-120));
+const rowsText = () => page.evaluate(() => [...document.querySelectorAll("[data-terminal-selection-row]")].map((r) => r.textContent.replace(/\u00a0/g, " ")).join("\n"));
+await page.waitForSelector('section[aria-label="Buzz Term"]', { timeout: 90000 }).catch(() => {});
+for (let i = 0; i < 120 && !/^HANDOFF_E2E_42$/m.test(await rowsText().catch(() => "")); i++) await sleep(250);
+const screenText = await rowsText().catch(() => "");
+check("e. Buzz term opened by itself and ran the session's launch line (its OUTPUT, not just the typed command)", /^HANDOFF_E2E_42$/m.test(screenText), screenText.slice(-160));
 
 // f. terminals OFF: clear message, no navigation
 terminalsOn = false;
