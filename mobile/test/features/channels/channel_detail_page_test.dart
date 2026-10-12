@@ -5779,7 +5779,6 @@ void main() {
       final createdAction = findRichText('created this channel');
       expect(createdAction, findsOneWidget);
       expect(find.byType(CircleAvatar), findsNothing);
-      final nameRect = tester.getRect(find.text('Alice'));
       final nameText = tester.widget<Text>(find.text('Alice'));
       expect(nameText.style?.fontSize, 14);
       expect(nameText.style?.fontWeight, FontWeight.w500);
@@ -5787,10 +5786,10 @@ void main() {
         find.byKey(const ValueKey('system-message-username-alice')),
         findsNothing,
       );
-      final timestampRect = tester.getRect(
+      expect(
         find.byKey(const ValueKey('system-message-timestamp-alice')),
+        findsNothing,
       );
-      expect(timestampRect.left, greaterThan(nameRect.right));
       final createdText = tester.widget<RichText>(createdAction);
       expect(
         effectiveFontSizeForText(createdText.text, 'created this channel'),
@@ -5814,7 +5813,7 @@ void main() {
       expect(find.byType(CircleAvatar), findsNothing);
       expect(
         find.byKey(const ValueKey('system-message-timestamp-alice')),
-        findsOneWidget,
+        findsNothing,
       );
     });
 
@@ -8679,7 +8678,7 @@ void main() {
             find.byKey(const ValueKey('system-message-author-bob')),
           );
           final huddleBody = tester.getRect(findRichText(huddleEvent.action));
-          expect(huddleAuthor.left, huddleBody.left);
+          expect(huddleAuthor.left, greaterThanOrEqualTo(huddleBody.left));
           expect(huddleBody.top, greaterThan(regularAvatar.bottom));
           expect(huddleAuthor.top, greaterThanOrEqualTo(huddleBody.top));
         },
@@ -9201,15 +9200,14 @@ void main() {
       expect(addedAction, findsOneWidget);
       expect(find.text('Alice added Bob to the channel'), findsNothing);
       expect(find.byType(CircleAvatar), findsNothing);
-      final nameRect = tester.getRect(find.text('Bob'));
       expect(
         find.byKey(const ValueKey('system-message-username-bob')),
         findsNothing,
       );
-      final timestampRect = tester.getRect(
+      expect(
         find.byKey(const ValueKey('system-message-timestamp-bob')),
+        findsNothing,
       );
-      expect(timestampRect.left, greaterThan(nameRect.right));
       final addedText = tester.widget<RichText>(addedAction);
       expect(effectiveFontSizeForText(addedText.text, 'was added by '), 14);
     });
@@ -9319,11 +9317,13 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final nameRect = tester.getRect(
-        find.byKey(const ValueKey('system-message-author-bob')),
+      final card = tester.getRect(
+        find.byKey(const ValueKey('activity-card-sys1')),
       );
-      final reactionRect = tester.getRect(find.byType(ReactionRow));
-      expect(reactionRect.left, nameRect.left);
+      expect(
+        tester.getCenter(find.byType(ReactionRow)).dx,
+        closeTo(card.center.dx, 0.01),
+      );
     });
 
     testWidgets('a reacted message offers the + picker in the timeline', (
@@ -9403,7 +9403,7 @@ void main() {
     });
 
     testWidgets(
-      'constrains generic system timestamps at accessibility text sizes',
+      'keeps centered activities timestamp-free at accessibility text sizes',
       (tester) async {
         tester.view.physicalSize = const Size(240, 600);
         tester.view.devicePixelRatio = 1;
@@ -9432,13 +9432,7 @@ void main() {
         final timestampFinder = find.byKey(
           const ValueKey('system-message-timestamp-alice'),
         );
-        final timestamp = tester.widget<Text>(timestampFinder);
-        expect(timestamp.maxLines, 1);
-        expect(timestamp.overflow, TextOverflow.ellipsis);
-        expect(
-          tester.getSize(timestampFinder).width,
-          lessThanOrEqualTo(Grid.xxl),
-        );
+        expect(timestampFinder, findsNothing);
         expect(tester.takeException(), isNull);
       },
     );

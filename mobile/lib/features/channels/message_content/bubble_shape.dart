@@ -56,3 +56,13 @@ class _MessageBubbleShape extends ShapeBorder {
   @override
   void paint(Canvas canvas, Rect rect, {TextDirection? textDirection}) {}
 }
+
+BorderRadius _attachmentCorners({required bool start, required bool end}) =>
+    BorderRadius.only(
+      topLeft: Radius.circular(start ? Radii.container : Radii.sm),
+      topRight: const Radius.circular(Radii.container),
+      bottomLeft: Radius.circular(
+        end ? (Radii.sm + Radii.container) / 2 : Radii.sm,
+      ),
+      bottomRight: const Radius.circular(Radii.container),
+    );

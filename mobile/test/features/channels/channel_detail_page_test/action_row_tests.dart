@@ -89,24 +89,23 @@ void actionRowTests() {
         );
         final actionBody = tester.getRect(body);
         final actionAuthor = tester.getRect(author);
-        expect(actionBody.left, lessThan(regularBody.left));
-        expect(actionAuthor.left, actionBody.left);
+        final card = tester.getRect(
+          find.byKey(const ValueKey('activity-card-action')),
+        );
+        expect(card.center.dx, closeTo(tester.getRect(row).center.dx, 0.01));
+        expect(actionAuthor.left, greaterThanOrEqualTo(actionBody.left));
         expect(regularAuthor.left, regularBody.left);
         expect(actionAuthor.top, greaterThanOrEqualTo(actionBody.top));
         final timestamp = find.byKey(
           const ValueKey('system-message-timestamp-alice'),
         );
-        expect(tester.widget<Text>(timestamp).data, formatMessageTime(1010));
-        expect(
-          tester.getRect(timestamp).top,
-          greaterThanOrEqualTo(actionBody.top),
-        );
+        expect(timestamp, findsNothing);
         final reactions = find.descendant(
           of: row,
           matching: find.byType(ReactionRow),
         );
         expect(reactions, findsOneWidget);
-        expect(tester.getTopLeft(reactions).dx, actionBody.left);
+        expect(tester.getCenter(reactions).dx, closeTo(card.center.dx, 0.01));
         expect(tester.takeException(), isNull);
       });
 
@@ -131,7 +130,7 @@ void actionRowTests() {
         );
         expect(
           find.byKey(const ValueKey('system-message-timestamp-fallback')),
-          findsOneWidget,
+          findsNothing,
         );
       });
     }
@@ -358,7 +357,7 @@ void actionRowTests() {
         );
         expect(
           find.byKey(const ValueKey('system-message-timestamp-alice')),
-          findsOneWidget,
+          findsNothing,
         );
         expect(tester.takeException(), isNull);
       });

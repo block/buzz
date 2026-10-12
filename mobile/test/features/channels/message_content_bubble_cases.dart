@@ -25,6 +25,38 @@ void bubbleContentTests() {
     }
   });
 
+  testWidgets('image corners follow the conversation group', (tester) async {
+    for (final grouped in [false, true]) {
+      await tester.pumpWidget(
+        _testable(
+          MessageContent(
+            content: '![photo](https://example.com/photo.png)',
+            bubble: true,
+            bubbleStart: !grouped,
+            bubbleEnd: !grouped,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final frame = tester.widget<Container>(
+        find.byKey(
+          const ValueKey(
+            'message-media-image-preview:https://example.com/photo.png',
+          ),
+        ),
+      );
+      final corners =
+          (frame.decoration! as BoxDecoration).borderRadius! as BorderRadius;
+      expect(corners.topLeft.x, grouped ? Radii.sm : Radii.container);
+      expect(
+        corners.bottomLeft.x,
+        grouped ? Radii.sm : (Radii.sm + Radii.container) / 2,
+      );
+      expect(corners.topRight.x, Radii.container);
+      expect(corners.bottomRight.x, Radii.container);
+    }
+  });
+
   testWidgets('photo gallery stays outside its caption bubble', (tester) async {
     await tester.pumpWidget(
       _testable(

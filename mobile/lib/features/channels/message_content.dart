@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../../shared/widgets/message_attachment_corners.dart';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -390,7 +391,16 @@ class MessageContent extends HookConsumerWidget {
             children: [
               for (final (index, segment) in segments.indexed)
                 if (segment.attachment)
-                  renderMarkdown(segment.text)
+                  MessageAttachmentCorners(
+                    borderRadius: _attachmentCorners(
+                      start: bubbleStart && index == 0,
+                      end:
+                          bubbleEnd &&
+                          trailingGallery == null &&
+                          index == segments.length - 1,
+                    ),
+                    child: renderMarkdown(segment.text),
+                  )
                 else
                   Container(
                     key: ValueKey('message-text-bubble-$index'),
@@ -437,15 +447,21 @@ class MessageContent extends HookConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (trailingGallery.content.trim().isNotEmpty) markdown,
-        _MessageImageCarousel(
-          key: ValueKey(
-            trailingGallery.items.map((item) => item.url).join('\u0000'),
+        MessageAttachmentCorners(
+          borderRadius: _attachmentCorners(
+            start: bubbleStart && trailingGallery.content.trim().isEmpty,
+            end: bubbleEnd,
           ),
-          items: trailingGallery.items,
-          leadingOverflow: mediaCarouselLeadingOverflow,
-          trailingOverflow: mediaCarouselTrailingOverflow,
-          onReply: onMediaReply,
-          onMore: onMediaMore,
+          child: _MessageImageCarousel(
+            key: ValueKey(
+              trailingGallery.items.map((item) => item.url).join('\u0000'),
+            ),
+            items: trailingGallery.items,
+            leadingOverflow: mediaCarouselLeadingOverflow,
+            trailingOverflow: mediaCarouselTrailingOverflow,
+            onReply: onMediaReply,
+            onMore: onMediaMore,
+          ),
         ),
       ],
     );
@@ -690,7 +706,9 @@ class _MessageImagePreview extends HookConsumerWidget {
           child: MediaViewerHero(
             tag: heroTag,
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(Radii.md),
+              borderRadius:
+                  MessageAttachmentCorners.of(context) ??
+                  BorderRadius.circular(Radii.md),
               child: MediaImage(
                 url: url,
                 decodeWidth: previewDecodeWidth,
@@ -739,7 +757,9 @@ class _MessageMediaPreviewFrame extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: backgroundColor,
-        borderRadius: BorderRadius.circular(Radii.md),
+        borderRadius:
+            MessageAttachmentCorners.of(context) ??
+            BorderRadius.circular(Radii.md),
         border: Border.all(color: context.colors.outlineVariant),
       ),
       child: child,

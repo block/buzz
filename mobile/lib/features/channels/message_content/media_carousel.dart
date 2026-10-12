@@ -146,7 +146,9 @@ class _MessageImageCarousel extends HookConsumerWidget {
                         clipBehavior: Clip.antiAlias,
                         decoration: BoxDecoration(
                           color: context.colors.surfaceContainerHighest,
-                          borderRadius: BorderRadius.circular(Radii.md),
+                          borderRadius:
+                              MessageAttachmentCorners.of(context) ??
+                              BorderRadius.circular(Radii.md),
                           border: Border.all(
                             color: context.colors.outlineVariant,
                           ),
@@ -154,7 +156,9 @@ class _MessageImageCarousel extends HookConsumerWidget {
                         child: MediaViewerHero(
                           tag: heroTags[index],
                           child: ClipRRect(
-                            borderRadius: BorderRadius.circular(Radii.md),
+                            borderRadius:
+                                MessageAttachmentCorners.of(context) ??
+                                BorderRadius.circular(Radii.md),
                             child: MediaImage(
                               url: item.url,
                               decodeWidth: previewDecodeWidths[index],

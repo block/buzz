@@ -166,51 +166,61 @@ class _SystemMessageRow extends HookConsumerWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               RepaintBoundary(
                 key: spotlightKey,
-                child: groupedMembership != null
-                    ? _MembershipSystemMessageContent(
-                        event: groupedMembership,
-                        channelId: channelId,
-                        createdAt: message.createdAt,
-                        resolveLabel: resolveLabel,
-                        userCache: userCache,
-                      )
-                    : messageStyleActor != null &&
-                          messageStyleActor.isNotEmpty &&
-                          messageStyleAction != null
-                    ? _MessageStyleSystemMessageContent(
-                        displayPubkey: messageStyleActor,
-                        channelId: channelId,
-                        createdAt: message.createdAt,
-                        resolveLabel: resolveLabel,
-                        userCache: userCache,
-                        actionSpans: messageStyleAction,
-                        icon: _systemEventIcon(systemEvent.type),
-                      )
-                    : Row(
-                        children: [
-                          _SystemActivityIcon(
-                            icon: _systemEventIcon(systemEvent.type),
-                          ),
-                          const SizedBox(width: Grid.xxs),
-                          Expanded(
-                            child: Text(
-                              systemEvent.describe(resolveLabel),
-                              style: _systemActionTextStyle(context),
+                child: Align(
+                  alignment: Alignment.center,
+                  child: Container(
+                    key: ValueKey('activity-card-${message.id}'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.twelve,
+                      vertical: Grid.xxs,
+                    ),
+                    decoration: BoxDecoration(
+                      color: context.colors.onSurface.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(Radii.container),
+                    ),
+                    child: IntrinsicWidth(
+                      child: groupedMembership != null
+                          ? _MembershipSystemMessageContent(
+                              event: groupedMembership,
+                              channelId: channelId,
+                              createdAt: message.createdAt,
+                              resolveLabel: resolveLabel,
+                              userCache: userCache,
+                            )
+                          : messageStyleActor != null &&
+                                messageStyleActor.isNotEmpty &&
+                                messageStyleAction != null
+                          ? _MessageStyleSystemMessageContent(
+                              displayPubkey: messageStyleActor,
+                              channelId: channelId,
+                              createdAt: message.createdAt,
+                              resolveLabel: resolveLabel,
+                              userCache: userCache,
+                              actionSpans: messageStyleAction,
+                              icon: _systemEventIcon(systemEvent.type),
+                            )
+                          : Row(
+                              children: [
+                                _SystemActivityIcon(
+                                  icon: _systemEventIcon(systemEvent.type),
+                                ),
+                                const SizedBox(width: Grid.xxs),
+                                Expanded(
+                                  child: Text(
+                                    systemEvent.describe(resolveLabel),
+                                    textAlign: TextAlign.center,
+                                    style: _systemActionTextStyle(context),
+                                  ),
+                                ),
+                              ],
                             ),
-                          ),
-                          _messageTimestamp(
-                            context,
-                            message.createdAt,
-                            key: ValueKey(
-                              'system-message-timestamp-${message.id}',
-                            ),
-                          ),
-                        ],
-                      ),
+                    ),
+                  ),
+                ),
               ),
               if (systemEvent.type == SystemEventType.huddleStarted &&
                   systemEvent.ephemeralChannelId != null)
@@ -222,8 +232,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                   isArchived: isArchived,
                 ),
               if (reactions.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(left: Grid.sm + Grid.xxs),
+                IntrinsicWidth(
                   child: ReactionRow(
                     messageId: message.id,
                     channelId: channelId,
@@ -424,6 +433,7 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
         const SizedBox(width: Grid.xxs),
         Expanded(
           child: Text.rich(
+            textAlign: TextAlign.center,
             TextSpan(
               style: _systemActionTextStyle(context),
               children: [
@@ -435,15 +445,6 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
                 ),
                 const TextSpan(text: ' '),
                 ...actionSpans,
-                const TextSpan(text: '  '),
-                WidgetSpan(
-                  alignment: PlaceholderAlignment.middle,
-                  child: _messageTimestamp(
-                    context,
-                    createdAt,
-                    key: ValueKey('system-message-timestamp-$displayPubkey'),
-                  ),
-                ),
               ],
             ),
           ),
