@@ -918,3 +918,9 @@
   box-shadow: none;
   margin: 0;
 }
+
+/* Phone web layout: hover-only row actions (e.g. project delete) have no hover on touch and would otherwise be always
+   visible below md. Hide them; the same actions stay reachable from the long-press context menu. */
+[data-phone] [data-sidebar="menu-action"][data-show-on-hover] {
+  display: none;
+}
