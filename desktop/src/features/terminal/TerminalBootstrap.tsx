@@ -92,6 +92,11 @@ type CreateSessionOptions = {
   };
 };
 
+/** The desktop's remote listener allows 3 terminals (reattached/detached ones included). */
+const REMOTE_TAB_CAP = 3;
+const tabLimitToast = () => toast.message(`Tab limit reached (${REMOTE_TAB_CAP})`, { id: "buzz-term-tab-limit", duration: 2500 });
+const isTooMany = (e: unknown) => (e as { code?: string } | null)?.code === "too_many_terminals" || /too_many_terminals/.test(String((e as Error)?.message ?? e));
+
 const INITIAL_SIZE: TerminalViewportSize = {
   columns: 80,
   rows: 24,
@@ -352,6 +357,10 @@ export function TerminalBootstrap({
     (options?: CreateSessionOptions) => {
       const baseContext = resolveSpawnContext();
       if (!available || !baseContext) return;
+      if (isRemoteTerminal() && !options?.reattach && sessionsRef.current.length >= REMOTE_TAB_CAP) {
+        tabLimitToast();
+        return;
+      }
       if (options?.forceShell) {
         createInAppSessionRef.current(options);
         return;
@@ -600,6 +609,11 @@ export function TerminalBootstrap({
         .catch((error) => {
           if (closedSessionKeysRef.current.delete(key)) return;
           removeSession(key);
+          // Desktop cap hit (e.g. detached sessions count): keep the panel and the other tabs, just say so.
+          if (remote && isTooMany(error)) {
+            tabLimitToast();
+            return;
+          }
           // herdr program spawn failed — fall back to a login shell instead of
           // permanently disabling Term (available=false) and leaving chrome blank.
           if (herdrAttach) {
@@ -958,6 +972,7 @@ export function TerminalBootstrap({
       }}
       onInput={(text) => send(active?.connection?.input(text))}
       onNewSession={(kind) => createSession(kind === "shell" ? { forceShell: true } : kind === "herdr" ? { forceHerdr: true } : undefined)}
+      canAddTab={!isRemoteTerminal() || sessions.length < REMOTE_TAB_CAP}
       herdrNewTab={
         isRemoteTerminal() ? getWebTermInfo()?.termHost === "herdr" : getTermPreferences().sessionHost === "herdr"
       }

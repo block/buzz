@@ -98,6 +98,8 @@ type TerminalSubstrateProps = {
   onNewSession: (kind?: "shell" | "herdr") => void;
   /** Session host is herdr: + opens a small Terminal / herdr menu instead of creating a tab directly. */
   herdrNewTab?: boolean;
+  /** False hides the + (web: the desktop's 3-terminal cap is reached). */
+  canAddTab?: boolean;
   /** Phone/tablet behaviour (defaults to "the primary pointer is a finger"; desktop mice are unchanged). */
   touchUi?: boolean;
 };
@@ -151,6 +153,7 @@ export function TerminalSubstrate({
   onCloseSession,
   onNewSession,
   herdrNewTab = false,
+  canAddTab = true,
   touchUi: touchUiProp,
 }: TerminalSubstrateProps) {
   const { terminalPalette } = useTheme();
@@ -1333,6 +1336,7 @@ export function TerminalSubstrate({
               </button>
             </div>
           ))}
+          {canAddTab ? (
           <button
             aria-label="New Buzz Term tab"
             aria-haspopup={herdrNewTab ? "menu" : undefined}
@@ -1348,6 +1352,7 @@ export function TerminalSubstrate({
           >
             <Plus />
           </button>
+          ) : null}
           {newTabMenu
             ? createPortal(
                 <div
