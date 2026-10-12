@@ -1,5 +1,5 @@
-// Web Push feature flag + config. The push sender service is a separate server that is NOT deployed yet;
-// until VITE_BUZZ_WEB_PUSH_URL is set at build time, every push surface (banner, settings row, subscribe) stays hidden.
+// Web Push feature flag + config. VITE_BUZZ_WEB_PUSH_URL is the relay-hosted push gateway
+// (prod default https://push.huladesk.com, see vite.config.web.ts); empty hides every push surface.
 export const WEB_PUSH_URL = (
   (import.meta.env.VITE_BUZZ_WEB_PUSH_URL as string | undefined) || ""
 ).replace(/\/+$/, "");

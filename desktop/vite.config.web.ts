@@ -104,6 +104,17 @@ export default defineConfig(({ command }) => ({
           ? "wss://buzz.huladesk.com"
           : "ws://localhost:3000"),
     ),
+    // Web Push gateway (co-located with the relay). Prod builds default to it so later web deploys keep push on;
+    // set VITE_BUZZ_WEB_PUSH_URL="" to build with push hidden.
+    "import.meta.env.VITE_BUZZ_WEB_PUSH_URL": JSON.stringify(
+      process.env.VITE_BUZZ_WEB_PUSH_URL ??
+        (command === "build" ? "https://push.huladesk.com" : ""),
+    ),
+    // Link preview helper behind the relay's Caddy (/lp). Same default-on rule as push.
+    "import.meta.env.VITE_BUZZ_LINK_PREVIEW_URL": JSON.stringify(
+      process.env.VITE_BUZZ_LINK_PREVIEW_URL ??
+        (command === "build" ? "https://buzz.huladesk.com/lp" : ""),
+    ),
   },
   resolve: {
     alias: [
