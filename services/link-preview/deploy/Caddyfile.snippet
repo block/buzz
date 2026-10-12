@@ -1,0 +1,4 @@
+# Add inside the {$BUZZ_DOMAIN} site block, BEFORE the catch-all `handle { reverse_proxy relay:3000 }`:
+  handle_path /lp/* {
+    reverse_proxy link-preview:8787
+  }

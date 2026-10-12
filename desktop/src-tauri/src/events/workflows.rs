@@ -39,12 +39,49 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
 
 /// Kind 46030 — grant an approval token (with optional note).
 pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = approval_ref_tags(token)?;
     Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
 }
 
 /// Kind 46031 — deny an approval token (with optional note).
 pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = approval_ref_tags(token)?;
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
+}
+
+/// Reference tags for kinds 46030/46031. The relay resolves the approval from a
+/// `d` tag (the `approval_ref`, i.e. the stored token hash, 64 hex) or an `e`
+/// tag; the legacy `t` tag is kept for older relays.
+fn approval_ref_tags(token: &str) -> Result<Vec<nostr::Tag>, String> {
+    let token = token.trim();
+    let mut tags = vec![tag(vec!["t", token])?];
+    if token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        tags.push(tag(vec!["d", &token.to_ascii_lowercase()])?);
+    }
+    Ok(tags)
+}
+
+#[cfg(test)]
+mod approval_tag_tests {
+    use super::*;
+
+    fn tag_names(b: EventBuilder) -> Vec<Vec<String>> {
+        let keys = nostr::Keys::generate();
+        let ev = b.sign_with_keys(&keys).unwrap();
+        ev.tags.iter().map(|t| t.as_slice().to_vec()).collect()
+    }
+
+    #[test]
+    fn grant_with_approval_ref_sends_d_tag() {
+        let r = "AB".repeat(32);
+        let tags = tag_names(build_approval_grant(&r, None).unwrap());
+        assert!(tags.contains(&vec!["d".to_string(), "ab".repeat(32)]));
+        assert!(tags.contains(&vec!["t".to_string(), r]));
+    }
+
+    #[test]
+    fn deny_with_non_hex_token_keeps_only_t() {
+        let tags = tag_names(build_approval_deny("tok", Some("no")).unwrap());
+        assert_eq!(tags, vec![vec!["t".to_string(), "tok".to_string()]]);
+    }
 }

@@ -19,6 +19,8 @@ mod huddle;
 mod identity_storage;
 mod initial_window;
 mod key_backup;
+mod agent_exit_watch;
+mod permission_prompts;
 mod link_preview_tags;
 mod linux_media;
 #[cfg(target_os = "macos")]
@@ -234,6 +236,7 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             browser_agent::spawn_grant_watcher(app_handle.clone());
+            agent_exit_watch::spawn_agent_exit_watcher(app_handle.clone());
             user_signer::spawn_user_signer_watcher(app_handle.clone());
             #[cfg(target_os = "macos")]
             {
@@ -812,6 +815,8 @@ pub fn run() {
             update_team,
             set_team_shared,
             add_team_from_catalog,
+            permission_prompts::list_permission_prompts,
+            permission_prompts::respond_permission_prompt,
             delete_team,
             export_agent_snapshot,
             card_mint_key_status,

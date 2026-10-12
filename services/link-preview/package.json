@@ -1,0 +1,11 @@
+{
+  "name": "buzz-link-preview",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SSRF-guarded link preview metadata helper for the Buzz web app (NOT deployed).",
+  "main": "server.mjs",
+  "scripts": { "start": "node server.mjs", "test": "node --test test/*.test.mjs" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "@noble/curves": "2.0.1", "@noble/hashes": "2.0.1" }
+}

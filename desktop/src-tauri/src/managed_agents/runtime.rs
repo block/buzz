@@ -875,6 +875,10 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
+    // Private drop box for opt-in interactive permission prompts (BUZZ_ACP_PERMISSION_MODE=ask).
+    if let Ok(dir) = crate::permission_prompts::ensure_prompt_dir(app, &record.pubkey) {
+        command.env(crate::permission_prompts::PERMISSION_DIR_ENV, dir);
+    }
 
     // Stamp spawn config from values above, BEFORE spawning — a post-spawn
     // re-resolve races config edits and would stamp the wrong values.

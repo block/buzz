@@ -21,6 +21,7 @@ use crate::usage::{
 
 #[path = "acp_frame_writer.rs"]
 mod frame_writer;
+mod permission_ask;
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -2143,6 +2144,32 @@ impl AcpClient {
             "session/request_permission id={id}, {} options",
             options.len()
         );
+
+        // Opt-in: ask the owner (desktop, or the web over Direct) instead of auto-approving.
+        if let Some(cfg) = permission_ask::ask_config() {
+            let chosen = permission_ask::ask(&cfg, &msg["params"]).await;
+            let response = match chosen {
+                Some(option_id) => {
+                    tracing::info!(target: "acp::permission", "owner answered permission id={id} optionId={option_id:?}");
+                    permission_response_selected(&id, &option_id)
+                }
+                None => {
+                    tracing::warn!(target: "acp::permission", "no owner answer for permission id={id}; rejecting");
+                    match options
+                        .iter()
+                        .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"))
+                        .and_then(|opt| opt["optionId"].as_str())
+                    {
+                        Some(option_id) => permission_response_selected(&id, option_id),
+                        None => permission_response_cancelled(&id),
+                    }
+                }
+            };
+            self.write_ndjson(&response).await?;
+            self.permission_responded = true;
+            self.pending_permission_id = None;
+            return Ok(());
+        }
 
         // Find allow_once by kind — NEVER hardcode optionId.
         let allow_once = options

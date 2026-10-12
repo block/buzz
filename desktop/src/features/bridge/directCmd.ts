@@ -89,6 +89,7 @@ export const CMD_READS = [
   "get_agent_config_surface",
   "get_managed_agent_log",
   "get_agent_memory",
+  "list_permission_prompts",
 ] as const;
 export const CMD_WRITES = [
   "start_managed_agent",
@@ -98,6 +99,8 @@ export const CMD_WRITES = [
   "create_persona",
   "update_persona",
   "prepare_term_session_launch",
+  "add_team_from_catalog",
+  "respond_permission_prompt",
 ] as const;
 const PROMPT_MAX = 20_000;
 async function runtimeIdFor(deps: CmdDeps, id: string): Promise<void> {
@@ -369,6 +372,58 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       if (Object.keys(out).length === 1) bad("Nothing to change.");
       const r = obj(await inv(name, { input: out }));
       return { ...r, agent: sanitizeAgent(r.agent) };
+    }
+    case "list_permission_prompts": {
+      // Opt-in prompts (agent env BUZZ_ACP_PERMISSION_MODE=ask). Tool titles/inputs can carry credentials: redact them.
+      const pk = await managedPubkey(deps, a.pubkey);
+      return list(await inv(name, { pubkey: pk }), (x) => {
+        const o = obj(x);
+        const t = (v: unknown, max: number) => redactSecrets(typeof v === "string" ? v : "").slice(0, max);
+        return {
+          id: typeof o.id === "string" ? o.id.slice(0, 64) : "",
+          title: t(o.title, 500),
+          kind: t(o.kind, 40),
+          detail: t(o.detail, 4000),
+          createdAt: typeof o.createdAt === "number" ? o.createdAt : 0,
+          options: list(o.options, (y) => {
+            const p = obj(y);
+            return { optionId: String(p.optionId ?? "").slice(0, 200), name: t(p.name, 200), kind: t(p.kind, 40) };
+          }, 10),
+        };
+      }, 50);
+    }
+    case "respond_permission_prompt": {
+      const pk = await managedPubkey(deps, a.pubkey);
+      const requestId = str(a.requestId, "Request", 64) ?? bad("Missing request.");
+      if (!/^[0-9-]+$/.test(requestId)) bad("Invalid request.");
+      const optionId = str(a.optionId, "Option", 200) ?? bad("Missing option.");
+      await inv(name, { pubkey: pk, requestId, optionId });
+      return {};
+    }
+    case "add_team_from_catalog": {
+      // Same command the desktop's own catalog "Add" runs: it re-fetches and re-verifies the head from the relay, so the web
+      // only names which published team; nothing it sends is trusted as team content.
+      const i = obj(a.input);
+      const hex = (v: unknown, f: string) =>
+        typeof v === "string" && HEX64.test(v.toLowerCase()) ? v.toLowerCase() : bad(`Invalid ${f}.`);
+      const input = {
+        ownerPubkey: hex(i.ownerPubkey, "owner"),
+        teamDTag: str(i.teamDTag, "Team", 200) ?? bad("Missing team."),
+        eventId: hex(i.eventId, "event id"),
+      };
+      const r = obj(await inv(name, { input }));
+      const t = obj(r.team);
+      return {
+        alreadyPresent: r.alreadyPresent === true,
+        team: {
+          id: String(t.id ?? ""),
+          name: String(t.name ?? ""),
+          description: typeof t.description === "string" ? t.description : null,
+          persona_ids: Array.isArray(t.persona_ids) ? t.persona_ids.slice(0, 200).map(String) : [],
+          is_builtin: t.is_builtin === true,
+          shared: t.shared === true,
+        },
+      };
     }
     default:
       throw new MgmtError("unknown_op", "That command isn't available remotely.");

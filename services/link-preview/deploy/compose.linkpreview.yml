@@ -1,0 +1,26 @@
+# NOT DEPLOYED. Overlay for the buzz-prod compose project on the relay host:
+#   docker compose -f compose.yml -f compose.caddy.yml -f livekit/docker-compose.livekit.yml -f compose.linkpreview.yml up -d link-preview caddy
+# The helper gets its own network (no route to postgres/redis/minio/relay on buzz-net); only caddy joins both.
+services:
+  link-preview:
+    image: buzz-link-preview:${LINK_PREVIEW_TAG:-local}
+    build: ../../services/link-preview
+    environment:
+      LINK_PREVIEW_SESSION_SECRET: ${LINK_PREVIEW_SESSION_SECRET:?set LINK_PREVIEW_SESSION_SECRET (openssl rand -hex 32)}
+      LINK_PREVIEW_PUBLIC_URL: https://${BUZZ_DOMAIN:?set BUZZ_DOMAIN}/lp
+      LINK_PREVIEW_ALLOWED_ORIGINS: https://hulabuzz.huladesk.com
+      LINK_PREVIEW_ALLOWED_PUBKEYS: ${LINK_PREVIEW_ALLOWED_PUBKEYS:-}
+      LINK_PREVIEW_PER_MINUTE: "60"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5
+    restart: unless-stopped
+    networks: [lp-net]
+
+  caddy:
+    networks: [buzz-net, lp-net]
+
+networks:
+  lp-net: {}
