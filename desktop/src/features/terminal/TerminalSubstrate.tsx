@@ -102,6 +102,12 @@ type TerminalSubstrateProps = {
 const TOUCH_SENTINEL = "\u200b";
 const TOUCH_SEED = TOUCH_SENTINEL.repeat(64);
 
+/** Touch scroll gain: 1:1 for slow drags (precise), up to 3x for fast flicks; mouse-tracking TUIs get 2x more (wheel = 1 line). */
+function touchScrollGain(speedPxPerMs: number, mouseTracking: boolean): number {
+  const accel = 1 + Math.min(2, Math.max(0, speedPxPerMs - 0.3) * 1.5);
+  return mouseTracking ? accel * 2 : accel;
+}
+
 function isToggleChord(event: KeyboardEvent): boolean {
   return (
     event.code === "KeyJ" &&
@@ -334,7 +340,18 @@ export function TerminalSubstrate({
           break;
         }
         case "scroll": {
-          const result = accumulateScrollLines(touchScrollRef.current, action.dy, cellMetricsRef.current.height);
+          // Touch: track velocity for inertia and scale fast swipes (and mouse-tracking TUIs, where one wheel step is one
+          // line) so a single swipe covers many lines. Fractions accumulate; nothing is throttled or dropped.
+          let dy = action.dy;
+          if (touchUi) {
+            const now = performance.now();
+            const v = touchVelRef.current;
+            const dt = Math.max(1, now - v.t);
+            v.v = 0.8 * (dy / dt) + 0.2 * v.v; // px/ms, smoothed
+            v.t = now;
+            if (!inertiaActiveRef.current) dy *= touchScrollGain(Math.abs(v.v), mouseReportingRef.current);
+          }
+          const result = accumulateScrollLines(touchScrollRef.current, dy, cellMetricsRef.current.height);
           touchScrollRef.current = result.state;
           if (result.lines === 0) break;
           if (mouseReportingRef.current && onMouseRef.current) {
@@ -388,6 +405,8 @@ export function TerminalSubstrate({
     }
   };
   const touchDown = (event: React.PointerEvent) => {
+    stopInertia();
+    touchVelRef.current = { v: 0, t: performance.now() };
     setOwner("terminal");
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -406,6 +425,15 @@ export function TerminalSubstrate({
       );
     }
   };
+  const touchVelRef = React.useRef({ v: 0, t: 0 });
+  const inertiaRafRef = React.useRef(0);
+  const inertiaActiveRef = React.useRef(false);
+  const stopInertia = () => {
+    window.cancelAnimationFrame(inertiaRafRef.current);
+    inertiaRafRef.current = 0;
+    inertiaActiveRef.current = false;
+  };
+  React.useEffect(() => () => window.cancelAnimationFrame(inertiaRafRef.current), []);
   const touchMove = (event: React.PointerEvent) => {
     touchPointRef.current = { x: event.clientX, y: event.clientY };
     const actions = gesturesRef.current.move(event.pointerId, event.clientX, event.clientY, performance.now());
@@ -414,7 +442,24 @@ export function TerminalSubstrate({
   };
   const touchUp = (event: React.PointerEvent) => {
     window.clearTimeout(longPressTimerRef.current);
+    const wasScrolling = gesturesRef.current.state === "scroll";
     applyTouchActions(gesturesRef.current.up(event.pointerId, performance.now()));
+    // Inertia: keep scrolling with the release velocity, decaying like native momentum.
+    const v0 = touchVelRef.current;
+    if (wasScrolling && performance.now() - v0.t < 80 && Math.abs(v0.v) > 0.25) {
+      let v = v0.v * touchScrollGain(Math.abs(v0.v), mouseReportingRef.current);
+      let last = performance.now();
+      inertiaActiveRef.current = true;
+      const step = (t: number) => {
+        const dt = Math.min(48, t - last);
+        last = t;
+        v *= Math.pow(0.995, dt); // ~0.92 per 16 ms frame
+        if (Math.abs(v) < 0.03) return stopInertia();
+        applyTouchActions([{ type: "scroll", dy: v * dt }]);
+        inertiaRafRef.current = window.requestAnimationFrame(step);
+      };
+      inertiaRafRef.current = window.requestAnimationFrame(step);
+    }
   };
   const touchCancel = () => {
     window.clearTimeout(longPressTimerRef.current);
