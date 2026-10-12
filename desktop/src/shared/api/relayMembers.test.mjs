@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { relayClient } from "./relayClient.ts";
 import {
+  addRelayMember,
   canManageCommunityMembers,
+  changeRelayMemberRole,
+  removeRelayMember,
   loadRelayMembershipLookup,
   shouldWarnMissingMembershipSnapshot,
 } from "./relayMembers.ts";
@@ -111,4 +115,28 @@ test("an available snapshot never warns", () => {
     }),
     false,
   );
+});
+
+test("relay admin events refuse a connection to another community's relay", async () => {
+  const invoked = [];
+  globalThis.window ??= {};
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke: async (command) => {
+      invoked.push(command);
+      throw new Error(`unexpected ${command}`);
+    },
+  };
+  relayClient.bindRelayUrl("wss://self-hosted.example");
+  const target = "b".repeat(64);
+  const selected = "wss://hosted.example";
+
+  for (const publish of [
+    () => addRelayMember(target, "admin", selected),
+    () => removeRelayMember(target, selected),
+    () => changeRelayMemberRole(target, "member", selected),
+    () => addRelayMember(target, "admin", undefined),
+  ]) {
+    await assert.rejects(publish, /is not the selected community/);
+  }
+  assert.deepEqual(invoked, [], "nothing may be signed or sent");
 });

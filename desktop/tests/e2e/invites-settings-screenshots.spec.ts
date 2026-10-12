@@ -98,7 +98,7 @@ test("capture: share-style community invite dialog", async ({ page }) => {
   await expect(page.getByPlaceholder("Type an email address")).toHaveCount(0);
   await expect(
     dialog.getByText(
-      "Add someone directly or share a link they can use to join.",
+      /^Add someone to .+ directly or share a link they can use to join\.$/,
     ),
   ).toBeVisible();
   await expect(
