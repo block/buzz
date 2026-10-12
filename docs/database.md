@@ -142,18 +142,21 @@ that community. All in the same PR:
       `community_id NOT NULL` and key-leads-with-`community_id` lints fail.
 - [ ] Choose and implement its community-deletion disposition in
       `crates/buzz-db/src/store/deletion.rs`:
-  - **sever:** set the provenance column to `NULL` in the `BindingsRemoved`
-    step, as `product_feedback` and `rate_limit_violations` are;
+  - **sever:** set the provenance column to `NULL` in the `purge_postgres`
+    transaction, as `product_feedback` and `rate_limit_violations` are;
   - **delete and verify:** add it to `RELAY_ADMIN_TABLES` with a row source,
     as the `relay_admin_*` tables are; or
-  - **retain on purpose:** add it to `CONTROL_PLANE_TABLES` and state the
-    reason in the PR.
+  - **retain on purpose:** add no deletion code, and state the reason in a
+    comment beside the table's migration and in the PR, as
+    `operator_listener_outbox` is retained. No check enforces this choice.
 - [ ] Use the `community_write_fence_excluded_table` edit only if the column
       must be named `community_id`; otherwise give the column another name.
 - [ ] A Postgres-gated deletion test that seeds a row for the target community
-      and asserts the chosen disposition after
-      `verify_postgres_logically_deleted`, as the existing tests do for
-      `product_feedback` and `relay_admin_*`.
+      and asserts the chosen disposition. For delete and verify, call
+      `purge_postgres` and `verify_postgres_logically_deleted`, following
+      `purge_postgres_succeeds_with_relay_admin_action_rows`. For sever, call
+      `purge_postgres` and assert the column is `NULL`. This is new coverage:
+      no existing test drives the sever path through `purge_postgres`.
 
 A `DO` block in a migration is not a persisted function. It MAY guard
 idempotent DDL, as migration `0049` does. It MUST NOT be used to run data
