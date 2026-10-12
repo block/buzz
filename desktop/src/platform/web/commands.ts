@@ -2,6 +2,8 @@
 // everything else is classified by capabilities.ts and rejects with a typed NativeOnlyError.
 import { capabilityGroupFor, groupPolicy } from "./capabilities";
 import { chatHandlers } from "./chat";
+import { getFeed, type FeedArgs } from "./feed";
+import { queryRelay } from "./relayHttp";
 import {
   defaultRelayWsUrl,
   relayHttpBase,
@@ -193,10 +195,16 @@ export const handlers: Record<string, Handler> = {
   copy_text_to_clipboard: (a) => navigator.clipboard.writeText(a?.text ?? ""),
   read_clipboard_text: () => navigator.clipboard.readText(),
   // quiet defaults for desktop-only subsystems the shell touches at boot
-  get_feed: () => ({
-    feed: { mentions: [], needs_action: [], activity: [], agent_activity: [] },
-    meta: { since: 0, total: 0, generated_at: Math.floor(Date.now() / 1000) },
-  }), // S2: home feed
+  // Home feed: mentions + approvals (+ edits for link-preview suppression), ported from desktop get_feed.
+  get_feed: (a) => {
+    const me = signerPubkey();
+    if (!me)
+      return {
+        feed: { mentions: [], needs_action: [], activity: [], agent_activity: [] },
+        meta: { since: 0, total: 0, generated_at: Math.floor(Date.now() / 1000) },
+      };
+    return getFeed(a as FeedArgs, me, (filters) => queryRelay(filters as never) as never);
+  },
   get_voice_input_mode: () => "push_to_talk",
   get_audio_output_device: () => "",
   // chat path (S1)

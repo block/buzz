@@ -1,4 +1,5 @@
 import * as React from "react";
+import { publishTerminalTabs } from "./terminalTabsBridge";
 import { getWebTermInfo } from "@/features/bridge/webTermHub";
 import { isTauri } from "@tauri-apps/api/core";
 
@@ -910,6 +911,48 @@ export function TerminalBootstrap({
     [activeKey, fail],
   );
 
+  const closeSession = (key: string) => {
+    setSessions((current) =>
+      current.map((session) =>
+        session.key === key ? { ...session, closing: true } : session,
+      ),
+    );
+    const connection = sessionsRef.current.find(
+      (session) => session.key === key,
+    )?.connection;
+    if (!connection) {
+      closedSessionKeysRef.current.add(key);
+      removeSession(key);
+      return;
+    }
+    void connection
+      .close()
+      .then(() => removeSession(key))
+      .catch(fail);
+  };
+  const closeSessionRef = React.useRef(closeSession);
+  closeSessionRef.current = closeSession;
+  // Mirror the tab list for the phone tab switcher (same select/close handlers as the strip).
+  const tabMirror = sessions
+    .filter((session) => !session.closing)
+    .map((session) => `${session.key}\u0000${session.title}\u0000${session.context.channelName ?? ""}`)
+    .join("\u0001");
+  React.useEffect(() => {
+    publishTerminalTabs({
+      tabs: sessionsRef.current
+        .filter((session) => !session.closing)
+        .map((session) => ({
+          active: session.key === activeKey,
+          channelName: session.context.channelName,
+          id: session.key,
+          title: session.title,
+        })),
+      select: setActiveKey,
+      close: (key) => closeSessionRef.current(key),
+    });
+  }, [tabMirror, activeKey]);
+  React.useEffect(() => () => publishTerminalTabs(null), []);
+
   if (!panelMounted) return null;
 
   return (
@@ -942,25 +985,7 @@ export function TerminalBootstrap({
       sessionFrames={visibleSessions.flatMap((session) =>
         session.frame ? [{ sessionId: session.key, frame: session.frame }] : [],
       )}
-      onCloseSession={(key) => {
-        setSessions((current) =>
-          current.map((session) =>
-            session.key === key ? { ...session, closing: true } : session,
-          ),
-        );
-        const connection = sessionsRef.current.find(
-          (session) => session.key === key,
-        )?.connection;
-        if (!connection) {
-          closedSessionKeysRef.current.add(key);
-          removeSession(key);
-          return;
-        }
-        void connection
-          .close()
-          .then(() => removeSession(key))
-          .catch(fail);
-      }}
+      onCloseSession={closeSession}
       onFrameConsumed={(frame) => {
         const delivery = sessionsRef.current.find(
           (session) => session.delivery?.frame === frame,

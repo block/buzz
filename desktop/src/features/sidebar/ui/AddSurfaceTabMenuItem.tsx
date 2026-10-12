@@ -3,6 +3,7 @@ import { AppWindow } from "lucide-react";
 
 import type { SurfaceTabTarget } from "@/app/surfaceTabs/surfaceTabModel";
 import { useOptionalSurfaceTabs } from "@/app/surfaceTabs/SurfaceTabsProvider";
+import { isPhoneLayout } from "@/shared/lib/phoneLayout";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -45,7 +46,7 @@ export function AddSurfaceTabMenuItem({
         <ContextMenuIconSlot>
           <AppWindow className="h-4 w-4" />
         </ContextMenuIconSlot>
-        <span>Add as Tab</span>
+        <span>{isPhoneLayout() ? "Open in new tab" : "Add as Tab"}</span>
       </ContextMenuItem>
       {divided ? <ContextMenuSeparator /> : null}
     </>

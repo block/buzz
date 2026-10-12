@@ -35,6 +35,7 @@ const { ctx, page, errs } = await open(iphone);
 check("phone: data-phone set", await page.evaluate(() => document.documentElement.hasAttribute("data-phone")));
 check("phone: tab bar visible", await page.isVisible('[data-testid="phone-tabbar"]'));
 check("phone: no slide-out sidebar trigger visible", !(await page.isVisible('[data-sidebar="trigger"]')));
+await page.tap('[data-testid="phone-tab-inbox"]'); await page.waitForTimeout(1500);
 check("phone: sidebar not rendered on Inbox", (await page.locator('[data-testid="app-sidebar"]').count()) === 0);
 await page.screenshot({ path: `${out}/phone-1-inbox.png` });
 await page.tap('[data-testid="phone-tab-channels"]'); await page.waitForTimeout(1500);

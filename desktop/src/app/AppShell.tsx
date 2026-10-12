@@ -123,6 +123,7 @@ import { SidebarProvider } from "@/shared/ui/sidebar";
 import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 import { PhoneMeScreen } from "@/app/phone/PhoneMeScreen";
 import { PhoneTabBar } from "@/app/phone/PhoneTabBar";
+import { PhoneTabSwitcher } from "@/app/phone/PhoneTabSwitcher";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import {
   type PhoneTab,
@@ -230,6 +231,13 @@ export function AppShell() {
   React.useEffect(() => {
     setPhoneOverlay(null); // any navigation leaves the Channels/Me list screens
   }, [location.pathname]);
+  // Phone opens on the Channels tab (the root route is Inbox on iPad/desktop).
+  const phoneStartedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!isPhone || phoneStartedRef.current) return;
+    phoneStartedRef.current = true;
+    if (location.pathname === "/") setPhoneOverlay("channels");
+  }, [isPhone, location.pathname]);
   React.useEffect(() => {
     const root = document.documentElement;
     if (showPhoneTabBar) root.setAttribute("data-phone-tabbar", "");
@@ -1126,12 +1134,32 @@ export function AppShell() {
                             </div>
                           </div>
                         ) : null}
+                        {isPhone && !hideAppChrome ? (
+                          <PhoneTabSwitcher
+                            channels={channels}
+                            onOpenBuzzTerm={() => {
+                              setPhoneOverlay(null);
+                              void navigate({ to: "/buzz-term" });
+                            }}
+                            terminalActive={
+                              phoneOverlay === null &&
+                              location.pathname.startsWith("/buzz-term")
+                            }
+                          />
+                        ) : null}
                         {showPhoneTabBar && !hideAppChrome ? (
                           <PhoneTabBar
                             active={phoneTab}
                             badges={{
-                              inbox: homeBadgeCountExcludingHighPriority,
                               channels: unreadChannelNotificationCount,
+                            }}
+                            me={{
+                              avatarUrl: profileQuery.data?.avatarUrl,
+                              displayName:
+                                profileQuery.data?.displayName ||
+                                identityQuery.data?.displayName ||
+                                "Me",
+                              pubkey: identityQuery.data?.pubkey,
                             }}
                             onSelect={(tab: PhoneTab) => {
                               if (tab === "channels" || tab === "me" || tab === "search") {

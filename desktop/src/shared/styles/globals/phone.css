@@ -7,7 +7,12 @@
   --phone-tabbar-bar-h: 3.5rem;
   --phone-tabbar-gap: 8px;
   /* Space the floating tab bar occupies, from the bottom of the screen to its top edge plus a small gap. */
-  --phone-tabbar-h: calc(var(--phone-tabbar-bar-h) + var(--phone-safe-bottom) + var(--phone-tabbar-gap) * 2);
+  --phone-tabbar-bottom: calc(var(--phone-safe-bottom) + var(--phone-tabbar-gap));
+  --phone-tabbar-h: calc(var(--phone-tabbar-bar-h) + var(--phone-tabbar-bottom) + var(--phone-tabbar-gap));
+}
+/* Installed PWA: the bar sits just above the home indicator (the inset already clears it; no extra gap). */
+[data-phone][data-phone-standalone] {
+  --phone-tabbar-bottom: max(6px, calc(var(--phone-safe-bottom) - 8px));
 }
 /* The shell follows the visual viewport (--phone-vh, set from JS; 100dvh fallback) so it shrinks with the keyboard,
    and starts below the status bar / Dynamic Island. */
@@ -36,7 +41,7 @@
   position: fixed;
   left: 14px;
   right: 14px;
-  bottom: calc(var(--phone-safe-bottom) + var(--phone-tabbar-gap));
+  bottom: var(--phone-tabbar-bottom);
   height: var(--phone-tabbar-bar-h);
   padding: 4px;
   gap: 2px;
@@ -270,4 +275,93 @@
 }
 [data-phone] div:has(> .phone-search-dialog) {
   z-index: 115 !important;
+}
+
+/* Channels list: no bottom profile bar and no scroll-docked menu row (Me and the tab bar cover them). */
+[data-phone] .phone-fullscreen [data-testid="sidebar-profile-card"],
+[data-phone] .phone-fullscreen [data-testid="sidebar-menu-dock"] {
+  display: none !important;
+}
+/* Tab bar: the Me tab is the user's avatar. */
+[data-phone] .phone-tabbar .phone-tab-avatar {
+  width: 30px;
+  height: 30px;
+}
+/* Settings: nothing wider than the screen. */
+[data-phone] .phone-settings,
+[data-phone] .phone-settings * {
+  min-width: 0;
+}
+[data-phone] .phone-settings [data-testid^="settings-panel-"] {
+  overflow-x: hidden;
+}
+[data-phone] .phone-settings [data-testid^="settings-panel-"] :is(p, span, label, h2, h3, h4) {
+  overflow-wrap: anywhere;
+}
+[data-phone] .phone-settings [data-testid^="settings-panel-"] :is(img, svg, video, canvas) {
+  max-width: 100%;
+}
+/* Phone tab switcher: floating count button top-left, list fanned out underneath. */
+[data-phone] .phone-tab-switcher-button {
+  position: fixed;
+  top: calc(var(--phone-safe-top) + 4px);
+  left: 8px;
+  z-index: 130;
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(24, 24, 27, 0.78);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+[data-phone] .phone-tab-switcher-panel {
+  position: fixed;
+  top: calc(var(--phone-safe-top) + 46px);
+  left: 8px;
+  z-index: 130;
+  width: min(320px, calc(100vw - 16px));
+  max-height: calc(var(--phone-vh, 100dvh) - var(--phone-safe-top) - var(--phone-tabbar-h) - 56px);
+  overflow-y: auto;
+  border-radius: 16px;
+  background: hsl(var(--popover));
+  color: hsl(var(--popover-foreground));
+  border: 1px solid hsl(var(--border));
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+  padding: 4px;
+  transform-origin: top left;
+  animation: phone-tab-fan 140ms ease-out;
+}
+@keyframes phone-tab-fan {
+  from { opacity: 0; transform: scale(0.92) translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+[data-phone] .phone-tab-switcher-row {
+  display: flex;
+  align-items: center;
+  border-radius: 10px;
+}
+[data-phone] .phone-tab-switcher-row.is-active {
+  background: hsl(var(--primary) / 0.14);
+  color: hsl(var(--primary));
+  font-weight: 600;
+}
+/* Headers move right of the floating button. */
+[data-phone][data-phone-tab-switcher] [data-testid="app-top-chrome"] [data-testid="phone-back"] {
+  left: 50px;
+}
+[data-phone][data-phone-tab-switcher] .phone-settings-header {
+  padding-left: 50px;
+}
+[data-phone][data-phone-tab-switcher] .phone-fullscreen {
+  padding-top: calc(var(--phone-safe-top) + 44px);
+}
+[data-phone][data-phone-tab-switcher] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tabs {
+  padding-left: 48px;
 }

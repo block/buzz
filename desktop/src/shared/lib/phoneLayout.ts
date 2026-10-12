@@ -35,13 +35,20 @@ function installPhoneViewportHeight(mql: MediaQueryList): void {
       root.removeAttribute("data-phone-keyboard");
       return;
     }
-    const h = vv ? vv.height : window.innerHeight;
-    root.style.setProperty("--phone-vh", `${Math.round(h)}px`);
+    let h = vv ? vv.height : window.innerHeight;
+    const standalone = isStandaloneDisplay();
+    if (standalone) root.setAttribute("data-phone-standalone", "");
+    else root.removeAttribute("data-phone-standalone");
     // The soft keyboard is up when the visual viewport is much shorter than the layout viewport (or than the
     // largest height seen, for engines that resize both).
     maxH = Math.max(maxH, window.innerHeight, h);
-    if (h < maxH - 150) root.setAttribute("data-phone-keyboard", "");
+    const keyboard = h < maxH - 150;
+    if (keyboard) root.setAttribute("data-phone-keyboard", "");
     else root.removeAttribute("data-phone-keyboard");
+    // Installed iOS PWA: the visual/inner height can come up short of the full screen (status-bar and home
+    // indicator insets subtracted), leaving a dead band under the tab bar. Without the keyboard, use the full height.
+    if (standalone && !keyboard) h = Math.max(h, window.innerHeight, maxH);
+    root.style.setProperty("--phone-vh", `${Math.round(h)}px`);
     if (vv && (window.scrollY !== 0 || vv.offsetTop !== 0)) window.scrollTo(0, 0);
   };
   sync();
@@ -49,6 +56,13 @@ function installPhoneViewportHeight(mql: MediaQueryList): void {
   vv?.addEventListener("scroll", sync);
   window.addEventListener("resize", sync);
   mql.addEventListener("change", sync);
+}
+
+/** Installed web app (iOS "Add to Home Screen" or display-mode: standalone). */
+export function isStandaloneDisplay(): boolean {
+  if (typeof window === "undefined") return false;
+  const nav = navigator as Navigator & { standalone?: boolean };
+  return nav.standalone === true || (typeof window.matchMedia === "function" && window.matchMedia("(display-mode: standalone)").matches);
 }
 
 const ROW_SELECTOR = '[data-testid="message-row"]';
