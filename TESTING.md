@@ -65,9 +65,10 @@ The inventory keeps membership separate from restriction policy. Public NIP-11,
 NIP-05, policy documents, and health probes have no authenticated community
 principal. Anonymous policy-receipt acceptance is pre-membership and has no
 principal to restrict. Invite claim is also pre-membership, but it carries a
-verified NIP-98 principal and remains restriction-enforced: its coverage remains
-pending in the inventory until BUZZ-268 lands and qualifies the updated
-v1/v2 lifecycle. After BUZZ-268 lands, the intended contract is to retain valid
+verified NIP-98 principal and is classified as restriction-enforced in the
+inventory. Enforcement will land with BUZZ-268; coverage remains pending until
+that sibling lands and qualifies the updated v1/v2 lifecycle. After BUZZ-268
+lands, the intended contract is to retain valid
 unexpired v1 codes and mint only v2, with a 72-hour default and 30-day maximum
 lifetime. Both formats will reject banned claimants and owners transactionally,
 and issuer bans will permanently invalidate v2. For v1, an unset operator
