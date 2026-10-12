@@ -2,11 +2,9 @@
 import * as React from "react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "@/features/settings/ui/SettingsOptionGroup";
 import {
   REMOTE_AGENT_MGMT_LABEL,
-  REMOTE_TERMINAL_DESC,
   REMOTE_TERMINAL_LABEL,
 } from "@/features/settings/ui/RemoteAccessSettingsCard";
 import {
@@ -85,7 +83,8 @@ export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>, opts?: 
     // Buzz term is on by default: once the desktop advertises terminals and its tailnet address answers, turn it on here
     // (and pick that desktop) unless the user switched it off themselves. Without this the page stayed on its
     // "isn't available" instructions even though the desktop was ready.
-    if (!prefs.terminalOn && !prefs.terminalOptOut) {
+    // "Allow remote terminal" is a desktop setting: the web follows it (no web-local switch or opt-out any more).
+    if (!prefs.terminalOn) {
       const ready = hosts.find((h) => h.supports.terminal && !h.stale && reachOf(h) === "reachable");
       if (ready) setWebRemotePrefs({ terminalOn: true, terminalHost: ready.id });
     }
@@ -165,38 +164,27 @@ export function WebRemoteAgentManagement() {
   );
 }
 
+/** Web Settings → Buzz Term: read-only. "Allow remote terminal" is set on the desktop; this shows what it reports. */
 export function WebRemoteTerminal() {
-  const { hosts, prefs, reachOf } = useRemoteHosts();
+  const { b, hosts, prefs, reachOf } = useRemoteHosts();
+  const on = b.heartbeat?.remote?.terminals === true;
   const capable = hosts.filter((h) => h.supports.terminal);
-  const reachable = capable.filter((h) => reachOf(h) === "reachable");
-  const canTurnOn = reachable.length > 0;
   return (
     <SettingsOptionGroup data-testid="web-remote-terminal" title="Remote terminal">
       <SettingsOptionRow>
-        <div className="min-w-0">
-          <label className="text-sm font-medium" htmlFor="web-remote-terminal-switch">
-            {REMOTE_TERMINAL_LABEL}
-          </label>
+        <div className="min-w-0" data-testid="web-remote-terminal-status" data-on={on ? "1" : "0"}>
+          <p className="flex items-center gap-2 text-sm font-medium">
+            {REMOTE_TERMINAL_LABEL} on your desktop
+            <StatusChip tone={b.heartbeat && on ? "green" : "grey"} testId="web-remote-terminal-chip">
+              {b.heartbeat ? (on ? "On" : "Off") : "Unknown"}
+            </StatusChip>
+          </p>
           <p className="text-sm font-normal text-muted-foreground/70" data-settings-subcopy>
-            {REMOTE_TERMINAL_DESC}
-            {!canTurnOn && " Terminals need a direct connection over your tailnet; no host is reachable right now."}
+            This is a desktop setting. Change it on your desktop in Settings → Buzz Term.
           </p>
         </div>
-        <Switch
-          checked={prefs.terminalOn && canTurnOn}
-          data-testid="web-remote-terminal-toggle"
-          disabled={!canTurnOn}
-          id="web-remote-terminal-switch"
-          onCheckedChange={(on) =>
-            setWebRemotePrefs({
-              terminalOn: on,
-              terminalOptOut: !on,
-              ...(on && !prefs.terminalHost ? { terminalHost: reachable[0]?.id ?? null } : {}),
-            })
-          }
-        />
       </SettingsOptionRow>
-      {prefs.terminalOn && canTurnOn && (
+      {capable.length > 0 && (
         <div className="px-4 pb-3">
           <HostList feature="terminal" hosts={hosts} prefs={prefs} reachOf={reachOf} />
         </div>
