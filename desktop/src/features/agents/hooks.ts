@@ -389,8 +389,8 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
     queryFn: listRelayAgents,
     // Relay agent discovery is scoped to the viewer's relay-signed channel
     // memberships, then resolves exact agent/profile/policy coordinates in
-    // protocol-sized batches. Polling remains the only refresh path for remote
-    // changes, so keep it relaxed and pause while backgrounded.
+    // protocol-sized batches. Membership changes refresh it immediately;
+    // polling covers other remote changes and pauses while backgrounded.
     refetchInterval,
     enabled: options?.enabled,
     ...agentsFocusRefetchPolicy,

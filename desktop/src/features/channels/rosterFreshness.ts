@@ -48,9 +48,9 @@ export async function invalidateChannelMembersRosters(
 }
 
 /**
- * Refreshes a channel's cached roster whenever its membership changes (see
- * channelMembershipWrites). Cancels a fetch already in flight first: it may
- * have been routed to the lagging replica before the change was recorded.
+ * Refreshes the roster and membership-scoped agent directory when membership
+ * changes. Cancel pending reads first so pre-change results cannot overwrite
+ * the refresh or keep shared agents missing from mentions until the next poll.
  */
 export function refreshRostersOnMembershipChange(
   queryClient: Pick<
@@ -59,9 +59,13 @@ export function refreshRostersOnMembershipChange(
   >,
 ) {
   return onChannelMembershipChange((channelId) => {
-    const queryKey = channelMembersQueryKey(channelId);
-    void queryClient
-      .cancelQueries({ queryKey, exact: true })
-      .then(() => queryClient.invalidateQueries({ queryKey, exact: true }));
+    for (const queryKey of [
+      channelMembersQueryKey(channelId),
+      ["relay-agents"],
+    ]) {
+      void queryClient
+        .cancelQueries({ queryKey, exact: true })
+        .then(() => queryClient.invalidateQueries({ queryKey, exact: true }));
+    }
   });
 }

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { getMentionableAgentPubkeys } from "@/features/agents/lib/agentAutocompleteEligibility";
 
 let now = 1_000_000;
 // The window runs on the monotonic clock; wall-clock jumps must not move it.
@@ -342,3 +343,64 @@ test("a community switch clears recorded changes", async () => {
   assert.equal(routes.at(-1), "replica");
   roster.teardown();
 });
+
+for (const initialReadPending of [false, true]) {
+  test(`membership changes refresh shared mentions with ${initialReadPending ? "an in-flight" : "a cached"} directory`, async (t) => {
+    resetChannelMembershipWrites();
+    const client = new QueryClient();
+    t.after(() => client.clear());
+    const channelId = "shared-agent-channel";
+    const queryKey = ["relay-agents"];
+    let joined = false;
+    let completeInitialRead;
+    const agent = {
+      pubkey: BOT,
+      ownerPubkey: OWNER,
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: [channelId],
+    };
+    const observer = new QueryObserver(client, {
+      queryKey,
+      staleTime: 5 * 60_000,
+      queryFn: () => {
+        const agents = joined ? [agent] : [];
+        if (initialReadPending && !completeInitialRead) {
+          return new Promise((resolve) => {
+            completeInitialRead = () => resolve(agents);
+          });
+        }
+        return agents;
+      },
+    });
+    t.after(refreshRostersOnMembershipChange(client));
+    t.after(observer.subscribe(() => {}));
+    const mentions = () =>
+      getMentionableAgentPubkeys({
+        currentPubkey: "cc".repeat(32),
+        eligibilityScope: { type: "channel", channelId },
+        managedAgentPubkeys: [],
+        relayAgents: client.getQueryData(queryKey),
+        sharedChannelIds: new Set([channelId]),
+        phase: "prepare",
+      });
+    await settle();
+    assert.equal(mentions().has(BOT), false);
+
+    // A live membership notification arrives while the app stays open.
+    joined = true;
+    noteChannelMembershipChange(channelId);
+    await settle();
+    assert.equal(mentions().has(BOT), true);
+
+    // A pre-join request must not replace the new directory when it finishes.
+    completeInitialRead?.();
+    await settle();
+    assert.equal(mentions().has(BOT), true);
+
+    joined = false;
+    noteChannelMembershipChange(channelId);
+    await settle();
+    assert.equal(mentions().has(BOT), false);
+  });
+}
