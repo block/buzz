@@ -14,7 +14,12 @@ Before planning or reviewing a non-trivial change:
 2. Read the `VISION_*.md` documents relevant to the affected product surface.
 3. Read the applicable guidance in [TESTING.md](TESTING.md) and any
    package-local `TESTING.md`.
-4. Check that the proposed design advances, or at least does not contradict,
+4. For any change to `migrations/`, `schema/`, or schema-dependent `buzz-db`
+   queries, read [docs/database.md](docs/database.md): no new triggers,
+   functions, or foreign keys; no data backfills in migrations; update every
+   schema location; and keep every migration compatible with the relay that
+   is currently deployed.
+5. Check that the proposed design advances, or at least does not contradict,
    that product intent. Call out any intentional tension explicitly.
 
 Implementation describes the product today; the vision documents describe the
@@ -128,7 +133,8 @@ crates/
 desktop/              # Tauri 2 + React 19 desktop app
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
-migrations/           # SQL migrations (auto-applied on relay startup)
+migrations/           # SQL migrations (applied by operators; opt-in at relay startup via BUZZ_AUTO_MIGRATE)
+schema/               # Desired-state schema (schema/tables/public/ is the SchemaBot source)
 scripts/              # Dev tooling
 .env.example          # Config template — copy to .env before running
 ```
