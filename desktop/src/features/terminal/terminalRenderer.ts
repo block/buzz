@@ -178,6 +178,63 @@ export class TerminalGrid {
     });
   }
 
+  /** One string per cell of a row ("" for the trailing cells of a wide character), `columns` long. */
+  #cellsOf(line: number): string[] {
+    const cells = Array.from({ length: this.#viewport.columns }, () => " ");
+    for (const span of this.#rows[line]?.spans ?? []) {
+      for (const cluster of span.clusters) {
+        cells[cluster.column] = cluster.text;
+        for (let offset = 1; offset < cluster.width; offset++) {
+          cells[cluster.column + offset] = "";
+        }
+      }
+    }
+    return cells;
+  }
+
+  /**
+   * Text between two cells (inclusive, 0-based row/column, either order), as a touch selection needs it: columns are cells,
+   * not string offsets, so wide characters select correctly. Rows end with a newline unless they wrap into the next.
+   */
+  textBetweenCells(
+    rowA: number,
+    colA: number,
+    rowB: number,
+    colB: number,
+  ): string {
+    const forward = rowA < rowB || (rowA === rowB && colA <= colB);
+    const [r1, c1, r2, c2] = forward
+      ? [rowA, colA, rowB, colB]
+      : [rowB, colB, rowA, colA];
+    const first = Math.max(0, r1);
+    const last = Math.min(this.#rows.length - 1, r2);
+    let out = "";
+    for (let line = first; line <= last; line++) {
+      const cells = this.#cellsOf(line);
+      const from = line === r1 ? Math.max(0, c1) : 0;
+      const to = line === r2 ? Math.min(cells.length - 1, c2) : cells.length - 1;
+      let text = cells.slice(from, to + 1).join("");
+      const wrapped = this.#rows[line]?.wrapped ?? false;
+      if (!wrapped || line === last) text = text.trimEnd();
+      out += text;
+      if (line < last && !wrapped) out += "\n";
+    }
+    return out;
+  }
+
+  /** The run of non-blank cells around a cell (for double-tap / long-press word selection); null on blank space. */
+  wordAt(row: number, col: number): { start: number; end: number } | null {
+    if (row < 0 || row >= this.#rows.length) return null;
+    const cells = this.#cellsOf(row);
+    const blank = (i: number) => cells[i] === " ";
+    if (col < 0 || col >= cells.length || blank(col)) return null;
+    let start = col;
+    let end = col;
+    while (start > 0 && !blank(start - 1)) start--;
+    while (end < cells.length - 1 && !blank(end + 1)) end++;
+    return { start, end };
+  }
+
   normalizeSelectionOffset(
     rowIndex: number,
     offset: number,
