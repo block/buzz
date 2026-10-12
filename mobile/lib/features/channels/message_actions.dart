@@ -64,9 +64,10 @@ Future<void> showMessageActions({
 }) async {
   if (!context.mounted) return;
   unawaited(HapticFeedback.mediumImpact());
+  final restoreFocusOnCancel = composerFocusNode?.hasFocus ?? false;
   composerFocusNode?.unfocus();
 
-  showBuzzModalBottomSheet<void>(
+  final selectedAction = await showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
@@ -132,7 +133,7 @@ Future<void> showMessageActions({
                           leading: const Icon(BuzzIcons.copy),
                           title: const Text('Copy text'),
                           onTap: () {
-                            Navigator.of(sheetContext).pop();
+                            Navigator.of(sheetContext).pop(true);
                             // Copy to clipboard
                             final data = ClipboardData(text: message.content);
                             Clipboard.setData(data);
@@ -148,7 +149,7 @@ Future<void> showMessageActions({
                           leading: const Icon(BuzzIcons.pencil),
                           title: const Text('Edit message'),
                           onTap: () {
-                            Navigator.of(sheetContext).pop();
+                            Navigator.of(sheetContext).pop(true);
                             _showEditSheet(
                               context: context,
                               ref: ref,
@@ -167,7 +168,7 @@ Future<void> showMessageActions({
                             style: TextStyle(color: sheetContext.colors.error),
                           ),
                           onTap: () {
-                            Navigator.of(sheetContext).pop();
+                            Navigator.of(sheetContext).pop(true);
                             _confirmDelete(
                               context: context,
                               ref: ref,
@@ -186,6 +187,9 @@ Future<void> showMessageActions({
       ),
     ),
   );
+  if (selectedAction != true && restoreFocusOnCancel && context.mounted) {
+    restoreComposerFocus?.call();
+  }
 }
 
 /// Image-focused actions shown from the full-screen viewer.
@@ -491,7 +495,7 @@ class _MarkReadUnreadTile extends ConsumerWidget {
       leading: Icon(unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen),
       title: Text(unread ? 'Mark read' : 'Mark unread'),
       onTap: () {
-        Navigator.of(context).pop();
+        Navigator.of(context).pop(true);
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
           // Advances the `msg:` marker and clears this message's own forced
@@ -532,7 +536,7 @@ class _FollowThreadTile extends ConsumerWidget {
       leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () {
-        Navigator.of(context).pop();
+        Navigator.of(context).pop(true);
         final notifier = ref.read(threadFollowsProvider.notifier);
         if (following) {
           notifier.unfollowThread(rootId);
@@ -577,7 +581,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
           icon: BuzzIcons.messageSquareReply,
           label: 'Reply',
           onTap: () {
-            Navigator.of(context).pop();
+            Navigator.of(context).pop(true);
             Navigator.of(pageContext).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(
@@ -596,7 +600,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
         icon: BuzzIcons.link2,
         label: 'Copy link',
         onTap: () {
-          Navigator.of(context).pop();
+          Navigator.of(context).pop(true);
           copyToClipboard(
             pageContext,
             messageLinkFor(message: message, channelId: channelId),
@@ -613,7 +617,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
               context,
               rootNavigator: true,
             ).context;
-            Navigator.of(context).pop();
+            Navigator.of(context).pop(true);
             showRemindMeLaterSheet(
               context: rootContext,
               ref: ref,

@@ -767,6 +767,36 @@ void main() {
       },
     );
 
+    for (final action in [
+      null,
+      'Copy link',
+      'Copy text',
+      'Follow thread',
+      'Mark unread',
+    ]) {
+      testWidgets('composer focus after sheet dismissal: $action', (
+        tester,
+      ) async {
+        final focusNode = FocusNode();
+        addTearDown(focusNode.dispose);
+        await _pumpMessageActionsPopover(
+          tester,
+          message: _message(),
+          prefs: await _mockPrefs(),
+          composerFocusNode: focusNode,
+          composerInitiallyFocused: true,
+        );
+        expect(focusNode.hasFocus, isFalse);
+        if (action == null) {
+          await tester.tapAt(const Offset(10, 10));
+        } else {
+          await tester.tap(find.text(action));
+        }
+        await tester.pumpAndSettle();
+        expect(focusNode.hasFocus, action == null);
+      });
+    }
+
     testWidgets('hides utility actions for system messages', (tester) async {
       final prefs = await _mockPrefs();
       await _pumpSheet(tester, message: _message(isSystem: true), prefs: prefs);

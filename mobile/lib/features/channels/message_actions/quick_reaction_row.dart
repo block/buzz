@@ -66,7 +66,7 @@ class _QuickReactionRow extends ConsumerWidget {
               child: _QuickReactionCircle(
                 size: circleSize,
                 onTap: () {
-                  Navigator.of(sheetContext).pop();
+                  Navigator.of(sheetContext).pop(true);
                   react(emoji[index]);
                 },
                 child: _QuickReactionGlyph(
@@ -80,7 +80,7 @@ class _QuickReactionRow extends ConsumerWidget {
             child: _QuickReactionCircle(
               size: circleSize,
               onTap: () {
-                Navigator.of(sheetContext).pop();
+                Navigator.of(sheetContext).pop(true);
                 showEmojiPicker(context: pageContext, onSelect: react);
               },
               child: Icon(
