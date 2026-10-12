@@ -6,6 +6,7 @@ import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
 import { AddCommunityDialog } from "@/features/communities/ui/AddCommunityDialog";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
+import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
 import {
   useChannelSections,
@@ -171,6 +172,7 @@ export function AppSidebar({
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
   const { open: sidebarOpen, openMobile } = useSidebar();
   const isMobile = useIsMobile();
+  const isPhone = usePhoneLayout();
   const [isSidebarUpdateCardDismissed, setIsSidebarUpdateCardDismissed] =
     React.useState(false);
   const showSidebarUpdateCard =
@@ -587,7 +589,7 @@ export function AppSidebar({
   return (
     <Sidebar
       className="!z-[100] !border-r-0"
-      collapsible="offcanvas"
+      collapsible={isPhone ? "none" : "offcanvas"}
       data-testid="app-sidebar"
       onClick={(event) => {
         if (isSidebarBackgroundTarget(event.target)) {
@@ -1005,7 +1007,7 @@ export function AppSidebar({
 
           <SidebarFooter>
             {relayConnectionCard.showSidebarRelayConnectionCard &&
-            (isMobile ? openMobile : sidebarOpen) ? (
+            (isPhone || (isMobile ? openMobile : sidebarOpen)) ? (
               <SidebarRelayConnectionCard
                 className="mb-2"
                 isConnected={relayConnectionCard.isRelayConnectionSuccess}

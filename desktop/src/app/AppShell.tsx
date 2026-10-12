@@ -1,7 +1,7 @@
 import * as React from "react";
 import { ProtectedGlobalOverlay } from "@protected-feature-components";
 import { useQueryClient } from "@tanstack/react-query";
-import { Outlet, useLocation } from "@tanstack/react-router";
+import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import {
   deriveShellRoute,
   markAllReadSources,
@@ -120,6 +120,16 @@ import type { Channel, ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { useAppDeepLinks } from "@/shared/useAppDeepLinks";
 import { SidebarProvider } from "@/shared/ui/sidebar";
+import { usePhoneLayout } from "@/shared/lib/phoneLayout";
+import { PhoneMeScreen } from "@/app/phone/PhoneMeScreen";
+import { PhoneTabBar } from "@/app/phone/PhoneTabBar";
+import {
+  type PhoneTab,
+  phoneHidesTabBar,
+  phoneTabForPath,
+  setPhoneOverlay,
+  usePhoneOverlay,
+} from "@/app/phone/phoneTabs";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
@@ -203,6 +213,27 @@ export function AppShell() {
   });
   // Settings lives in history so back returns to the previous app entry.
   const settingsOpen = location.pathname === "/settings";
+  // Phone layout (< 600px, web): bottom tab bar replaces the slide-out left nav.
+  const isPhone = usePhoneLayout();
+  const phoneOverlay = usePhoneOverlay();
+  const phoneTab = phoneTabForPath(location.pathname, phoneOverlay);
+  const showPhoneTabBar =
+    isPhone && !phoneHidesTabBar(location.pathname, phoneOverlay);
+  const navigate = useNavigate();
+  const isPhoneThread = location.pathname.includes("/posts/");
+  const handlePhoneBack = React.useCallback(() => {
+    if (isPhoneThread) goBack();
+    else setPhoneOverlay("channels");
+  }, [goBack, isPhoneThread]);
+  React.useEffect(() => {
+    setPhoneOverlay(null); // any navigation leaves the Channels/Me list screens
+  }, [location.pathname]);
+  React.useEffect(() => {
+    const root = document.documentElement;
+    if (showPhoneTabBar) root.setAttribute("data-phone-tabbar", "");
+    else root.removeAttribute("data-phone-tabbar");
+    return () => root.removeAttribute("data-phone-tabbar");
+  }, [showPhoneTabBar]);
   const rawLocationSearchSection = (location.search as { section?: unknown })
     .section;
   // Migrate the legacy "moderation" token to "relay-admin" (renamed section
@@ -873,6 +904,11 @@ export function AppShell() {
                   <AppWorkflowEditorOverlayProvider>
                     {!settingsOpen && !hideAppChrome ? (
                       <AppTopChrome
+                        onPhoneBack={
+                          isPhone && !showPhoneTabBar && !settingsOpen
+                            ? handlePhoneBack
+                            : undefined
+                        }
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
                         hasCommunityRail={hasCommunityRail}
@@ -924,7 +960,8 @@ export function AppShell() {
                       </div>
                     ) : (
                       <div className="relative flex min-h-0 flex-1 overflow-visible">
-                        {!hideAppChrome ? (
+                        {!hideAppChrome && (!isPhone || phoneOverlay === "channels") ? (
+                          <PhoneFullscreen phone={isPhone} testId="phone-channels-screen">
                           <AppSidebar
                             activeCommunity={communitiesHook.activeCommunity}
                             archivedHuddleChannels={archivedHuddleChannels}
@@ -988,7 +1025,10 @@ export function AppShell() {
                             onSelectPinnedSite={(pinId) =>
                               void goPinnedSite(pinId)
                             }
-                            onSelectChannel={handleSidebarChannelSelect}
+                            onSelectChannel={(...args: Parameters<typeof handleSidebarChannelSelect>) => {
+                              setPhoneOverlay(null);
+                              return handleSidebarChannelSelect(...args);
+                            }}
                             onOpenSearchResult={handleOpenSearchResult}
                             searchChannels={channels}
                             searchFocusRequests={[
@@ -1036,6 +1076,44 @@ export function AppShell() {
                             starredChannelIds={starredChannelIds}
                             onStarChannel={starChannel}
                             onUnstarChannel={unstarChannel}
+                          />
+                          </PhoneFullscreen>
+                        ) : null}
+                        {isPhone && phoneOverlay === "me" && !hideAppChrome ? (
+                          <div className="phone-fullscreen">
+                            <PhoneMeScreen
+                              avatarUrl={profileQuery.data?.avatarUrl}
+                              displayName={
+                                profileQuery.data?.displayName ||
+                                identityQuery.data?.displayName ||
+                                "Me"
+                              }
+                              onBots={() => void goBots()}
+                              onBrowsers={() => void goBrowsers()}
+                              onProjects={() => void goProjects()}
+                              onSettings={handleOpenSettings}
+                              onWorkflows={() => void goWorkflows()}
+                              pubkey={identityQuery.data?.pubkey}
+                            />
+                          </div>
+                        ) : null}
+                        {showPhoneTabBar && !hideAppChrome ? (
+                          <PhoneTabBar
+                            active={phoneTab}
+                            badges={{
+                              inbox: homeBadgeCountExcludingHighPriority,
+                              channels: unreadChannelNotificationCount,
+                            }}
+                            onSelect={(tab: PhoneTab) => {
+                              if (tab === "channels" || tab === "me") {
+                                setPhoneOverlay(tab);
+                                return;
+                              }
+                              setPhoneOverlay(null);
+                              if (tab === "inbox") void goHome();
+                              else if (tab === "agents") void goAgents();
+                              else void navigate({ to: "/buzz-term" });
+                            }}
                           />
                         ) : null}
                         <TerminalContextOverrideProvider
@@ -1109,5 +1187,25 @@ export function AppShell() {
         </AppShellProvider>
       </ChannelNavigationProvider>
     </PreventSleepProvider>
+  );
+}
+
+/** Phone: hosts a tab's list screen full screen above the tab bar. Elsewhere renders children unwrapped (a Fragment), so
+ * the desktop sidebar keeps its sibling relationship with the inset (Tailwind `peer-*`). */
+function PhoneFullscreen({
+  phone,
+  testId,
+  children,
+}: {
+  phone: boolean;
+  testId?: string;
+  children: React.ReactNode;
+}) {
+  return phone ? (
+    <div className="phone-fullscreen" data-testid={testId}>
+      {children}
+    </div>
+  ) : (
+    <>{children}</>
   );
 }
