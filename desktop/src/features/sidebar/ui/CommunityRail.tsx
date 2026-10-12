@@ -2,11 +2,11 @@ import {
   DndContext,
   DragOverlay,
   KeyboardSensor,
-  PointerSensor,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
 import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
+import { useSidebarDragSensors } from "@/shared/lib/dndSensors";
 import {
   SortableContext,
   arrayMove,
@@ -327,8 +327,10 @@ export function CommunityRail({
     React.useState<Community | null>(null);
   const [draggingId, setDraggingId] = React.useState<string | null>(null);
 
+  const [mouseSensor, touchSensor] = useSidebarDragSensors();
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    mouseSensor,
+    touchSensor,
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     }),
