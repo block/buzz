@@ -43,6 +43,12 @@ export class RootErrorBoundary extends Component<
             Reload Buzz to try again. If this keeps happening, check that Buzz
             can access website data, then contact support.
           </p>
+          <pre
+            data-testid="root-error-text"
+            className="max-h-48 max-w-md overflow-auto whitespace-pre-wrap break-words rounded bg-muted px-3 py-2 text-left text-xs"
+          >
+            {error.message || String(error)}
+          </pre>
           <button
             type="button"
             className="rounded-md border border-border bg-secondary px-4 py-2 text-sm hover:bg-secondary/80"
