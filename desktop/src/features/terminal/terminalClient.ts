@@ -28,6 +28,8 @@ export type TerminalAttachRequest = {
   scrollback?: number;
   /** Web only: force this session to a plain shell on the desktop even when its Buzz Term setting is herdr (handoff sessions). */
   remoteHost?: "shell";
+  /** Web only: re-drive this desktop terminal (it outlived a page refresh / dropped link) instead of launching a new one. */
+  reattachId?: string;
 };
 
 export type TerminalViewport = TerminalFrame["viewport"];
@@ -91,6 +93,8 @@ export type TerminalBackend = {
     onMessage: (message: Exclude<TerminalMessage, { type: "frame" }>) => void,
     onFrame: (delivery: TerminalDelivery) => void,
   ): Promise<TerminalConnectionApi>;
+  /** Web only: terminals still running on the desktop from an earlier connection, to rebuild the tabs. */
+  listLive?(): Promise<Array<{ id: string; title?: string | null }>>;
   /** An attach (or later op) failed; the web uses this to show why and close the panel. */
   onError?(error: unknown): void;
 };

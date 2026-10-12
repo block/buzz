@@ -23,7 +23,7 @@ export function termFailureMessage(code: string | undefined, detail: string | un
       return null;
     case "lost":
     case "closed":
-      return "The connection to your desktop was lost. Sessions on it ended. Reconnect to start a new one.";
+      return "The connection to your desktop was lost. Your terminals keep running there for 10 minutes; Reconnect to bring them back.";
     case "no_desktop":
       return "Your desktop isn't advertising remote access right now.";
     case "emu_unsupported":

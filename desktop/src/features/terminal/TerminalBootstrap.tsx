@@ -76,6 +76,8 @@ type CreateSessionOptions = {
   forceShell?: boolean;
   /** + menu "herdr": explicit choice — never fall back to a plain shell just because an attach tab exists. */
   forceHerdr?: boolean;
+  /** Web: reattach this desktop terminal (survived a refresh / dropped link) instead of launching a new one. */
+  reattach?: { id: string; title?: string | null };
   termSessionSid?: string | null;
   pendingLaunchCommand?: string | null;
   extraEnv?: Record<string, string>;
@@ -186,6 +188,7 @@ export function TerminalBootstrap({
     React.useState(panel.mode !== "closed");
   const previousPanelModeRef = React.useRef(panel.mode);
   const acknowledgedSequenceRef = React.useRef(new Map<string, number>());
+  const reattachInFlightRef = React.useRef(false);
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
   /** When a term-session handoff is creating the first tab, skip blank auto-create. */
@@ -353,6 +356,27 @@ export function TerminalBootstrap({
         createInAppSessionRef.current(options);
         return;
       }
+      // Web, no tabs yet (page load, refresh, Reconnect): bring back the desktop terminals that are still running first.
+      const backend = getTerminalBackend();
+      if (isRemoteTerminal() && sessionsRef.current.length === 0 && !options?.reattach && backend?.listLive && !options?.pendingLaunchCommand) {
+        if (reattachInFlightRef.current) return;
+        reattachInFlightRef.current = true;
+        void backend
+          .listLive()
+          .catch(() => [])
+          .then((live) => {
+            if (!mountedRef.current) return;
+            if (live.length === 0 || sessionsRef.current.length > 0) {
+              if (sessionsRef.current.length === 0) createInAppSessionRef.current(options);
+              return;
+            }
+            for (const t of live) createInAppSessionRef.current({ reattach: { id: t.id, title: t.title } });
+          })
+          .finally(() => {
+            reattachInFlightRef.current = false;
+          });
+        return;
+      }
 
       // Fast path: Buzz Term host — create the in-app PTY immediately (no async
       // herdr probe) so the panel never sits empty.
@@ -448,7 +472,7 @@ export function TerminalBootstrap({
         connection: null,
         delivery: null,
         frame: undefined,
-        title: herdrAttach ? "herdr" : "SHELL",
+        title: herdrAttach ? "herdr" : options?.reattach?.title || "SHELL",
         closing: false,
         context: spawnContext,
         termSessionSid: options?.termSessionSid ?? null,
@@ -509,6 +533,7 @@ export function TerminalBootstrap({
             ...(prefs.shell && !remote ? { shell: prefs.shell } : {}),
             // a handoff launch line is typed into a shell, so never into the desktop's herdr UI
             ...(remote && (options?.pendingLaunchCommand || options?.forceShell) ? { remoteHost: "shell" as const } : {}),
+            ...(remote && options?.reattach ? { reattachId: options.reattach.id } : {}),
             ...(herdrAttach
               ? { program: herdrAttach.bin, args: herdrAttach.argv }
               : {}),
@@ -539,7 +564,8 @@ export function TerminalBootstrap({
               }));
             }, 350);
           }
-          if (sizeRef.current !== size) {
+          // a reattached terminal still has the size of the device that last drove it
+          if (sizeRef.current !== size || options?.reattach) {
             const currentSize = sizeRef.current;
             resizeChainRef.current = resizeChainRef.current
               .then(async () => {

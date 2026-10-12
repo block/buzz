@@ -37,7 +37,7 @@ export class RemoteTerminalConnection implements TerminalConnectionApi {
 
   static async attach(
     conn: RemoteConnection,
-    opts: { cols: number; rows: number; host?: "shell" | "herdr"; session?: string },
+    opts: { cols: number; rows: number; host?: "shell" | "herdr"; session?: string; reattachId?: string },
     onMessage: OnMessage,
     onFrame: OnFrame,
   ): Promise<RemoteTerminalConnection> {
@@ -68,6 +68,7 @@ export class RemoteTerminalConnection implements TerminalConnectionApi {
     const handle = await conn.openEmuTerminal(opts, deliver, exit);
     self = new RemoteTerminalConnection(handle);
     for (const m of pending.splice(0)) deliver(m);
+    if (handle.title) onMessage({ type: "title", payload: handle.title });
     return self;
   }
 
@@ -207,6 +208,7 @@ export class RemoteTerminalHub implements TerminalBackend {
           rows: request.rows,
           ...(info?.termHost ? { host: herdr ? ("herdr" as const) : ("shell" as const) } : {}),
           ...(herdr && info?.termSession ? { session: info.termSession } : {}),
+          ...(request.reattachId ? { reattachId: request.reattachId } : {}),
         },
         onMessage,
         onFrame,
@@ -216,6 +218,13 @@ export class RemoteTerminalHub implements TerminalBackend {
       this.set({ state: this.lost ? "lost" : this.conn?.ready ? "connected" : "error", code: err.code, detail: err.detail });
       throw err;
     }
+  }
+
+  /** Desktop terminals that survived a refresh / dropped link (the desktop keeps them ~10 min). */
+  async listLive(): Promise<Array<{ id: string; title?: string | null }>> {
+    const conn = await this.ensure();
+    if (!conn.terminals) return [];
+    return conn.listTerminals();
   }
 
   onError(_error: unknown) {}

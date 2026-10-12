@@ -12,6 +12,8 @@ export type WsLike = {
 export type WsFactory = (url: string) => WsLike;
 
 export type RemoteSession = { name: string; status: string };
+/** A desktop terminal kept alive across connections (term.list). */
+export type LiveTerminal = { id: string; emu: boolean; title?: string | null; attached: boolean; mine?: boolean };
 export type TerminalHandle = {
   write(s: string): void;
   resize(cols: number, rows: number): void;
@@ -28,6 +30,8 @@ export type EmuHandle = {
   /** Viewport of the bootstrap snapshot, exactly as the desktop's renderer expects it. */
   viewport: Record<string, unknown>;
   scrollback?: number;
+  /** Title the program last set (reattached terminals). */
+  title?: string;
   /** Fire-and-forget op (input, ack, scroll, mouse, focus, viewport_ready, detach). */
   fire(op: string, fields?: Record<string, unknown>): void;
   /** Op with a correlated `emu.reply` (resize, attach). */
@@ -250,10 +254,11 @@ export class RemoteConnection {
    * Sends term.open and waits for term.opened. Inside the connection's signed terminal window it goes without a signature;
    * otherwise (or if the desktop says the window ended, or it's an older desktop) it signs `terminal:<launchId>` first.
    */
-  private async openWithAuth(ws: WsLike, launchId: string, body: Record<string, unknown>): Promise<Frame> {
+  private async openWithAuth(ws: WsLike, launchId: string, body: Record<string, unknown>, attach = false): Promise<Frame> {
     const go = async (event?: string) => {
-      ws.send(JSON.stringify({ t: "term.open", launchId, ...body, ...(event ? { event } : {}) }));
-      const opened = await this.waitFor((f) => f.t === "term.opened" && f.id === launchId, 30_000);
+      ws.send(JSON.stringify(attach ? { t: "term.attach", id: launchId, ...(event ? { event } : {}) } : { t: "term.open", launchId, ...body, ...(event ? { event } : {}) }));
+      const want = attach ? "term.attached" : "term.opened";
+      const opened = await this.waitFor((f) => f.t === want && f.id === launchId, 30_000);
       if (typeof opened.termSignedUntil === "number" && opened.termSignedUntil > 0) this.termSignedUntil = opened.termSignedUntil * 1000;
       return opened;
     };
@@ -302,20 +307,31 @@ export class RemoteConnection {
    * signer; otherwise it signs `terminal:<launchId>`. Frames that beat `term.opened` (the bootstrap snapshot usually does) are buffered
    * and replayed to `onMsg` right after, in order.
    */
+  /** Desktop terminals that outlived an earlier connection (page refresh / dropped link), for reattaching as tabs. */
+  async listTerminals(): Promise<LiveTerminal[]> {
+    const ws = this.ws;
+    if (!ws || !this.ready) throw new RemoteError("closed");
+    ws.send(JSON.stringify({ t: "term.list" }));
+    const r = await this.waitFor((f) => f.t === "term.list", 15_000);
+    return (Array.isArray(r.sessions) ? r.sessions : [])
+      .filter((s: LiveTerminal) => typeof s?.id === "string" && s.emu === true)
+      .slice(0, 16);
+  }
+
   async openEmuTerminal(
-    opts: { cols: number; rows: number; session?: string; host?: "shell" | "herdr" },
+    opts: { cols: number; rows: number; session?: string; host?: "shell" | "herdr"; reattachId?: string },
     onMsg: (m: EmuMessage) => void,
     onClosed: () => void,
   ): Promise<EmuHandle> {
     const ws = this.ws;
     if (!ws || !this.ready) throw new RemoteError("closed");
-    const launchId = crypto.randomUUID();
+    const launchId = opts.reattachId ?? crypto.randomUUID();
     const entry = { on: null as ((m: EmuMessage) => void) | null, pre: [] as EmuMessage[] };
     this.emus.set(launchId, entry);
     this.termOut.set(launchId, { data: () => {}, closed: onClosed });
     let opened: Frame;
     try {
-      opened = await this.openWithAuth(ws, launchId, { cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null, emu: true });
+      opened = await this.openWithAuth(ws, launchId, { cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null, emu: true }, Boolean(opts.reattachId));
     } catch (e) {
       this.emus.delete(launchId);
       this.termOut.delete(launchId);
@@ -338,6 +354,7 @@ export class RemoteConnection {
       subscriptionId: String(opened.subscriptionId ?? ""),
       viewport: (opened.viewport ?? {}) as Record<string, unknown>,
       scrollback: typeof opened.scrollback === "number" ? opened.scrollback : undefined,
+      title: typeof opened.title === "string" ? opened.title : undefined,
       fire,
       request: <T,>(op: string, fields: Record<string, unknown> = {}, ms = 15_000) =>
         new Promise<T>((resolve, reject) => {
