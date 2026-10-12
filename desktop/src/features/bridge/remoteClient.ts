@@ -139,6 +139,31 @@ export class RemoteConnection {
     this.makeWs = makeWs;
   }
 
+  /** Diagnostics: one ping/pong round trip on this socket, in ms. */
+  async pingRtt(): Promise<number> {
+    const ws = this.ws;
+    if (!this.ready || !ws) throw new RemoteError("closed");
+    const t = performance.now();
+    const pong = this.waitFor((f) => f.t === "pong", 5000);
+    ws.send(JSON.stringify({ t: "ping" }));
+    await pong;
+    return performance.now() - t;
+  }
+
+  /** Diagnostics: what kind of path the socket takes (no hostnames). */
+  transportLabel(): string {
+    try {
+      const u = new URL(this.info.url);
+      const h = u.hostname;
+      const kind = h.endsWith(".ts.net") || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h)
+        ? "Tailscale direct"
+        : /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(h) || h.endsWith(".local") ? "LAN direct" : "internet (proxy/relay or public host)";
+      return `${u.protocol.replace(":", "")} · ${kind}`;
+    } catch {
+      return "unknown";
+    }
+  }
+
   private waitFor<T extends Frame>(pred: (f: Frame) => boolean, ms = 90_000): Promise<T> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new RemoteError("timeout")), ms);

@@ -3,6 +3,7 @@ import { publishTerminalTabs } from "./terminalTabsBridge";
 import { getWebTermInfo } from "@/features/bridge/webTermHub";
 import { isTauri } from "@tauri-apps/api/core";
 import { createFrameCoalescer, createInputCoalescer } from "./webTermCoalesce";
+import { termProbe } from "@/platform/web/kbDebug/termProbe";
 
 import {
   type TerminalDelivery,
@@ -541,7 +542,21 @@ export function TerminalBootstrap({
         update((session) => ({ ...session, delivery, frame: delivery.frame }));
       };
       // Web: merge frames that outpace the screen and render once per animation frame (desktop unchanged).
-      const onFrame = isTauri() ? applyFrame : createFrameCoalescer(applyFrame).push;
+      // Web: the desktop keeps one frame in flight and sends the next only after our ack. Acking after React has
+      // painted put render time inside every keystroke's round trip; ack on arrival instead so the next frame is on
+      // the wire while this one paints, and merge any that land before the next paint (desktop unchanged).
+      const webFrames = isTauri() ? null : createFrameCoalescer(applyFrame);
+      const onFrame = !webFrames
+        ? applyFrame
+        : (delivery: TerminalDelivery) => {
+            termProbe.frameArrived();
+            const { sequence, subscriptionId } = delivery.frame;
+            if (sequence > (acknowledgedSequenceRef.current.get(subscriptionId) ?? -1)) {
+              acknowledgedSequenceRef.current.set(subscriptionId, sequence);
+              void delivery.acknowledge().catch(() => {});
+            }
+            webFrames.push(delivery);
+          };
 
       const size = sizeRef.current;
       void (async () => {
@@ -891,6 +906,7 @@ export function TerminalBootstrap({
   const activeConnectionRef = React.useRef<TerminalConnectionApi | null | undefined>(null);
   activeConnectionRef.current = active?.connection;
   const sendTermInput = React.useCallback((text: string) => {
+    termProbe.inputSent();
     void activeConnectionRef.current?.input(text)?.catch(fail);
   }, [fail]);
   const webInput = React.useMemo(() => createInputCoalescer((text) => sendTermInput(text)), [sendTermInput]);

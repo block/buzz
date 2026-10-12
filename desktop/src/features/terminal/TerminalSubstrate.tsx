@@ -1,4 +1,5 @@
 import * as React from "react";
+import { termProbe } from "@/platform/web/kbDebug/termProbe";
 import { createPortal } from "react-dom";
 import { ChevronRight, Maximize2, Minimize2, Plus, X } from "lucide-react";
 
@@ -916,6 +917,7 @@ export function TerminalSubstrate({
     setSelectionRows(gridRef.current?.selectionRows() ?? []);
 
     paintTerminal();
+    termProbe.painted();
   }, [activeSessionId, cursorPainted, frames, terminalPalette, cellMetrics]);
 
   const runTabAction = (action: () => void) => {

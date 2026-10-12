@@ -10,10 +10,14 @@ import "@fontsource/jetbrains-mono/700.css";
 import "@/shared/styles/globals.css";
 import { installPhoneLayoutAttribute } from "@/shared/lib/phoneLayout";
 import { installExternalLinkGuard } from "@/shared/lib/externalLinks";
+import { installKbDebug } from "@/platform/web/kbDebug/kbDebug";
 
 installPhoneLayoutAttribute();
 // Web/PWA only: external links open in the system browser (the desktop app routes links natively).
-if (!("__TAURI_INTERNALS__" in window)) installExternalLinkGuard();
+if (!("__TAURI_INTERNALS__" in window)) {
+  installExternalLinkGuard();
+  installKbDebug();
+}
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";

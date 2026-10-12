@@ -96,6 +96,24 @@ async function keyboardCase(label, opts, flags, kbH, pan) {
   check("viewport still allows pinch zoom (no maximum-scale / user-scalable=no)", !/maximum-scale|user-scalable\s*=\s*no/.test(meta), meta);
   await b.close();
 }
+// Diagnostics overlay: ?kbdebug=1 turns it on (saved), shows live numbers, never takes taps; Off button / ?kbdebug=0 turn it off.
+{
+  const { b, page } = await open(webkit, IPHONE);
+  const pad = await page.evaluate(() => getComputedStyle(document.getElementById("root")).paddingBottom);
+  check("phone: app frame has no bottom padding (home-indicator inset not double counted)", pad === "0px", pad);
+  await page.goto("http://localhost:4180/?kbdebug=1"); await page.waitForTimeout(4000);
+  const o = page.locator('[data-testid="kbdebug-overlay"]');
+  check("kbdebug overlay shown via ?kbdebug=1", await o.isVisible());
+  const txt = await o.innerText();
+  check("overlay shows viewport, safe-area, frame, composer, tab bar, term lines", ["inner ", "vv h", "safe-area", "frame top", "--phone-vh", "composer bottom", "tabbar", "key→echo", "ping"].every((k) => txt.includes(k)), txt.split("\n").slice(0, 3).join(" | "));
+  check("overlay does not take taps", (await o.evaluate((e) => getComputedStyle(e).pointerEvents)) === "none");
+  await page.reload(); await page.waitForTimeout(4000);
+  check("overlay setting persists across reload", await o.isVisible());
+  await page.screenshot({ path: `${out}/b6-kbdebug.png` });
+  await page.locator('[data-testid="kbdebug-off"]').click(); await page.waitForTimeout(300);
+  check("Off button hides it and clears the setting", !(await o.isVisible()) && (await page.evaluate(() => localStorage.getItem("buzz.kbdebug"))) === null);
+  await b.close();
+}
 // desktop (mouse) keeps its own field sizes
 {
   const { b, page } = await open(webkit, { viewport: { width: 1280, height: 800 } });

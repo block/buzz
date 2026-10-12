@@ -70,6 +70,7 @@ import {
 import { BuzzTermSettingsPanel } from "./BuzzTermSettingsPanel";
 import { SidebarMenuCountsSetting } from "./SidebarMenuCountsSetting";
 import { SignerToastSetting } from "./SignerToastSetting";
+import { KbDebugSetting } from "./KbDebugSetting";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
@@ -846,6 +847,7 @@ function ThemeSettingsCard() {
           <LinkPreviewStyleSetting />
           <SidebarMenuCountsSetting />
           <SignerToastSetting />
+          <KbDebugSetting />
         </SettingsOptionGroup>
       </SettingsOptionGroupList>
     </section>

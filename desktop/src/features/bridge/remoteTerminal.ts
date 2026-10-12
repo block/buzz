@@ -1,6 +1,7 @@
 // Web Buzz Term, Plan A: the desktop's own emulator runs in its remote listener and pushes the same row/span/cell frames the
 // Tauri build gets over its Channel. This file is the web half of `terminalClient`: a TerminalConnectionApi over the direct
 // websocket (so TerminalBootstrap/TerminalSubstrate run unchanged), plus the hub that owns the (signed-once) connection.
+import { termProbe } from "@/platform/web/kbDebug/termProbe";
 import type {
   TerminalAttachRequest,
   TerminalBackend,
@@ -184,6 +185,7 @@ export class RemoteTerminalHub implements TerminalBackend {
       .connect()
       .then(() => {
         this.conn = c;
+        termProbe.registerPing(() => c.pingRtt(), c.transportLabel());
         this.set({ state: "connected" });
         return c;
       })

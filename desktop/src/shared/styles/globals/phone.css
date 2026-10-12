@@ -36,6 +36,10 @@
 }
 [data-phone] body > #root {
   padding-top: var(--phone-safe-top);
+  /* web.css pads #root by env(safe-area-inset-bottom) (34pt on Face ID iPhones). On phone the tab bar and the composer
+     clear the home indicator themselves, so that padding was counted twice, and with the keyboard up (where there is
+     no home indicator to clear) it became the band between the composer and the keyboard. */
+  padding-bottom: 0 !important;
   box-sizing: border-box;
   /* Fixed to the visual viewport (see phoneLayout --phone-vv-top) so iOS's focus pan can't push the shell offscreen. */
   position: fixed;
