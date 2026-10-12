@@ -180,31 +180,38 @@ pub(crate) struct PendingNostrBindDeepLink {
 #[derive(Default)]
 pub(crate) struct PendingNostrBindDeepLinks(Mutex<VecDeque<PendingNostrBindDeepLink>>);
 
+const MAX_PENDING_NOSTR_BIND_LINKS: usize = 32;
+
 impl PendingNostrBindDeepLinks {
-    fn enqueue(&self, payload: NostrBindDeepLinkPayload) -> PendingNostrBindDeepLink {
+    fn enqueue(&self, payload: NostrBindDeepLinkPayload) -> Option<PendingNostrBindDeepLink> {
         let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
+        queue.retain(|item| nostr_bind::validate_expires_at(&item.payload.expires_at).is_ok());
+        if nostr_bind::validate_expires_at(&payload.expires_at).is_err() {
+            return None;
+        }
         // A duplicate cold-launch/open callback must not replace a challenge
         // with different signing fields before the user sees it.
         if let Some(existing) = queue.iter().find(|item| {
             item.payload.challenge_id == payload.challenge_id
                 && item.payload.origin == payload.origin
         }) {
-            return existing.clone();
+            return Some(existing.clone());
         }
         let pending = PendingNostrBindDeepLink {
             id: uuid::Uuid::new_v4().to_string(),
             payload,
         };
+        if queue.len() == MAX_PENDING_NOSTR_BIND_LINKS {
+            queue.pop_front();
+        }
         queue.push_back(pending.clone());
-        pending
+        Some(pending)
     }
 
     fn first(&self) -> Option<PendingNostrBindDeepLink> {
-        self.0
-            .lock()
-            .expect("pending deep-link queue poisoned")
-            .front()
-            .cloned()
+        let mut queue = self.0.lock().expect("pending deep-link queue poisoned");
+        queue.retain(|item| nostr_bind::validate_expires_at(&item.payload.expires_at).is_ok());
+        queue.front().cloned()
     }
 
     fn acknowledge(&self, id: &str) -> bool {
@@ -769,8 +776,9 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
         Some("nostr-bind") => match parse_nostr_bind_deep_link(&url) {
             Ok(payload) => {
                 activate_main_window(app);
-                let pending = app.state::<PendingNostrBindDeepLinks>().enqueue(payload);
-                let _ = app.emit("deep-link-nostr-bind", pending);
+                if let Some(pending) = app.state::<PendingNostrBindDeepLinks>().enqueue(payload) {
+                    let _ = app.emit("deep-link-nostr-bind", pending);
+                }
             }
             Err(error) => {
                 eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");

@@ -335,7 +335,7 @@ export function listenForEntityDeepLinks(
 }
 
 export function listenForNostrBindDeepLinks(
-  onOpen: (payload: NostrBindDeepLinkPayload) => void,
+  onOpen: (payload: NostrBindDeepLinkPayload) => boolean,
 ): Promise<UnlistenFn> {
   let drainRunning = false;
   let drainRequested = false;
@@ -354,7 +354,7 @@ export function listenForNostrBindDeepLinks(
               "take_pending_nostr_bind_deep_link",
             );
             if (!pending) break;
-            onOpen(pending.payload);
+            if (!onOpen(pending.payload)) break;
             const acknowledged = await invoke<boolean>(
               "acknowledge_pending_nostr_bind_deep_link",
               { id: pending.id },
