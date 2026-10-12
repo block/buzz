@@ -72,27 +72,12 @@ export function StatusChip(props: { tone: ChipTone; children: React.ReactNode; t
 
 /** Web: the desktop's OpenClaw workspace status over Direct (read-only, no secrets). */
 export function useDesktopOpenClawStatus(): { tone: ChipTone; label: string } {
-  const { live } = useDesktopData();
-  const [st, setSt] = React.useState<{ tone: ChipTone; label: string } | null>(null);
-  React.useEffect(() => {
-    if (!live) return setSt(null);
-    let dead = false;
-    const run = () =>
-      proxyCmd<{ connected: boolean; expiresAt: string | null }>("get_openclaw_workspace_mcp_status")
-        .then((r) => {
-          if (dead) return;
-          const expired = !!r.expiresAt && Date.parse(r.expiresAt) < Date.now();
-          setSt(r.connected && !expired ? { tone: "green", label: "Connected" } : expired ? { tone: "amber", label: "Expired" } : { tone: "amber", label: "Not set up" });
-        })
-        .catch(() => !dead && setSt({ tone: "red", label: "Error" }));
-    void run();
-    const t = window.setInterval(run, 30_000);
-    return () => {
-      dead = true;
-      window.clearInterval(t);
-    };
-  }, [live]);
-  return st ?? { tone: "grey", label: "Unknown" };
+  const r = useDesktopRead<{ connected: boolean; expiresAt: string | null }>("get_openclaw_workspace_mcp_status");
+  if (r.status === "stale") return { tone: "grey", label: "Reload your desktop" };
+  if (r.status === "error" && !r.data) return { tone: "red", label: "Error" };
+  if (!r.data) return { tone: "grey", label: "Unknown" };
+  const expired = !!r.data.expiresAt && Date.parse(r.data.expiresAt) < Date.now();
+  return r.data.connected && !expired ? { tone: "green", label: "Connected" } : expired ? { tone: "amber", label: "Expired" } : { tone: "amber", label: "Not set up" };
 }
 
 /** Web Settings → Agents: OpenClaw workspace, read-only status from the desktop. */
@@ -112,19 +97,44 @@ export function WebOpenClawStatusNote() {
 }
 
 export type DesktopTermSettings = { cwd: string | null; shell: string | null; scrollback: number | null; sessionHost: string | null; sessionName: string | null };
-/** Web: the desktop's Buzz Term session settings over Direct (read-only); null = not connected / unknown. */
-export function useDesktopTermSettings(): DesktopTermSettings | null {
+/** Web: the desktop's Buzz Term session settings over Direct (read-only). */
+export function useDesktopTermSettings(): { data: DesktopTermSettings | null; status: "unknown" | "ok" | "stale" | "error" } {
+  return useDesktopRead<DesktopTermSettings>("get_term_settings");
+}
+
+/**
+ * Web: one read-only desktop command over Direct. Fetches when Direct goes live, again on window focus/visibility, and retries
+ * every 15 s after a failure. `stale` = the desktop doesn't know the command yet (its window needs a reload).
+ */
+export function useDesktopRead<T>(name: string, args?: Record<string, unknown>): { data: T | null; status: "unknown" | "ok" | "stale" | "error" } {
   const { live } = useDesktopData();
-  const [t, setT] = React.useState<DesktopTermSettings | null>(null);
+  const [st, setSt] = React.useState<{ data: T | null; status: "unknown" | "ok" | "stale" | "error" }>({ data: null, status: "unknown" });
+  const key = JSON.stringify(args ?? {});
   React.useEffect(() => {
-    if (!live) return setT(null);
+    if (!live) return setSt({ data: null, status: "unknown" });
     let dead = false;
-    proxyCmd<DesktopTermSettings>("get_term_settings")
-      .then((r) => !dead && setT(r))
-      .catch(() => !dead && setT(null));
+    let timer: number | null = null;
+    const run = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      proxyCmd<T>(name, JSON.parse(key))
+        .then((data) => !dead && setSt({ data, status: "ok" }))
+        .catch((e: { code?: string }) => {
+          if (dead) return;
+          const stale = e?.code === "unknown_op";
+          setSt((p) => ({ data: p.data, status: stale ? "stale" : "error" }));
+          timer = window.setTimeout(run, 15_000);
+        });
+    };
+    run();
+    const onFocus = () => document.visibilityState === "visible" && run();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
     return () => {
       dead = true;
+      if (timer !== null) window.clearTimeout(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
     };
-  }, [live]);
-  return t;
+  }, [live, name, key]);
+  return st;
 }

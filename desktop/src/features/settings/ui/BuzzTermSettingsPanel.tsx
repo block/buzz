@@ -509,9 +509,13 @@ function InfoRows(props: { rows: [string, string, string][] }) {
   );
 }
 /** Web: the desktop's session settings, read-only. */
+function webTermUnknown(status: string) {
+  return status === "stale" ? "Reload your desktop to see this" : "Unknown";
+}
 function WebTermSessionCard() {
-  const t = useDesktopTermSettings();
-  const v = (x: string | number | null | undefined, dflt: string) => (t === null ? "Unknown" : x === null || x === undefined || x === "" ? dflt : String(x));
+  const r = useDesktopTermSettings();
+  const t = r.data;
+  const v = (x: string | number | null | undefined, dflt: string) => (t === null ? webTermUnknown(r.status) : x === null || x === undefined || x === "" ? dflt : String(x));
   return (
     <SettingsOptionGroup data-testid="buzz-term-session-card" title="Sessions">
       <InfoRows
@@ -526,8 +530,9 @@ function WebTermSessionCard() {
 }
 /** Web: the desktop's session host, read-only. */
 function WebTermHostCard() {
-  const t = useDesktopTermSettings();
-  const host = t === null ? "Unknown" : t.sessionHost === "herdr" ? "herdr" : "Buzz Term tabs";
+  const r = useDesktopTermSettings();
+  const t = r.data;
+  const host = t === null ? webTermUnknown(r.status) : t.sessionHost === "herdr" ? "herdr" : "Buzz Term tabs";
   const rows: [string, string, string][] = [["Session host", host, "web-term-host"]];
   if (t?.sessionHost === "herdr") rows.push(["herdr session", t.sessionName || "Not set", "web-term-session-name"]);
   return (
