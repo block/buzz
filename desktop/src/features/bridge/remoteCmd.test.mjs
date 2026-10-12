@@ -40,3 +40,33 @@ test("a desktop refusal becomes a readable error", async () => {
   await assert.rejects(proxyCmd("list_managed_agents"), /Allow remote agent management/);
   setProxyDirect(null);
 });
+
+test("one shared direct client stays bound until the last holder (nav, Settings) releases it", async () => {
+  const { acquireProxyDirect, getProxyDirect } = await import("./remoteCmd.ts");
+  setProxyDirect(null);
+  const d = fakeDirect(true);
+  const releaseNav = acquireProxyDirect(d);
+  const releaseSettings = acquireProxyDirect(d);
+  assert.equal(getProxyDirect(), d);
+  releaseNav();
+  assert.equal(getProxyDirect(), d, "Settings still holds it after the nav goes away");
+  releaseSettings();
+  releaseSettings();
+  assert.equal(getProxyDirect(), null);
+  acquireProxyDirect(null)();
+});
+
+test("presence prefers the desktop's answer over Direct and falls back to the web's own", async () => {
+  const PK = "a".repeat(64);
+  const h = { get_presence: async () => ({ [PK]: "offline" }) };
+  installProxyHandlers(h);
+  setProxyDirect(null);
+  assert.deepEqual(await h.get_presence({ pubkeys: [PK] }), { [PK]: "offline" });
+  const d = fakeDirect(true, () => ({ [PK]: "online" }));
+  setProxyDirect(d);
+  assert.deepEqual(await h.get_presence({ pubkeys: [PK] }), { [PK]: "online" });
+  assert.deepEqual(d.calls[0], ["cmd", { name: "get_presence", args: { pubkeys: [PK] } }]);
+  setProxyDirect({ live: true, call: async () => { throw new Error("down"); } });
+  assert.deepEqual(await h.get_presence({ pubkeys: [PK] }), { [PK]: "offline" });
+  setProxyDirect(null);
+});

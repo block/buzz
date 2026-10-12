@@ -1,4 +1,5 @@
 import { ProtectedOpenClawWorkspaceSettingsCard } from "@protected-feature-components";
+import { useBindDirectProxy } from "@/features/bridge/ui/WebRemoteSettings";
 import { DesktopDataNotice, DesktopOnlyNote, isWebBuild, useAutoDirectOnOpen } from "@/features/bridge/ui/DesktopData";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import {
@@ -24,6 +25,8 @@ export function AgentsSettingsPanel() {
   const automaticallyMentionAgents = useKeepMentionedAgentsPinned();
   const showAgentThinking = useShowAgentThinking();
   const web = isWebBuild();
+  // Settings has no left nav, so bind the same shared direct client here (one signature per connection) and connect when opened.
+  if (web) useBindDirectProxy(); // biome-ignore lint: web is constant for the app lifetime
   useAutoDirectOnOpen();
 
   return (

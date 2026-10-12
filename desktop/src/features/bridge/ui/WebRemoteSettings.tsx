@@ -26,7 +26,7 @@ import {
 } from "../remoteHosts";
 import { useQueryClient } from "@tanstack/react-query";
 import { directAgentsFor } from "../directAgents";
-import { setProxyDirect } from "../remoteCmd";
+import { acquireProxyDirect } from "../remoteCmd";
 import { useBridgeAgents } from "../useBridgeAgents";
 import { useDirectState } from "./DirectAgentsPanel";
 
@@ -206,24 +206,32 @@ export function WebRemoteTerminal() {
   );
 }
 
-/** Mounted in the left nav on web: keeps the switches consistent with what hosts offer, and exposes what the nav may show. */
-export function WebRemoteWatcher() {
-  const rh = useRemoteHosts({ sync: true });
-  const queryClient = useQueryClient();
-  // Bind the desktop command proxy to the agents host's direct client (one signed connection shared with the Agents page).
+/** Web: binds the desktop command proxy to the agents host's shared direct client (one signed connection for the Agents page, Settings and the controls). */
+export function useBindDirectProxy() {
+  const rh = useRemoteHosts();
   const host = rh.selected("agents") ?? rh.hosts.find((h) => h.supports.agents);
   const direct = React.useMemo(
     () => (host?.hasDirect && rh.b.available ? directAgentsFor({ desktopId: host.id, url: host.url }, rh.b.signJson) : null),
     [host?.id, host?.url, host?.hasDirect, rh.b.available], // eslint-disable-line react-hooks/exhaustive-deps
   );
-  React.useEffect(() => {
-    setProxyDirect(direct);
-    return () => setProxyDirect(null);
-  }, [direct]);
+  React.useEffect(() => acquireProxyDirect(direct), [direct]);
+  return direct;
+}
+
+/** Mounted in the left nav on web: keeps the switches consistent with what hosts offer, and exposes what the nav may show. */
+export function WebRemoteWatcher() {
+  const rh = useRemoteHosts({ sync: true });
+  const queryClient = useQueryClient();
+  const host = rh.selected("agents") ?? rh.hosts.find((h) => h.supports.agents);
+  const direct = React.useMemo(
+    () => (host?.hasDirect && rh.b.available ? directAgentsFor({ desktopId: host.id, url: host.url }, rh.b.signJson) : null),
+    [host?.id, host?.url, host?.hasDirect, rh.b.available], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  React.useEffect(() => acquireProxyDirect(direct), [direct]);
   // The desktop's data replaces the web's empty defaults the moment the connection goes live (and back when it ends).
   const live = useDirectState(direct).live;
   React.useEffect(() => {
-    void queryClient.invalidateQueries({ predicate: (q) => /agent|persona|runtime|acp|harness/i.test(String(q.queryKey[0])) });
+    void queryClient.invalidateQueries({ predicate: (q) => /agent|persona|runtime|acp|harness|presence/i.test(String(q.queryKey[0])) });
   }, [live, direct, queryClient]);
   return null;
 }

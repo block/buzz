@@ -191,3 +191,35 @@ test("cmd: agent defaults change only provider/model/harness; env vars are kept 
   assert.ok(!JSON.stringify(r).includes("real-secret"));
   assert.equal(await code(handleMgmt("cmd", { name: "set_global_agent_config", args: { config: { preferred_runtime: "nope" } } }, d)), "runtime_unavailable");
 });
+
+test("cmd get_presence returns only valid presence entries and rejects bad keys", async () => {
+  const { handleCmd } = await import("./directCmd.ts");
+  const PK = "b".repeat(64);
+  const inv = async (n, a) => (n === "get_presence" ? { [PK]: "online", junk: "online", [("c".repeat(64))]: "weird" } : null);
+  assert.deepEqual(await handleCmd("get_presence", { pubkeys: [PK.toUpperCase()] }, { invokeRaw: inv }), { [PK]: "online" });
+  await assert.rejects(handleCmd("get_presence", { pubkeys: ["x"] }, { invokeRaw: inv }), /Invalid pubkey/);
+});
+
+test("cmd list_managed_agents keeps status, pid, start time and error fields the cards use", async () => {
+  const { handleCmd } = await import("./directCmd.ts");
+  const row = { pubkey: "d".repeat(64), name: "Test", status: "running", pid: 42, lastStartedAt: "2026-10-11T00:00:00Z", lastError: null, needsRestart: false, backend: { type: "local" }, envVars: { K: "secret" } };
+  const [out] = await handleCmd("list_managed_agents", {}, { invokeRaw: async () => [row] });
+  for (const k of ["status", "pid", "lastStartedAt", "lastError", "needsRestart", "backend"]) assert.deepEqual(out[k], row[k]);
+  assert.deepEqual(out.envVars, row.envVars, "camelCase env map is passed through unchanged by the web shim");
+});
+
+test("cmd get_presence returns only valid presence entries and rejects bad keys", async () => {
+  const { handleCmd } = await import("./directCmd.ts");
+  const PK = "b".repeat(64);
+  const inv = async () => ({ [PK]: "online", junk: "online", ["c".repeat(64)]: "weird" });
+  assert.deepEqual(await handleCmd("get_presence", { pubkeys: [PK.toUpperCase()] }, { invokeRaw: inv }), { [PK]: "online" });
+  await assert.rejects(handleCmd("get_presence", { pubkeys: ["x"] }, { invokeRaw: inv }), /Invalid pubkey/);
+});
+
+test("cmd list_managed_agents keeps status, pid, start time and error fields the cards use, and blanks env values", async () => {
+  const { handleCmd } = await import("./directCmd.ts");
+  const row = { pubkey: "d".repeat(64), name: "Test", status: "running", pid: 42, last_started_at: "2026-10-11T00:00:00Z", last_error: null, needs_restart: false, backend: { type: "local" }, env_vars: { K: "secret" } };
+  const [out] = await handleCmd("list_managed_agents", {}, { invokeRaw: async () => [row] });
+  for (const k of ["status", "pid", "last_started_at", "last_error", "needs_restart", "backend"]) assert.deepEqual(out[k], row[k]);
+  assert.deepEqual(out.env_vars, { K: "" });
+});

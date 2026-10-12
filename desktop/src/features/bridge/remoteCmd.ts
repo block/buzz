@@ -22,6 +22,23 @@ export function setProxyDirect(d: DirectAgents | null) {
   for (const l of listeners) l();
 }
 export const getProxyDirect = () => current;
+// Several places (left nav, Settings) bind the same shared client; it stays bound until the last of them goes away.
+const holds = new Map<DirectAgents, number>();
+/** Binds `d` as the proxy's direct connection; returns a release function. Safe to call from any number of components. */
+export function acquireProxyDirect(d: DirectAgents | null): () => void {
+  if (!d) return () => {};
+  holds.set(d, (holds.get(d) ?? 0) + 1);
+  setProxyDirect(d);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    const n = (holds.get(d) ?? 1) - 1;
+    if (n > 0) return void holds.set(d, n);
+    holds.delete(d);
+    if (current === d) setProxyDirect(null);
+  };
+}
 export const proxyDirectLive = () => !!current?.live;
 export function subscribeProxy(fn: () => void) {
   listeners.add(fn);
@@ -63,8 +80,25 @@ export const PROXIED_READS: Record<string, () => unknown> = {
   get_global_agent_config: () => ({ env_vars: {}, provider: null, model: null, preferred_runtime: null }),
 };
 
+/** Commands the web can answer itself: prefer the desktop's answer when Direct is live, else (or if that call fails) the web's own. */
+const PREFER_DESKTOP = new Set(["get_presence"]);
+
 export function installProxyHandlers(handlers: Record<string, (a?: any) => unknown>) {
   for (const name of CMD_NAMES) {
+    if (PREFER_DESKTOP.has(name)) {
+      const own = handlers[name];
+      handlers[name] = async (a) => {
+        if (proxyDirectLive()) {
+          try {
+            return await proxyCmd(name, a);
+          } catch {
+            /* fall through to the web's own answer */
+          }
+        }
+        return own ? own(a) : {};
+      };
+      continue;
+    }
     const empty = name in PROXIED_READS ? PROXIED_READS[name] : null;
     handlers[name] = (a) => (empty && !proxyDirectLive() ? empty() : proxyCmd(name, a));
   }

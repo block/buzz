@@ -81,6 +81,7 @@ export const CMD_READS = [
   "discover_acp_providers",
   "agent_access_owner_only",
   "get_global_agent_config",
+  "get_presence",
 ] as const;
 export const CMD_WRITES = [
   "start_managed_agent",
@@ -153,6 +154,14 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       return list(await inv(name), sanitizePersona, 200);
     case "discover_acp_providers":
       return list(await inv(name, { force: a.force === true }), sanitizeRuntime, 200);
+    case "get_presence": {
+      // The desktop's own presence answer, so an agent's online dot on the web is exactly what the desktop shows.
+      const pks = Array.isArray(a.pubkeys) ? a.pubkeys : bad("pubkeys must be a list.");
+      if (pks.length > 500) bad("Too many pubkeys.");
+      const keys = pks.map((x) => (typeof x === "string" && HEX64.test(x.toLowerCase()) ? x.toLowerCase() : bad("Invalid pubkey.")));
+      const r = obj(await inv(name, { pubkeys: keys }));
+      return Object.fromEntries(Object.entries(r).filter(([k, v]) => HEX64.test(k.toLowerCase()) && (v === "online" || v === "away" || v === "offline")));
+    }
     case "agent_access_owner_only":
       return (await inv(name)) === true;
     case "get_global_agent_config":
