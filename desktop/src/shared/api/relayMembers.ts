@@ -171,10 +171,12 @@ async function publishRelayAdminEvent(
     tags,
   });
 
+  // Re-checked before every send, so a switch during signing cancels it.
   await relayClient.publishEvent(
     event,
     "Timed out while updating relay access.",
     "Failed to update relay access.",
+    () => relayClient.getRelayUrl() === relayUrl,
   );
 }
 

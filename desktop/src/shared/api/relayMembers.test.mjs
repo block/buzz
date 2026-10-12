@@ -117,15 +117,27 @@ test("an available snapshot never warns", () => {
   );
 });
 
-test("relay admin events refuse a connection to another community's relay", async () => {
+function installRecordingTauri(t) {
   const invoked = [];
-  globalThis.window ??= {};
-  globalThis.window.__TAURI_INTERNALS__ = {
-    invoke: async (command) => {
-      invoked.push(command);
-      throw new Error(`unexpected ${command}`);
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    ...previousWindow,
+    __TAURI_INTERNALS__: {
+      invoke: async (command) => {
+        invoked.push(command);
+        throw new Error(`unexpected ${command}`);
+      },
     },
   };
+  t.after(() => {
+    relayClient.disconnect();
+    globalThis.window = previousWindow;
+  });
+  return invoked;
+}
+
+test("relay admin events refuse a connection to another community's relay", async (t) => {
+  const invoked = installRecordingTauri(t);
   relayClient.bindRelayUrl("wss://self-hosted.example");
   const target = "b".repeat(64);
   const selected = "wss://hosted.example";
@@ -139,4 +151,15 @@ test("relay admin events refuse a connection to another community's relay", asyn
     await assert.rejects(publish, /is not the selected community/);
   }
   assert.deepEqual(invoked, [], "nothing may be signed or sent");
+});
+
+test("relay admin events for the connected community proceed to signing", async (t) => {
+  const invoked = installRecordingTauri(t);
+  relayClient.bindRelayUrl("wss://hosted.example");
+
+  await assert.rejects(
+    () => addRelayMember("b".repeat(64), "admin", "wss://hosted.example"),
+    /unexpected sign_event/,
+  );
+  assert.deepEqual(invoked, ["sign_event"]);
 });
