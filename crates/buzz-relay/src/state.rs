@@ -944,7 +944,16 @@ async fn revalidate_live_authorization_sessions(
     }
     let mut targets = sessions_by_target.keys().copied().collect::<Vec<_>>();
     targets.sort_by_key(|target| {
+        // A stale session that was omitted by a deadline keeps its previous
+        // successful check time. Use the oldest socket for each target so a
+        // newer sibling cannot keep that authorization behind the same tail.
+        // Identity fields make equal-age targets deterministic.
+        let oldest_check = sessions_by_target
+            .get(target)
+            .and_then(|sessions| sessions.iter().map(|session| session.last_checked_at).min())
+            .unwrap_or(started_at);
         (
+            oldest_check,
             target.community_id,
             target.pubkey,
             target.session_owner_pubkey,
@@ -5638,6 +5647,27 @@ mod live_authorization_tests {
         }
     }
 
+    fn register_audio_authorization_session_at(
+        registry: &CommunityConnectionRegistry,
+        community_id: CommunityId,
+        connection_id: Uuid,
+        pubkey: [u8; 32],
+        checked_at: TokioInstant,
+    ) -> (CommunityConnectionGuard, CancellationToken) {
+        let cancel = CancellationToken::new();
+        let control = CommunityConnectionControl::new(cancel.clone());
+        control.mark_live_authorized(
+            pubkey,
+            None,
+            false,
+            false,
+            crate::nip_fi_session::NipFiWsRoute::Audio,
+            checked_at,
+        );
+        let guard = registry.register(connection_id, community_id, control);
+        (guard, cancel)
+    }
+
     fn database_failure_lookup() -> LiveAuthorizationBatchLookup {
         Arc::new(|_| Box::pin(async { Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolClosed)) }))
     }
@@ -6090,6 +6120,154 @@ mod live_authorization_tests {
         assert_eq!(expired.closed_for_db_failure, 2);
         assert!(first.cancel.is_cancelled());
         assert!(second.cancel.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scan_timeout_keeps_stale_sessions_oldest_for_the_next_bounded_scan() {
+        const PEERS: usize =
+            LIVE_AUTHORIZATION_BATCH_SIZE * LIVE_AUTHORIZATION_QUERY_CONCURRENCY * 5;
+        const TARGETS: usize = PEERS + 1;
+
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2721);
+        let peers_checked_at = TokioInstant::now();
+        let mut guards = Vec::with_capacity(TARGETS + 1);
+        for index in 0..PEERS {
+            let mut pubkey = [0; 32];
+            pubkey[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            let (guard, _) = register_audio_authorization_session_at(
+                &registry,
+                tenant,
+                Uuid::from_u128(index as u128 + 1),
+                pubkey,
+                peers_checked_at,
+            );
+            guards.push(guard);
+        }
+
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        let tail_pubkey = [0xff; 32];
+        let tail_checked_at = TokioInstant::now();
+        let tail_target = buzz_db::LiveAuthorizationTarget {
+            community_id: tenant,
+            pubkey: tail_pubkey,
+            session_owner_pubkey: None,
+        };
+        let (tail_old_guard, tail_old_cancel) = register_audio_authorization_session_at(
+            &registry,
+            tenant,
+            Uuid::from_u128(PEERS as u128 + 1),
+            tail_pubkey,
+            tail_checked_at,
+        );
+        guards.push(tail_old_guard);
+
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        let tail_new_checked_at = TokioInstant::now();
+        let (tail_new_guard, tail_new_cancel) = register_audio_authorization_session_at(
+            &registry,
+            tenant,
+            Uuid::from_u128(PEERS as u128 + 2),
+            tail_pubkey,
+            tail_new_checked_at,
+        );
+        guards.push(tail_new_guard);
+
+        let first_batch = Arc::new(std::sync::Mutex::new(None));
+        let delayed_success: LiveAuthorizationBatchLookup = Arc::new({
+            let first_batch = Arc::clone(&first_batch);
+            move |targets| {
+                let mut recorded = first_batch.lock().expect("first scan batch lock");
+                if recorded.is_none() {
+                    *recorded = Some(targets.clone());
+                }
+                drop(recorded);
+                Box::pin(async move {
+                    // Five waves finish just under the shared deadline; the
+                    // final tail batch is still running when ScanTimeout fires.
+                    tokio::time::sleep(std::time::Duration::from_millis(990)).await;
+                    Ok(targets
+                        .into_iter()
+                        .map(|target| access_state(target, None, false, false, false))
+                        .collect())
+                })
+            }
+        });
+
+        let first_report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            false,
+            false,
+            &CancellationToken::new(),
+            delayed_success,
+        )
+        .await;
+
+        assert!(first_report.scan_timed_out);
+        assert_eq!(first_report.checked_targets, PEERS);
+        assert_eq!(first_report.failed_targets, 1);
+        assert_eq!(first_report.closed_sessions, 0);
+        assert!(!tail_old_cancel.is_cancelled());
+        assert!(!tail_new_cancel.is_cancelled());
+        let first_batch = first_batch
+            .lock()
+            .expect("first scan batch lock")
+            .clone()
+            .expect("scan should start at least one batch");
+        assert_eq!(first_batch.len(), LIVE_AUTHORIZATION_BATCH_SIZE);
+        assert_eq!(first_batch[0].pubkey, [0; 32]);
+        assert_eq!(first_batch[1].pubkey[..8], 1_u64.to_be_bytes());
+        let unrefreshed = registry
+            .live_authorization_sessions()
+            .into_iter()
+            .filter(|session| session.pubkey == tail_pubkey)
+            .collect::<Vec<_>>();
+        assert_eq!(unrefreshed.len(), 2);
+        let unrefreshed_checks = unrefreshed
+            .iter()
+            .map(|session| session.last_checked_at)
+            .collect::<Vec<_>>();
+        assert!(unrefreshed_checks.contains(&tail_checked_at));
+        assert!(unrefreshed_checks.contains(&tail_new_checked_at));
+
+        let first_retry_batch = Arc::new(std::sync::Mutex::new(None));
+        let retry_failure: LiveAuthorizationBatchLookup = Arc::new({
+            let first_retry_batch = Arc::clone(&first_retry_batch);
+            move |targets| {
+                let mut recorded = first_retry_batch.lock().expect("retry scan batch lock");
+                if recorded.is_none() {
+                    *recorded = Some(targets.clone());
+                }
+                drop(recorded);
+                Box::pin(async move {
+                    std::future::pending::<buzz_db::Result<Vec<buzz_db::LiveAuthorizationState>>>()
+                        .await
+                })
+            }
+        });
+        let retry_report = revalidate_live_authorization_sessions(
+            &registry,
+            &manager,
+            false,
+            false,
+            &CancellationToken::new(),
+            retry_failure,
+        )
+        .await;
+
+        assert!(retry_report.scan_timed_out);
+        assert_eq!(retry_report.failed_targets, TARGETS);
+        let first_retry_batch = first_retry_batch
+            .lock()
+            .expect("retry scan batch lock")
+            .clone()
+            .expect("retry scan should start at least one batch");
+        assert_eq!(first_retry_batch[0], tail_target);
+        assert!(tail_old_cancel.is_cancelled());
+        assert!(tail_new_cancel.is_cancelled());
+        drop(guards);
     }
 
     #[tokio::test]

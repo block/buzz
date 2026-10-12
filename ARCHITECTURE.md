@@ -340,10 +340,12 @@ AUTH evidence retains its three-rejection cap. The worker shares graceful
 shutdown cancellation and has no migration or rollout flag; all relay pods
 must run this code for the bound to hold deployment-wide.
 
-Targets are ordered deterministically within each scan, so repeated deadline
-hits can leave the same tail targets unqueried and fail-close them after grace.
-This path does not rotate scan order or jitter authorization-driven closes; if
-writer saturation lasts beyond grace, many sockets on a pod can close together
+Targets are ordered within each scan by the oldest last-successful-check time
+among their sessions, then by community, principal, and captured owner. A target
+missed at a deadline therefore gets priority on the next scan while it remains
+live. Under sustained writer saturation, deadlines can still leave targets
+unresolved and close sessions after grace. This path does not jitter
+authorization-driven closes, so many sockets on a pod can still close together
 and create a reconnect herd.
 
 ### Step 5: Cleanup
