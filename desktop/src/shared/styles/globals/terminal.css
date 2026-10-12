@@ -535,3 +535,18 @@
     min-height: 44px;
   }
 }
+
+/* Key bar icon buttons (keyboard show/hide): crisp SVG centered in the 44px target. */
+.buzz-terminal-touch-key.buzz-terminal-touch-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  min-width: 44px;
+  min-height: 44px;
+}
+.buzz-terminal-touch-key.buzz-terminal-touch-icon svg {
+  width: 24px;
+  height: 24px;
+  flex: none;
+}

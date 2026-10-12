@@ -1,3 +1,4 @@
+import { ChevronDown, Keyboard } from "lucide-react";
 import * as React from "react";
 import { createPortal } from "react-dom";
 
@@ -173,8 +174,22 @@ export function TerminalTouchBar({ ctrl, alt, meta, onToggleCtrl, onToggleAlt, o
       <button type="button" className="buzz-terminal-touch-key" data-testid="tk-paste" onPointerDown={press(onPaste)} {...common}>
         Paste
       </button>
-      <button type="button" className="buzz-terminal-touch-key" data-testid="tk-keyboard" aria-label={keyboardOpen ? "Hide keyboard" : "Show keyboard"} onPointerDown={press(onToggleKeyboard)} {...common}>
-        {keyboardOpen ? "⌄" : "⌨"}
+      <button
+        type="button"
+        className="buzz-terminal-touch-key buzz-terminal-touch-icon"
+        data-testid="tk-keyboard"
+        aria-label={keyboardOpen ? "Hide keyboard" : "Show keyboard"}
+        // One action per tap, on pointerup (inside the user gesture, so iOS lets the hidden input focus and raise the keyboard).
+        // Down/mousedown are swallowed so the button never takes focus (which would blur the input) and no click doubles it.
+        onPointerDown={(e) => e.preventDefault()}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={(e) => e.preventDefault()}
+        onPointerUp={(e) => {
+          e.preventDefault();
+          onToggleKeyboard();
+        }}
+      >
+        {keyboardOpen ? <ChevronDown aria-hidden size={24} strokeWidth={2} /> : <Keyboard aria-hidden size={24} strokeWidth={2} />}
       </button>
     </div>
   );

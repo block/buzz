@@ -517,12 +517,21 @@ export function TerminalSubstrate({
   };
   // Touch: the on-screen keyboard opens only from the keyboard button (toggle). Elsewhere the hidden input stays inputmode="none",
   // so taps/focus reclaims never pop the keyboard (a hardware keyboard still types).
-  const [kbWanted, setKbWanted] = React.useState(false);
+  const [kbWanted, setKbWantedState] = React.useState(false);
+  // Synchronous mirror: the toggle decides from this, never from a stale render.
+  const kbWantedRef = React.useRef(false);
+  const setKbWanted = (on: boolean) => {
+    kbWantedRef.current = on;
+    setKbWantedState(on);
+  };
+  /** Until this time (ms) after an intentional open, blur/close detection is ignored (our own blur→focus, the keyboard animating in). */
+  const kbOpenGuardRef = React.useRef(0);
   const toggleKeyboard = () => {
     const area = textareaRef.current;
     if (!area) return;
     if (touchUi) {
-      if (kbWanted) {
+      if (kbWantedRef.current) {
+        kbOpenGuardRef.current = 0;
         setKbWanted(false);
         area.inputMode = "none";
         area.blur();
@@ -530,9 +539,12 @@ export function TerminalSubstrate({
       }
       window.dispatchEvent(new Event("buzz:collapse-sidebar"));
       setOwner("terminal");
-      area.inputMode = "text"; // set synchronously: iOS only shows the keyboard for a focus inside this tap
+      kbOpenGuardRef.current = performance.now() + 600;
       setKbWanted(true);
-      area.blur();
+      // All synchronous inside the tap (iOS only shows the keyboard for a focus in the user gesture). Re-focus so the new
+      // inputmode takes effect; the blur this causes is inside the guard, so it can't flip the toggle back off.
+      area.inputMode = "text";
+      if (document.activeElement === area) area.blur();
       area.focus({ preventScroll: true });
       return;
     }
@@ -1720,8 +1732,8 @@ export function TerminalSubstrate({
           className="buzz-terminal-input"
           inputMode={touchUi && !kbWanted ? "none" : undefined}
           onBlur={() => {
-            // iOS "Done"/swipe-down dismissed the keyboard: back to tap-safe mode
-            if (touchUi && kbWanted) {
+            // iOS "Done"/swipe-down dismissed the keyboard: back to tap-safe mode (not our own re-focus right after an open)
+            if (touchUi && kbWantedRef.current && performance.now() >= kbOpenGuardRef.current) {
               setKbWanted(false);
               if (textareaRef.current) textareaRef.current.inputMode = "none";
             }
