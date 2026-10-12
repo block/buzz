@@ -44,7 +44,7 @@ export function DraggableChannelRow({
       {...attributes}
       {...listeners}
       className={cn(
-        "touch-none transition-[opacity,transform] duration-100 ease-out motion-reduce:transition-none",
+        "touch-pan-y select-none [-webkit-touch-callout:none] transition-[opacity,transform] duration-100 ease-out motion-reduce:transition-none",
         isDragging && "opacity-30",
       )}
       data-sidebar-draggable-channel

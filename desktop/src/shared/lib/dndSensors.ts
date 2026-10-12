@@ -1,5 +1,5 @@
 // Sidebar drag sensors: mouse/pen drags exactly as before (PointerSensor, 6px), while touch needs a long press so a swipe scrolls
-// the panel instead of grabbing the row (iOS/iPad). Touch pointers are ignored by the pointer sensor and handled by TouchSensor.
+// the panel instead of grabbing the row (iOS/iPad). Rows must be touch-action: pan-y (not none) or the browser can't scroll. Touch pointers are ignored by the pointer sensor and handled by TouchSensor.
 import { PointerSensor, TouchSensor, useSensor } from "@dnd-kit/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
@@ -14,7 +14,7 @@ export class NonTouchPointerSensor extends PointerSensor {
 }
 
 /** Long-press before a touch drag starts; moving more than `tolerance` px first lets the scroll win. */
-export const TOUCH_DRAG_DELAY_MS = 350;
+export const TOUCH_DRAG_DELAY_MS = 1100;
 export const TOUCH_DRAG_TOLERANCE_PX = 8;
 
 export function useSidebarDragSensors() {

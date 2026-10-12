@@ -124,7 +124,7 @@ function CommunityButton({
               aria-current={isActive ? "true" : undefined}
               aria-label={tooltipLabel}
               className={cn(
-                "relative flex h-9 w-9 items-center justify-center touch-none outline-hidden focus:outline-none focus-visible:outline-none",
+                "relative flex h-9 w-9 items-center justify-center touch-pan-y select-none [-webkit-touch-callout:none] outline-hidden focus:outline-none focus-visible:outline-none",
                 isDragging && "opacity-30",
               )}
               data-testid={`community-rail-button-${community.id}`}
