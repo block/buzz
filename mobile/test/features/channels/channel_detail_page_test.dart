@@ -9371,14 +9371,25 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('add-reaction-pill')), findsOneWidget);
-
-      await tester.tap(find.byKey(const ValueKey('add-reaction-pill')));
+      expect(
+        find.byKey(const ValueKey('combined-reaction-tray')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('reaction-sheet-add')));
       // Not pumpAndSettle: with no dataset asset in a widget test the sheet
       // shows its loading spinner, which animates forever.
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       expect(find.byType(EmojiPickerSheet), findsOneWidget);
+      expect(
+        find.byKey(
+          const ValueKey('reaction-details-sheet'),
+          skipOffstage: false,
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('an unreacted message keeps the timeline free of chrome', (
@@ -15303,7 +15314,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('reaction-pill-👍')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('combined-reaction-tray')),
+        findsNothing,
+      );
 
       // The reaction arrives over the channel socket, as it does on device.
       messagesNotifier.setMessages([
@@ -15314,7 +15328,10 @@ void main() {
 
       // Still on the thread route — no pop needed for the pill to appear.
       expect(find.byType(ThreadDetailPage), findsOneWidget);
-      expect(find.byKey(const ValueKey('reaction-pill-👍')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('combined-reaction-tray')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a live deletion does not restore the routed thread head', (
@@ -15443,9 +15460,8 @@ void main() {
       await tester.pumpAndSettle();
 
       // The head keeps a standing +; the bare reply gets none, so a thread
-      // reads as quietly as the channel does. Two + pills, not three: the head
-      // and the reacted reply.
-      expect(find.byKey(const ValueKey('add-reaction-pill')), findsNWidgets(2));
+      // reads quietly. Reacted replies open details, whose first control adds emoji.
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsOneWidget);
       final headRow = find.descendant(
         of: find.byKey(const ValueKey('thread-message-group-thread-root')),
         matching: find.byKey(const ValueKey('add-reaction-pill')),
@@ -15461,7 +15477,7 @@ void main() {
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('thread-message-group-reply-reacted')),
-          matching: find.byKey(const ValueKey('add-reaction-pill')),
+          matching: find.byKey(const ValueKey('combined-reaction-tray')),
         ),
         findsOneWidget,
       );

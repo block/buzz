@@ -134,6 +134,53 @@ class ReactionRow extends StatelessWidget {
     // the point. Without it, an empty row would be dead space.
     if (reactions.isEmpty && !showAddButton) return const SizedBox.shrink();
 
+    if (combined && reactions.isNotEmpty) {
+      void openDetails() => showReactionDetailSheet(
+        context: context,
+        channelId: channelId,
+        reactions: reactions,
+        initialEmoji: '',
+        onAddReaction: showAddButton ? onAddReaction : null,
+      );
+      return Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xxs),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Semantics(
+            button: true,
+            label: 'View reactions',
+            child: GestureDetector(
+              key: const ValueKey('combined-reaction-tray'),
+              behavior: HitTestBehavior.opaque,
+              onTap: openDetails,
+              onLongPress: openDetails,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: context.colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(Radii.container),
+                  border: Border.all(color: context.colors.surface, width: 2),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(Grid.quarter),
+                  child: Wrap(
+                    spacing: Grid.quarter,
+                    runSpacing: Grid.quarter,
+                    children: [
+                      for (final reaction in reactions)
+                        Padding(
+                          padding: const EdgeInsets.all(Grid.quarter),
+                          child: _ReactionEmoji(reaction: reaction, size: 20),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     final controls = Wrap(
       spacing: Grid.half,
       runSpacing: Grid.half,
@@ -388,6 +435,7 @@ Future<void> showReactionDetailSheet({
   required String channelId,
   required List<TimelineReaction> reactions,
   required String initialEmoji,
+  VoidCallback? onAddReaction,
 }) async {
   if (reactions.isEmpty) return;
   if (await _showNativeReactionDetails(
@@ -395,6 +443,7 @@ Future<void> showReactionDetailSheet({
     channelId,
     reactions,
     initialEmoji,
+    onAddReaction,
   )) {
     return;
   }
@@ -413,6 +462,7 @@ Future<void> showReactionDetailSheet({
         channelId: channelId,
         reactions: reactions,
         initialEmoji: initialEmoji,
+        onAddReaction: onAddReaction,
       ),
     );
     return;
@@ -426,6 +476,7 @@ Future<void> showReactionDetailSheet({
       channelId: channelId,
       reactions: reactions,
       initialEmoji: initialEmoji,
+      onAddReaction: onAddReaction,
     ),
   );
 }
@@ -435,11 +486,13 @@ class _AndroidReactionDetailSheet extends HookConsumerWidget {
     required this.channelId,
     required this.reactions,
     required this.initialEmoji,
+    this.onAddReaction,
   });
 
   final String channelId;
   final List<TimelineReaction> reactions;
   final String initialEmoji;
+  final VoidCallback? onAddReaction;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -475,39 +528,56 @@ class _AndroidReactionDetailSheet extends HookConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            TabBar(
-              isScrollable: true,
-              padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-              tabAlignment: TabAlignment.start,
-              dividerHeight: 0,
-              indicatorSize: TabBarIndicatorSize.tab,
-              indicatorPadding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-              indicator: BoxDecoration(
-                color: context.colors.primary.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(Radii.full),
-              ),
-              labelColor: context.colors.onSurface,
-              unselectedLabelColor: context.colors.onSurfaceVariant,
-              tabs: [
-                Tab(
-                  key: const ValueKey('reaction-filter-all'),
-                  text: 'All $total',
-                ),
-                for (final reaction in reactions)
-                  Tab(
-                    key: ValueKey('reaction-filter-${reaction.emoji}'),
-                    child: Tooltip(
-                      message: dataset.displayName(reaction.emoji),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _ReactionEmoji(reaction: reaction, size: 20),
-                          const SizedBox(width: Grid.quarter),
-                          Text('${reaction.count}'),
-                        ],
-                      ),
-                    ),
+            Row(
+              children: [
+                if (onAddReaction != null)
+                  IconButton(
+                    key: const ValueKey('reaction-sheet-add'),
+                    tooltip: 'Add reaction',
+                    onPressed: onAddReaction,
+                    icon: const Icon(BuzzIcons.smilePlus),
                   ),
+                Expanded(
+                  child: TabBar(
+                    isScrollable: true,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.gutter,
+                    ),
+                    tabAlignment: TabAlignment.start,
+                    dividerHeight: 0,
+                    indicatorSize: TabBarIndicatorSize.tab,
+                    indicatorPadding: const EdgeInsets.symmetric(
+                      vertical: Grid.xxs,
+                    ),
+                    indicator: BoxDecoration(
+                      color: context.colors.primary.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(Radii.full),
+                    ),
+                    labelColor: context.colors.onSurface,
+                    unselectedLabelColor: context.colors.onSurfaceVariant,
+                    tabs: [
+                      Tab(
+                        key: const ValueKey('reaction-filter-all'),
+                        text: 'All $total',
+                      ),
+                      for (final reaction in reactions)
+                        Tab(
+                          key: ValueKey('reaction-filter-${reaction.emoji}'),
+                          child: Tooltip(
+                            message: dataset.displayName(reaction.emoji),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _ReactionEmoji(reaction: reaction, size: 20),
+                                const SizedBox(width: Grid.quarter),
+                                Text('${reaction.count}'),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
               ],
             ),
             Expanded(
@@ -560,16 +630,22 @@ class _ReactionDetailSheet extends HookConsumerWidget {
   final String channelId;
   final List<TimelineReaction> reactions;
   final String initialEmoji;
+  final VoidCallback? onAddReaction;
 
   const _ReactionDetailSheet({
     required this.channelId,
     required this.reactions,
     required this.initialEmoji,
+    this.onAddReaction,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final selectedEmoji = useState<String?>(initialEmoji);
+    final selectedEmoji = useState<String?>(
+      reactions.any((reaction) => reaction.emoji == initialEmoji)
+          ? initialEmoji
+          : null,
+    );
     final userCache = ref.watch(userCacheProvider);
     final identityNames = ref.watch(channelIdentityNamesProvider(channelId));
     final dataset = ref.watch(emojiDatasetOrEmptyProvider);
@@ -606,6 +682,13 @@ class _ReactionDetailSheet extends HookConsumerWidget {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
+                  if (onAddReaction != null)
+                    IconButton(
+                      key: const ValueKey('reaction-sheet-add'),
+                      tooltip: 'Add reaction',
+                      onPressed: onAddReaction,
+                      icon: const Icon(BuzzIcons.smilePlus),
+                    ),
                   Padding(
                     padding: const EdgeInsets.only(right: Grid.half),
                     child: ChoiceChip(
@@ -763,6 +846,7 @@ Future<bool> _showNativeReactionDetails(
   String channelId,
   List<TimelineReaction> reactions,
   String initialEmoji,
+  VoidCallback? onAddReaction,
 ) async {
   if (!NativeMessagePresentation.isSupportedPlatform) return false;
   return NativeMessagePresentation.withLease(() async {
@@ -854,6 +938,7 @@ Future<bool> _showNativeReactionDetails(
       final pending = NativeMessagePresentation.present('reactions', {
         'requestId': requestId,
         'initialEmoji': initialEmoji,
+        'canAddReaction': onAddReaction != null,
         'sheetColor': sheetColors.surface.toARGB32(),
         'foregroundColor': sheetColors.primary.toARGB32(),
         'dark': Theme.of(context).brightness == Brightness.dark,
@@ -873,7 +958,7 @@ Future<bool> _showNativeReactionDetails(
               },
             },
         ],
-      });
+      }, onAddReaction: onAddReaction);
       container.read(userCacheProvider.notifier).preload(pubkeys);
       return await pending != null;
     } finally {

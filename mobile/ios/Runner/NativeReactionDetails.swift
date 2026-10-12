@@ -4,6 +4,8 @@ import ImageIO
 /// Native resizable sheet: selected emoji first, with All and per-emoji filters.
 final class NativeReactionDetailsViewController: UIViewController, UITableViewDataSource {
   var onClose: (() -> Void)?
+  var onAddReaction: (() -> Void)?
+  private let canAddReaction: Bool
   private let sheetColor: UIColor
   private let foregroundColor: UIColor
   private let reactions: [[String: Any]]
@@ -31,6 +33,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     }
     sheetColor = color("sheetColor", fallback: .systemGroupedBackground)
     foregroundColor = color("foregroundColor", fallback: .label)
+    canAddReaction = data["canAddReaction"] as? Bool == true
     reactions = data["reactions"] as? [[String: Any]] ?? []
     profiles = data["profiles"] as? [String: [String: Any]] ?? [:]
     let initial = data["initialEmoji"] as? String
@@ -132,6 +135,20 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
 
   private func rebuildFilters() {
     for child in filters.arrangedSubviews { child.removeFromSuperview() }
+    if canAddReaction {
+      let add = UIButton(type: .system)
+      var config = UIButton.Configuration.gray()
+      config.image = UIImage(systemName: "face.smiling.badge.plus") ?? UIImage(systemName: "plus.circle")
+      config.cornerStyle = .capsule
+      config.baseForegroundColor = foregroundColor
+      add.configuration = config
+      add.accessibilityLabel = "Add reaction"
+      add.accessibilityIdentifier = "reaction-sheet-add"
+      add.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+      add.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+      add.addAction(UIAction { [weak self] _ in self?.onAddReaction?() }, for: .touchUpInside)
+      filters.addArrangedSubview(add)
+    }
     let count = reactions.reduce(0) { $0 + ($1["count"] as? Int ?? 0) }
     addFilter(title: "All \(count)", emoji: nil, reaction: nil)
     for reaction in reactions {

@@ -189,9 +189,15 @@ class MessageContent extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final ownTextColor = context.colors.brightness == Brightness.dark
+        ? Colors.black
+        : Colors.white;
     final baseTextStyle =
-        baseStyle ??
-        context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
+        (baseStyle ??
+                context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.onSurface,
+                ))
+            ?.copyWith(color: bubble && ownMessage ? ownTextColor : null);
     final resolvedMentionNames = mentionNames;
     final signedMentionPubkeys = mentionedPubkeysFromTags(tags);
     final mentionBindings = renderedMentionBindings(
@@ -398,18 +404,19 @@ class MessageContent extends HookConsumerWidget {
                           : Grid.xxs,
                     ),
                     decoration: ShapeDecoration(
-                      color: Color.alphaBlend(
-                        (ownMessage
-                                ? context.colors.primary
-                                : context.colors.onSurface)
-                            .withValues(
-                              alpha:
-                                  context.colors.brightness == Brightness.dark
-                                  ? (ownMessage ? 0.24 : 0.14)
-                                  : (ownMessage ? 0.12 : 0.04),
+                      color: ownMessage
+                          ? (context.colors.brightness == Brightness.dark
+                                ? const Color(0xFFF2F2F2)
+                                : Colors.black)
+                          : Color.alphaBlend(
+                              context.colors.onSurface.withValues(
+                                alpha:
+                                    context.colors.brightness == Brightness.dark
+                                    ? 0.14
+                                    : 0.04,
+                              ),
+                              context.colors.surface,
                             ),
-                        context.colors.surface,
-                      ),
                       shape: _MessageBubbleShape(
                         start: bubbleStart && index == 0,
                         end:

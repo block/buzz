@@ -12,6 +12,7 @@ class NativeMessagePresentation {
   static const channel = MethodChannel('buzz/native_message_presentation');
 
   static final _presentedCallbacks = <String, VoidCallback>{};
+  static final _addReactionCallbacks = <String, VoidCallback>{};
   static var _nextRequest = 0;
   static bool _active = false;
 
@@ -32,12 +33,18 @@ class NativeMessagePresentation {
     String method,
     Map<String, Object?> arguments, {
     VoidCallback? onPresented,
+    VoidCallback? onAddReaction,
   }) async {
     if (!isSupportedPlatform) return null;
-    final requestId = 'message-${_nextRequest++}';
-    if (onPresented != null) {
-      _presentedCallbacks[requestId] = onPresented;
+    final requestId =
+        arguments['requestId'] as String? ?? 'message-${_nextRequest++}';
+    if (onAddReaction != null) _addReactionCallbacks[requestId] = onAddReaction;
+    if (onPresented != null) _presentedCallbacks[requestId] = onPresented;
+    if (onPresented != null || onAddReaction != null) {
       channel.setMethodCallHandler((call) async {
+        if (call.method == 'reactionAddTapped') {
+          _addReactionCallbacks[call.arguments]?.call();
+        }
         if (call.method == 'messagePresented') {
           _presentedCallbacks[call.arguments]?.call();
         }
@@ -46,14 +53,16 @@ class NativeMessagePresentation {
     try {
       return await channel.invokeMapMethod<Object?, Object?>(method, {
         ...arguments,
-        if (onPresented != null) 'requestId': requestId,
+        if (onPresented != null || onAddReaction != null)
+          'requestId': requestId,
       });
     } on MissingPluginException {
       return null;
     } on PlatformException {
       return null;
     } finally {
-      _presentedCallbacks.remove(requestId);
+      if (onPresented != null) _presentedCallbacks.remove(requestId);
+      if (onAddReaction != null) _addReactionCallbacks.remove(requestId);
     }
   }
 }

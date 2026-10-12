@@ -11,6 +11,7 @@ import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -130,18 +131,76 @@ void main() {
         onAddReaction: () => added = true,
       );
       expect(find.text('1'), findsNothing);
-      await tester.tap(find.byKey(const ValueKey('reaction-pill-$_fire')));
+      expect(find.byKey(const ValueKey('add-reaction-pill')), findsNothing);
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('combined-reaction-tray')))
+            .width,
+        lessThan(70),
+      );
+      await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
       await tester.pumpAndSettle();
       final sheet = find.byKey(const ValueKey('reaction-details-sheet'));
       expect(sheet, findsOneWidget);
       expect(toggled, isEmpty);
-      Navigator.of(tester.element(sheet)).pop();
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('add-reaction-pill')));
+      await tester.tap(find.byKey(const ValueKey('reaction-sheet-add')));
       await tester.pumpAndSettle();
       expect(added, isTrue);
     },
   );
+
+  testWidgets('native add action keeps reaction presentation alive', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final completion = Completer<Map<String, Object?>>();
+    Map<Object?, Object?>? payload;
+    var added = 0;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async {
+        if (call.method == 'reactions') {
+          payload = call.arguments as Map<Object?, Object?>;
+          return completion.future;
+        }
+        return <String, Object?>{};
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await _pumpRow(
+      tester,
+      combined: true,
+      reactions: [_reaction()],
+      showAddButton: true,
+      onAddReaction: () => added++,
+    );
+    await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
+    await tester.pump();
+    expect(payload!['canAddReaction'], isTrue);
+    await NativeMessagePresentation.present('updateProfiles', {
+      'requestId': payload!['requestId'],
+      'profiles': <String, Object?>{},
+    });
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      NativeMessagePresentation.channel.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('reactionAddTapped', payload!['requestId']),
+      ),
+      (_) {},
+    );
+    await tester.pump();
+    expect(added, 1);
+    expect(completion.isCompleted, isFalse);
+    completion.complete({});
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
     'native reactor labels retain channel qualifications and live updates',

@@ -65,6 +65,10 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
     } else {
       let sheet = NativeReactionDetailsViewController(data: data)
       sheet.onClose = { [weak self] in self?.dismiss([:]) }
+      sheet.onAddReaction = { [weak self] in
+        guard let self, let requestID = self.requestID else { return }
+        self.channel.invokeMethod("reactionAddTapped", arguments: requestID)
+      }
       sheet.modalPresentationStyle = .pageSheet
       if let presentation = sheet.sheetPresentationController {
         presentation.overrideTraitCollection = UITraitCollection(userInterfaceStyle: sheet.overrideUserInterfaceStyle)
