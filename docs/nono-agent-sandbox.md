@@ -72,11 +72,18 @@ matters.
 
 | File | Owner | Written |
 |------|-------|---------|
-| `~/.config/nono/profiles/buzz-agent.json` | Buzz | On every launch, if its content differs from the bundled copy |
-| `~/.config/nono/profiles/buzz-agent-local.json` | User | Once, if missing; never overwritten |
+| `~/.config/nono/profiles/<nest>-agent.json` | Buzz | On every launch, if its content differs from the embedded copy |
+| `~/.config/nono/profiles/<nest>-agent-local.json` | User | Once, if missing; never overwritten |
 
-`buzz-agent.json` is a bundled resource (`desktop/src-tauri/resources/nono/`)
-with `"extends": "default"`. It grants:
+`<nest>` is the nest directory name without its dot (`buzz`, `buzz-dev`,
+`buzz-demo-<slug>`), so prod, dev, and demo builds never rewrite each other's
+base profile. The examples below use the prod names. Implemented in
+`managed_agents/sandbox_profile.rs`, with the template at
+`managed_agents/sandbox_profile.json`. It is installed at boot right after
+`ensure_nest()`.
+
+`buzz-agent.json` is embedded in the binary with `"extends": "default"`. It
+grants:
 
 - `workdir.access: readwrite` (the nest).
 - Read: the app bundle's sidecar directory (`buzz-acp`, `buzz`, `buzz-dev-mcp`,
@@ -86,16 +93,25 @@ with `"extends": "default"`. It grants:
 - Read-write: the agent-runtime config homes the known runtimes need
   (`~/.claude`, `~/.claude.json*`, `~/.codex`, `~/.config/goose`,
   `~/.cache`), and temp directories.
-- Keychain (macOS): `~/Library/Keychains` read-write with
-  `bypass_protection`, matching nono's registry `claude-code` profile. Neither
+- Keychain (macOS): granted in the seeded **local** profile, not the base
+  (`platform_overrides.macos`: allow plus `bypass_protection` on
+  `~/Library/Keychains`, matching nono's registry `claude-code` profile).
+  nono merges `extends` and `platform_overrides` additively ("can only add or
+  tighten"), so a local profile can never remove a base grant; keeping the
+  grant in the user's file lets them delete it. Neither
   `buzz-acp` nor Desktop reads the keychain; Claude Code reads its own
   subscription OAuth token from the login keychain. Desktop's readiness probe
   (`claude auth status`, `readiness.rs:452`) runs unsandboxed, so without this
   grant Desktop would report a subscription agent as ready while the
   sandboxed agent fails to authenticate. The cost is that every agent can
   reach the keychain database files; individual items stay behind macOS
-  keychain access control. A user on API-key auth can tighten this in the local
-  profile.
+  keychain access control. A user on API-key auth can delete the block from
+  the local profile.
+- Not granted: the desktop app-data directory. `buzz channel-templates`
+  reads `<app data>/templates/channel-templates.json`, but the same directory
+  can hold `managed-agents.json` with plaintext agent keys (when no keyring is
+  available). Step 2 grants read access to the `templates` subdirectory per
+  spawn.
 - Network: unrestricted (see §4).
 
 There is one shared base profile for all runtimes in v1.
@@ -104,8 +120,16 @@ There is one shared base profile for all runtimes in v1.
 
 ```json
 {
-  "meta": { "name": "buzz-agent-local", "version": "1", "description": "Local overrides for Buzz agents" },
-  "extends": "buzz-agent"
+  "meta": { "name": "buzz-agent-local", "version": "1", "description": "..." },
+  "extends": "buzz-agent",
+  "platform_overrides": {
+    "macos": {
+      "filesystem": {
+        "allow": ["$HOME/Library/Keychains"],
+        "bypass_protection": ["$HOME/Library/Keychains"]
+      }
+    }
+  }
 }
 ```
 
@@ -248,7 +272,5 @@ process-group assumptions in §2.
 
 ## Open questions
 
-1. Can a user narrow a parent grant from the local profile (for example, take
-   away the keychain grant)? nono documents `deny` as additive across
-   `extends`, but how `deny` interacts with an inherited `bypass_protection`
-   needs a test before we tell users how to remove it.
+None at the moment. (Resolved: a local profile cannot remove an inherited
+grant, which is why the keychain grant lives in the local profile.)
