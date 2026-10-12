@@ -40,6 +40,24 @@ export function acquireProxyDirect(d: DirectAgents | null): () => void {
   };
 }
 export const proxyDirectLive = () => !!current?.live;
+/**
+ * User-initiated actions from any screen (e.g. a term-session card's Open in a channel): the left-nav watcher binds the shared
+ * Direct client app-wide but only the Agents/Settings pages connect it. Connect it now (or wait for a connect in progress) so the
+ * command doesn't fail with NeedsDirectError while the desktop is reachable. Resolves true once live, false after `timeoutMs`.
+ */
+export async function ensureProxyDirectLive(timeoutMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!current && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+  const d = current;
+  if (!d) return false;
+  if (d.live) return true;
+  if (d.state !== "connecting") void d.connect().catch(() => undefined);
+  while (Date.now() < deadline) {
+    if (current?.live) return true;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return !!current?.live;
+}
 export function subscribeProxy(fn: () => void) {
   listeners.add(fn);
   return () => void listeners.delete(fn);

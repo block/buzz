@@ -2,6 +2,8 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getTerminalBackend } from "@/features/terminal/terminalClient";
 import { withEnvExports } from "@/features/bridge/termHandoff";
 import { toast } from "sonner";
+import { ensureProxyDirectLive } from "@/features/bridge/remoteCmd";
+import { openTerminalPanel } from "@/features/terminal/terminalPanelStore";
 
 import type { TermSessionCard } from "./types.ts";
 import {
@@ -35,6 +37,8 @@ export async function openTermSessionCard(
     return null;
   }
   let prepared;
+  // Web: same shared Direct client the left nav binds (and the Agents/Settings pages connect); connect it if it isn't yet.
+  if (web) await ensureProxyDirectLive(8000);
   try {
     // Web: answered by the desktop over the Direct connection (directCmd), the same command its own Open runs.
     prepared = await prepareTermSessionLaunch(card);
@@ -90,5 +94,6 @@ export async function openTermSessionCard(
     launchCommand,
     extraEnv,
   });
+  if (web) openTerminalPanel("maximized", "all");
   return { launchCommand, extraEnv };
 }
