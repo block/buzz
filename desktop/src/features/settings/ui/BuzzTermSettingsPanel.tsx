@@ -1,6 +1,7 @@
 import * as React from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { useDesktopTermSettings } from "@/features/bridge/ui/DesktopData";
+import { useDirectSession } from "@/features/bridge/ui/WebRemoteSettings";
 import { homeDir } from "@tauri-apps/api/path";
 
 import { expandTilde } from "@/features/communities/communityStorage";
@@ -53,6 +54,9 @@ const SESSION_HOST_OPTIONS = [
  */
 export function BuzzTermSettingsPanel() {
   const web = !isTauri();
+  // Settings has no left nav (which normally binds the shared Direct client), so without this the desktop reads below never
+  // saw a Direct connection and stayed "Unknown" even while the host row said Direct. Same session as Agents/Settings → Agents.
+  if (web) useDirectSession(); // biome-ignore lint: web is constant for the app lifetime
   const prefs = useTermPreferences();
   const [cwdDraft, setCwdDraft] = React.useState(prefs.cwd);
   const [shellDraft, setShellDraft] = React.useState(prefs.shell);
