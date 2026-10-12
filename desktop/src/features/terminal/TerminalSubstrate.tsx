@@ -818,6 +818,36 @@ export function TerminalSubstrate({
     if (touchUi) setTouchSel(null);
   }, [touchUi, activeSessionId]);
 
+  // Touch (iPad/iPhone Safari, PWA): size from the real visible area instead of trusting flex/100vh, which left maximized at
+  // ~3/4 height. Maximized pins to the content surface's box down to the visual viewport's bottom; docked keeps its height within
+  // the real height. Recomputed on viewport/orientation/surface resize. Desktop (non-touch) is untouched.
+  const [touchBox, setTouchBox] = React.useState<{ top: number; left: number; width: number; bottom: number; vh: number } | null>(null);
+  React.useEffect(() => {
+    if (!touchUi) return;
+    const surface = substrateRef.current?.closest("[data-buzz-content-surface]") as HTMLElement | null;
+    const vv = window.visualViewport;
+    const update = () => {
+      const vh = vv ? vv.height + vv.offsetTop : window.innerHeight;
+      const r = surface?.getBoundingClientRect();
+      const next = r
+        ? { top: Math.round(r.top), left: Math.round(r.left), width: Math.round(r.width), bottom: Math.max(0, Math.round(window.innerHeight - vh)), vh: Math.round(vh) }
+        : null;
+      setTouchBox((c) => (c && next && c.top === next.top && c.left === next.left && c.width === next.width && c.bottom === next.bottom && c.vh === next.vh ? c : next));
+    };
+    update();
+    const ro = surface ? new ResizeObserver(update) : null;
+    if (surface) ro?.observe(surface);
+    vv?.addEventListener("resize", update);
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      ro?.disconnect();
+      vv?.removeEventListener("resize", update);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, [touchUi, mode]);
+
   // Native non-passive wheel: React's delegated onWheel is passive in the
   // browsers we ship, so preventDefault there cannot stop the outer UI from
   // stealing the gesture. Match AppTopChrome / useScrollBoundaryLock.
@@ -973,7 +1003,22 @@ export function TerminalSubstrate({
       data-keyboard-open={touchUi && kb.open ? "true" : undefined}
       style={{
         ...terminalStyle,
-        ...(mode === "docked" ? { height: dockHeight } : undefined),
+        ...(mode === "docked"
+          ? { height: touchUi && touchBox ? Math.min(dockHeight, Math.round(touchBox.vh * 0.7)) : dockHeight }
+          : undefined),
+        ...(touchUi && touchBox && mode === "maximized" && visible && !kb.open
+          ? {
+              position: "fixed" as const,
+              inset: "auto",
+              top: touchBox.top,
+              left: touchBox.left,
+              width: touchBox.width,
+              bottom: touchBox.bottom,
+              height: "auto",
+              paddingBottom: "env(safe-area-inset-bottom)",
+              zIndex: 30,
+            }
+          : undefined),
         ...(touchUi && kb.open
           ? { position: "fixed" as const, inset: "auto", left: 0, right: 0, top: kb.top, height: kb.height, zIndex: 60 }
           : undefined),
