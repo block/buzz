@@ -1,6 +1,7 @@
 # Plan: run desktop-managed agents inside a nono sandbox
 
-Status: proposal. Target: nono 0.79+, desktop managed agents (local backend).
+Status: implemented (steps 0–4). Target: nono 0.79+, desktop managed agents
+(local backend). User guide: [agent-sandbox.md](agent-sandbox.md).
 
 ## Goal
 
