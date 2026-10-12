@@ -86,7 +86,8 @@ export type PublisherOptions = {
 
 export class BridgePublisher {
   private key = generateSessionKey();
-  private seq = { agents: 0, hb: 0 };
+  // Start from the clock so a window reload (new publisher, same key) keeps counting up instead of restarting at 1.
+  private seq = { agents: Date.now(), hb: Date.now() };
   private started = false;
   private keyPublished = false;
   private keyPromise: Promise<void> | null = null;

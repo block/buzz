@@ -395,12 +395,14 @@ export function bridgeTags(
 
 /** Per-(device,key-id,type) monotonic seq guard (replay / out-of-order). */
 export class SeqGuard {
-  private last = new Map<string, number>();
+  private last = new Map<string, { seq: number; ts: number }>();
   accept(env: Envelope): boolean {
     const k = `${env.dev}|${env.kid}|${env.type}`;
     const prev = this.last.get(k);
-    if (prev !== undefined && env.seq <= prev) return false;
-    this.last.set(k, env.seq);
+    // A desktop window reload restarts the publisher's counter under the same key: a strictly newer envelope time is a
+    // restart, not a replay, so accept it (otherwise heartbeats were dropped for minutes until the counter caught up).
+    if (prev !== undefined && env.seq <= prev.seq && !(env.ts > prev.ts)) return false;
+    this.last.set(k, { seq: env.seq, ts: env.ts });
     return true;
   }
 }
