@@ -32,6 +32,7 @@ function installPhoneViewportHeight(mql: MediaQueryList): void {
   const sync = () => {
     if (!mql.matches) {
       root.style.removeProperty("--phone-vh");
+      root.style.removeProperty("--phone-vv-top");
       root.removeAttribute("data-phone-keyboard");
       return;
     }
@@ -50,6 +51,11 @@ function installPhoneViewportHeight(mql: MediaQueryList): void {
     if (standalone && !keyboard) h = Math.max(h, window.innerHeight, maxH);
     root.style.setProperty("--phone-vh", `${Math.round(h)}px`);
     resetDocumentScroll();
+    // Safari tab: focusing the composer pans the visual viewport down inside the layout viewport (offsetTop > 0) and
+    // scrollTo(0,0) can't undo it. The shell is position:fixed, so pin its top to the visual viewport instead; the
+    // composer then sits right above the keyboard with the list filling the space above.
+    const top = vv && keyboard ? Math.max(0, Math.round(vv.offsetTop)) : 0;
+    root.style.setProperty("--phone-vv-top", `${top}px`);
   };
   // iOS scrolls the document (and sometimes #root) to reveal a focused field; the shell is fixed-height, so any
   // leftover offset after the keyboard closes or a route change shows a blank screen. Pin everything back to 0.
@@ -64,6 +70,8 @@ function installPhoneViewportHeight(mql: MediaQueryList): void {
     }
   };
   document.addEventListener("focusout", () => window.setTimeout(resetDocumentScroll, 50), true);
+  // iOS reveals a focused field by scrolling/panning after focus; re-sync as it settles.
+  document.addEventListener("focusin", () => { for (const ms of [0, 100, 300, 600]) window.setTimeout(sync, ms); }, true);
   window.addEventListener("hashchange", () => window.setTimeout(resetDocumentScroll, 0));
   window.addEventListener("scroll", resetDocumentScroll, { passive: true });
   sync();

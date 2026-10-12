@@ -29,7 +29,7 @@ function render() {
     el = null;
     return;
   }
-  if (el) return update();
+  if (el) { update(); place(); return; }
   if (showTimer) {
     // Waiting on a "problems" delay and an auth URL just arrived: show now.
     if (delay > 0) return;
@@ -41,9 +41,9 @@ function render() {
     el = document.createElement("div");
     el.setAttribute("data-testid", "signer-waiting");
     el.setAttribute("role", "status");
-    document.body.appendChild(el);
-    place();
+    document.documentElement.appendChild(el);
     update();
+    place();
   }, delay);
 }
 const DOCKED = '[data-testid="phone-tabbar"], [data-testid="message-composer"], .buzz-terminal-touch-key';
@@ -51,32 +51,46 @@ function cssPx(name: string): number {
   const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   return Number.isFinite(v) ? v : 0;
 }
-/** Position from prefs: top under the safe area, or bottom above the tab bar / composer / terminal keys. */
+/**
+ * True overlay: position:fixed on <html> (outside #root / body flow), placed by `top` in visual-viewport terms so
+ * iOS keyboard pans can't drag it into or over content. Only the toast itself takes pointer events.
+ * Top: under the safe area. Bottom: above the tab bar / composer / terminal keys.
+ */
 function place() {
   if (!el) return;
   const phone = window.matchMedia?.("(max-width: 599px)").matches;
   const { position } = getSignerToastPrefs();
   el.setAttribute("data-position", position);
-  const base = phone
-    ? "position:fixed;left:50%;transform:translateX(-50%);max-width:calc(100vw - 16px);z-index:2147483647;background:#111d;color:#f5f5f5;border:1px solid #444;border-radius:10px;padding:5px 10px;font:12px/1.3 Inter,system-ui,sans-serif;box-shadow:0 2px 10px #0006;display:flex;gap:8px;align-items:center"
-    : "position:fixed;left:50%;transform:translateX(-50%);max-width:calc(100vw - 32px);z-index:2147483647;background:#111;color:#f5f5f5;border:1px solid #444;border-radius:12px;padding:10px 14px;font:14px/1.4 Inter,system-ui,sans-serif;box-shadow:0 4px 20px #0008;display:flex;gap:10px;align-items:center";
+  const look = phone
+    ? "max-width:calc(100vw - 16px);background:#111d;color:#f5f5f5;border:1px solid #444;border-radius:10px;padding:5px 10px;font:12px/1.3 Inter,system-ui,sans-serif;box-shadow:0 2px 10px #0006;gap:8px"
+    : "max-width:calc(100vw - 32px);background:#111;color:#f5f5f5;border:1px solid #444;border-radius:12px;padding:10px 14px;font:14px/1.4 Inter,system-ui,sans-serif;box-shadow:0 4px 20px #0008;gap:10px";
+  const fixedCss = "position:fixed;left:50%;right:auto;bottom:auto;margin:0;transform:translateX(-50%);z-index:2147483647;display:flex;align-items:center;pointer-events:auto;box-sizing:border-box;";
+  // Style first (off-screen) so its real height is known before placing it.
+  el.style.cssText = `${fixedCss}top:-9999px;${look}`;
+  const vv = window.visualViewport;
+  const vTop = vv?.offsetTop ?? 0;
+  const vh = vv?.height ?? window.innerHeight;
+  let top: number;
   if (position === "top") {
-    el.style.cssText = `${base};top:calc(max(var(--phone-safe-top, 0px), env(safe-area-inset-top)) + ${phone ? 6 : 12}px)`;
-    return;
+    const rootEl = document.getElementById("root");
+    const safeTop = phone && rootEl ? parseFloat(getComputedStyle(rootEl).paddingTop) || 0 : 0; // = --phone-safe-top, resolved
+    top = vTop + safeTop + (phone ? 6 : 12);
+  } else {
+    const tops = [...document.querySelectorAll(DOCKED)]
+      .map((n) => n.getBoundingClientRect())
+      .filter((r) => r.width > 0 && r.height > 0)
+      .map((r) => r.top - vTop);
+    const clear = bottomClearancePx(vh, tops, Math.max(cssPx("--phone-safe-bottom"), 0));
+    const h = el.offsetHeight || 40;
+    top = vTop + vh - clear - h;
   }
-  const vh = window.visualViewport?.height ?? window.innerHeight;
-  const tops = [...document.querySelectorAll(DOCKED)]
-    .map((n) => n.getBoundingClientRect())
-    .filter((r) => r.width > 0 && r.height > 0)
-    .map((r) => r.top);
-  const safeBottom = Math.max(cssPx("--phone-safe-bottom"), 0);
-  const px = tops.length ? bottomClearancePx(vh, tops, safeBottom) : null;
-  el.style.cssText = `${base};bottom:${px === null ? `calc(env(safe-area-inset-bottom) + 16px)` : `${Math.round(window.innerHeight - vh + px)}px`}`;
+  el.style.cssText = `${fixedCss}top:${Math.round(top)}px;${look}`;
 }
 if (typeof window !== "undefined") {
   const re = () => place();
   window.addEventListener("resize", re);
   window.visualViewport?.addEventListener("resize", re);
+  window.visualViewport?.addEventListener("scroll", re);
   window.addEventListener("hashchange", () => setTimeout(re, 300));
   subscribeSignerToastPrefs(() => {
     if (el && getSignerToastPrefs().mode === "off" && !st.authUrl) { el.remove(); el = null; }

@@ -37,6 +37,11 @@
 [data-phone] body > #root {
   padding-top: var(--phone-safe-top);
   box-sizing: border-box;
+  /* Fixed to the visual viewport (see phoneLayout --phone-vv-top) so iOS's focus pan can't push the shell offscreen. */
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--phone-vv-top, 0px);
 }
 [data-phone] body > #root > * {
   height: 100% !important;
@@ -391,4 +396,8 @@
 }
 [data-phone][data-phone-tab-switcher] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tabs {
   padding-left: 48px;
+}
+/* Keyboard up: composer sits right on the keyboard (the 20px quiet inset is for the home-indicator area). */
+[data-phone][data-phone-keyboard] .composer-dock {
+  --composer-dock-quiet-inset: 4px;
 }
