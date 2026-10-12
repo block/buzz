@@ -299,9 +299,13 @@ export function WebRemoteWatcher() {
   React.useEffect(() => {
     if (snapTs == null) return;
     void queryClient.invalidateQueries({ queryKey: ["presence"] });
+    // A start/stop snapshot lands before the agent's own relay presence flips (it connects or drops a moment later): re-check
+    // presence a few times right after, instead of waiting for the 5 s poll.
+    const burst = [1_000, 2_500, 5_000].map((ms) => setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["presence"] }), ms));
     // Any desktop change (start/stop/crash, rename, persona edit) republishes the snapshot: refetch the agent and persona lists
     // too: over Direct when live, else from the saved snapshot. Before, a live Direct session never refreshed on desktop changes.
     void queryClient.invalidateQueries({ predicate: (q) => /agent|persona/i.test(String(q.queryKey[0])) });
+    return () => burst.forEach(clearTimeout);
   }, [snapTs, queryClient, live]);
   // Edits that don't change the agent snapshot (persona renames) still show when you come back to the tab.
   React.useEffect(() => {

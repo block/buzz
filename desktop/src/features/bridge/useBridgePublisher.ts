@@ -354,6 +354,20 @@ export function useBridgePublisher(
   }, [harnessSig]);
 
   const agents = agentsQuery.data;
+  // The agents list only polls while this window is focused, so with the desktop in the background (JM on the web) a process
+  // that exits or finishes starting never reached the snapshot until focus came back. While the bridge is on and an agent is
+  // running, re-read the list every 2 s regardless of focus; a status change then goes out as an urgent
+  // (250 ms) snapshot and the web redraws at once.
+  const bridgeQueryClient = useQueryClient();
+  const busy = !!agents?.some((a) => a.status === "running");
+  React.useEffect(() => {
+    if (!enabled || !busy) return;
+    const t = setInterval(() => {
+      if (typeof document !== "undefined" && document.hasFocus()) return; // focused: the list's own poll covers it
+      void bridgeQueryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+    }, 2_000);
+    return () => clearInterval(t);
+  }, [enabled, busy, bridgeQueryClient]);
   React.useEffect(() => {
     const p = publisherRef.current;
     if (!p || !agents) return;
