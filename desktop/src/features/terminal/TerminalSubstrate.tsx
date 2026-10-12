@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { ChevronRight, Maximize2, Minimize2, Plus, X } from "lucide-react";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
@@ -93,7 +94,10 @@ type TerminalSubstrateProps = {
   onTerminalFocusChange: (focused: boolean) => void;
   onSelectSession: (id: string) => void;
   onCloseSession: (id: string) => void;
-  onNewSession: () => void;
+  /** New tab; `kind` comes from the + menu when herdr is the Session host ("shell" = plain Terminal, "herdr" = herdr). */
+  onNewSession: (kind?: "shell" | "herdr") => void;
+  /** Session host is herdr: + opens a small Terminal / herdr menu instead of creating a tab directly. */
+  herdrNewTab?: boolean;
   /** Phone/tablet behaviour (defaults to "the primary pointer is a finger"; desktop mice are unchanged). */
   touchUi?: boolean;
 };
@@ -146,6 +150,7 @@ export function TerminalSubstrate({
   onSelectSession,
   onCloseSession,
   onNewSession,
+  herdrNewTab = false,
   touchUi: touchUiProp,
 }: TerminalSubstrateProps) {
   const { terminalPalette } = useTheme();
@@ -232,6 +237,22 @@ export function TerminalSubstrate({
   // ── touch ──
   const [mods, setMods] = React.useState<StickyMods>({ ctrl: false, alt: false, meta: false });
   const [selectMode, setSelectMode] = React.useState(false);
+  const [newTabMenu, setNewTabMenu] = React.useState<{ left: number; top: number } | null>(null);
+  const newTabMenuRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!newTabMenu) return;
+    const away = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (!newTabMenuRef.current?.contains(t) && !t?.closest?.('[data-testid="terminal-new-tab"]')) setNewTabMenu(null);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setNewTabMenu(null);
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", esc, true);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("keydown", esc, true);
+    };
+  }, [newTabMenu]);
   const selectModeRef = React.useRef(selectMode);
   selectModeRef.current = selectMode;
   const modsRef = React.useRef(mods);
@@ -1302,12 +1323,51 @@ export function TerminalSubstrate({
           ))}
           <button
             aria-label="New Buzz Term tab"
+            aria-haspopup={herdrNewTab ? "menu" : undefined}
+            aria-expanded={herdrNewTab ? newTabMenu !== null : undefined}
             className="buzz-terminal-new-tab"
-            onClick={() => runTabAction(onNewSession)}
+            data-testid="terminal-new-tab"
+            onClick={(event) => {
+              if (!herdrNewTab) return runTabAction(() => onNewSession());
+              const r = event.currentTarget.getBoundingClientRect();
+              setNewTabMenu((m) => (m ? null : { left: r.left, top: r.bottom + 4 }));
+            }}
             type="button"
           >
             <Plus />
           </button>
+          {newTabMenu
+            ? createPortal(
+                <div
+                  className="buzz-terminal-newtab-menu"
+                  data-testid="terminal-new-tab-menu"
+                  ref={newTabMenuRef}
+                  role="menu"
+                  style={{ left: Math.max(4, Math.min(newTabMenu.left, window.innerWidth - 164)), top: newTabMenu.top }}
+                >
+                  {(
+                    [
+                      ["shell", "Terminal"],
+                      ["herdr", "herdr"],
+                    ] as const
+                  ).map(([kind, label]) => (
+                    <button
+                      data-testid={`terminal-new-tab-${kind}`}
+                      key={kind}
+                      onClick={() => {
+                        setNewTabMenu(null);
+                        runTabAction(() => onNewSession(kind));
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>,
+                document.body,
+              )
+            : null}
         </div>
         <div className="buzz-terminal-readout">
           <button

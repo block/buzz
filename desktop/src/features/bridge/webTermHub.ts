@@ -21,6 +21,11 @@ export function getWebTermHub(): RemoteTerminalHub {
 }
 
 /** Keep the hub pointed at the desktop's latest heartbeat and the current signer (called on every render of the page). */
+/** What the desktop last advertised for remote terminals (read-only; e.g. termHost "herdr"). */
+export function getWebTermInfo(): RemoteInfo | undefined {
+  return info;
+}
+
 export function configureWebTermHub(next: { info: RemoteInfo | undefined; sign: SignJson }) {
   info = next.info;
   sign = next.sign;

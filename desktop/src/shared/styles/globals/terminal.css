@@ -501,3 +501,37 @@
   min-width: 56px;
   white-space: nowrap;
 }
+
+/* + menu (Terminal / herdr) when the Session host is herdr. */
+.buzz-terminal-newtab-menu {
+  background: hsl(var(--popover, var(--background)));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  box-shadow: 0 6px 20px #0003;
+  color: hsl(var(--popover-foreground, var(--foreground)));
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  position: fixed;
+  z-index: 2147483640;
+}
+.buzz-terminal-newtab-menu > button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  min-height: 32px;
+  padding: 0 10px;
+  text-align: left;
+}
+.buzz-terminal-newtab-menu > button:hover {
+  background: hsl(var(--foreground) / 0.06);
+}
+@media (pointer: coarse) {
+  .buzz-terminal-newtab-menu > button {
+    min-height: 44px;
+  }
+}

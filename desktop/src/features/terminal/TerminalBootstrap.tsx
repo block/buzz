@@ -1,4 +1,5 @@
 import * as React from "react";
+import { getWebTermInfo } from "@/features/bridge/webTermHub";
 import { isTauri } from "@tauri-apps/api/core";
 
 import {
@@ -71,6 +72,8 @@ type Session = {
 };
 
 type CreateSessionOptions = {
+  /** New-tab menu "Terminal": a plain login shell even when the Session host is herdr (web: asks the desktop for a shell). */
+  forceShell?: boolean;
   termSessionSid?: string | null;
   pendingLaunchCommand?: string | null;
   extraEnv?: Record<string, string>;
@@ -344,6 +347,10 @@ export function TerminalBootstrap({
     (options?: CreateSessionOptions) => {
       const baseContext = resolveSpawnContext();
       if (!available || !baseContext) return;
+      if (options?.forceShell) {
+        createInAppSessionRef.current(options);
+        return;
+      }
 
       // Fast path: Buzz Term host — create the in-app PTY immediately (no async
       // herdr probe) so the panel never sits empty.
@@ -498,7 +505,7 @@ export function TerminalBootstrap({
             ...(cwd ? { cwd } : {}),
             ...(prefs.shell && !remote ? { shell: prefs.shell } : {}),
             // a handoff launch line is typed into a shell, so never into the desktop's herdr UI
-            ...(remote && options?.pendingLaunchCommand ? { remoteHost: "shell" as const } : {}),
+            ...(remote && (options?.pendingLaunchCommand || options?.forceShell) ? { remoteHost: "shell" as const } : {}),
             ...(herdrAttach
               ? { program: herdrAttach.bin, args: herdrAttach.argv }
               : {}),
@@ -905,7 +912,10 @@ export function TerminalBootstrap({
         });
       }}
       onInput={(text) => send(active?.connection?.input(text))}
-      onNewSession={createSession}
+      onNewSession={(kind) => createSession(kind === "shell" ? { forceShell: true } : undefined)}
+      herdrNewTab={
+        isRemoteTerminal() ? getWebTermInfo()?.termHost === "herdr" : getTermPreferences().sessionHost === "herdr"
+      }
       onScroll={(lines) => send(active?.connection?.scroll(lines))}
       onMouse={(event) => send(active?.connection?.mouse(event))}
       onSelectSession={setActiveKey}
