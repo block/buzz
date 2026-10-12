@@ -371,10 +371,25 @@ impl Trail {
         };
         Some(
             self.valid()
-                .filter(|e| e.pubkey == actor)
+                .filter(|e| e.pubkey == actor && self.declared(e))
                 .filter_map(task_key)
                 .collect(),
         )
+    }
+
+    /// Whether a work event lies inside the declared channels or
+    /// repositories. Events fetched by id (a status's target, say) may be
+    /// older than the window, but never widen the declared scope.
+    fn declared(&self, event: &Event) -> bool {
+        let kind = event.kind.as_u16();
+        if kind == 9 {
+            evidence::tag_value(event, "h")
+                .is_some_and(|h| self.scope.channels.iter().any(|c| c == h))
+        } else if CODE_KINDS.contains(&kind) || kind == ISSUE {
+            matches!(one_repo(event), Ok(Some(a)) if self.scope.repos.iter().any(|r| r == a))
+        } else {
+            true
+        }
     }
 
     /// Valid events that belong to a task in `tasks` (every task if `None`).
@@ -918,9 +933,32 @@ impl<'a> Reduce<'a> {
     }
 
     fn status(&mut self, event: &'a Event) {
-        let Some(key) = evidence::target(event) else {
-            return;
+        let key = match status_root(event) {
+            Ok(key) => key,
+            Err(why) => {
+                return self.gap(
+                    event.id,
+                    format!("status {why}; whose work it judges is ambiguous; not interpreted"),
+                );
+            }
         };
+        if let Some(target) = self.valid(&key) {
+            match (one_repo(event), one_repo(target)) {
+                (Err(why), _) => {
+                    return self.gap(event.id, format!("status {why}; not interpreted"));
+                }
+                (Ok(Some(named)), Ok(actual)) if Some(named) != actual => {
+                    return self.gap(
+                        event.id,
+                        format!(
+                            "status names repository {named}, but its target {key} is in {}; not interpreted",
+                            actual.unwrap_or("no single repository")
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
         match self.valid(&key) {
             Some(target) if self.outside(target) && task_key(target).is_some() => return,
             Some(issue) if issue.kind.as_u16() == ISSUE => {
@@ -968,7 +1006,7 @@ impl<'a> Reduce<'a> {
                 Some(format!("series-level {claim} claim; revision unknown")),
             )
         } else {
-            match self.revision(event, key, root) {
+            match self.revision(event, key) {
                 Ok(revision) => (Some(revision), OutcomeScope::Revision, None),
                 Err(why) => {
                     let what = if claim == "merged" { "merge" } else { claim };
@@ -1051,28 +1089,17 @@ impl<'a> Reduce<'a> {
     /// The exact revision a status judges: exactly one `e` reply naming the
     /// original PR or a validated update of it. Never the newest tip. The
     /// error is a suffix explaining why the revision is unknown.
-    fn revision(
-        &self,
-        event: &Event,
-        root: EventId,
-        original: Option<&Event>,
-    ) -> Result<EventId, String> {
-        let replies: Vec<EventId> = evidence::tags(event, "e")
-            .filter(|p| p.get(3).is_some_and(|m| m == "reply"))
-            .filter_map(|p| p.get(1).and_then(|id| EventId::from_hex(id).ok()))
-            .collect();
+    fn revision(&self, event: &Event, root: EventId) -> Result<EventId, String> {
+        // Every raw reply counts: a malformed one is not dropped, it makes
+        // the judged revision ambiguous. `status` already checked that the
+        // repository the status names is its target's.
+        let replies: Vec<Option<EventId>> = marked(event, "reply").collect();
         let revision = match replies.as_slice() {
             [] => return Err(String::new()),
-            [one] => *one,
+            [Some(one)] => *one,
+            [None] => return Err("; its revision reply is not an event id".into()),
             _ => return Err("; names more than one revision".into()),
         };
-        if let (Some(original), Some(_)) = (original, evidence::tag_value(event, "a")) {
-            let names = evidence::tags(event, "a")
-                .any(|p| p.get(1).map(String::as_str) == evidence::tag_value(original, "a"));
-            if !names {
-                return Err("; names a different repository".into());
-            }
-        }
         match self.index.get(&revision) {
             Some(p) if p.task == root && p.resolved => Ok(revision),
             Some(_) => Err(format!(
@@ -1245,6 +1272,40 @@ fn single_id(event: &Event, name: &str) -> Option<EventId> {
     match (values.next(), values.next()) {
         (Some(id), None) => EventId::from_hex(id).ok(),
         _ => None,
+    }
+}
+
+/// Every `e` tag marked `marker`, parsed: `None` for one that does not name
+/// an event id, so malformed references are counted, never dropped.
+fn marked<'e>(event: &'e Event, marker: &'e str) -> impl Iterator<Item = Option<EventId>> + 'e {
+    evidence::tags(event, "e")
+        .filter(move |p| p.get(3).is_some_and(|m| m == marker))
+        .map(|p| p.get(1).and_then(|id| EventId::from_hex(id).ok()))
+}
+
+/// The work a status judges: its one `root`-marked `e` tag. A missing,
+/// repeated, or malformed root makes the status ambiguous.
+fn status_root(event: &Event) -> Result<EventId, String> {
+    let roots: Vec<Option<EventId>> = marked(event, "root").collect();
+    match roots.as_slice() {
+        [Some(root)] => Ok(*root),
+        [] => Err("names no root-marked e tag".into()),
+        [None] => Err("names a root that is not an event id".into()),
+        _ => Err(format!("names {} roots", roots.len())),
+    }
+}
+
+/// The repository an event names: every `30617` `a` tag must agree.
+fn one_repo(event: &Event) -> Result<Option<&str>, String> {
+    let named: BTreeSet<&str> = evidence::tags(event, "a")
+        .filter_map(|p| p.get(1))
+        .map(String::as_str)
+        .filter(|a| a.starts_with("30617:"))
+        .collect();
+    match named.len() {
+        0 => Ok(None),
+        1 => Ok(named.into_iter().next()),
+        n => Err(format!("names {n} different repositories")),
     }
 }
 

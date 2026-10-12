@@ -1526,3 +1526,115 @@ fn issue_is_a_request_whose_statuses_judge_no_contribution() {
     assert_readable_honest(&text);
     assert_honest(&by_request);
 }
+
+// Counterexamples from Cobra's re-review of 800dd72be7.
+
+#[test]
+fn a_status_cannot_pull_actor_work_in_from_an_undeclared_repo() {
+    let mut w = repo_work();
+    let outside_coord = repo(&w.owner, "outside-declared-scope");
+    let outside = sign(
+        build_git_pull_request(
+            &outside_coord,
+            "",
+            &GitPullRequestMeta {
+                subject: "Outside the declared repository".into(),
+                commit: commit(7),
+                clone_urls: vec!["https://git.example/outside.git".into()],
+                ..GitPullRequestMeta::default()
+            },
+        )
+        .expect("pr"),
+        &w.actor,
+        T0 + 1,
+    );
+    // Tagged with the declared repository, but its target is the actor's
+    // older PR in another one. A signature does not make the link valid.
+    let mismatched = repo_status(GitStatus::Closed, &w, &outside, T0 + 200);
+    w.relay.add(&outside);
+    w.relay.add(&mismatched);
+    let trail = read(
+        &w.relay,
+        Entry::Actor(w.actor.public_key()),
+        windowed(&w, T0 + 100),
+    )
+    .trail;
+    assert!(
+        trail.tasks.is_empty(),
+        "outside work became actor work: {trail:#?}"
+    );
+    assert!(
+        has_gap(&trail, &mismatched, "but its target"),
+        "{:#?}",
+        trail.gaps
+    );
+    assert_honest(&trail);
+}
+
+/// A merge status on R1 judging R2, plus one extra tag.
+fn merge_with(c: &Code, extra: Tag, at: u64) -> Event {
+    let meta = GitStatusMeta {
+        root_event: c.r1.id.to_hex(),
+        accepted_revision_root: Some(c.r2.id.to_hex()),
+        repo: Some(repo(&c.owner, "r")),
+        ..GitStatusMeta::default()
+    };
+    let b = build_git_status(GitStatus::AppliedOrResolved, "", &meta).expect("status");
+    sign(b.tag(extra), &c.owner, at)
+}
+
+#[test]
+fn a_malformed_second_reply_leaves_the_revision_unknown() {
+    let mut c = code(Keys::generate(), Keys::generate());
+    let ambiguous = merge_with(
+        &c,
+        Tag::parse(["e", "not-an-event-id", "", "reply"]).expect("e"),
+        T0 + 30,
+    );
+    c.relay.add(&ambiguous);
+    let trail = code_read(&c, Entry::Request(c.r1.id));
+    let task = only_task(&trail);
+    assert!(
+        task.contributions.iter().all(|x| x.outcomes.is_empty()),
+        "ambiguous status binds: {task:#?}"
+    );
+    let [outcome] = task.unbound.as_slice() else {
+        panic!("one unbound outcome: {task:#?}")
+    };
+    assert_eq!(outcome.id, ambiguous.id.to_hex());
+    assert!(outcome.note.as_deref().is_some_and(|n| n
+        .starts_with("PR-level merge claim; judged revision unknown")
+        && n.contains("more than one revision")));
+}
+
+#[test]
+fn several_roots_or_repositories_are_not_interpreted() {
+    let mut c = code(Keys::generate(), Keys::generate());
+    let other = EventId::from_slice(&[8; 32]).expect("id").to_hex();
+    let two_roots = merge_with(
+        &c,
+        Tag::parse(["e", &other, "", "root"]).expect("e"),
+        T0 + 30,
+    );
+    let another = format!("30617:{}:another", c.owner.public_key());
+    let two_repos = merge_with(&c, Tag::parse(["a", &another]).expect("a"), T0 + 31);
+    c.relay.add(&two_roots);
+    c.relay.add(&two_repos);
+    let trail = code_read(&c, Entry::Request(c.r1.id));
+    let task = only_task(&trail);
+    assert!(
+        task.contributions.iter().all(|x| x.outcomes.is_empty()) && task.unbound.is_empty(),
+        "contradictory statuses were interpreted: {task:#?}"
+    );
+    assert!(
+        has_gap(&trail, &two_roots, "names 2 roots"),
+        "{:#?}",
+        trail.gaps
+    );
+    assert!(
+        has_gap(&trail, &two_repos, "names 2 different repositories"),
+        "{:#?}",
+        trail.gaps
+    );
+    assert_honest(&trail);
+}
