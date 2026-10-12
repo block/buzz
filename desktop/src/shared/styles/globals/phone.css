@@ -1,0 +1,46 @@
+/* Phone layout ([data-phone], < 600px) — bottom tab bar shell. iPad/desktop never match these selectors.
+   [data-phone-tabbar] is set on <html> while the tab bar is showing. Unlayered so it beats Tailwind utilities. */
+[data-phone] {
+  --phone-tabbar-h: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+}
+[data-phone] .phone-tabbar {
+  height: var(--phone-tabbar-h);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+/* Content stops above the tab bar. */
+[data-phone][data-phone-tabbar] [data-buzz-content-surface] {
+  margin-bottom: var(--phone-tabbar-h) !important;
+}
+/* Full-screen phone list screens (Channels list, Me) sit between the top inset and the tab bar. */
+[data-phone] .phone-fullscreen {
+  position: fixed;
+  inset: 0 0 var(--phone-tabbar-h) 0;
+  padding-top: env(safe-area-inset-top, 0px);
+  z-index: 110;
+  background: hsl(var(--sidebar-background, var(--background)));
+  display: flex;
+  flex-direction: column;
+}
+[data-phone] .phone-fullscreen [data-testid="app-sidebar"] {
+  width: 100% !important;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Buzz Term: the key bar sits above the tab bar; while the soft keyboard is up the tab bar goes away. */
+[data-phone][data-phone-tabbar] .buzz-terminal-substrate[data-terminal-mode="maximized"]:not([data-keyboard-open="true"]) {
+  padding-bottom: var(--phone-tabbar-h) !important;
+}
+[data-phone][data-phone-tabbar] .buzz-terminal-substrate[data-terminal-mode="maximized"]:not([data-keyboard-open="true"]) .buzz-terminal-touchbar {
+  padding-bottom: 4px;
+}
+[data-phone] body:has(.buzz-terminal-substrate[data-keyboard-open="true"]) .phone-tabbar {
+  display: none;
+}
+/* The desktop top-chrome controls (sidebar toggle, refresh, history, surface tabs) are replaced by the tab bar. */
+[data-phone] [data-testid="app-top-chrome"] [data-phone-hide] {
+  display: none !important;
+}
+/* The Channels tab is the list only: Inbox/Agents/Buzz term live in the tab bar, Projects/Bots/Browsers under Me. */
+[data-phone] .phone-fullscreen .sidebar-primary-menu {
+  display: none;
+}

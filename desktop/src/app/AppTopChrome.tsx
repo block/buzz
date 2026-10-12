@@ -16,6 +16,8 @@ import { useOptionalSidebar } from "@/shared/ui/sidebar";
 
 type AppTopChromeProps = {
   canGoBack: boolean;
+  /** Phone layout only: header back button for full-screen conversation views. */
+  onPhoneBack?: () => void;
   canGoForward: boolean;
   onGoBack: () => void;
   onGoForward: () => void;
@@ -76,6 +78,7 @@ export function AppTopChrome({
   onGoBack,
   onGoForward,
   hasCommunityRail = false,
+  onPhoneBack,
 }: AppTopChromeProps) {
   const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
@@ -154,6 +157,20 @@ export function AppTopChrome({
           navRowAlignmentClass,
         )}
       >
+        {onPhoneBack ? (
+          <Button
+            aria-label="Back"
+            className={TOP_CHROME_ICON_BUTTON_CLASS}
+            data-testid="phone-back"
+            onClick={onPhoneBack}
+            size="icon"
+            type="button"
+            variant="ghost"
+          >
+            <ChevronLeft />
+          </Button>
+        ) : null}
+        <span className="contents" data-phone-hide="">
         <TopChromeSidebarTrigger />
         <Button
           aria-label="Refresh"
@@ -189,8 +206,11 @@ export function AppTopChrome({
           <ChevronRight />
         </Button>
         <SurfaceTabHomeButton className={TOP_CHROME_ICON_BUTTON_CLASS} />
+        </span>
       </div>
-      <SurfaceTabStrip className={navRowAlignmentClass ?? undefined} />
+      <span className="contents" data-phone-hide="">
+        <SurfaceTabStrip className={navRowAlignmentClass ?? undefined} />
+      </span>
       <div
         className={cn("flex min-w-0 flex-1 items-center", navRowAlignmentClass)}
         data-tauri-drag-region

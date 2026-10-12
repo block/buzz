@@ -116,9 +116,20 @@ export async function queryRelayHttp(filters: Filter[]): Promise<NostrEvent[]> {
  * One-shot query. Prefers the authenticated WebSocket (one signature per session); falls back to HTTP /query for
  * bridge-only filters, ephemeral kinds, or if the socket path fails.
  */
+/** Relay NIP-11 `max_filters` for a WebSocket REQ (crates/buzz-relay/src/protocol.rs MAX_FILTERS_PER_REQ). */
+export const WS_MAX_FILTERS = 10;
+
 export async function queryRelay(filters: Filter[]): Promise<NostrEvent[]> {
   if (canUseWs(filters)) {
     try {
+      // The relay rejects a WebSocket REQ with more than 10 filters (NIP-11 max_filters) without a CLOSED for the sub,
+      // which would stall until the query timeout. Split into parallel REQs on the same authenticated socket.
+      if (filters.length > WS_MAX_FILTERS) {
+        const chunks: Filter[][] = [];
+        for (let i = 0; i < filters.length; i += WS_MAX_FILTERS)
+          chunks.push(filters.slice(i, i + WS_MAX_FILTERS));
+        return (await Promise.all(chunks.map((c) => wsQuery(c)))).flat();
+      }
       return await wsQuery(filters);
     } catch (e) {
       if (import.meta.env.DEV)
