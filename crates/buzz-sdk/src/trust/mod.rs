@@ -25,6 +25,8 @@ mod work;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trail_tests;
 
 use std::collections::BTreeSet;
 
@@ -36,7 +38,10 @@ pub use fetch::{MAX_PAGES, QUERY_LIMIT};
 pub use report::*;
 pub use trail::{Entry, Scope, Trail, TRAIL_POLICY};
 pub use verifier::Verifier;
-pub use work::{WorkRole, OUTCOME_CLAIMS, WORK_PREFIX};
+pub use work::{
+    build_work_label, build_work_part, build_work_request, PartSpec, WorkRole, OUTCOME_CLAIMS,
+    WORK_PREFIX,
+};
 
 /// Provisional kind of a work fingerprint (addressable), as registered in
 /// [`buzz_core::kind::KIND_WORK_FINGERPRINT`].

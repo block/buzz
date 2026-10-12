@@ -7,12 +7,14 @@
 //! is reported with the reason and never read as work, acceptance, or
 //! progress. Outcomes are NIP-32 labels (kind 1985) in [`LABEL_NAMESPACE`].
 
-use nostr::{Event, EventId, PublicKey};
+use nostr::{Event, EventBuilder, EventId, Kind, PublicKey};
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+use uuid::Uuid;
 
 use super::evidence::tags;
-use super::LABEL_NAMESPACE;
+use super::{tag, LABEL_NAMESPACE};
+use crate::SdkError;
 
 /// The `t` value prefix of the convention.
 pub const WORK_PREFIX: &str = "buzz.work/";
@@ -288,4 +290,218 @@ fn texts(content: &Map<String, Value>, key: &str) -> Result<Vec<String>, String>
         return Err(err());
     }
     Ok(out)
+}
+
+/// Build an unsigned typed request: a top-level channel message.
+///
+/// There is no thread parameter: a typed request is always top-level in this
+/// version, so the relay records it as its own thread root.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] when `title` or `task_type` is blank or
+/// `acceptance_criteria` is empty or holds a blank entry.
+pub fn build_work_request(
+    channel: Uuid,
+    title: &str,
+    task_type: &str,
+    acceptance_criteria: &[String],
+) -> Result<EventBuilder, SdkError> {
+    let content = json!({
+        "title": title,
+        "task_type": task_type,
+        "acceptance_criteria": acceptance_criteria,
+    });
+    let tags = vec![
+        tag(["h", &channel.to_string()])?,
+        tag(["t", WorkRole::Request.tag()])?,
+    ];
+    typed(&content, tags, WorkRole::Request)
+}
+
+/// What a commitment, update, or submission says.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartSpec {
+    /// The contributor's summary.
+    pub summary: String,
+    /// `working` or `blocked`; updates only.
+    pub state: Option<String>,
+    /// Artifact locator; submissions only.
+    pub artifact: Option<String>,
+    /// Artifact revision; submissions only.
+    pub artifact_revision: Option<String>,
+}
+
+/// Build an unsigned commitment, update, or submission answering `request`.
+///
+/// Every reference is derived from the signed events: the channel and
+/// requester from `request`, which must be a typed request, and `q` from
+/// `previous`, which must be a typed submission to the same request.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] when `role` is [`WorkRole::Request`],
+/// `request` is not a typed request with one channel, `previous` is given for
+/// a role other than submission or is not a submission to `request`, or the
+/// content misses a field the role requires.
+pub fn build_work_part(
+    request: &Event,
+    role: WorkRole,
+    spec: &PartSpec,
+    previous: Option<&Event>,
+) -> Result<EventBuilder, SdkError> {
+    if role == WorkRole::Request {
+        return Err(SdkError::InvalidInput(
+            "a request is built with build_work_request".into(),
+        ));
+    }
+    match read(request) {
+        Message::Request(_) => {}
+        Message::Malformed(reason) => {
+            return Err(SdkError::InvalidInput(format!(
+                "event {} is not a valid typed request ({reason})",
+                request.id
+            )))
+        }
+        _ => {
+            return Err(SdkError::InvalidInput(format!(
+                "event {} is not a typed request; contributions answer a typed request",
+                request.id
+            )))
+        }
+    }
+    let channel = single(request, "h").ok_or_else(|| {
+        SdkError::InvalidInput(format!("request {} names no single channel", request.id))
+    })?;
+    let id = request.id.to_hex();
+    let mut tags = vec![
+        tag(["h", channel])?,
+        tag(["e", &id, "", "root"])?,
+        tag(["e", &id, "", "reply"])?,
+        tag(["p", &request.pubkey.to_hex()])?,
+        tag(["t", role.tag()])?,
+    ];
+    if let Some(prior) = previous {
+        if role != WorkRole::Submission {
+            return Err(SdkError::InvalidInput(
+                "only a submission names a previous revision".into(),
+            ));
+        }
+        let same = matches!(read(prior), Message::Part(p)
+            if p.role == WorkRole::Submission && p.request == request.id);
+        if !same {
+            return Err(SdkError::InvalidInput(format!(
+                "event {} is not a typed submission to request {}",
+                prior.id, request.id
+            )));
+        }
+        tags.push(tag(["q", &prior.id.to_hex()])?);
+    }
+    let mut content = json!({ "summary": spec.summary });
+    match role {
+        WorkRole::Update => content["state"] = json!(spec.state),
+        WorkRole::Submission => {
+            content["artifact"] = json!(spec.artifact);
+            content["artifact_revision"] = json!(spec.artifact_revision);
+        }
+        _ => {}
+    }
+    typed(&content, tags, role)
+}
+
+/// Build an unsigned `buzz.wot` outcome label on one submission.
+///
+/// `e`, `p`, and `h` are derived from `target`: its id (with `origin` as the
+/// relay hint), its signer, and its only channel. The relay re-derives and
+/// checks the same values.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] when `target` is not a typed
+/// submission with one channel, `claim` is not in [`OUTCOME_CLAIMS`],
+/// `reason` is blank, or `criteria_checked` is empty or holds a blank entry.
+pub fn build_work_label(
+    target: &Event,
+    origin: &str,
+    claim: &str,
+    reason: &str,
+    criteria_checked: &[String],
+    evidence_refs: &[String],
+) -> Result<EventBuilder, SdkError> {
+    let claim = OUTCOME_CLAIMS
+        .into_iter()
+        .find(|c| *c == claim)
+        .ok_or_else(|| {
+            SdkError::InvalidInput(format!(
+                "{claim:?} is not one of {}",
+                OUTCOME_CLAIMS.join(", ")
+            ))
+        })?;
+    if !matches!(read(target), Message::Part(p) if p.role == WorkRole::Submission) {
+        return Err(SdkError::InvalidInput(format!(
+            "event {} is not a typed submission; outcomes judge an exact submitted revision",
+            target.id
+        )));
+    }
+    let channel = single(target, "h").ok_or_else(|| {
+        SdkError::InvalidInput(format!("submission {} names no single channel", target.id))
+    })?;
+    let content = json!({
+        "reason": reason,
+        "criteria_checked": criteria_checked,
+        "evidence_refs": evidence_refs,
+    })
+    .to_string();
+    let map = object(&content).map_err(SdkError::InvalidInput)?;
+    text(&map, "reason").map_err(SdkError::InvalidInput)?;
+    texts(&map, "criteria_checked").map_err(SdkError::InvalidInput)?;
+    // A self-judgment still names its target's signer: `p` is derived from
+    // the target, so nostr's default self-tag stripping must not drop it.
+    Ok(EventBuilder::new(Kind::Custom(1985), content)
+        .tags([
+            tag(["L", LABEL_NAMESPACE])?,
+            tag(["l", claim, LABEL_NAMESPACE])?,
+            tag(["e", &target.id.to_hex(), origin])?,
+            tag(["p", &target.pubkey.to_hex()])?,
+            tag(["h", channel])?,
+        ])
+        .allow_self_tagging())
+}
+
+/// Check `content` the way [`read`] will for `role`, then build the message.
+fn typed(content: &Value, tags: Vec<nostr::Tag>, role: WorkRole) -> Result<EventBuilder, SdkError> {
+    let content = content.to_string();
+    let map = object(&content).map_err(SdkError::InvalidInput)?;
+    let check = || -> Result<(), String> {
+        match role {
+            WorkRole::Request => {
+                text(&map, "title")?;
+                text(&map, "task_type")?;
+                texts(&map, "acceptance_criteria")?;
+                return Ok(());
+            }
+            WorkRole::Update => match text(&map, "state")?.as_str() {
+                "working" | "blocked" => {}
+                other => return Err(format!("state {other:?} is not working or blocked")),
+            },
+            WorkRole::Submission => {
+                text(&map, "artifact")?;
+                text(&map, "artifact_revision")?;
+            }
+            WorkRole::Commitment => {}
+        }
+        text(&map, "summary").map(drop)
+    };
+    check().map_err(SdkError::InvalidInput)?;
+    Ok(EventBuilder::new(Kind::Custom(9), content)
+        .tags(tags)
+        .allow_self_tagging())
+}
+
+fn single<'a>(event: &'a Event, name: &'a str) -> Option<&'a str> {
+    let mut values = tags(event, name).filter_map(|p| p.get(1));
+    match (values.next(), values.next()) {
+        (Some(v), None) => Some(v.as_str()),
+        _ => None,
+    }
 }

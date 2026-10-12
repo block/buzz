@@ -20,7 +20,7 @@ use super::judge::{authority, Judge};
 use super::work::{self, Message, Part, WorkRole};
 use super::{
     AuthorityStatus as A, Contribution, ContributionRole, Gap, Independence, Outcome, OutcomeScope,
-    OwnerLink, PolicyRef, Query, Response, Source, Task, TaskRequest, TrailScope, WorkTrail,
+    PolicyRef, Query, Response, Source, Task, TaskRequest, TrailScope, WorkTrail,
 };
 use crate::SdkError;
 
@@ -522,7 +522,14 @@ impl<'a> Reduce<'a> {
         })
     }
 
-    fn place(&mut self, key: EventId, code: bool, event: &'a Event, mut c: Contribution) {
+    fn place(
+        &mut self,
+        key: EventId,
+        code: bool,
+        event: &'a Event,
+        mentions: &[PublicKey],
+        mut c: Contribution,
+    ) {
         let task = self.task(key, code);
         if c.unresolved.is_none() {
             if let (
@@ -532,10 +539,7 @@ impl<'a> Reduce<'a> {
                 | ContributionRole::Submission,
             ) = (task.requester, c.role)
             {
-                let names = evidence::tags(event, "p")
-                    .filter_map(|p| p.get(1))
-                    .any(|pk| *pk == requester.to_hex());
-                if !names {
+                if !mentions.contains(&requester) {
                     c.unresolved = Some("its p tags do not name the requester".into());
                 }
             }
@@ -563,7 +567,7 @@ impl<'a> Reduce<'a> {
                 9 => match work::read(event) {
                     Message::Part(part) => {
                         let c = self.part(event, &part);
-                        self.place(part.request, false, event, c);
+                        self.place(part.request, false, event, &part.mentions, c);
                     }
                     Message::Request(_) => {
                         self.task(event.id, false);
@@ -587,7 +591,7 @@ impl<'a> Reduce<'a> {
                         ),
                     };
                     let c = code(event, ContributionRole::Proposal, unresolved, None);
-                    self.place(event.id, true, event, c);
+                    self.place(event.id, true, event, &[], c);
                 }
                 1619 => match single_id(event, "E") {
                     Some(root) => {
@@ -598,7 +602,7 @@ impl<'a> Reduce<'a> {
                             unresolved,
                             Some(root),
                         );
-                        self.place(root, true, event, c);
+                        self.place(root, true, event, &[], c);
                     }
                     None => self.gap(
                         event.id,
@@ -613,7 +617,7 @@ impl<'a> Reduce<'a> {
                         Some("patch revisions are series-scoped; revision unknown".into()),
                         (root != event.id).then_some(root),
                     );
-                    self.place(root, true, event, c);
+                    self.place(root, true, event, &[], c);
                     if let Some(task) = self.tasks.get_mut(&root) {
                         task.series = true;
                     }
@@ -629,14 +633,16 @@ impl<'a> Reduce<'a> {
             WorkRole::Update => ContributionRole::Update,
             _ => ContributionRole::Submission,
         };
-        if let Some(previous) = part.previous {
-            let same = self.valid(&previous).is_some_and(|p| {
-                matches!(work::read(p), Message::Part(q)
-                    if q.role == WorkRole::Submission && q.request == part.request)
+        let mut previous = part.previous;
+        if let Some(q) = previous {
+            let same = self.valid(&q).is_some_and(|p| {
+                matches!(work::read(p), Message::Part(prior)
+                    if prior.role == WorkRole::Submission && prior.request == part.request)
             });
             if !same {
+                previous = None;
                 self.gap(event.id, format!(
-                    "q names {previous}, which is not a verified submission to the same request; revision link unresolved"
+                    "q names {q}, which is not a verified submission to the same request; revision link unresolved"
                 ));
             }
         }
@@ -651,7 +657,7 @@ impl<'a> Reduce<'a> {
             state: part.state.clone(),
             artifact: part.artifact.clone(),
             revision: part.artifact_revision.clone(),
-            previous: part.previous.map(|id| id.to_hex()),
+            previous: previous.map(|id| id.to_hex()),
             unresolved: None,
             outcomes: Vec::new(),
         }
@@ -997,10 +1003,7 @@ fn code(
         kind: event.kind.as_u16(),
         role,
         signer: event.pubkey.to_hex(),
-        owner_link: match evidence::owner_link(event) {
-            OwnerLink::Verified(o) => OwnerLink::Verified(o),
-            other => other,
-        },
+        owner_link: evidence::owner_link(event),
         created_at: event.created_at.as_secs(),
         summary: evidence::tag_value(event, "subject").map(str::to_owned),
         state: None,
