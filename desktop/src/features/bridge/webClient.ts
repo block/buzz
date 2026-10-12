@@ -366,7 +366,12 @@ export class BridgeWebClient {
         json = await this.io.decryptFromSelf(ev.content);
         this.io.cachePut(ev.id, json);
       } catch {
-        if (this.keyHeadId === ev.id) this.set({ keyState: "failed" });
+        if (this.keyHeadId === ev.id) {
+          // Forget the head so the next backfill (watchdog/focus/reconnect) tries the signer again instead of staying stuck.
+          this.keyHeadAt = 0;
+          this.keyHeadId = "";
+          this.set({ keyState: "failed" });
+        }
         return;
       }
     }

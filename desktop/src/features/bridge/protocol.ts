@@ -401,7 +401,7 @@ export class SeqGuard {
     const prev = this.last.get(k);
     // A desktop window reload restarts the publisher's counter under the same key: a strictly newer envelope time is a
     // restart, not a replay, so accept it (otherwise heartbeats were dropped for minutes until the counter caught up).
-    if (prev !== undefined && env.seq <= prev.seq && !(env.ts > prev.ts)) return false;
+    if (prev !== undefined && (env.ts < prev.ts || (env.seq <= prev.seq && !(env.ts > prev.ts)))) return false;
     this.last.set(k, { seq: env.seq, ts: env.ts });
     return true;
   }

@@ -8,6 +8,7 @@ import { nip44DecryptFromSelf, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 import { BRIDGE_KIND, BRIDGE_TAG, D_AGENTS, D_BROWSER_SESSIONS, D_HEARTBEAT, D_KEY, nowS } from "./protocol";
 import { BridgeCommander } from "./commander";
+import { shouldKickBridge } from "./bridgeWatchdog";
 import { BridgeWebClient, type BridgeState } from "./webClient";
 
 const WEB_DEVICE_KEY = "buzz-bridge-web-device-id";
@@ -214,10 +215,41 @@ function startBridge(pubkey: string): Shared {
     void backfill();
     goLive();
     // After a relay reconnect, events published while we were away must be re-fetched.
-    const offReconnect = relayClient.subscribeToReconnects(() => void backfill());
-    const t = window.setInterval(() => c.tick(), 5_000);
+    // Fresh live subscriptions + backfill: after a relay reconnect, a Mac sleep, or when the watchdog sees no heartbeat. The old
+    // subscriptions are dropped first (a socket drop can leave them silently dead).
+    const resubscribe = () => {
+      if (cancelled) return;
+      void unsub?.();
+      void unsubExtra?.();
+      unsub = null;
+      unsubExtra = null;
+      if (retry !== null) window.clearTimeout(retry);
+      retry = null;
+      attempt = 0;
+      void backfill();
+      goLive();
+    };
+    const offReconnect = relayClient.subscribeToReconnects(resubscribe);
+    let lastKick = nowS();
+    const kickIfStale = () => {
+      const now = nowS();
+      if (!shouldKickBridge({ visible: document.visibilityState === "visible", lastHeardTs: c.state.lastHeardTs, keyFailed: c.state.keyState === "failed", now, lastKick })) return;
+      lastKick = now;
+      resubscribe();
+    };
+    const t = window.setInterval(() => {
+      c.tick();
+      kickIfStale();
+    }, 5_000);
+    const onWake = () => kickIfStale();
+    window.addEventListener("focus", onWake);
+    window.addEventListener("online", onWake);
+    document.addEventListener("visibilitychange", onWake);
     const stop = () => {
       cancelled = true;
+      window.removeEventListener("focus", onWake);
+      window.removeEventListener("online", onWake);
+      document.removeEventListener("visibilitychange", onWake);
       offReconnect();
       if (retry !== null) window.clearTimeout(retry);
       window.clearInterval(t);
