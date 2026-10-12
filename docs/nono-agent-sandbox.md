@@ -214,17 +214,26 @@ process-group assumptions in §2.
 
 ### 5. Settings and recovery
 
-- Global setting **Agent sandbox: On / Off** (default On on macOS and Linux).
-  Off is an explicit, visible choice with a warning and is stamped into the
-  spawn snapshot, so toggling raises the existing restart badge.
-- **Bundled nono missing or not executable** (dev builds with a 0-byte stub,
-  damaged installs): with the setting On, refuse to spawn and say so. Never
-  fall back silently (rules 1 and 6: the toggle is the recovery affordance).
-- **Edit profile:** opens `buzz-agent-local.json`; **Reset** rewrites the
-  stub after confirmation.
-- **Denials:** run `nono` with `--log-file <agent log dir>/nono.log`, and
-  surface the path next to the agent log. Rely on nono's diagnostic footer when
-  available.
+Settings → Agents → **Agent sandbox** (`AgentSandboxSettingsCard`, hidden on
+Windows):
+
+- **Run agents in a sandbox** toggle, on by default on macOS and Linux.
+  Turning it off asks for confirmation; turning it on does not. It is written
+  only by `set_agent_sandbox_enabled`, which restarts running local agents.
+  `set_global_agent_config` keeps the on-disk value, so a defaults-editor
+  save carrying a stale copy cannot flip it, and both commands do their
+  read-modify-write under one lock. The spawn snapshot records the setting too.
+- **Problem banner:** `get_agent_sandbox_status` runs the same checks a
+  sandboxed spawn runs (sidecar present, nest workdir, profiles installed,
+  local profile valid) and the card shows the reason sandboxed agents cannot
+  start. The toggle stays available, so the user always has a way out
+  (rule 6). Spawns never fall back to unsandboxed silently (rule 1).
+- **Sandbox profile:** shows the local profile path; **Edit** opens it in the
+  default app, **Reset** (confirmed) replaces it with the default seed.
+  Changes apply when agents restart.
+- **Denials:** not surfaced yet. With `nono wrap`, nono is gone after `exec`,
+  so it cannot log runtime denials; agents see ordinary permission errors in
+  their own output and the agent log.
 
 ### 6. Distribution and platforms
 

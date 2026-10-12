@@ -57,6 +57,28 @@ pub(crate) fn nono_profiles_dir() -> Option<PathBuf> {
 
 /// Install the base profile and seed the local profile for the live nest.
 pub(crate) fn ensure_sandbox_profiles() -> Result<SandboxProfileNames, String> {
+    let (dir, names) = live_profiles()?;
+    ensure_sandbox_profiles_at(&dir, &names)?;
+    Ok(names)
+}
+
+/// Path of the user-owned profile for the live nest, installing both
+/// profiles first so the file exists.
+pub(crate) fn ensure_local_profile_path() -> Result<PathBuf, String> {
+    let (dir, names) = live_profiles()?;
+    ensure_sandbox_profiles_at(&dir, &names)?;
+    Ok(local_profile_path(&dir, &names))
+}
+
+/// Replace the user-owned profile with the default seed. Running agents keep
+/// their current sandbox until they restart.
+pub(crate) fn reset_local_profile() -> Result<PathBuf, String> {
+    let (dir, names) = live_profiles()?;
+    reset_local_profile_at(&dir, &names)?;
+    Ok(local_profile_path(&dir, &names))
+}
+
+fn live_profiles() -> Result<(PathBuf, SandboxProfileNames), String> {
     let nest = super::nest_dir().ok_or("cannot resolve the nest directory")?;
     let names = profile_names(&nest).ok_or_else(|| {
         format!(
@@ -65,8 +87,26 @@ pub(crate) fn ensure_sandbox_profiles() -> Result<SandboxProfileNames, String> {
         )
     })?;
     let dir = nono_profiles_dir().ok_or("cannot resolve the nono profile directory")?;
-    ensure_sandbox_profiles_at(&dir, &names)?;
-    Ok(names)
+    Ok((dir, names))
+}
+
+fn local_profile_path(profiles_dir: &Path, names: &SandboxProfileNames) -> PathBuf {
+    profiles_dir.join(format!("{}.json", names.local))
+}
+
+/// Remove the local profile (a symlink is removed, not its target) and seed it
+/// again.
+pub(crate) fn reset_local_profile_at(
+    profiles_dir: &Path,
+    names: &SandboxProfileNames,
+) -> Result<(), String> {
+    let path = local_profile_path(profiles_dir, names);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("failed to remove {}: {e}", path.display())),
+    }
+    ensure_sandbox_profiles_at(profiles_dir, names)
 }
 
 /// Write the base profile when its content differs, and create the local
@@ -84,7 +124,7 @@ pub(crate) fn ensure_sandbox_profiles_at(
         write_replacing(&base_path, base.as_bytes())?;
     }
 
-    let local_path = profiles_dir.join(format!("{}.json", names.local));
+    let local_path = local_profile_path(profiles_dir, names);
     write_if_absent(&local_path, render_local_profile(names)?.as_bytes())
 }
 
@@ -258,6 +298,35 @@ mod tests {
             fs::metadata(&base_path).unwrap().modified().unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn reset_restores_the_default_local_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_sandbox_profiles_at(dir.path(), &names()).unwrap();
+        let local_path = dir.path().join("buzz-agent-local.json");
+        let seeded = fs::read_to_string(&local_path).unwrap();
+        fs::write(&local_path, "{ broken").unwrap();
+
+        reset_local_profile_at(dir.path(), &names()).unwrap();
+
+        assert_eq!(fs::read_to_string(&local_path).unwrap(), seeded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_replaces_a_symlink_without_touching_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles-profile.json");
+        fs::write(&target, "{}").unwrap();
+        let local_path = dir.path().join("buzz-agent-local.json");
+        std::os::unix::fs::symlink(&target, &local_path).unwrap();
+
+        reset_local_profile_at(dir.path(), &names()).unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{}");
+        assert!(!fs::symlink_metadata(&local_path).unwrap().is_symlink());
+        assert_eq!(read_json(&local_path)["extends"], "buzz-agent");
     }
 
     #[cfg(unix)]

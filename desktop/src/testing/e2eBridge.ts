@@ -33,6 +33,7 @@ import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
+import { handleAgentSandboxMockCommand } from "./e2eBridgeAgentSandbox.ts";
 import {
   createMockSubscription,
   hasMockSubscription,
@@ -15318,7 +15319,6 @@ export function maybeInstallE2eTauriMocks() {
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":
-        return null;
       case "set_window_vibrancy":
         return null;
       case "plugin:window|is_fullscreen":
@@ -15373,7 +15373,7 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       }
       default:
-        throw new Error(`Unsupported mocked Tauri command: ${command}`);
+        return handleAgentSandboxMockCommand(command, payload);
     }
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
