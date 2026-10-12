@@ -56,14 +56,12 @@ export function BuzzTermPage() {
   const hub = getWebTermHub();
   const status = React.useSyncExternalStore(hub.subscribe, hub.getStatus);
 
-  // Register the backend while this page is up; leaving it closes the left-nav-style panel (sessions stay alive in the hub).
+  // The backend is registered app-wide (WebRemoteWatcher → useWebTermBackend) so the in-channel Term works too; leaving this
+  // page closes the left-nav-style panel (sessions stay alive in the hub).
   React.useLayoutEffect(() => {
     if (!usable) return;
-    setTerminalBackend(hub);
-    return () => {
-      setTerminalBackend(null);
-      setTerminalPanelMode("closed");
-    };
+    setTerminalBackend(hub); // already registered by the watcher; harmless, and covers a first render before it runs
+    return () => setTerminalPanelMode("closed");
   }, [usable, hub]);
 
   // Open the terminal by itself on arrival (like the desktop's left-nav Buzz Term).

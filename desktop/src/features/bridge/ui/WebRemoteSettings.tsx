@@ -26,6 +26,8 @@ import { directAgentsFor } from "../directAgents";
 import { acquireProxyDirect } from "../remoteCmd";
 import { useBridgeAgents } from "../useBridgeAgents";
 import { useDirectState } from "./DirectAgentsPanel";
+import { getTerminalBackend, setTerminalBackend } from "@/features/terminal/terminalClient";
+import { configureWebTermHub, getWebTermHub } from "../webTermHub";
 import { StatusChip } from "./DesktopData";
 
 export function useRemoteHosts(opts?: { sync?: boolean }) {
@@ -223,9 +225,29 @@ export function useDirectSession(opts?: { auto?: boolean }) {
 /** Query keys whose data comes from the desktop over Direct (refetched when the connection starts or ends). */
 export const DESKTOP_QUERY = /agent|persona|runtime|acp|harness|presence|config|provider/i;
 
+/**
+ * Web: registers the desktop's remote terminal (Plan A hub) as the Term backend for the whole app while the desktop offers
+ * terminals and answers on the tailnet, so the in-channel Term (header icon / ⌘J) opens real channel-scoped sessions, not
+ * only the left-nav Buzz term page.
+ */
+function useWebTermBackend(rh: ReturnType<typeof useRemoteHosts>) {
+  const ready = rh.b.available && rh.hosts.some((h) => h.supports.terminal && !h.stale && rh.reachOf(h) !== "unreachable");
+  const info = rh.b.heartbeat?.remote;
+  configureWebTermHub({ info, sign: rh.b.signJson });
+  const hub = getWebTermHub();
+  React.useEffect(() => {
+    if (!ready) return;
+    setTerminalBackend(hub);
+    return () => {
+      if (getTerminalBackend() === hub) setTerminalBackend(null);
+    };
+  }, [ready, hub]);
+}
+
 /** Mounted in the left nav on web: keeps the switches consistent with what hosts offer, and exposes what the nav may show. */
 export function WebRemoteWatcher() {
   const rh = useRemoteHosts({ sync: true });
+  useWebTermBackend(rh);
   const queryClient = useQueryClient();
   const host = rh.selected("agents") ?? rh.hosts.find((h) => h.supports.agents);
   const direct = React.useMemo(
