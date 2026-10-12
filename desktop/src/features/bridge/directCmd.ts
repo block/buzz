@@ -86,6 +86,9 @@ export const CMD_READS = [
   "discover_agent_models",
   "get_agent_models",
   "get_term_settings",
+  "get_agent_config_surface",
+  "get_managed_agent_log",
+  "get_agent_memory",
 ] as const;
 export const CMD_WRITES = [
   "start_managed_agent",
@@ -158,6 +161,54 @@ function modelsOut(v: unknown): unknown {
     supportsSwitching: r.supportsSwitching === true,
   };
 }
+
+const SECRET_NAME = /(token|secret|passw|api[_-]?key|apikey|auth|credential|cookie|bearer|private|session[_-]?key|access[_-]?key)/i;
+/** Masks obvious credentials in free text (log lines, config values). */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, "$1$2[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/g, "$1 [redacted]")
+    .replace(/\b(?:sk|rk|xox[abpr]|ghp|gho|ghs|github_pat|glpat|AKIA|nsec1)[A-Za-z0-9_-]{10,}/g, "[redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "[redacted]");
+}
+/** Runtime config surface for the read-only web panel: settings and MCP server names only, no secret-looking values. */
+function configSurfaceOut(v: unknown): unknown {
+  const r = obj(v);
+  const field = (f: unknown) => {
+    const x = obj(f);
+    const secret = SECRET_NAME.test(String(x.key ?? "")) || SECRET_NAME.test(String(x.label ?? ""));
+    return { ...x, value: x.value == null ? null : secret ? "[hidden]" : redactSecrets(String(x.value)) };
+  };
+  const norm = obj(r.normalized);
+  const normalized = Object.fromEntries(
+    Object.entries(norm).map(([k, nf]) => {
+      if (!nf || typeof nf !== "object") return [k, nf ?? null];
+      const n = obj(nf);
+      return [k, { ...n, ...(typeof n.value === "string" ? { value: redactSecrets(n.value) } : {}) }];
+    }),
+  );
+  return {
+    runtimeId: r.runtimeId ?? null,
+    runtimeLabel: r.runtimeLabel ?? null,
+    isPreSpawn: r.isPreSpawn === true,
+    normalized,
+    advanced: list(r.advanced, field, 500),
+    extensions: list(r.extensions, (e) => {
+      const x = obj(e);
+      return { name: String(x.name ?? ""), kind: String(x.kind ?? ""), enabled: x.enabled === true };
+    }, 500),
+    sources: r.sources ?? {},
+    ...(r.claudeConfigDirCustom !== undefined ? { claudeConfigDirCustom: r.claudeConfigDirCustom === true } : {}),
+    ...(typeof r.effortConfigId === "string" ? { effortConfigId: r.effortConfigId } : {}),
+    ...(Array.isArray(r.effortOptions) ? { effortOptions: r.effortOptions } : {}),
+  };
+}
+async function managedPubkey(deps: CmdDeps, raw: unknown): Promise<string> {
+  const pk = typeof raw === "string" && HEX64.test(raw.toLowerCase()) ? raw.toLowerCase() : bad("Invalid pubkey.");
+  const agents = list(await deps.invokeRaw("list_managed_agents"), (x) => obj(x), 500) as Array<Record<string, unknown>>;
+  if (!agents.some((x) => String(x.pubkey).toLowerCase() === pk)) throw new MgmtError("not_found", "That agent isn't on your desktop.");
+  return pk;
+}
 export const CMD_NAMES: readonly string[] = [...CMD_READS, ...CMD_WRITES];
 
 /** The result of a proxied command, or throws MgmtError. `which` tells the caller whether the call mutates agent state. */
@@ -173,6 +224,23 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       return list(await inv(name), sanitizePersona, 200);
     case "discover_acp_providers":
       return list(await inv(name, { force: a.force === true }), sanitizeRuntime, 200);
+    case "get_agent_config_surface":
+      return configSurfaceOut(await inv(name, { pubkey: await managedPubkey(deps, a.pubkey) }));
+    case "get_managed_agent_log": {
+      const pk = await managedPubkey(deps, a.pubkey);
+      const n = Number.isInteger(a.lineCount) ? Math.min(Math.max(a.lineCount as number, 1), 2000) : 500;
+      const r = obj(await inv(name, { pubkey: pk, lineCount: n }));
+      return { content: redactSecrets(String(r.content ?? "")).slice(-400_000), log_path: typeof r.log_path === "string" ? r.log_path : "" };
+    }
+    case "get_agent_memory": {
+      // The desktop checks you own the agent before decrypting; only managed agents are allowed here too.
+      const r = obj(await inv(name, { agentPubkey: await managedPubkey(deps, a.agentPubkey) }));
+      const entry = (e: unknown) => {
+        const x = obj(e);
+        return { slug: String(x.slug ?? ""), body: redactSecrets(String(x.body ?? "")), eventId: String(x.eventId ?? ""), createdAt: Number(x.createdAt ?? 0), outgoingRefs: list(x.outgoingRefs, (y) => String(y), 500) };
+      };
+      return { core: r.core ? entry(r.core) : null, memories: list(r.memories, entry, 5000), truncated: r.truncated === true, fetchedAt: Number(r.fetchedAt ?? 0) };
+    }
     case "get_presence": {
       // The desktop's own presence answer, so an agent's online dot on the web is exactly what the desktop shows.
       const pks = Array.isArray(a.pubkeys) ? a.pubkeys : bad("pubkeys must be a list.");

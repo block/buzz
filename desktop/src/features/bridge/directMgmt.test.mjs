@@ -251,3 +251,25 @@ test("cmd discover_agent_models runs only the desktop catalog's command with the
   assert.ok(!JSON.stringify(out).includes("desk-secret") && !("env" in out));
   await assert.rejects(handleCmd("discover_agent_models", { input: { agentCommand: "/bin/sh" } }, deps), /isn't installed/);
 });
+
+test("profile reads: config surface hides secret fields, log and memories are redacted, unmanaged agents refused", async () => {
+  const { handleCmd, redactSecrets } = await import("./directCmd.ts");
+  const PK = "e".repeat(64);
+  const inv = async (n) => {
+    if (n === "list_managed_agents") return [{ pubkey: PK }];
+    if (n === "get_agent_config_surface")
+      return { runtimeId: "claude", normalized: { model: { value: "opus" } }, advanced: [{ key: "ANTHROPIC_API_KEY", label: "Key", value: "sk-ant-abcdefghijklmnop" }, { key: "temp", label: "Temperature", value: "0.2" }], extensions: [{ name: "github", kind: "stdio", enabled: true, headers: { Authorization: "Bearer zzz" }, env: { T: "x" } }], sources: {} };
+    if (n === "get_managed_agent_log") return { content: "start\nOPENAI_API_KEY=sk-abcdefghijklmnop123\nAuthorization: Bearer abcdefghijkl\nok", log_path: "/tmp/a.log" };
+    if (n === "get_agent_memory") return { core: { slug: "core", body: "token: ghp_abcdefghijklmnop", eventId: "1", createdAt: 1, outgoingRefs: [] }, memories: [], truncated: false, fetchedAt: 2 };
+  };
+  const cs = await handleCmd("get_agent_config_surface", { pubkey: PK }, { invokeRaw: inv });
+  assert.equal(cs.advanced[0].value, "[hidden]");
+  assert.equal(cs.advanced[1].value, "0.2");
+  assert.deepEqual(cs.extensions, [{ name: "github", kind: "stdio", enabled: true }]);
+  const log = await handleCmd("get_managed_agent_log", { pubkey: PK, lineCount: 100 }, { invokeRaw: inv });
+  assert.ok(!/sk-abc|abcdefghijkl$/m.test(log.content) && log.content.includes("OPENAI_API_KEY=[redacted]") && log.content.includes("Bearer [redacted]"));
+  const mem = await handleCmd("get_agent_memory", { agentPubkey: PK }, { invokeRaw: inv });
+  assert.ok(!mem.core.body.includes("ghp_"));
+  await assert.rejects(handleCmd("get_managed_agent_log", { pubkey: "f".repeat(64) }, { invokeRaw: inv }), /isn't on your desktop/);
+  assert.equal(redactSecrets("plain line"), "plain line");
+});
