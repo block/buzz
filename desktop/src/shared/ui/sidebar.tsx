@@ -197,6 +197,16 @@ const SidebarProvider = React.forwardRef<
       [],
     );
 
+    // `buzz:collapse-sidebar` (e.g. Buzz Term opening the on-screen keyboard on touch) closes the left nav.
+    React.useEffect(() => {
+      const collapse = () => {
+        setOpenMobile(false);
+        setOpen(false);
+      };
+      window.addEventListener("buzz:collapse-sidebar", collapse);
+      return () => window.removeEventListener("buzz:collapse-sidebar", collapse);
+    }, [setOpen]);
+
     const toggleSidebar = React.useCallback(() => {
       return isMobile
         ? setOpenMobile((open) => !open)

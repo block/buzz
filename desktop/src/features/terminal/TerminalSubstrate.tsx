@@ -425,9 +425,27 @@ export function TerminalSubstrate({
     setTouchSel(null);
     textareaRef.current?.focus({ preventScroll: true });
   };
+  // Touch: the on-screen keyboard opens only from the keyboard button (toggle). Elsewhere the hidden input stays inputmode="none",
+  // so taps/focus reclaims never pop the keyboard (a hardware keyboard still types).
+  const [kbWanted, setKbWanted] = React.useState(false);
   const toggleKeyboard = () => {
     const area = textareaRef.current;
     if (!area) return;
+    if (touchUi) {
+      if (kbWanted) {
+        setKbWanted(false);
+        area.inputMode = "none";
+        area.blur();
+        return;
+      }
+      window.dispatchEvent(new Event("buzz:collapse-sidebar"));
+      setOwner("terminal");
+      area.inputMode = "text"; // set synchronously: iOS only shows the keyboard for a focus inside this tap
+      setKbWanted(true);
+      area.blur();
+      area.focus({ preventScroll: true });
+      return;
+    }
     if (document.activeElement === area) area.blur();
     else {
       setOwner("terminal");
@@ -801,15 +819,22 @@ export function TerminalSubstrate({
     if (!touchUi) return;
     const vv = window.visualViewport;
     if (!vv) return;
-    const update = () => {
+    // One layout pass per frame while the keyboard animates (no thrash); the canvas refits from the new box and keeps the cursor row.
+    let raf = 0;
+    const apply = () => {
+      raf = 0;
       const next = keyboardInset(vv, window.innerHeight);
       setKb((c) => (c.open === next.open && c.top === next.top && c.height === next.height ? c : next));
-      if (next.open) window.scrollTo(0, 0);
+      if (next.open && (window.scrollY || document.documentElement.scrollTop)) window.scrollTo(0, 0);
     };
-    update();
+    const update = () => {
+      if (!raf) raf = window.requestAnimationFrame(apply);
+    };
+    apply();
     vv.addEventListener("resize", update);
     vv.addEventListener("scroll", update);
     return () => {
+      window.cancelAnimationFrame(raf);
       vv.removeEventListener("resize", update);
       vv.removeEventListener("scroll", update);
     };
@@ -1536,6 +1561,14 @@ export function TerminalSubstrate({
           autoCapitalize="off"
           autoComplete="off"
           className="buzz-terminal-input"
+          inputMode={touchUi && !kbWanted ? "none" : undefined}
+          onBlur={() => {
+            // iOS "Done"/swipe-down dismissed the keyboard: back to tap-safe mode
+            if (touchUi && kbWanted) {
+              setKbWanted(false);
+              if (textareaRef.current) textareaRef.current.inputMode = "none";
+            }
+          }}
           onCompositionEnd={() => {
             handoffRef.current = reduceHandoff(handoffRef.current, {
               type: "composition-end",
