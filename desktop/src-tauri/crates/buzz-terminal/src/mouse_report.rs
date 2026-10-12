@@ -1,10 +1,10 @@
 //! Encode pointer / touch / wheel into PTY mouse reports when mouse mode is on.
 
-use buzz_terminal::Terminal;
+use crate::Terminal;
 
 /// Button codes for SGR / X10 mouse protocols (wheel uses 64/65).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MouseButton {
+pub enum MouseButton {
     Left = 0,
     Middle = 1,
     Right = 2,
@@ -13,14 +13,14 @@ pub(super) enum MouseButton {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MouseAction {
+pub enum MouseAction {
     Press,
     Release,
     Move,
 }
 
 /// Encode one mouse event. Returns `None` when mouse tracking is off.
-pub(super) fn encode_mouse_event(
+pub fn encode_mouse_event(
     terminal: &Terminal,
     button: MouseButton,
     action: MouseAction,
@@ -68,7 +68,7 @@ pub(super) fn encode_mouse_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buzz_terminal::{Fences, Size};
+    use crate::{Fences, Size};
 
     fn term_with(feed: &[u8]) -> Terminal {
         let (mut term, actions) = Terminal::new(

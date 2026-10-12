@@ -6,7 +6,7 @@
 //! complete snapshot, and independently gates a resized viewport until the
 //! renderer confirms that it knows the applied [`Viewport`].
 
-use buzz_terminal::{damage::Frame, Viewport};
+use crate::{damage::Frame, Viewport};
 use std::fmt;
 
 use uuid::Uuid;
@@ -14,14 +14,14 @@ use uuid::Uuid;
 /// A renderer attachment. Messages from an attachment that has been replaced
 /// cannot release the new attachment's credit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SubscriptionId(Uuid);
+pub struct SubscriptionId(Uuid);
 
 impl SubscriptionId {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, String> {
         Uuid::parse_str(value)
             .map(Self)
             .map_err(|_| "invalid terminal subscription id".to_string())
@@ -36,14 +36,14 @@ impl fmt::Display for SubscriptionId {
 
 /// A frame carrying the identity and sequence that its ACK must repeat.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Publication {
-    pub(crate) subscription_id: SubscriptionId,
-    pub(crate) sequence: u64,
-    pub(crate) frame: Frame,
+pub struct Publication {
+    pub subscription_id: SubscriptionId,
+    pub sequence: u64,
+    pub frame: Frame,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OfferError {
+pub enum OfferError {
     /// Replacing pending incremental damage would lose changes that existed in
     /// the older pending frame. Only a complete snapshot may be replaceable.
     PendingFrameMustBeSnapshot,
@@ -61,27 +61,27 @@ struct Subscription {
 ///
 /// PTY ownership is deliberately elsewhere. Faulting or detaching this state
 /// stops renderer publication only; it must never stop the PTY reader.
-pub(crate) struct FramePublisher {
+pub struct FramePublisher {
     applied: Viewport,
     subscription: Option<Subscription>,
 }
 
 impl FramePublisher {
-    pub(crate) fn new(applied: Viewport) -> Self {
+    pub fn new(applied: Viewport) -> Self {
         Self {
             applied,
             subscription: None,
         }
     }
 
-    pub(crate) fn applied_viewport(&self) -> Viewport {
+    pub fn applied_viewport(&self) -> Viewport {
         self.applied
     }
 
     /// Attach with a complete snapshot of the current viewport. Attachment is
     /// a fresh bootstrap: no credit or readiness from the old subscription is
     /// inherited.
-    pub(crate) fn attach(
+    pub fn attach(
         &mut self,
         id: SubscriptionId,
         snapshot: Frame,
@@ -102,7 +102,7 @@ impl FramePublisher {
     /// Whether the next capture must be complete so it can safely replace the
     /// single pending value. Callers use this to select the engine's snapshot
     /// path before taking the terminal lock.
-    pub(crate) fn requires_snapshot(&self) -> bool {
+    pub fn requires_snapshot(&self) -> bool {
         self.subscription.as_ref().is_some_and(|subscription| {
             subscription.in_flight.is_some() || !subscription.viewport_ready
         })
@@ -111,7 +111,7 @@ impl FramePublisher {
     /// Offer the newest capture. Frames for an overtaken viewport are inert.
     /// While credit/readiness is held, the newest complete snapshot replaces
     /// the prior one and pending storage remains exactly one frame.
-    pub(crate) fn offer(&mut self, frame: Frame) -> Result<Option<Publication>, OfferError> {
+    pub fn offer(&mut self, frame: Frame) -> Result<Option<Publication>, OfferError> {
         if frame.viewport != self.applied {
             return Ok(None);
         }
@@ -133,7 +133,7 @@ impl FramePublisher {
     /// Apply the viewport returned by the engine resize call. A real change
     /// invalidates pending state and closes the readiness gate. Same-size
     /// resizes are inert because the engine returns the unchanged viewport.
-    pub(crate) fn resize_applied(&mut self, viewport: Viewport) {
+    pub fn resize_applied(&mut self, viewport: Viewport) {
         if viewport == self.applied {
             return;
         }
@@ -146,7 +146,7 @@ impl FramePublisher {
 
     /// Release ordinary frame credit only for the exact live subscription and
     /// exact frame in flight.
-    pub(crate) fn acknowledge(&mut self, id: SubscriptionId, sequence: u64) -> Option<Publication> {
+    pub fn acknowledge(&mut self, id: SubscriptionId, sequence: u64) -> Option<Publication> {
         let subscription = self.subscription.as_mut()?;
         if subscription.id != id || subscription.in_flight != Some(sequence) {
             return None;
@@ -158,7 +158,7 @@ impl FramePublisher {
     /// Renderer confirmation that the resize invoke result has been installed.
     /// Equality against the one atomic viewport value is the entire policy:
     /// old subscription IDs and superseded viewport values are inert.
-    pub(crate) fn viewport_ready(
+    pub fn viewport_ready(
         &mut self,
         id: SubscriptionId,
         viewport: Viewport,
@@ -173,7 +173,7 @@ impl FramePublisher {
 
     /// Drop publication state after channel close, invoke rejection, renderer
     /// teardown, or explicit detach. The caller owns safe Buzz focus recovery.
-    pub(crate) fn fault(&mut self, id: SubscriptionId) -> bool {
+    pub fn fault(&mut self, id: SubscriptionId) -> bool {
         if self
             .subscription
             .as_ref()
@@ -187,7 +187,7 @@ impl FramePublisher {
     }
 
     /// Permanently detach publication as the session begins closing.
-    pub(crate) fn close(&mut self) {
+    pub fn close(&mut self) {
         self.subscription = None;
     }
 
@@ -226,7 +226,7 @@ impl FramePublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buzz_terminal::damage::{CursorFrame, RowFrame};
+    use crate::damage::{CursorFrame, RowFrame};
 
     fn viewport(generation: u64, columns: usize, screen_lines: usize) -> Viewport {
         Viewport {

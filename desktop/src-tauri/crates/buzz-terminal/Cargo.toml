@@ -8,6 +8,8 @@ license = "Apache-2.0"
 alacritty_terminal = { version = "0.26.0", default-features = false }
 parking_lot = "0.12"
 portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -16,3 +18,4 @@ libc = "0.2"
 # Tests reach into the grid to prove content survived a frame.
 alacritty_terminal = { version = "0.26.0", default-features = false }
 parking_lot = "0.12"
+serde_json = "1"
