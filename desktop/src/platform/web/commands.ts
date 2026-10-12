@@ -2,6 +2,7 @@
 // everything else is classified by capabilities.ts and rejects with a typed NativeOnlyError.
 import { capabilityGroupFor, groupPolicy } from "./capabilities";
 import { chatHandlers } from "./chat";
+import { parityHandlers } from "./parity";
 import { getFeed, type FeedArgs } from "./feed";
 import { queryRelay } from "./relayHttp";
 import {
@@ -209,6 +210,8 @@ export const handlers: Record<string, Handler> = {
   get_audio_output_device: () => "",
   // chat path (S1)
   ...chatHandlers,
+  // web parity round 1: search, edit, channel management, downloads
+  ...parityHandlers,
 };
 for (const c of EMPTY_LIST) handlers[c] = () => [];
 for (const c of FALSE_CMDS) handlers[c] = () => false;
