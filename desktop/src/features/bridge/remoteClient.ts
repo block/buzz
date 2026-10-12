@@ -20,6 +20,21 @@ export type TerminalHandle = {
   scrollback?: number;
 };
 
+/** One server-side-emulated terminal (Plan A): structured frames come in as `term.msg`, ops go out as `emu.*`. */
+export type EmuMessage = { type: string; payload?: unknown };
+export type EmuHandle = {
+  id: string;
+  subscriptionId: string;
+  /** Viewport of the bootstrap snapshot, exactly as the desktop's renderer expects it. */
+  viewport: Record<string, unknown>;
+  scrollback?: number;
+  /** Fire-and-forget op (input, ack, scroll, mouse, focus, viewport_ready, detach). */
+  fire(op: string, fields?: Record<string, unknown>): void;
+  /** Op with a correlated `emu.reply` (resize, attach). */
+  request<T = unknown>(op: string, fields?: Record<string, unknown>, ms?: number): Promise<T>;
+  close(): void;
+};
+
 export class RemoteError extends Error {
   /** unreachable = socket never opened; otherwise the desktop's error code */
   code: string;
@@ -68,6 +83,9 @@ export class RemoteConnection {
   private backlog: Frame[] = [];
   private termOut = new Map<string, { data: (b: Uint8Array) => void; closed: () => void }>();
   private ping: ReturnType<typeof setInterval> | null = null;
+  /** Emulated terminals by launch id. `on` is null until `term.opened`; frames that arrive earlier are buffered in `pre`. */
+  private emus = new Map<string, { on: ((m: EmuMessage) => void) | null; pre: EmuMessage[] }>();
+  private emuPending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   ready = false;
   terminals = false;
   /** "Allow remote agent management" was on when this connection was signed (it is re-checked on every request). */
@@ -141,7 +159,27 @@ export class RemoteConnection {
         this.termOut.get(f.id)?.data(utf8(String(f.data)));
         return;
       }
+      if (f.t === "term.msg" && typeof f.id === "string") {
+        const e = this.emus.get(f.id);
+        const m = f.msg as EmuMessage | undefined;
+        if (e && m && typeof m.type === "string") {
+          if (e.on) e.on(m);
+          else if (e.pre.length < 64) e.pre.push(m);
+        }
+        return;
+      }
+      if (f.t === "emu.reply") {
+        const p = typeof f.rid === "string" ? this.emuPending.get(f.rid) : undefined;
+        if (p && typeof f.rid === "string") {
+          clearTimeout(p.timer);
+          this.emuPending.delete(f.rid);
+          if (f.ok === true) p.resolve(f.result);
+          else p.reject(new RemoteError("terminal", typeof f.error === "string" ? f.error : undefined));
+        }
+        return;
+      }
       if (f.t === "term.closed" && typeof f.id === "string") {
+        this.emus.delete(f.id);
         this.termOut.get(f.id)?.closed();
         this.termOut.delete(f.id);
         return;
@@ -159,6 +197,12 @@ export class RemoteConnection {
       for (const w of this.waiters.splice(0)) w({ t: "error", code: "closed" });
       for (const t of this.termOut.values()) t.closed();
       this.termOut.clear();
+      this.emus.clear();
+      for (const [rid, p] of this.emuPending) {
+        clearTimeout(p.timer);
+        p.reject(new RemoteError("closed"));
+        this.emuPending.delete(rid);
+      }
       this.onClose?.();
     };
     ws.onclose = closed;
@@ -224,6 +268,72 @@ export class RemoteConnection {
       write: (s) => ws.send(JSON.stringify({ t: "term.in", id: launchId, data: b64(s) })),
       resize: (cols, rows) => ws.send(JSON.stringify({ t: "term.resize", id: launchId, cols, rows })),
       close: () => ws.send(JSON.stringify({ t: "term.close", id: launchId })),
+    };
+  }
+
+  /**
+   * Open a terminal whose emulator runs on the desktop (the same one Buzz Term uses). Each launch still asks the signer for a
+   * fresh `terminal:<launchId>` signature. Frames that beat `term.opened` (the bootstrap snapshot usually does) are buffered
+   * and replayed to `onMsg` right after, in order.
+   */
+  async openEmuTerminal(
+    opts: { cols: number; rows: number; session?: string; host?: "shell" | "herdr" },
+    onMsg: (m: EmuMessage) => void,
+    onClosed: () => void,
+  ): Promise<EmuHandle> {
+    const ws = this.ws;
+    if (!ws || !this.ready) throw new RemoteError("closed");
+    const launchId = crypto.randomUUID();
+    ws.send(JSON.stringify({ t: "term.challenge", launchId }));
+    const challenge = await this.waitFor((f) => f.t === "challenge" && f.purpose === `terminal:${launchId}`);
+    const event = await this.signChallenge(challenge, `terminal:${launchId}`);
+    const entry = { on: null as ((m: EmuMessage) => void) | null, pre: [] as EmuMessage[] };
+    this.emus.set(launchId, entry);
+    this.termOut.set(launchId, { data: () => {}, closed: onClosed });
+    ws.send(
+      JSON.stringify({ t: "term.open", launchId, cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null, emu: true, event }),
+    );
+    let opened: Frame;
+    try {
+      opened = await this.waitFor((f) => f.t === "term.opened" && f.id === launchId, 30_000);
+    } catch (e) {
+      this.emus.delete(launchId);
+      this.termOut.delete(launchId);
+      throw e;
+    }
+    if (opened.emu !== true) {
+      // an older desktop without the emulator: it would stream raw bytes we can't draw
+      ws.send(JSON.stringify({ t: "term.close", id: launchId }));
+      this.emus.delete(launchId);
+      this.termOut.delete(launchId);
+      throw new RemoteError("emu_unsupported", "The desktop needs to be updated for the full Buzz Term on web.");
+    }
+    entry.on = onMsg;
+    for (const m of entry.pre.splice(0)) onMsg(m);
+    const fire = (op: string, fields: Record<string, unknown> = {}) => {
+      if (this.ready) ws.send(JSON.stringify({ t: op, id: launchId, ...fields }));
+    };
+    return {
+      id: launchId,
+      subscriptionId: String(opened.subscriptionId ?? ""),
+      viewport: (opened.viewport ?? {}) as Record<string, unknown>,
+      scrollback: typeof opened.scrollback === "number" ? opened.scrollback : undefined,
+      fire,
+      request: <T,>(op: string, fields: Record<string, unknown> = {}, ms = 15_000) =>
+        new Promise<T>((resolve, reject) => {
+          if (!this.ready) return reject(new RemoteError("closed"));
+          const rid = crypto.randomUUID();
+          const timer = setTimeout(() => {
+            this.emuPending.delete(rid);
+            reject(new RemoteError("timeout"));
+          }, ms);
+          this.emuPending.set(rid, { resolve: resolve as (v: unknown) => void, reject, timer });
+          ws.send(JSON.stringify({ t: op, id: launchId, rid, ...fields }));
+        }),
+      close: () => {
+        if (this.ready) ws.send(JSON.stringify({ t: "emu.close", id: launchId }));
+        this.emus.delete(launchId);
+      },
     };
   }
 
