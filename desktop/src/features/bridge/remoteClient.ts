@@ -11,6 +11,30 @@ export type WsLike = {
 };
 export type WsFactory = (url: string) => WsLike;
 
+/** Tab order survives a refresh: launch ids → creation sequence (the desktop's term.list order is arbitrary). */
+const TAB_ORDER_KEY = "buzz.webterm.tabOrder";
+function readTabOrder(): Record<string, number> {
+  try {
+    const v = JSON.parse(globalThis.localStorage?.getItem(TAB_ORDER_KEY) ?? "{}");
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+function noteTabCreated(id: string) {
+  try {
+    const o = readTabOrder();
+    if (o[id] !== undefined) return;
+    // keep it small: only the last 32 launches matter (the desktop caps live terminals at 3)
+    const entries = Object.entries(o).sort((a, b) => a[1] - b[1]).slice(-31);
+    const next = Object.fromEntries(entries);
+    next[id] = Date.now();
+    globalThis.localStorage?.setItem(TAB_ORDER_KEY, JSON.stringify(next));
+  } catch {
+    // storage unavailable: order falls back to the desktop's
+  }
+}
+
 export type RemoteSession = { name: string; status: string };
 /** A desktop terminal kept alive across connections (term.list). */
 export type LiveTerminal = { id: string; emu: boolean; title?: string | null; attached: boolean; mine?: boolean };
@@ -340,7 +364,11 @@ export class RemoteConnection {
     const r = await this.waitFor((f) => f.t === "term.list", 15_000);
     return (Array.isArray(r.sessions) ? r.sessions : [])
       .filter((s: LiveTerminal) => typeof s?.id === "string" && s.emu === true)
-      .slice(0, 16);
+      .slice(0, 16)
+      .sort((a: LiveTerminal, b: LiveTerminal) => {
+        const o = readTabOrder();
+        return (o[a.id] ?? Number.MAX_SAFE_INTEGER) - (o[b.id] ?? Number.MAX_SAFE_INTEGER);
+      });
   }
 
   async openEmuTerminal(
@@ -351,6 +379,7 @@ export class RemoteConnection {
     const ws = this.ws;
     if (!ws || !this.ready) throw new RemoteError("closed");
     const launchId = opts.reattachId ?? crypto.randomUUID();
+    if (!opts.reattachId) noteTabCreated(launchId);
     const entry = { on: null as ((m: EmuMessage) => void) | null, pre: [] as EmuMessage[] };
     this.emus.set(launchId, entry);
     this.termOut.set(launchId, { data: () => {}, closed: onClosed });
