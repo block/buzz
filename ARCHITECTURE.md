@@ -312,10 +312,12 @@ also revokes that session. On open relays, an owner who was already a nonmember
 at admission does not become a membership requirement. Moderation timeouts are
 not read by this worker because they restrict writes, not an established
 socket. All membership, ownership, and ban predicates include the bound
-community. Admission reads the captured owner's membership from the writer
-when the delegation check did not already establish it; that bounded point
-lookup records the baseline needed to distinguish a later membership removal
-from pre-existing open-relay nonmembership.
+community. When the delegation check did not already establish the captured
+owner's membership, admission makes a bounded writer-authoritative membership
+read to record whether that owner was already a relay member. This adds a writer
+dependency to admission; a failed point read refuses the socket with an
+authorization-unavailable AUTH response. The baseline distinguishes a later
+membership removal from pre-existing open-relay nonmembership.
 
 Each batch snapshot is the revalidation ordering point. A removal or ban
 committed before that snapshot closes the session; a re-add or unban committed
