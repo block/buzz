@@ -88,11 +88,11 @@ void actionRowTests() {
         );
         final actionBody = tester.getRect(body);
         final actionAuthor = tester.getRect(author);
-        expect(actionBody.left, regularBody.left);
+        expect(actionBody.left, regularBody.left - Grid.xs);
         expect(actionAuthor.left, regularAuthor.left);
         expect(
           actionBody.top - actionAuthor.bottom,
-          closeTo(regularBody.top - regularAuthor.bottom, 0.01),
+          closeTo(regularBody.top - regularAuthor.bottom - Grid.xxs, 0.01),
         );
         final timestamp = find.byKey(
           const ValueKey('system-message-timestamp-alice'),

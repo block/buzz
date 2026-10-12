@@ -84,6 +84,7 @@ part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
+part 'channel_detail_page_test/bubble_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -506,6 +507,7 @@ void main() {
   threadTitleCapsuleTests();
   presenceTests();
   actionRowTests();
+  bubbleLayoutTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -8637,7 +8639,7 @@ void main() {
       (kind: EventKind.huddleEnded, action: 'ended the huddle'),
     ]) {
       testWidgets(
-        '${huddleEvent.action} aligns its author and body with a regular message',
+        '${huddleEvent.action} retains its system layout beside bubble messages',
         (tester) async {
           await tester.pumpWidget(
             _buildTestable(
@@ -8691,20 +8693,22 @@ void main() {
           final regularBody = tester.getRect(findRichText('Regular message'));
           final huddleBody = tester.getRect(findRichText(huddleEvent.action));
 
+          expect(huddleAuthor.top - huddleAvatar.top, Grid.half);
+          expect(huddleAuthor.left, regularAuthor.left);
           expect(
-            huddleAuthor.top - huddleAvatar.top,
-            closeTo(regularAuthor.top - regularAvatar.top, 0.01),
+            regularAvatar.bottom,
+            closeTo(regularBody.bottom + Grid.xxs + Grid.quarter, 0.01),
           );
           expect(
             huddleBody.top - huddleAuthor.bottom,
-            closeTo(regularBody.top - regularAuthor.bottom, 0.01),
+            closeTo(regularBody.top - regularAuthor.bottom - Grid.xxs, 0.01),
           );
         },
       );
     }
 
     testWidgets(
-      'keeps membership and huddle rows evenly spaced with authored messages',
+      'keeps membership and huddle rows separated from bubble messages',
       (tester) async {
         await tester.pumpWidget(
           _buildTestable(
@@ -8767,14 +8771,14 @@ void main() {
           avatarRect('system-message-row-huddle-dave'),
           avatarRect('message-row-message-erin'),
         ];
-        final authoredMessageGap = avatars[1].top - avatars[0].bottom;
-
-        for (var index = 2; index < avatars.length; index++) {
+        // System actors remain at the top; conversation avatars sit at the
+        // bubble bottom. Their artwork no longer defines the inter-row gap.
+        for (var index = 1; index < avatars.length; index++) {
           expect(
             avatars[index].top - avatars[index - 1].bottom,
-            closeTo(authoredMessageGap, 1),
-            reason: 'row $index should use the authored-message gap',
+            greaterThanOrEqualTo(Grid.xs),
           );
+          expect(avatars[index].left, avatars.first.left);
         }
       },
     );

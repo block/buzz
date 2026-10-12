@@ -3,6 +3,7 @@ part of '../channel_detail_page.dart';
 class _MessageBubble extends HookConsumerWidget {
   final TimelineMessage message;
   final bool showAuthor;
+  final bool showAvatar;
   final bool hasReplies;
   final Map<String, String> channelNames;
   final String currentChannelId;
@@ -16,6 +17,7 @@ class _MessageBubble extends HookConsumerWidget {
   const _MessageBubble({
     required this.message,
     required this.showAuthor,
+    this.showAvatar = true,
     required this.hasReplies,
     required this.channelNames,
     required this.currentChannelId,
@@ -153,8 +155,8 @@ class _MessageBubble extends HookConsumerWidget {
                 ),
           child: Padding(
             padding: EdgeInsets.only(
-              top: showAuthor ? 0 : Grid.xxs,
-              bottom: showAuthor ? 0 : Grid.xxs,
+              top: showAuthor ? 0 : Grid.quarter,
+              bottom: Grid.quarter,
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -162,9 +164,9 @@ class _MessageBubble extends HookConsumerWidget {
                 RepaintBoundary(
                   key: messageSnapshotKey,
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      if (showAuthor)
+                      if (showAvatar)
                         GestureDetector(
                           onTap: () => showUserProfileSheet(
                             context,
@@ -247,6 +249,8 @@ class _MessageBubble extends HookConsumerWidget {
                                 ),
                               MessageContent(
                                 content: message.content,
+                                bubble: true,
+                                ownMessage: currentPubkey?.toLowerCase() == pk,
                                 mentionNames: resolvedMentionNames,
                                 mentionLabels: mentionLabels,
                                 agentMentionPubkeys: agentMentionPubkeys,

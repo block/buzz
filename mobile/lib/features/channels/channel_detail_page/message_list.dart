@@ -812,6 +812,18 @@ class _MessageList extends HookConsumerWidget {
                             message.pubkey.toLowerCase() ||
                         (message.createdAt - prevMessage.createdAt) > 300);
 
+                final nextMessage = chronIdx + 1 < displayEntries.length
+                    ? displayEntries[chronIdx + 1].first.message
+                    : null;
+                final showAvatar =
+                    nextMessage == null ||
+                    nextMessage.isSystem ||
+                    nextMessage.hasAttachments ||
+                    !isSameDay(message.createdAt, nextMessage.createdAt) ||
+                    nextMessage.pubkey.toLowerCase() !=
+                        message.pubkey.toLowerCase() ||
+                    nextMessage.createdAt - message.createdAt > 300;
+
                 return LocalMessageSendTransition(
                   key: ValueKey('channel-message-send-${message.id}'),
                   animate: isRecentLocalMessageSendAnimation(
@@ -851,6 +863,7 @@ class _MessageList extends HookConsumerWidget {
                           _MessageBubble(
                             message: message,
                             showAuthor: showAuthor,
+                            showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,

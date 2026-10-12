@@ -34,6 +34,8 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
+part 'message_content_bubble_cases.dart';
+
 Widget _testable(
   Widget child, {
   List<Override> overrides = const [],
@@ -373,6 +375,7 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  bubbleContentTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;
     const sampleCount = 48;

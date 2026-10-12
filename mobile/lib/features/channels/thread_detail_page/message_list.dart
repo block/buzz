@@ -227,6 +227,17 @@ class _ThreadMessageList extends HookWidget {
                                 reply.pubkey.toLowerCase() ||
                             (reply.createdAt - previousReply.createdAt) > 300;
 
+                        final nextReply =
+                            chronologicalIndex + 1 < replies.length
+                            ? replies[chronologicalIndex + 1]
+                            : null;
+                        final showAvatar =
+                            nextReply == null ||
+                            !isSameDay(reply.createdAt, nextReply.createdAt) ||
+                            nextReply.pubkey.toLowerCase() !=
+                                reply.pubkey.toLowerCase() ||
+                            nextReply.createdAt - reply.createdAt > 300;
+
                         // Check if this reply itself has children (nested thread).
                         final nestedChildren = childrenByParent[reply.id];
                         final nestedSummary =
@@ -265,6 +276,7 @@ class _ThreadMessageList extends HookWidget {
                                     channelId: channelId,
                                     currentPubkey: currentPubkey,
                                     showAuthor: showAuthor,
+                                    showAvatar: showAvatar,
                                     isHighlighted:
                                         reply.id == highlightedMessageId,
                                     allMessages: allMessages,

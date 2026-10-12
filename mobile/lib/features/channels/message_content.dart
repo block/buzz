@@ -39,6 +39,7 @@ import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/bubble_segments.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
@@ -88,6 +89,12 @@ String _safeDownloadedFilename(String filename) {
 /// and media-aware markdown images/videos.
 class MessageContent extends HookConsumerWidget {
   final String content;
+
+  /// Paint conversation text bubbles while keeping attachments on the page.
+  final bool bubble;
+
+  /// Distinguishes messages authored by the signed-in identity.
+  final bool ownMessage;
 
   /// Display names for mentioned pubkeys, extracted from event p-tags.
   /// Keys are lowercase pubkeys, values are display names.
@@ -148,6 +155,8 @@ class MessageContent extends HookConsumerWidget {
   const MessageContent({
     super.key,
     required this.content,
+    this.bubble = false,
+    this.ownMessage = false,
     this.mentionNames = const {},
     this.mentionLabels = const {},
     this.agentMentionPubkeys = const {},
@@ -316,12 +325,12 @@ class MessageContent extends HookConsumerWidget {
       onChannelTap: resolvedChannelTap,
     );
 
-    final markdown = KeyedSubtree(
+    Widget renderMarkdown(String text) => KeyedSubtree(
       key: ValueKey(
-        '$finalContent\u0000$mentionPresentationKey\u0000$channelPresentationKey',
+        '$text\u0000$mentionPresentationKey\u0000$channelPresentationKey',
       ),
       child: GptMarkdown(
-        finalContent,
+        text,
         style: style,
         followLinkColor: false,
         // normalizeBareLinks() already turns bare URLs into Markdown links;
@@ -352,6 +361,43 @@ class MessageContent extends HookConsumerWidget {
         inlineComponents: inlineComponents,
       ),
     );
+    final markdown = bubble
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final (index, segment) in _bubbleSegments(
+                finalContent,
+                imetaByUrl,
+              ).indexed)
+                if (segment.attachment)
+                  renderMarkdown(segment.text)
+                else
+                  Container(
+                    key: ValueKey('message-text-bubble-$index'),
+                    margin: const EdgeInsets.only(bottom: Grid.quarter),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.xs,
+                      vertical: Grid.xxs,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Color.alphaBlend(
+                        context.colors.onSurface.withValues(
+                          alpha: context.colors.brightness == Brightness.dark
+                              ? (ownMessage ? 0.20 : 0.14)
+                              : (ownMessage ? 0.09 : 0.04),
+                        ),
+                        context.colors.surface,
+                      ),
+                      borderRadius: BorderRadius.circular(
+                        Radii.dialog - Grid.xxs,
+                      ),
+                    ),
+                    child: renderMarkdown(segment.text),
+                  ),
+            ],
+          )
+        : renderMarkdown(finalContent);
     if (trailingGallery == null) return markdown;
 
     return Column(

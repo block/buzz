@@ -6,6 +6,7 @@ class _ThreadMessage extends HookConsumerWidget {
   final String channelId;
   final String? currentPubkey;
   final bool showAuthor;
+  final bool showAvatar;
   final bool isHighlighted;
   final List<TimelineMessage>? allMessages;
   final bool isMember;
@@ -23,6 +24,7 @@ class _ThreadMessage extends HookConsumerWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.showAuthor,
+    this.showAvatar = true,
     this.isHighlighted = false,
     this.allMessages,
     this.isMember = false,
@@ -148,8 +150,8 @@ class _ThreadMessage extends HookConsumerWidget {
             snapshotKey: messageSnapshotKey,
             child: Padding(
               padding: EdgeInsets.only(
-                top: showAuthor ? 0 : Grid.xxs,
-                bottom: showAuthor ? 0 : Grid.xxs,
+                top: showAuthor ? 0 : Grid.quarter,
+                bottom: Grid.quarter,
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -157,9 +159,9 @@ class _ThreadMessage extends HookConsumerWidget {
                   RepaintBoundary(
                     key: messageSnapshotKey,
                     child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        if (showAuthor)
+                        if (showAvatar)
                           GestureDetector(
                             onTap: () => showUserProfileSheet(
                               context,
@@ -240,6 +242,9 @@ class _ThreadMessage extends HookConsumerWidget {
                                   ),
                                 MessageContent(
                                   content: message.content,
+                                  bubble: true,
+                                  ownMessage:
+                                      currentPubkey?.toLowerCase() == pk,
                                   mentionNames: resolvedMentionNames,
                                   mentionLabels: mentionLabels,
                                   agentMentionPubkeys: agentMentionPubkeys,
