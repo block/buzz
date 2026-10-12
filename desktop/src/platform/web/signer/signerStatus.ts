@@ -26,8 +26,11 @@ function render() {
     el = document.createElement("div");
     el.setAttribute("data-testid", "signer-waiting");
     el.setAttribute("role", "status");
-    el.style.cssText =
-      "position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom) + 16px);z-index:2147483647;background:#111;color:#f5f5f5;border:1px solid #444;border-radius:12px;padding:10px 14px;font:14px/1.4 Inter,system-ui,sans-serif;box-shadow:0 4px 20px #0008;display:flex;gap:10px;align-items:center";
+    // Phone: top, below the safe area, smaller, so it never covers the composer/terminal key bar.
+    const phone = window.matchMedia?.("(max-width: 599px)").matches;
+    el.style.cssText = phone
+      ? "position:fixed;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 6px);max-width:calc(100vw - 16px);z-index:2147483647;background:#111d;color:#f5f5f5;border:1px solid #444;border-radius:10px;padding:5px 10px;font:12px/1.3 Inter,system-ui,sans-serif;box-shadow:0 2px 10px #0006;display:flex;gap:8px;align-items:center"
+      : "position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom) + 16px);z-index:2147483647;background:#111;color:#f5f5f5;border:1px solid #444;border-radius:12px;padding:10px 14px;font:14px/1.4 Inter,system-ui,sans-serif;box-shadow:0 4px 20px #0008;display:flex;gap:10px;align-items:center";
     document.body.appendChild(el);
     update();
   }, 1500);

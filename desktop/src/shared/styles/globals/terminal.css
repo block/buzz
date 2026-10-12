@@ -419,3 +419,44 @@
     z-index: 6;
   }
 }
+
+/* Phone only ([data-phone], < 600px): maximized Buzz Term goes edge to edge. iPad/desktop never match.
+   Unlayered on purpose: it must beat the Tailwind utilities (mb-2, rounded-2xl, flex) on the shell elements. */
+  [data-phone] body:has(.buzz-terminal-substrate[data-terminal-mode="maximized"][data-terminal-visible="true"]) [data-testid="app-top-chrome"] {
+    display: none;
+  }
+  [data-phone] [data-buzz-content-surface]:has(.buzz-terminal-substrate[data-terminal-mode="maximized"][data-terminal-visible="true"]) {
+    border-radius: 0;
+    box-shadow: none;
+    margin: 0;
+  }
+  /* pin to the full viewport width (the content surface's parents keep a few px of inset on the left) */
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"][data-touch-ui="true"]:not([data-keyboard-open="true"]) {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100vw !important;
+  }
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] {
+    border: 0;
+    border-radius: 0;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px) !important;
+  }
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-contract-bar {
+    flex-basis: 34px;
+    gap: 4px;
+    padding: 0 4px;
+  }
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tab,
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tab-select,
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-new-tab {
+    height: 28px;
+    padding: 0 6px;
+  }
+  /* key bar flush at the bottom; only the home-indicator inset below it (the substrate adds none) */
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-touchbar {
+    margin: 0;
+    padding: 4px 4px env(safe-area-inset-bottom, 0px);
+  }
+  [data-phone] .buzz-terminal-substrate[data-keyboard-open="true"] .buzz-terminal-touchbar {
+    padding-bottom: 4px;
+  }
