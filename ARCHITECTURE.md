@@ -331,8 +331,12 @@ cancels the socket. NIP-FI root and audio sockets receive their existing
 route-specific `authorization_denied` or `authorization_unavailable` terminal
 response; other sockets receive the normal access-revoked or unavailable close
 reason. This trades connection availability during a prolonged database
-outage for a bounded authorization window. Reconnecting after the database
-recovers performs the ordinary admission checks. The worker shares graceful
+outage for a bounded authorization window. The desktop leaves explicit
+server-side policy-read failures unauthenticated and retries them with its
+existing jittered exponential reconnect schedule, capped at 30 seconds. A
+successful later admission restores the connection without manual preconnect;
+`restricted:` and `blocked:` responses remain terminal, and invalid or unknown
+AUTH evidence retains its three-rejection cap. The worker shares graceful
 shutdown cancellation and has no migration or rollout flag; all relay pods
 must run this code for the bound to hold deployment-wide.
 
