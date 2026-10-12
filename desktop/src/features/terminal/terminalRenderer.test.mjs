@@ -281,3 +281,44 @@ test("SGR 2 dim text paints at half opacity and the next span is opaque", () => 
   assert.deepEqual(ctx.alphas, [0.5, 1]);
   assert.equal(ctx.globalAlpha, 1);
 });
+
+function gridWith(columns, rows) {
+  const grid = new TerminalGrid({ generation: 0, columns, screenLines: rows.length });
+  grid.apply({
+    viewport: grid.viewport,
+    full: true,
+    cursor: { line: 0, column: 0, visible: false },
+    rows: rows.map((r, line) => ({
+      line,
+      wrapped: r.wrapped ?? false,
+      spans: [{ style: { fg: 0, bg: 0, flags: 0 }, clusters: r.clusters }],
+    })),
+  });
+  return grid;
+}
+const word = (text, column) => [...text].map((ch, i) => ({ column: column + i, text: ch, width: 1 }));
+
+test("touch selection reads text between cells (inclusive, either order, rows joined by newlines)", () => {
+  const grid = gridWith(12, [
+    { clusters: [...word("hello", 0), ...word("world", 6)] },
+    { clusters: word("second", 0) },
+  ]);
+  assert.equal(grid.textBetweenCells(0, 6, 0, 10), "world");
+  assert.equal(grid.textBetweenCells(0, 10, 0, 6), "world");
+  assert.equal(grid.textBetweenCells(0, 6, 1, 2), "world\nsec");
+});
+
+test("touch selection counts cells, so a wide character doesn't shift the columns after it", () => {
+  const grid = gridWith(8, [{ clusters: [{ column: 0, text: "一", width: 2 }, ...word("ab", 2)] }]);
+  assert.equal(grid.textBetweenCells(0, 2, 0, 3), "ab");
+  assert.equal(grid.textBetweenCells(0, 0, 0, 3), "一ab");
+});
+
+test("wrapped rows join without a newline; word selection stops at blanks", () => {
+  const grid = gridWith(5, [{ clusters: word("abcde", 0), wrapped: true }, { clusters: word("fg", 0) }]);
+  assert.equal(grid.textBetweenCells(0, 0, 1, 1), "abcdefg");
+  const g2 = gridWith(12, [{ clusters: [...word("foo-bar", 0), ...word("baz", 8)] }]);
+  assert.deepEqual(g2.wordAt(0, 2), { start: 0, end: 6 });
+  assert.deepEqual(g2.wordAt(0, 9), { start: 8, end: 10 });
+  assert.equal(g2.wordAt(0, 7), null);
+});

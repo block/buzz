@@ -1,6 +1,7 @@
 import {
   getShortcutsByCategory,
   getPlatformKeys,
+  isShortcutUnavailableOnWeb,
   type KeyboardShortcut,
 } from "@/shared/lib/keyboard-shortcuts";
 import {
@@ -61,7 +62,13 @@ export function KeyboardShortcutsCard() {
                     {shortcut.description}
                   </span>
                 </div>
-                <KeyCombo shortcut={shortcut} />
+                {isShortcutUnavailableOnWeb(shortcut.id) ? (
+                  <span className="text-xs text-muted-foreground" data-testid={`shortcut-na-${shortcut.id}`}>
+                    N/A
+                  </span>
+                ) : (
+                  <KeyCombo shortcut={shortcut} />
+                )}
               </SettingsOptionRow>
             ))}
           </SettingsOptionGroup>

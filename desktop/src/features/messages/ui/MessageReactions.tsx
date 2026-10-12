@@ -19,6 +19,7 @@ import {
   PopoverTrigger,
 } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { RelayImg } from "@/shared/ui/RelayImg";
 
 const REACTION_PILL_BASE_CLASSES =
   "inline-flex h-7 items-center rounded-full border text-xs font-medium leading-none transition-colors";
@@ -79,7 +80,7 @@ function EmojiGlyph({
   const displayName = emojiDisplayName(reaction.emoji);
   if (reaction.emojiUrl) {
     return (
-      <img
+      <RelayImg
         alt={reaction.emoji}
         title={displayName}
         src={rewriteRelayUrl(reaction.emojiUrl)}

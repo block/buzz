@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -415,6 +416,9 @@ export function GlassBackgroundSetting() {
       </div>
     </SettingsOptionRow>
   );
+
+  // Web: glass is a macOS desktop window effect, so the row (and its opacity slider) isn't shown.
+  if (!isTauri()) return null;
 
   return (
     <>

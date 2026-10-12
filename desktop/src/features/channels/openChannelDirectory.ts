@@ -23,8 +23,10 @@ import {
  * Nested under {@link channelsQueryKey}, so channel mutations that invalidate
  * the member list (join, leave, archive) also refresh a mounted directory.
  */
+// Literal (not spread from channelsQueryKey): hooks.ts and this module sit in an
+// import cycle, and a top-level spread crashes the production bundle ("is not iterable").
 export const openChannelDirectoryQueryKey = [
-  ...channelsQueryKey,
+  "channels",
   "open-directory",
 ] as const;
 

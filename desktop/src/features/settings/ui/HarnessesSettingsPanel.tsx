@@ -1,4 +1,5 @@
 import * as React from "react";
+import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import { ExternalLink, Plus, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -8,6 +9,7 @@ import {
 } from "@/features/agents/hooks";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 import { Button } from "@/shared/ui/button";
 
 import { HarnessCatalogDialog } from "./HarnessCatalogDialog";
@@ -109,6 +111,43 @@ export function HarnessesSettingsPanel() {
   }, [entries]);
 
   const isRefreshing = runtimesQuery.isFetching;
+  const { web, live } = useDesktopData();
+  if (web) {
+    // Web: the desktop's harnesses, read-only (installing or changing them happens on the desktop).
+    return (
+      <SettingsOptionGroup data-testid="settings-harnesses" description="Agent tools installed on your desktop." title="Agent runtimes">
+        <div className="divide-y divide-border/55 px-4 py-2 text-sm" data-testid="web-runtime-list">
+          {!live ? (
+            <p className="py-2 text-muted-foreground">Your desktop's runtimes appear here once this device has a Direct connection to it.</p>
+          ) : rows.length === 0 ? (
+            <p className="py-2 text-muted-foreground">No agent runtimes are ready on your desktop yet. Add one there.</p>
+          ) : (
+            rows.map((r) => (
+              <div key={r.id} className="flex min-h-16 items-center justify-between gap-4 py-3.5" data-testid="web-runtime-row">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center" data-testid={`web-runtime-logo-${r.id}`}>
+                    <RuntimeIcon className="h-9 w-9" runtime={r} />
+                  </span>
+                  <p className="min-w-0 text-sm font-medium">{r.label}{r.source === "custom" ? " (custom)" : ""}</p>
+                </div>
+                {r.availability === "available" ? (
+                  <span
+                    className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+                    data-testid={`web-runtime-ready-${r.id}`}
+                  >
+                    Ready
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{r.installHint || "Not installed"}</span>
+                )}
+              </div>
+            ))
+          )}
+          <p className="py-2 text-xs text-muted-foreground">Install, add or remove runtimes (including custom harnesses and ACP transports) on your desktop.</p>
+        </div>
+      </SettingsOptionGroup>
+    );
+  }
 
   return (
     <SettingsOptionGroup

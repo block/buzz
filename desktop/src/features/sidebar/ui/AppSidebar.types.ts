@@ -49,6 +49,7 @@ export type AppSidebarProps = {
     | "agents"
     | "bots"
     | "workflows"
+    | "buzzTerm"
     | "pulse"
     | "projects"
     | "pin";

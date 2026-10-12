@@ -1,4 +1,6 @@
 import { ProtectedOpenClawWorkspaceSettingsCard } from "@protected-feature-components";
+import { useDirectSession } from "@/features/bridge/ui/WebRemoteSettings";
+import { DesktopDataNotice, isWebBuild, WebOpenClawStatusNote } from "@/features/bridge/ui/DesktopData";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import {
   setKeepMentionedAgentsPinned,
@@ -11,6 +13,7 @@ import {
 import { Switch } from "@/shared/ui/switch";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { RemoteAgentManagementCard } from "./RemoteAccessSettingsCard";
 import {
   SettingsOptionGroup,
   SettingsOptionGroupList,
@@ -21,6 +24,10 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 export function AgentsSettingsPanel() {
   const automaticallyMentionAgents = useKeepMentionedAgentsPinned();
   const showAgentThinking = useShowAgentThinking();
+  const web = isWebBuild();
+  // Same direct session as the Agents page (shared client, one signature, Via relay → Direct, Retry on decline), so opening
+  // Settings → Agents directly loads the desktop's runtimes and defaults.
+  if (web) useDirectSession(); // biome-ignore lint: web is constant for the app lifetime
 
   return (
     <section className="min-w-0" data-testid="settings-agents">
@@ -29,9 +36,14 @@ export function AgentsSettingsPanel() {
         description="Control how agents behave in conversations and run on this machine."
       />
 
-      <div className="mb-4">
-        <ProtectedOpenClawWorkspaceSettingsCard />
-      </div>
+      <DesktopDataNotice />
+      {web ? (
+        <WebOpenClawStatusNote />
+      ) : (
+        <div className="mb-4">
+          <ProtectedOpenClawWorkspaceSettingsCard />
+        </div>
+      )}
 
       <SettingsOptionGroupList>
         <SettingsOptionGroup title="Conversations">
@@ -80,7 +92,8 @@ export function AgentsSettingsPanel() {
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>
-        <PreventSleepSettingsCard />
+        {web ? null : <PreventSleepSettingsCard />}
+        <RemoteAgentManagementCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
       </SettingsOptionGroupList>

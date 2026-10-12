@@ -1,3 +1,4 @@
+import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 import { Button } from "@/shared/ui/button";
 
 type AgentDefinitionDialogFooterProps = {
@@ -17,9 +18,17 @@ export function AgentDefinitionDialogFooter({
   publishesCatalogUpdates,
   submitLabel,
 }: AgentDefinitionDialogFooterProps) {
+  // Web: agents are created and edited on the desktop, so saving needs the Direct connection.
+  const { web, live, reason } = useDesktopData();
+  const blocked = web && !live;
   return (
     <div className="flex w-full flex-wrap items-center justify-between gap-3">
       <div className="flex min-h-9 min-w-0 flex-wrap items-center gap-3">
+        {blocked ? (
+          <p className="max-w-sm text-xs text-destructive" data-testid="agent-dialog-needs-direct">
+            {reason}
+          </p>
+        ) : null}
         {publishesCatalogUpdates ? (
           <p
             className="max-w-sm text-xs text-muted-foreground"
@@ -42,7 +51,7 @@ export function AgentDefinitionDialogFooter({
         </Button>
         <Button
           data-testid="persona-dialog-submit"
-          disabled={!canSubmit}
+          disabled={!canSubmit || blocked}
           form="persona-dialog-form"
           type="submit"
         >

@@ -77,7 +77,11 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
-import { useCommunityPinnedSitesLiveUpdates } from "@/features/pinned-sites/hooks";
+import { useRemoteAccessEvents } from "@/features/bridge/useRemoteAccessEvents";
+import { RemoteBrowserIndicator } from "@/features/bridge/ui/RemoteBrowserIndicator";
+import {
+  useCommunityPinnedSitesLiveUpdates,
+} from "@/features/pinned-sites/hooks";
 import { closeLinkSidePanel } from "@/features/link-panel/lib/linkSidePanelStore";
 import { hideAllPinWebviews } from "@/features/pinned-sites/lib/pinWebview";
 import { useArchiveSync } from "@/features/local-archive/useArchiveSync";
@@ -97,6 +101,7 @@ import { requestFocusedThreadClose } from "@/features/channels/focusedThreadClos
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
+import { useBridgePublisher } from "@/features/bridge/useBridgePublisher";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   consumePendingCommunityRestore,
@@ -284,6 +289,14 @@ export function AppShell() {
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
+  useRemoteAccessEvents(identityQuery.data?.pubkey);
+  // PWA bridge (slice A): desktop publishes agent status for the member's own browser. No-op outside Tauri.
+  useBridgePublisher(
+    identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
+    (id) => channels.find((c) => c.id === id)?.name,
+    channelsQuery.data,
+  );
   const dmChannelIds = React.useMemo(() => {
     const ids = new Set<string>();
     for (const channel of channelsQuery.data ?? []) {
@@ -775,6 +788,7 @@ export function AppShell() {
   });
   return (
     <PreventSleepProvider>
+      <RemoteBrowserIndicator />
       {!hideAppChrome ? (
         <AppShellTrayMenu
           channels={channels}

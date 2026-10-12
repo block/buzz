@@ -13,6 +13,7 @@ import {
   BotsDirectoryGrid,
   BotsEmptyState,
 } from "@/features/community-bots/ui/BotsDirectoryPanels";
+import { CatalogDiagnosticCard } from "@/features/community-bots/ui/CatalogDiagnosticCard";
 import { useRelayMembersQuery } from "@/features/community-members/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
@@ -86,7 +87,10 @@ export function BotsView({ onOpenBot, onOpenBotsSettings }: BotsViewProps) {
         ) : null}
 
         {!isLoading && cards.length === 0 ? (
-          <BotsEmptyState onOpenSettings={onOpenBotsSettings} />
+          <>
+            <BotsEmptyState onOpenSettings={onOpenBotsSettings} />
+            <CatalogDiagnosticCard />
+          </>
         ) : null}
 
         {!isLoading && cards.length > 0 ? (

@@ -193,6 +193,12 @@ export function setTermSessionName(next: string): void {
   publish({ ...snapshot, sessionName });
 }
 
+/** Non-React subscription (remote access re-pushes the shell/herdr choice to the Rust backend when it changes). */
+export function subscribeTermPreferences(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => void listeners.delete(listener);
+}
+
 export function useTermPreferences(): Snapshot {
   return React.useSyncExternalStore(
     (listener) => {

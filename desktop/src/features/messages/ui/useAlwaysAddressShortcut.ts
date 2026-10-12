@@ -1,3 +1,4 @@
+import { isShortcutUnavailableOnWeb } from "@/shared/lib/keyboard-shortcuts";
 import * as React from "react";
 
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
@@ -27,6 +28,7 @@ export function useAlwaysAddressShortcut({
     (event: React.KeyboardEvent): boolean => {
       if (
         !enabled ||
+        isShortcutUnavailableOnWeb("always-address-agent") ||
         event.code !== "KeyM" ||
         !hasPrimaryShortcutModifier(event) ||
         event.altKey ||

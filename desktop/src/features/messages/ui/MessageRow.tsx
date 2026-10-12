@@ -28,6 +28,7 @@ import {
   THREAD_REPLY_LINE_WIDTH_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import { cn } from "@/shared/lib/cn";
+import { useSendStatus } from "@/shared/lib/sendStatus";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -154,6 +155,8 @@ export const MessageRow = React.memo(
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
     const isDisplayedAsContinuation = isContinuation && !message.pending;
+    // Web / slow remote signer: which phase is this pending row in (waiting on the signer, or failed with a Retry)?
+    const sendEntry = useSendStatus(message.pending ? message.id : "");
     const showAgentThinking = useShowAgentThinking();
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
@@ -453,12 +456,41 @@ export const MessageRow = React.memo(
       message.pending || message.edited ? (
         <>
           {message.pending ? (
-            <p
-              className="font-normal text-muted-foreground/70"
-              data-testid="message-send-status"
-            >
-              Sending…
-            </p>
+            sendEntry?.phase === "failed" ? (
+              <p
+                className="flex flex-wrap items-baseline gap-2 font-normal text-destructive"
+                data-testid="message-send-failed"
+              >
+                <span>Failed — {sendEntry.reason}</span>
+                {sendEntry.retry ? (
+                  <button
+                    className="font-medium underline"
+                    data-testid="message-send-retry"
+                    onClick={sendEntry.retry}
+                    type="button"
+                  >
+                    Retry
+                  </button>
+                ) : null}
+                {sendEntry.discard ? (
+                  <button
+                    className="underline opacity-70"
+                    data-testid="message-send-discard"
+                    onClick={sendEntry.discard}
+                    type="button"
+                  >
+                    Discard
+                  </button>
+                ) : null}
+              </p>
+            ) : (
+              <p
+                className="font-normal text-muted-foreground/70"
+                data-testid="message-send-status"
+              >
+                {sendEntry?.waitingFor ?? "Sending…"}
+              </p>
+            )
           ) : null}
           {message.edited ? (
             <Tooltip>

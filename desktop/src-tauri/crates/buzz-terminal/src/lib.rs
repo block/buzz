@@ -16,6 +16,11 @@ pub mod reader;
 pub mod shared;
 pub mod shell;
 pub mod units;
+pub mod mouse_report;
+pub mod scroll_sign;
+pub mod transport;
+pub mod wheel_dispatch;
+pub mod wire;
 
 #[cfg(test)]
 mod context_tests;

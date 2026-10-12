@@ -91,6 +91,7 @@ import {
   useSidebar,
 } from "@/shared/ui/sidebar";
 import { useProtectedVisibleDirectMessages } from "@protected-feature-components";
+import { huddlesAvailable } from "@/features/huddle/lib/huddlesAvailable";
 
 export function AppSidebar({
   addCommunityPrefill,
@@ -953,7 +954,7 @@ export function AppSidebar({
                       onDeleteChannel={requestDeleteChannel}
                     />
                   </FeatureGate>
-                  <ArchivedHuddlesSection
+                  {huddlesAvailable() ? <ArchivedHuddlesSection
                     isActiveChannel={selectedView === "channel"}
                     isCollapsed={collapsedGroups.archivedHuddles}
                     items={archivedHuddleChannels}
@@ -970,7 +971,7 @@ export function AppSidebar({
                     selectedChannelId={selectedChannelId}
                     unreadChannelCounts={unreadChannelCounts}
                     unreadChannelIds={unreadChannelIds}
-                  />
+                  /> : null}
                 </>
               ) : null}
 

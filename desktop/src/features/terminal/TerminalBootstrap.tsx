@@ -1,11 +1,15 @@
 import * as React from "react";
+import { getWebTermInfo } from "@/features/bridge/webTermHub";
 import { isTauri } from "@tauri-apps/api/core";
 
 import {
   type TerminalDelivery,
   TerminalConnection,
+  type TerminalConnectionApi,
   type TerminalFrameMessage,
   type TerminalMessage,
+  getTerminalBackend,
+  useTerminalBackend,
 } from "./terminalClient";
 import {
   TerminalSubstrate,
@@ -50,7 +54,7 @@ type TerminalContext = {
 
 type Session = {
   key: string;
-  connection: TerminalConnection | null;
+  connection: TerminalConnectionApi | null;
   delivery: TerminalDelivery | null;
   frame: TerminalFrameMessage | undefined;
   title: string;
@@ -68,6 +72,12 @@ type Session = {
 };
 
 type CreateSessionOptions = {
+  /** New-tab menu "Terminal": a plain login shell even when the Session host is herdr (web: asks the desktop for a shell). */
+  forceShell?: boolean;
+  /** + menu "herdr": explicit choice — never fall back to a plain shell just because an attach tab exists. */
+  forceHerdr?: boolean;
+  /** Web: reattach this desktop terminal (survived a refresh / dropped link) instead of launching a new one. */
+  reattach?: { id: string; title?: string | null };
   termSessionSid?: string | null;
   pendingLaunchCommand?: string | null;
   extraEnv?: Record<string, string>;
@@ -82,6 +92,11 @@ type CreateSessionOptions = {
   };
 };
 
+/** The desktop's remote listener allows 3 terminals (reattached/detached ones included). */
+const REMOTE_TAB_CAP = 3;
+const tabLimitToast = () => toast.message(`Tab limit reached (${REMOTE_TAB_CAP})`, { id: "buzz-term-tab-limit", duration: 2500 });
+const isTooMany = (e: unknown) => (e as { code?: string } | null)?.code === "too_many_terminals" || /too_many_terminals/.test(String((e as Error)?.message ?? e));
+
 const INITIAL_SIZE: TerminalViewportSize = {
   columns: 80,
   rows: 24,
@@ -95,6 +110,21 @@ const FALLBACK_TERM_CHANNEL_NAME = "Buzz Term";
 
 function report(error: unknown) {
   console.error("terminal session failed", error);
+}
+
+/**
+ * Web: sessions come from the member's desktop through a registered backend (the Buzz term page registers it) instead of the
+ * Tauri runtime. The desktop's own Buzz Term settings apply there, so this device's local Session host / shell / cwd / scrollback
+ * settings are ignored: it always asks for a plain launch and the desktop decides shell vs herdr.
+ */
+function isRemoteTerminal(): boolean {
+  return !isTauri() && getTerminalBackend() !== null;
+}
+function effectiveSessionHost(): "buzz-term" | "herdr" {
+  return isRemoteTerminal() ? "buzz-term" : getTermPreferences().sessionHost;
+}
+function effectiveOpenMode(): "docked" | "maximized" {
+  return isRemoteTerminal() ? "maximized" : getTermPreferences().openMode;
 }
 
 export function TerminalBootstrap({
@@ -128,17 +158,26 @@ export function TerminalBootstrap({
   const identityRef = React.useRef<{ npub: string; relayUrl: string } | null>(
     null,
   );
-  identityRef.current = npub && relayUrl ? { npub, relayUrl } : null;
+  const remote = useTerminalBackend() !== null && !isTauri();
+  identityRef.current =
+    npub && relayUrl
+      ? { npub, relayUrl }
+      : remote
+        ? { npub: npub ?? "web", relayUrl: relayUrl ?? "web" }
+        : null;
   const mountedRef = React.useRef(true);
   const sizeRef = React.useRef(INITIAL_SIZE);
   const resizeChainRef = React.useRef(Promise.resolve());
   const connectionSizesRef = React.useRef(
-    new WeakMap<TerminalConnection, TerminalViewportSize>(),
+    new WeakMap<TerminalConnectionApi, TerminalViewportSize>(),
   );
   const closedSessionKeysRef = React.useRef(new Set<string>());
   const [sessions, setSessions] = React.useState<Session[]>([]);
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
-  const [available, setAvailable] = React.useState(() => isTauri());
+  const [tauriAvailable, setAvailable] = React.useState(() => isTauri());
+  // A registered remote backend means "available" from the start; a failed attach reports through the backend instead of
+  // permanently switching Term off, so the page can offer Reconnect.
+  const available = remote || tauriAvailable;
   const panel = useTerminalPanel();
   const [renderedMode, setRenderedMode] = React.useState<
     "docked" | "maximized"
@@ -154,6 +193,8 @@ export function TerminalBootstrap({
     React.useState(panel.mode !== "closed");
   const previousPanelModeRef = React.useRef(panel.mode);
   const acknowledgedSequenceRef = React.useRef(new Map<string, number>());
+  const reattachInFlightRef = React.useRef(false);
+  const reattachFailuresRef = React.useRef(0);
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
   /** When a term-session handoff is creating the first tab, skip blank auto-create. */
@@ -237,6 +278,11 @@ export function TerminalBootstrap({
 
   const fail = React.useCallback((error: unknown) => {
     report(error);
+    if (isRemoteTerminal()) {
+      getTerminalBackend()?.onError?.(error);
+      setTerminalPanelMode("closed");
+      return;
+    }
     setAvailable(false);
   }, []);
 
@@ -287,8 +333,7 @@ export function TerminalBootstrap({
     ) => {
       const sessionKey = herdrAttachKey(result.sessionName);
       const existing = findHerdrAttachSession(sessionKey);
-      const prefs = getTermPreferences();
-      const mode = panel.mode === "closed" ? prefs.openMode : panel.mode;
+      const mode = panel.mode === "closed" ? effectiveOpenMode() : panel.mode;
       openTerminalPanel(mode, panel.tabScope);
       if (existing) {
         setActiveKey(existing.key);
@@ -313,10 +358,40 @@ export function TerminalBootstrap({
     (options?: CreateSessionOptions) => {
       const baseContext = resolveSpawnContext();
       if (!available || !baseContext) return;
+      if (isRemoteTerminal() && !options?.reattach && sessionsRef.current.length >= REMOTE_TAB_CAP) {
+        tabLimitToast();
+        return;
+      }
+      if (options?.forceShell) {
+        createInAppSessionRef.current(options);
+        return;
+      }
+      // Web, no tabs yet (page load, refresh, Reconnect): bring back the desktop terminals that are still running first.
+      const backend = getTerminalBackend();
+      if (isRemoteTerminal() && sessionsRef.current.length === 0 && !options?.reattach && backend?.listLive && !options?.pendingLaunchCommand) {
+        if (reattachInFlightRef.current) return;
+        reattachInFlightRef.current = true;
+        void backend
+          .listLive()
+          .then((live) => {
+            if (!mountedRef.current) return;
+            if (live.length === 0 || sessionsRef.current.length > 0) {
+              if (sessionsRef.current.length === 0) createInAppSessionRef.current(options);
+              return;
+            }
+            for (const t of live) createInAppSessionRef.current({ reattach: { id: t.id, title: t.title } });
+          })
+          // couldn't even list (signer declined, link down): never launch blind into a full cap — report it
+          .catch((error) => fail(error))
+          .finally(() => {
+            reattachInFlightRef.current = false;
+          });
+        return;
+      }
 
       // Fast path: Buzz Term host — create the in-app PTY immediately (no async
       // herdr probe) so the panel never sits empty.
-      if (getTermPreferences().sessionHost !== "herdr") {
+      if (effectiveSessionHost() !== "herdr") {
         createInAppSessionRef.current(options);
         return;
       }
@@ -326,12 +401,12 @@ export function TerminalBootstrap({
       const prefs = getTermPreferences();
       const sessionKey = herdrAttachKey(prefs.sessionName);
       const existing = findHerdrAttachSession(sessionKey);
-      const reopenMode = panel.mode === "closed" ? prefs.openMode : panel.mode;
+      const reopenMode = panel.mode === "closed" ? effectiveOpenMode() : panel.mode;
       const scope = panel.tabScope;
       // Open chrome immediately so left-nav / ⌘J never flash an empty panel
       // while the herdr probe runs.
       openTerminalPanel(reopenMode, scope);
-      if (existing) {
+      if (existing && !options?.forceHerdr) {
         // Attach tab already live — New tab (+) opens another in-app shell
         // (plain open never createWorkspace).
         createInAppSessionRef.current(options);
@@ -345,7 +420,24 @@ export function TerminalBootstrap({
             createInAppSessionRef.current(options);
             return;
           }
-          const result = await openInHerdr({ createWorkspace: false });
+          // Explicit herdr pick with an attach tab already open: add a new herdr workspace and focus that tab.
+          const result = await openInHerdr({ createWorkspace: Boolean(existing && options?.forceHerdr) });
+          if (result.ok && existing && options?.forceHerdr) {
+            // + → herdr with a herdr tab already open: a NEW tab with its own attach client (unique tab key, so the
+            // attach-by-session-name dedupe below can't fold it into the first tab). It shows the workspace just created.
+            const mode = panel.mode === "closed" ? effectiveOpenMode() : panel.mode;
+            openTerminalPanel(mode, panel.tabScope);
+            createInAppSessionRef.current({
+              ...options,
+              pendingLaunchCommand: null,
+              herdrAttach: {
+                bin: result.herdrBin,
+                argv: result.attachArgv,
+                sessionKey: `${herdrAttachKey(result.sessionName)}#${result.workspaceId ?? crypto.randomUUID()}`,
+              },
+            });
+            return;
+          }
           if (result.ok) {
             // Re-check reuse: a parallel open may have created the attach tab.
             const again = findHerdrAttachSession(
@@ -407,7 +499,7 @@ export function TerminalBootstrap({
         connection: null,
         delivery: null,
         frame: undefined,
-        title: herdrAttach ? "herdr" : "SHELL",
+        title: herdrAttach ? "herdr" : options?.reattach?.title || "SHELL",
         closing: false,
         context: spawnContext,
         termSessionSid: options?.termSessionSid ?? null,
@@ -450,19 +542,25 @@ export function TerminalBootstrap({
       const size = sizeRef.current;
       void (async () => {
         const prefs = getTermPreferences();
-        const cwd = await resolveTermCwdForAttach({
-          preference: prefs.cwd,
-          handoffCwd: options?.cwd,
-          homeDir,
-        });
+        // Remote: the desktop picks the directory (its own setting); a path from this device or a card means nothing there.
+        const cwd = remote
+          ? undefined
+          : await resolveTermCwdForAttach({
+              preference: prefs.cwd,
+              handoffCwd: options?.cwd,
+              homeDir,
+            });
         return TerminalConnection.attach(
           {
             ...spawnContext,
             threadId: spawnContext.threadId ?? undefined,
             ...size,
-            ...(options?.extraEnv ? { extraEnv: options.extraEnv } : {}),
+            ...(options?.extraEnv && !remote ? { extraEnv: options.extraEnv } : {}),
             ...(cwd ? { cwd } : {}),
-            ...(prefs.shell ? { shell: prefs.shell } : {}),
+            ...(prefs.shell && !remote ? { shell: prefs.shell } : {}),
+            // a handoff launch line is typed into a shell, so never into the desktop's herdr UI
+            ...(remote && (options?.pendingLaunchCommand || options?.forceShell) ? { remoteHost: "shell" as const } : {}),
+            ...(remote && options?.reattach ? { reattachId: options.reattach.id } : {}),
             ...(herdrAttach
               ? { program: herdrAttach.bin, args: herdrAttach.argv }
               : {}),
@@ -493,7 +591,8 @@ export function TerminalBootstrap({
               }));
             }, 350);
           }
-          if (sizeRef.current !== size) {
+          // a reattached terminal still has the size of the device that last drove it
+          if (sizeRef.current !== size || options?.reattach) {
             const currentSize = sizeRef.current;
             resizeChainRef.current = resizeChainRef.current
               .then(async () => {
@@ -512,6 +611,20 @@ export function TerminalBootstrap({
         .catch((error) => {
           if (closedSessionKeysRef.current.delete(key)) return;
           removeSession(key);
+          // Desktop cap hit (e.g. detached sessions count): keep the panel and the other tabs, just say so.
+          // Reattach keeps failing (not a declined signature): close the orphans so the next open starts clean.
+          if (remote && options?.reattach && !/declin|reject|denied/i.test(String((error as Error)?.message ?? error))) {
+            reattachFailuresRef.current += 1;
+            if (reattachFailuresRef.current >= 2) {
+              reattachFailuresRef.current = 0;
+              void getTerminalBackend()?.closeAllLive?.().catch(() => 0);
+            }
+          }
+          if (remote && isTooMany(error)) {
+            tabLimitToast();
+            // the only tab was refused: fall through to fail() → the page explains it and offers "Close old sessions"
+            if (sessionsRef.current.some((x) => x.key !== key)) return;
+          }
           // herdr program spawn failed — fall back to a login shell instead of
           // permanently disabling Term (available=false) and leaving chrome blank.
           if (herdrAttach) {
@@ -529,7 +642,7 @@ export function TerminalBootstrap({
           fail(error);
         });
     },
-    [available, fail, removeSession, resolveSpawnContext],
+    [available, fail, remote, removeSession, resolveSpawnContext],
   );
   createInAppSessionRef.current = createInAppSession;
 
@@ -540,7 +653,7 @@ export function TerminalBootstrap({
         ? sessionsRef.current.find((session) => session.key === liveKey)
         : null;
       if (live && !live.closing) {
-        openTerminalPanel(getTermPreferences().openMode, "channel");
+        openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
         setActiveKey(live.key);
         return;
       }
@@ -548,7 +661,11 @@ export function TerminalBootstrap({
       void (async () => {
         // Card Open + herdr host: create ONE focused workspace, send handoff
         // command into its root pane, then show/reuse the in-app herdr attach.
-        if (request.launchCommand.trim() && (await shouldOpenInHerdr())) {
+        if (
+          !remote &&
+          request.launchCommand.trim() &&
+          (await shouldOpenInHerdr())
+        ) {
           const result = await openInHerdr({
             createWorkspace: true,
             cwd: request.cwd,
@@ -583,23 +700,24 @@ export function TerminalBootstrap({
         }
 
         if (
+          !remote &&
           !contextRef.current &&
           !sessionsRef.current.at(-1)?.context &&
           !lastSpawnContextRef.current
         ) {
-          openTerminalPanel(getTermPreferences().openMode, "channel");
+          openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
           return;
         }
         if (!request.launchCommand.trim()) {
-          openTerminalPanel(getTermPreferences().openMode, "channel");
+          openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
           return;
         }
         if (!available) {
-          openTerminalPanel(getTermPreferences().openMode, "channel");
+          openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
           return;
         }
         skipAutoCreateRef.current = true;
-        openTerminalPanel(getTermPreferences().openMode, "channel");
+        openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
         createInAppSession({
           termSessionSid: request.sid,
           pendingLaunchCommand: request.launchCommand,
@@ -616,7 +734,7 @@ export function TerminalBootstrap({
         }, 0);
       })();
     },
-    [available, createInAppSession, openOrReuseHerdrAttach],
+    [available, createInAppSession, openOrReuseHerdrAttach, remote],
   );
 
   React.useEffect(() => {
@@ -677,13 +795,15 @@ export function TerminalBootstrap({
       const canSpawn =
         Boolean(contextRef.current) ||
         Boolean(lastSpawnContextRef.current) ||
-        (getTermPreferences().sessionHost === "herdr" &&
-          Boolean(identityRef.current));
+        remote ||
+        (effectiveSessionHost() === "herdr" && Boolean(identityRef.current));
       if (!canSpawn) return;
     }
 
     const spawnEmpty = () => {
-      if (getTermPreferences().sessionHost === "herdr") {
+      // Web goes through createSession too: it lists the desktop's still-running terminals and reattaches them before
+      // ever launching a new one (a direct create here used to skip that and hit the 3-terminal cap after a refresh).
+      if (remote || effectiveSessionHost() === "herdr") {
         createSession();
       } else {
         // Buzz Term: attach immediately — no async host probe.
@@ -721,6 +841,7 @@ export function TerminalBootstrap({
     context,
     createSession,
     panel.mode,
+    remote,
     tabScope,
     visibleSessions,
   ]);
@@ -801,7 +922,8 @@ export function TerminalBootstrap({
           ? sessions.length > 0 ||
             Boolean(context) ||
             Boolean(lastSpawnContextRef.current) ||
-            (getTermPreferences().sessionHost === "herdr" &&
+            remote ||
+            (effectiveSessionHost() === "herdr" &&
               Boolean(identityRef.current))
           : Boolean(context))
       }
@@ -862,7 +984,11 @@ export function TerminalBootstrap({
         });
       }}
       onInput={(text) => send(active?.connection?.input(text))}
-      onNewSession={createSession}
+      onNewSession={(kind) => createSession(kind === "shell" ? { forceShell: true } : kind === "herdr" ? { forceHerdr: true } : undefined)}
+      canAddTab={!isRemoteTerminal() || sessions.length < REMOTE_TAB_CAP}
+      herdrNewTab={
+        isRemoteTerminal() ? getWebTermInfo()?.termHost === "herdr" : getTermPreferences().sessionHost === "herdr"
+      }
       onScroll={(lines) => send(active?.connection?.scroll(lines))}
       onMouse={(event) => send(active?.connection?.mouse(event))}
       onSelectSession={setActiveKey}

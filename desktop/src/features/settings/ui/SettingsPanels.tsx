@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
@@ -140,10 +141,15 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "buzz-term",
 ];
 
+/** Sections that only exist on the desktop app: hidden from web Settings, and their URLs fall back to the default section. */
+export const DESKTOP_ONLY_SETTINGS_SECTIONS: readonly string[] = ["compute", "mobile", "updates", "hosted-communities", "community-members", "relay-admin", "local-archive", "voice", "huddle"];
+
 export function isSettingsSection(value: unknown): value is SettingsSection {
   return (
     typeof value === "string" &&
-    (SETTINGS_SECTION_VALUES as readonly string[]).includes(value)
+    (SETTINGS_SECTION_VALUES as readonly string[]).includes(value) &&
+    // Web: Compute (share compute) is desktop-only, so #/settings?section=compute falls back to the default section.
+    !(DESKTOP_ONLY_SETTINGS_SECTIONS.includes(value) && !isTauri())
   );
 }
 
@@ -874,9 +880,9 @@ export function renderSettingsSection(
         />
       );
     case "voice":
-      return <VoiceSettingsCard />;
+      return isTauri() ? <VoiceSettingsCard /> : null;
     case "huddle":
-      return <HuddleSettingsCard />;
+      return isTauri() ? <HuddleSettingsCard /> : null;
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
@@ -884,7 +890,7 @@ export function renderSettingsSection(
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":
-      return <MeshComputeSettingsCard />;
+      return isTauri() ? <MeshComputeSettingsCard /> : null;
     case "appearance":
       return <ThemeSettingsCard />;
     case "shortcuts":
@@ -892,13 +898,13 @@ export function renderSettingsSection(
     case "buzz-term":
       return <BuzzTermSettingsPanel />;
     case "pinned-sites":
-      return <PinnedSitesSettingsCard />;
+      return isTauri() ? <PinnedSitesSettingsCard /> : null;
     case "hosted-communities":
-      return <HostedCommunitiesSettingsCard />;
+      return isTauri() ? <HostedCommunitiesSettingsCard /> : null;
     case "community-members":
-      return (
+      return isTauri() ? (
         <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
-      );
+      ) : null;
     case "community-sections":
       return <CommunitySectionsSettingsCard />;
     case "bots":
@@ -909,15 +915,15 @@ export function renderSettingsSection(
         </>
       );
     case "relay-admin":
-      return <AdminConsoleSettingsCard />;
+      return isTauri() ? <AdminConsoleSettingsCard /> : null;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
     case "local-archive":
-      return <LocalArchiveSettingsCard />;
+      return isTauri() ? <LocalArchiveSettingsCard /> : null;
     case "mobile":
-      return <MobilePairingCard currentPubkey={props.currentPubkey} />;
+      return isTauri() ? <MobilePairingCard currentPubkey={props.currentPubkey} /> : null;
     case "updates":
-      return <UpdateChecker />;
+      return isTauri() ? <UpdateChecker /> : null;
     default: {
       const exhaustiveCheck: never = section;
       return exhaustiveCheck;

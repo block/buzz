@@ -334,4 +334,219 @@
       transition: none;
     }
   }
+
+  /* Touch (phones/tablets): key bar, selection, keyboard-aware layout. */
+  .buzz-terminal-substrate[data-touch-ui="true"] {
+    overscroll-behavior: none;
+    -webkit-touch-callout: none;
+  }
+  .buzz-terminal-substrate[data-touch-ui="true"] .buzz-terminal-viewport {
+    flex: 1 1 0;
+    height: auto;
+  }
+  .buzz-terminal-substrate[data-touch-ui="true"] .buzz-terminal-input {
+    font-size: 16px; /* >=16px stops iOS zooming the page on focus */
+    left: 0;
+    top: 0;
+    pointer-events: none;
+  }
+  .buzz-terminal-touchbar {
+    background: hsl(var(--background, 0 0% 100%));
+    border-top: 1px solid hsl(var(--border, 0 0% 80%));
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+    -webkit-overflow-scrolling: touch;
+  }
+  .buzz-terminal-substrate[data-keyboard-open="true"] .buzz-terminal-touchbar {
+    padding-bottom: 6px;
+  }
+  .buzz-terminal-touch-key {
+    background: hsl(var(--muted, 0 0% 94%));
+    border: 1px solid hsl(var(--border, 0 0% 80%));
+    border-radius: 8px;
+    color: inherit;
+    flex: 1 0 auto;
+    font: 600 14px "JetBrains Mono", monospace;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 10px;
+    touch-action: manipulation;
+    user-select: none;
+  }
+  .buzz-terminal-touch-key-on {
+    background: hsl(var(--primary, 220 90% 50%));
+    color: hsl(var(--primary-foreground, 0 0% 100%));
+  }
+  .buzz-terminal-touch-sel {
+    background: rgba(80, 140, 255, 0.35);
+    pointer-events: none;
+    position: absolute;
+  }
+  .buzz-terminal-touch-menu {
+    background: hsl(var(--popover, 0 0% 100%));
+    border: 1px solid hsl(var(--border, 0 0% 80%));
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    position: absolute;
+    z-index: 5;
+  }
+  .buzz-terminal-touch-menu button {
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: inherit;
+    font: 600 14px system-ui, sans-serif;
+    min-height: 36px;
+    padding: 0 12px;
+  }
+  .buzz-terminal-pastebox {
+    background: hsl(var(--popover, 0 0% 100%));
+    border: 1px solid hsl(var(--border, 0 0% 80%));
+    border-radius: 8px;
+    color: inherit;
+    font-size: 16px;
+    left: 12px;
+    padding: 10px;
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    z-index: 6;
+  }
+}
+
+/* Phone only ([data-phone], < 600px): maximized Buzz Term goes edge to edge. iPad/desktop never match.
+   Unlayered on purpose: it must beat the Tailwind utilities (mb-2, rounded-2xl, flex) on the shell elements. */
+  [data-phone] body:has(.buzz-terminal-substrate[data-terminal-mode="maximized"][data-terminal-visible="true"]) [data-testid="app-top-chrome"] {
+    display: none;
+  }
+  [data-phone] [data-buzz-content-surface]:has(.buzz-terminal-substrate[data-terminal-mode="maximized"][data-terminal-visible="true"]) {
+    border-radius: 0;
+    box-shadow: none;
+    margin: 0;
+  }
+  /* pin to the full viewport width (the content surface's parents keep a few px of inset on the left) */
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"][data-touch-ui="true"]:not([data-keyboard-open="true"]) {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100vw !important;
+  }
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] {
+    border: 0;
+    border-radius: 0;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px) !important;
+  }
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-contract-bar {
+    flex-basis: 34px;
+    gap: 4px;
+    padding: 0 4px;
+  }
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tab,
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tab-select,
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-new-tab {
+    height: 28px;
+    padding: 0 6px;
+  }
+  /* key bar flush at the bottom; only the home-indicator inset below it (the substrate adds none) */
+  [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-touchbar {
+    margin: 0;
+    padding: 4px 4px env(safe-area-inset-bottom, 0px);
+  }
+  [data-phone] .buzz-terminal-substrate[data-keyboard-open="true"] .buzz-terminal-touchbar {
+    padding-bottom: 4px;
+  }
+
+/* Phone maximized: no inner card. The viewport's px-5/pt-2 inset goes (only safe-area insets remain) and the terminal's own
+   background fills the substrate, so the leftover sub-row band above the key bar matches the terminal instead of a frame. */
+[data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] {
+  background: var(--buzz-terminal-background, hsl(var(--background))) !important;
+}
+[data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-viewport {
+  background: var(--buzz-terminal-background, transparent);
+  margin: 0 !important;
+  padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px) !important;
+}
+/* the window controls sat in their own tinted box at the right of the tab strip: blend them into the strip */
+[data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-readout {
+  background: transparent;
+}
+
+/* Key-bar group (TouchKeyGroup): the row floats directly above its button. */
+.buzz-terminal-touch-group {
+  display: flex;
+  flex: 1 0 auto;
+  position: relative;
+}
+.buzz-terminal-touch-group > .buzz-terminal-touch-key {
+  flex: 1 0 auto;
+}
+.buzz-terminal-touch-group-row {
+  background: hsl(var(--background, 0 0% 100%));
+  border: 1px solid hsl(var(--border, 0 0% 80%));
+  border-radius: 12px;
+  box-shadow: 0 4px 16px #0003;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  position: fixed;
+  z-index: 2147483640;
+}
+.buzz-terminal-touch-group-row .buzz-terminal-touch-key {
+  min-height: 44px;
+  min-width: 56px;
+  white-space: nowrap;
+}
+
+/* + menu (Terminal / herdr) when the Session host is herdr. */
+.buzz-terminal-newtab-menu {
+  background: hsl(var(--popover, var(--background)));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  box-shadow: 0 6px 20px #0003;
+  color: hsl(var(--popover-foreground, var(--foreground)));
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  position: fixed;
+  z-index: 2147483640;
+}
+.buzz-terminal-newtab-menu > button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  min-height: 32px;
+  padding: 0 10px;
+  text-align: left;
+}
+.buzz-terminal-newtab-menu > button:hover {
+  background: hsl(var(--foreground) / 0.06);
+}
+@media (pointer: coarse) {
+  .buzz-terminal-newtab-menu > button {
+    min-height: 44px;
+  }
+}
+
+/* Key bar icon buttons (keyboard show/hide): crisp SVG centered in the 44px target. */
+.buzz-terminal-touch-key.buzz-terminal-touch-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  min-width: 44px;
+  min-height: 44px;
+}
+.buzz-terminal-touch-key.buzz-terminal-touch-icon svg {
+  width: 24px;
+  height: 24px;
+  flex: none;
 }

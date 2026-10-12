@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { cn } from "@/shared/lib/cn";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
@@ -36,6 +37,17 @@ export function AgentIdentityCard({
   statusBadge,
 }: AgentIdentityCardProps) {
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
+  // Web without Direct: the card still shows (cached/relay data) but its controls (start/stop on the avatar, the ⋯ menu) are off.
+  const { web, live } = useDesktopData();
+  const controlsOff = web && !live;
+  const gate = (node: ReactNode, testId: string) =>
+    controlsOff ? (
+      <span className="pointer-events-auto inline-flex cursor-not-allowed" title="Needs a Direct connection" aria-disabled="true" data-testid={testId}>
+        <span className="pointer-events-none opacity-50">{node}</span>
+      </span>
+    ) : (
+      node
+    );
 
   return (
     <div
@@ -53,7 +65,7 @@ export function AgentIdentityCard({
 
       <div className="pointer-events-none relative z-20 flex h-full w-full min-w-0 flex-col items-center justify-center gap-5 px-4 pb-12 text-center">
         <div className="flex h-24 w-24 items-center justify-center">
-          {avatar ??
+          {avatar && controlsOff ? gate(avatar, `${dataTestId}-controls-off`) : avatar ??
             (trimmedAvatarUrl ? (
               <ProfileAvatar
                 avatarUrl={trimmedAvatarUrl}
@@ -73,7 +85,7 @@ export function AgentIdentityCard({
       </div>
 
       {actions ? (
-        <div className="absolute top-3 right-3 z-40">{actions}</div>
+        <div className="absolute top-3 right-3 z-40">{gate(actions, `${dataTestId}-menu-off`)}</div>
       ) : null}
 
       <div className="pointer-events-none absolute right-3 bottom-3 left-3 z-30 flex min-w-0 items-end gap-2 text-left text-sm leading-5">

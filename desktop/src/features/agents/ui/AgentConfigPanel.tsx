@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -315,10 +316,12 @@ function ClaudeConfigDirNotice() {
 
 export function AgentConfigPanel({
   advancedMode = "collapsed",
-  onEdit,
+  onEdit: onEditProp,
   pubkey,
   sections = ALL_AGENT_CONFIG_SECTIONS,
 }: Props) {
+  // Web: the desktop's config is shown read-only (fetched over Direct); editing stays on the desktop.
+  const onEdit = isTauri() ? onEditProp : undefined;
   const { data, isLoading, error } = useAgentConfigSurface(pubkey);
   const flatStateTitle = sections.includes("model")
     ? "Model settings"

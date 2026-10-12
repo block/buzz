@@ -43,7 +43,9 @@ type ChannelRouteScreenProps = {
 
 const MAX_ROUTE_ANCESTOR_HOPS = 50;
 
-async function fetchRouteEvent(eventId: string): Promise<RelayEvent | null> {
+async function fetchRouteEvent(rawEventId: string): Promise<RelayEvent | null> {
+  const eventId = rawEventId.split(/[?&#]/, 1)[0]?.trim() ?? ""; // tolerate a trailing query glued onto the id
+  if (!eventId) return null;
   try {
     return await getEventById(eventId);
   } catch (error) {

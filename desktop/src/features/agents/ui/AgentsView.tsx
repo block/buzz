@@ -35,10 +35,14 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
+import { MyAgentsPanel } from "@/features/bridge/ui/MyAgentsPanel";
+import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
+  const desktopData = useDesktopData();
+  const controlsOff = desktopData.web && !desktopData.live; // web without Direct: look stays, control is off
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
@@ -164,10 +168,12 @@ export function AgentsView() {
           className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]"
           data-testid="agents-page-content"
         >
+          <MyAgentsPanel />
           <PageHeader
             action={
               <>
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
+                  {controlsOff ? null : (
                   <Button
                     data-testid="agent-defaults-button"
                     ref={fullAiDefaultsTriggerRef}
@@ -180,9 +186,11 @@ export function AgentsView() {
                       ? "Agent defaults"
                       : "Set agent defaults"}
                   </Button>
+                  )}
                   {runningAgentCount > 0 ? (
                     <Button
-                      disabled={isActionPending}
+                      disabled={isActionPending || controlsOff}
+                      title={controlsOff ? "Needs a Direct connection" : undefined}
                       onClick={() => {
                         void agents.handleBulkStopRunning();
                       }}
@@ -210,6 +218,7 @@ export function AgentsView() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
+                    {controlsOff ? null : (
                     <DropdownMenuItem
                       onSelect={() => {
                         openAiDefaults(compactActionsTriggerRef.current);
@@ -220,6 +229,7 @@ export function AgentsView() {
                         ? "Agent defaults"
                         : "Set agent defaults"}
                     </DropdownMenuItem>
+                    )}
                     {runningAgentCount > 0 ? (
                       <DropdownMenuItem
                         disabled={isActionPending}

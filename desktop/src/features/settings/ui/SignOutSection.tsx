@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -58,7 +59,10 @@ export function SignOutSection() {
   const isPhraseConfirmed =
     confirmText.trim().toLowerCase() === SIGNOUT_CONFIRM_PHRASE;
 
-  const canDelete = hasConfirmedBackup && isPhraseConfirmed && !isPending;
+  // Web: the key lives in the member's signer (Primal or a browser extension), never in this app, so there is nothing to back
+  // up or reveal here; signing out only clears this device's local app data.
+  const web = !isTauri();
+  const canDelete = (web || hasConfirmedBackup) && isPhraseConfirmed && !isPending;
 
   function resetDialogState() {
     fetchCancelledRef.current = true;
@@ -78,6 +82,7 @@ export function SignOutSection() {
 
   async function openDialog() {
     setIsOpen(true);
+    if (web) return; // never ask for (or show) a private key on the web
     fetchCancelledRef.current = false;
     setIsNsecLoading(true);
     setNsecError(null);
@@ -129,9 +134,9 @@ export function SignOutSection() {
               className="text-sm font-normal text-muted-foreground/70"
               data-settings-subcopy
             >
-              Removes your identity key and all local app data from this device.
-              Before signing out, create and test a password-protected key
-              backup above — this cannot be undone.
+              {web
+                ? "Your key stays in your signer (Primal or your browser extension). Signing out only clears this app's local data on this device."
+                : "Removes your identity key and all local app data from this device. Before signing out, create and test a password-protected key backup above — this cannot be undone."}
             </p>
           </div>
           <Button
@@ -161,12 +166,13 @@ export function SignOutSection() {
           <AlertDialogHeader>
             <AlertDialogTitle>Sign out and wipe all data?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will delete your identity key, all agent settings, and cached
-              data from this device, then relaunch Buzz into first-run setup.
-              This cannot be undone.
+              {web
+                ? "This clears Buzz's local data in this browser and signs you out. Your key stays in your signer, so you can sign in again with it."
+                : "This will delete your identity key, all agent settings, and cached data from this device, then relaunch Buzz into first-run setup. This cannot be undone."}
             </AlertDialogDescription>
           </AlertDialogHeader>
 
+          {web ? null : (
           <div className="space-y-3">
             <p className="text-sm font-medium">
               1. Confirm you can restore your identity
@@ -204,13 +210,14 @@ export function SignOutSection() {
               </span>
             </label>
           </div>
+          )}
 
           <div className="space-y-2">
             <label
               className="text-sm font-medium"
               htmlFor="signout-confirm-phrase"
             >
-              2. Type{" "}
+              {web ? "Type" : "2. Type"}{" "}
               <span className="font-semibold">"{SIGNOUT_CONFIRM_PHRASE}"</span>{" "}
               to confirm
             </label>

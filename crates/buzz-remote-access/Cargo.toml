@@ -1,0 +1,22 @@
+[package]
+name = "buzz-remote-access"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Slice B of the PWA bridge: loopback-only listener (published to the user's own tailnet) with member-key challenge auth. Not wired into the app until reviewed."
+
+[dependencies]
+nostr = "0.44"
+tokio = { version = "1", features = ["signal", "rt", "rt-multi-thread", "macros", "net", "sync", "time", "process", "io-util"] }
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.2"
+hex = "0.4"
+base64 = "0.22"
+portable-pty = "0.9"
+buzz-terminal = { path = "../../desktop/src-tauri/crates/buzz-terminal" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "io-std"] }

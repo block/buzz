@@ -13,15 +13,12 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use uuid::Uuid;
 
-use crate::terminal_transport::{FramePublisher, OfferError, Publication, SubscriptionId};
+use buzz_terminal::mouse_report::{encode_mouse_event, MouseAction, MouseButton};
+use buzz_terminal::scroll_sign::{scroll_by_dom_lines, DomLines};
+use buzz_terminal::transport::{FramePublisher, OfferError, Publication, SubscriptionId};
+use buzz_terminal::wheel_dispatch::{plan as plan_wheel, WheelAction};
 
-mod mouse_report;
-mod scroll_sign;
-mod wheel_dispatch;
 
-use mouse_report::{encode_mouse_event, MouseAction, MouseButton};
-use scroll_sign::{scroll_by_dom_lines, DomLines};
-use wheel_dispatch::{plan as plan_wheel, WheelAction};
 
 const MAX_LIVE_SESSIONS: usize = 20;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
@@ -65,176 +62,7 @@ pub(crate) struct AttachRequest {
     scrollback: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WireViewport {
-    generation: u64,
-    columns: usize,
-    screen_lines: usize,
-}
-
-impl From<Viewport> for WireViewport {
-    fn from(value: Viewport) -> Self {
-        Self {
-            generation: value.generation,
-            columns: value.columns,
-            screen_lines: value.screen_lines,
-        }
-    }
-}
-
-impl From<WireViewport> for Viewport {
-    fn from(value: WireViewport) -> Self {
-        Self {
-            generation: value.generation,
-            columns: value.columns,
-            screen_lines: value.screen_lines,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AttachResponse {
-    session_id: String,
-    subscription_id: String,
-    viewport: WireViewport,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WireStyle {
-    fg: u32,
-    bg: u32,
-    flags: u16,
-}
-
-impl From<Style> for WireStyle {
-    fn from(value: Style) -> Self {
-        Self {
-            fg: value.fg,
-            bg: value.bg,
-            flags: value.flags,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WireCluster {
-    column: usize,
-    text: String,
-    width: u8,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WireSpan {
-    style: WireStyle,
-    clusters: Vec<WireCluster>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WireRow {
-    line: usize,
-    wrapped: bool,
-    spans: Vec<WireSpan>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WireCursor {
-    line: usize,
-    column: usize,
-    visible: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct FrameMessage {
-    subscription_id: String,
-    sequence: u64,
-    rows: Vec<WireRow>,
-    cursor: WireCursor,
-    full: bool,
-    viewport: WireViewport,
-    bracketed_paste: bool,
-    focus_reporting: bool,
-    mouse_reporting: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
-pub(crate) enum TerminalMessage {
-    Frame(FrameMessage),
-    Title(String),
-    ResetTitle,
-    Bell,
-    Exit,
-}
-
-fn wire_publication(publication: Publication) -> Result<FrameMessage> {
-    let frame = publication.frame;
-    let rows = frame
-        .rows
-        .into_iter()
-        .map(|row| {
-            let spans = row
-                .spans
-                .into_iter()
-                .map(|span| {
-                    if !span.counts_are_consistent() {
-                        return Err(
-                            "terminal engine emitted an inconsistent cluster count".to_string()
-                        );
-                    }
-                    let clusters = if span.cluster_count == 1 {
-                        vec![WireCluster {
-                            column: span.column,
-                            text: span.text,
-                            width: span.width,
-                        }]
-                    } else {
-                        span.text
-                            .chars()
-                            .enumerate()
-                            .map(|(index, ch)| WireCluster {
-                                column: span.column + index * usize::from(span.width),
-                                text: ch.to_string(),
-                                width: span.width,
-                            })
-                            .collect()
-                    };
-                    Ok(WireSpan {
-                        style: span.style.into(),
-                        clusters,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(WireRow {
-                line: row.line,
-                wrapped: row.wrapped,
-                spans,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(FrameMessage {
-        subscription_id: publication.subscription_id.to_string(),
-        sequence: publication.sequence,
-        rows,
-        cursor: WireCursor {
-            line: frame.cursor.line,
-            column: frame.cursor.column,
-            visible: frame.cursor.visible,
-        },
-        full: frame.full,
-        viewport: frame.viewport.into(),
-        bracketed_paste: false,
-        focus_reporting: false,
-        mouse_reporting: false,
-    })
-}
+use buzz_terminal::wire::*;
 
 fn feed_and_drain(terminal: &SharedTerminal, bytes: &[u8]) -> bool {
     let mut more = terminal.feed(bytes);

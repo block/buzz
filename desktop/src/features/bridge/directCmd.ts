@@ -1,0 +1,376 @@
+// Desktop-side executor for the web's "desktop command proxy" over the direct (tailnet) connection.
+// The web app runs the desktop's own Agents UI; its data commands (list_managed_agents, ...) are forwarded here by name.
+// Only the commands in this table can run. Reads return the desktop's raw answer with secrets removed; writes forward only
+// validated fields (never commands, args, env var values, prompts or key material). Pure: IO is injected via `invokeRaw`.
+import { MgmtError } from "./mgmtError";
+
+export type RawInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+export type CmdDeps = { invokeRaw: RawInvoke; ownerPubkey?: string };
+
+const HEX64 = /^[0-9a-f]{64}$/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
+const CONTROL = /[\u0000-\u001f\u007f]/;
+const bad = (m: string): never => {
+  throw new MgmtError("bad_request", m);
+};
+const obj = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+
+function str(v: unknown, field: string, max: number): string | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  if (typeof v !== "string") return bad(`${field} must be text.`);
+  const t = v.trim();
+  if (t.length > max) return bad(`${field} is too long.`);
+  if (CONTROL.test(t)) return bad(`${field} has invalid characters.`);
+  return t || undefined;
+}
+function pubkey(v: unknown): string {
+  const p = typeof v === "string" ? v.toLowerCase() : "";
+  return HEX64.test(p) ? p : bad("Choose one of your agents.");
+}
+
+/** env var values never leave the desktop: keys stay (the UI shows which are set), values are blanked. */
+export function blankEnv(e: unknown): Record<string, string> {
+  return Object.fromEntries(Object.keys(obj(e)).map((k) => [k, ""]));
+}
+export function sanitizeAgent(a: unknown): unknown {
+  const r = { ...obj(a) };
+  if ("env_vars" in r) r.env_vars = blankEnv(r.env_vars);
+  if ("private_key_nsec" in r) r.private_key_nsec = "";
+  return r;
+}
+export function sanitizePersona(p: unknown): unknown {
+  const r = { ...obj(p) };
+  if ("env_vars" in r) r.env_vars = blankEnv(r.env_vars);
+  return r;
+}
+function sanitizeRuntime(e: unknown): unknown {
+  const r = { ...obj(e) };
+  if ("definition_env" in r) r.definition_env = blankEnv(r.definition_env);
+  return r;
+}
+export function sanitizeGlobal(c: unknown): unknown {
+  const r = { ...obj(c) };
+  r.env_vars = blankEnv(r.env_vars);
+  return r;
+}
+const list = (v: unknown, f: (x: unknown) => unknown, max = 500) => (Array.isArray(v) ? v.slice(0, max).map(f) : []);
+
+export const RESPOND_MODES = ["owner-only", "anyone", "allowlist"] as const;
+function respondFields(src: Record<string, unknown>, out: Record<string, unknown>) {
+  if (src.respondTo !== undefined) {
+    if (typeof src.respondTo !== "string" || !(RESPOND_MODES as readonly string[]).includes(src.respondTo)) bad("Unknown access mode.");
+    out.respondTo = src.respondTo;
+  }
+  if (src.respondToAllowlist !== undefined) {
+    const l = src.respondToAllowlist;
+    if (!Array.isArray(l) || l.length > 500) return bad("The allow list is too long.");
+    out.respondToAllowlist = l.map((x) => (typeof x === "string" && HEX64.test(x.toLowerCase()) ? x.toLowerCase() : bad("The allow list has an invalid key.")));
+  }
+}
+
+async function runtimeFor(deps: CmdDeps, command: string): Promise<void> {
+  const cat = list(await deps.invokeRaw("discover_acp_providers", { force: false }), (x) => obj(x), 200) as Array<Record<string, unknown>>;
+  const ok = cat.some((r) => r.command === command && r.availability === "available" && r.source !== "custom");
+  if (!ok) throw new MgmtError("runtime_unavailable", "Custom harnesses can't be set remotely. Pick an installed harness, or edit it on the desktop.");
+}
+
+export const CMD_READS = [
+  "list_managed_agents",
+  "list_managed_agent_runtimes",
+  "list_personas",
+  "discover_acp_providers",
+  "agent_access_owner_only",
+  "get_global_agent_config",
+  "get_presence",
+  "get_openclaw_workspace_mcp_status",
+  "discover_agent_models",
+  "get_agent_models",
+  "get_term_settings",
+  "get_agent_config_surface",
+  "get_managed_agent_log",
+  "get_agent_memory",
+] as const;
+export const CMD_WRITES = [
+  "start_managed_agent",
+  "stop_managed_agent",
+  "create_managed_agent",
+  "update_managed_agent",
+  "create_persona",
+  "update_persona",
+  "prepare_term_session_launch",
+] as const;
+const PROMPT_MAX = 20_000;
+async function runtimeIdFor(deps: CmdDeps, id: string): Promise<void> {
+  const cat = list(await deps.invokeRaw("discover_acp_providers", { force: false }), (x) => obj(x), 200) as Array<Record<string, unknown>>;
+  if (!cat.some((r) => r.id === id && r.availability === "available" && r.source !== "custom"))
+    throw new MgmtError("runtime_unavailable", "Custom harnesses can't be set remotely. Pick an installed harness, or edit it on the desktop.");
+}
+function behaviorOf(v: unknown): Record<string, unknown> | undefined {
+  if (v === undefined || v === null) return undefined;
+  const b = obj(v);
+  const out: Record<string, unknown> = {};
+  respondFields(b, out);
+  if (b.parallelism !== undefined) {
+    if (!Number.isInteger(b.parallelism) || (b.parallelism as number) < 1 || (b.parallelism as number) > 32) bad("Parallelism must be 1-32.");
+    out.parallelism = b.parallelism;
+  }
+  if (b.sessionPolicy !== undefined) {
+    if (b.sessionPolicy !== "channel" && b.sessionPolicy !== "thread") bad("Unknown session policy.");
+    out.sessionPolicy = b.sessionPolicy;
+  }
+  return out;
+}
+async function personaFields(i: Record<string, unknown>, deps: CmdDeps): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { displayName: str(i.displayName, "Name", 64) ?? bad("Name is required.") };
+  const prompt = typeof i.systemPrompt === "string" ? i.systemPrompt : "";
+  if (prompt.length > PROMPT_MAX) bad("The prompt is too long.");
+  out.systemPrompt = prompt;
+  if (i.description !== undefined && i.description !== null) out.description = str(i.description, "Description", 280) ?? "";
+  for (const [k, max] of [["model", 100], ["provider", 100]] as const) {
+    const v = str(i[k], k, max);
+    if (v) out[k] = v;
+  }
+  const rt = str(i.runtime, "Harness", 100);
+  if (rt) {
+    await runtimeIdFor(deps, rt);
+    out.runtime = rt;
+  }
+  const av = str(i.avatarUrl, "Avatar", 500);
+  if (av) {
+    if (!/^https?:\/\//i.test(av)) bad("The avatar must be a web link.");
+    out.avatarUrl = av;
+  }
+  const pool = i.namePool;
+  if (Array.isArray(pool)) out.namePool = pool.slice(0, 100).map((n) => str(n, "Name pool", 64) ?? bad("Invalid name pool."));
+  const beh = behaviorOf(i.behavior);
+  if (beh) out.behavior = beh;
+  return out;
+}
+/** Model list fields only (no env, paths or tokens). */
+function modelsOut(v: unknown): unknown {
+  const r = obj(v);
+  const s = (x: unknown, max = 300) => (typeof x === "string" ? x.slice(0, max) : null);
+  return {
+    agentName: s(r.agentName) ?? "",
+    agentVersion: s(r.agentVersion) ?? "",
+    models: list(r.models, (m) => {
+      const o = obj(m);
+      return { id: s(o.id) ?? "", name: s(o.name), description: s(o.description, 1000) };
+    }, 500),
+    agentDefaultModel: s(r.agentDefaultModel),
+    selectedModel: s(r.selectedModel),
+    supportsSwitching: r.supportsSwitching === true,
+  };
+}
+
+const SECRET_NAME = /(token|secret|passw|api[_-]?key|apikey|auth|credential|cookie|bearer|private|session[_-]?key|access[_-]?key)/i;
+/** Masks obvious credentials in free text (log lines, config values). */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, "$1$2[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/g, "$1 [redacted]")
+    .replace(/\b(?:sk|rk|xox[abpr]|ghp|gho|ghs|github_pat|glpat|AKIA|nsec1)[A-Za-z0-9_-]{10,}/g, "[redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "[redacted]");
+}
+/** Runtime config surface for the read-only web panel: settings and MCP server names only, no secret-looking values. */
+function configSurfaceOut(v: unknown): unknown {
+  const r = obj(v);
+  const field = (f: unknown) => {
+    const x = obj(f);
+    const secret = SECRET_NAME.test(String(x.key ?? "")) || SECRET_NAME.test(String(x.label ?? ""));
+    return { ...x, value: x.value == null ? null : secret ? "[hidden]" : redactSecrets(String(x.value)) };
+  };
+  const norm = obj(r.normalized);
+  const normalized = Object.fromEntries(
+    Object.entries(norm).map(([k, nf]) => {
+      if (!nf || typeof nf !== "object") return [k, nf ?? null];
+      const n = obj(nf);
+      return [k, { ...n, ...(typeof n.value === "string" ? { value: redactSecrets(n.value) } : {}) }];
+    }),
+  );
+  return {
+    runtimeId: r.runtimeId ?? null,
+    runtimeLabel: r.runtimeLabel ?? null,
+    isPreSpawn: r.isPreSpawn === true,
+    normalized,
+    advanced: list(r.advanced, field, 500),
+    extensions: list(r.extensions, (e) => {
+      const x = obj(e);
+      return { name: String(x.name ?? ""), kind: String(x.kind ?? ""), enabled: x.enabled === true };
+    }, 500),
+    sources: r.sources ?? {},
+    ...(r.claudeConfigDirCustom !== undefined ? { claudeConfigDirCustom: r.claudeConfigDirCustom === true } : {}),
+    ...(typeof r.effortConfigId === "string" ? { effortConfigId: r.effortConfigId } : {}),
+    ...(Array.isArray(r.effortOptions) ? { effortOptions: r.effortOptions } : {}),
+  };
+}
+async function managedPubkey(deps: CmdDeps, raw: unknown): Promise<string> {
+  const pk = typeof raw === "string" && HEX64.test(raw.toLowerCase()) ? raw.toLowerCase() : bad("Invalid pubkey.");
+  const agents = list(await deps.invokeRaw("list_managed_agents"), (x) => obj(x), 500) as Array<Record<string, unknown>>;
+  if (!agents.some((x) => String(x.pubkey).toLowerCase() === pk)) throw new MgmtError("not_found", "That agent isn't on your desktop.");
+  return pk;
+}
+export const CMD_NAMES: readonly string[] = [...CMD_READS, ...CMD_WRITES];
+
+/** The result of a proxied command, or throws MgmtError. `which` tells the caller whether the call mutates agent state. */
+export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Promise<unknown> {
+  const a = obj(args);
+  const inv = deps.invokeRaw;
+  switch (name) {
+    case "list_managed_agents":
+      return list(await inv(name), sanitizeAgent, 200);
+    case "list_managed_agent_runtimes":
+      return list(await inv(name), (x) => x, 200);
+    case "list_personas":
+      return list(await inv(name), sanitizePersona, 200);
+    case "discover_acp_providers":
+      return list(await inv(name, { force: a.force === true }), sanitizeRuntime, 200);
+    case "prepare_term_session_launch": {
+      // Term-session card Open from the web: the desktop writes the card's prompt file (and, for Claude, its MCP config) exactly
+      // as its own Open does. Only paths come back; the shell line is typed into a remote terminal, which keeps its own
+      // "Allow remote terminal" switch and signed-duration checks.
+      const i = obj(a.input);
+      const sid = str(i.sid, "Session", 128) ?? bad("Missing session id.");
+      if (!/^[A-Za-z0-9_-]+$/.test(sid)) bad("Invalid session id.");
+      const tool = i.tool === "claude" || i.tool === "codex" ? i.tool : bad("Harness must be claude or codex.");
+      const prompt = typeof i.prompt === "string" && i.prompt.length > 0 ? i.prompt : bad("Missing prompt.");
+      if (prompt.length > 200_000) bad("The prompt is too long.");
+      const cwd = i.cwd == null ? null : (str(i.cwd, "Directory", 4096) ?? null);
+      const r = obj(await inv(name, { input: { sid, tool, prompt, cwd, openclawWorkspace: i.openclawWorkspace === true } }));
+      const path = (v: unknown) => (typeof v === "string" ? v.slice(0, 4096) : null);
+      return {
+        promptPath: path(r.promptPath) ?? "",
+        claudeConfigDir: path(r.claudeConfigDir),
+        openclawWired: r.openclawWired === true,
+        userSignerDir: path(r.userSignerDir),
+        buzzDevMcpWired: r.buzzDevMcpWired === true,
+      };
+    }
+    case "get_agent_config_surface":
+      return configSurfaceOut(await inv(name, { pubkey: await managedPubkey(deps, a.pubkey) }));
+    case "get_managed_agent_log": {
+      const pk = await managedPubkey(deps, a.pubkey);
+      const n = Number.isInteger(a.lineCount) ? Math.min(Math.max(a.lineCount as number, 1), 2000) : 500;
+      const r = obj(await inv(name, { pubkey: pk, lineCount: n }));
+      return { content: redactSecrets(String(r.content ?? "")).slice(-400_000), log_path: typeof r.log_path === "string" ? r.log_path : "" };
+    }
+    case "get_agent_memory": {
+      // The desktop checks you own the agent before decrypting; only managed agents are allowed here too.
+      const r = obj(await inv(name, { agentPubkey: await managedPubkey(deps, a.agentPubkey) }));
+      const entry = (e: unknown) => {
+        const x = obj(e);
+        return { slug: String(x.slug ?? ""), body: redactSecrets(String(x.body ?? "")), eventId: String(x.eventId ?? ""), createdAt: Number(x.createdAt ?? 0), outgoingRefs: list(x.outgoingRefs, (y) => String(y), 500) };
+      };
+      return { core: r.core ? entry(r.core) : null, memories: list(r.memories, entry, 5000), truncated: r.truncated === true, fetchedAt: Number(r.fetchedAt ?? 0) };
+    }
+    case "get_presence": {
+      // The desktop's own presence answer, so an agent's online dot on the web is exactly what the desktop shows.
+      const pks = Array.isArray(a.pubkeys) ? a.pubkeys : bad("pubkeys must be a list.");
+      if (pks.length > 500) bad("Too many pubkeys.");
+      const keys = pks.map((x) => (typeof x === "string" && HEX64.test(x.toLowerCase()) ? x.toLowerCase() : bad("Invalid pubkey.")));
+      const r = obj(await inv(name, { pubkeys: keys }));
+      return Object.fromEntries(Object.entries(r).filter(([k, v]) => HEX64.test(k.toLowerCase()) && (v === "online" || v === "away" || v === "offline")));
+    }
+    case "discover_agent_models": {
+      // Model lists for a harness on the desktop. The web names a runtime by its command; only a command from the desktop's
+      // own catalog is run, with the catalog's args and env and the desktop's own default env (nothing the web sends is
+      // executed or injected).
+      const i = obj(a.input);
+      const want = str(i.agentCommand, "Harness", 500) ?? bad("Choose a harness.");
+      const cat = list(await inv("discover_acp_providers", { force: false }), (x) => obj(x), 200) as Array<Record<string, unknown>>;
+      const entry = cat.find((r) => r.command === want && r.availability === "available");
+      if (!entry) throw new MgmtError("runtime_unavailable", "That harness isn't installed on your desktop.");
+      const provider = str(i.provider, "Provider", 100);
+      const global = obj(await inv("get_global_agent_config"));
+      const env = global.env_vars && typeof global.env_vars === "object" ? (global.env_vars as Record<string, string>) : {};
+      return modelsOut(
+        await inv(name, {
+          input: {
+            agentCommand: entry.command,
+            agentArgs: Array.isArray(entry.defaultArgs) ? entry.defaultArgs : [],
+            ...(provider ? { provider } : {}),
+            envVars: env,
+            definitionEnv: entry.definitionEnv && typeof entry.definitionEnv === "object" ? entry.definitionEnv : {},
+          },
+        }),
+      );
+    }
+    case "get_term_settings": {
+      // Buzz Term session preferences live in the desktop frontend's store (no secrets): cwd, shell, scrollback, host.
+      const { getTermPreferences } = await import("@/features/terminal/termPreferences");
+      const p = getTermPreferences();
+      return { cwd: p.cwd || null, shell: p.shell || null, scrollback: p.scrollback ?? null, sessionHost: p.sessionHost ?? null, sessionName: p.sessionName || null };
+    }
+    case "get_agent_models":
+      return modelsOut(await inv(name, { pubkey: pubkey(a.pubkey) }));
+    case "get_openclaw_workspace_mcp_status": {
+      // Status only: no URL, token or headers leave the desktop.
+      const r = obj(await inv(name));
+      return { connected: r.connected === true, expiresAt: typeof r.expiresAt === "string" ? r.expiresAt : null, connectedViaRelay: r.connectedViaRelay === true };
+    }
+    case "agent_access_owner_only":
+      return (await inv(name)) === true;
+    case "get_global_agent_config":
+      return sanitizeGlobal(await inv(name));
+    case "start_managed_agent":
+      return sanitizeAgent(await inv(name, { pubkey: pubkey(a.pubkey), expectedRelayUrl: null, expectedSignerPubkey: deps.ownerPubkey ?? null, replayFloorUnix: null }));
+    case "create_persona": {
+      const r = await inv(name, { input: await personaFields(obj(a.input), deps) });
+      return sanitizePersona(r);
+    }
+    case "update_persona": {
+      const i = obj(a.input);
+      const id = str(i.id, "Persona", 100) ?? bad("Choose an agent definition.");
+      const r = await inv(name, { input: { id, ...(await personaFields(i, deps)) } });
+      return sanitizePersona(r);
+    }
+    case "stop_managed_agent":
+      return sanitizeAgent(await inv(name, { pubkey: pubkey(a.pubkey) }));
+    case "create_managed_agent": {
+      const i = obj(a.input);
+      const out: Record<string, unknown> = { name: str(i.name, "Name", 64) ?? bad("Name is required.") };
+      for (const [k, max] of [["personaId", 100], ["provider", 100], ["model", 100]] as const) {
+        const v = str(i[k], k, max);
+        if (v) out[k] = v;
+      }
+      if (typeof i.systemPrompt === "string" && i.systemPrompt) {
+        if (i.systemPrompt.length > PROMPT_MAX) bad("The prompt is too long.");
+        out.systemPrompt = i.systemPrompt;
+      }
+      if (i.spawnAfterCreate === true) out.spawnAfterCreate = true;
+      const cmd = str(i.agentCommand, "Harness", 500);
+      if (cmd) {
+        await runtimeFor(deps, cmd);
+        out.agentCommand = cmd;
+        out.harnessOverride = i.harnessOverride === true;
+      }
+      respondFields(i, out);
+      const r = obj(await inv(name, { input: out }));
+      return { ...r, agent: sanitizeAgent(r.agent), private_key_nsec: "" };
+    }
+    case "update_managed_agent": {
+      const i = obj(a.input);
+      const out: Record<string, unknown> = { pubkey: pubkey(i.pubkey) };
+      const nm = str(i.name, "Name", 64);
+      if (i.name !== undefined) out.name = nm ?? bad("Name is required.");
+      for (const [k, max] of [["provider", 100], ["model", 100]] as const)
+        if (k in i) out[k] = str(i[k], k, max) ?? null;
+      if (typeof i.systemPrompt === "string") {
+        if (i.systemPrompt.length > PROMPT_MAX) bad("The prompt is too long.");
+        out.systemPrompt = i.systemPrompt;
+      }
+      const cmd = str(i.agentCommand, "Harness", 500);
+      if (cmd) {
+        await runtimeFor(deps, cmd);
+        out.agentCommand = cmd;
+        out.harnessOverride = i.harnessOverride === true;
+      }
+      respondFields(i, out);
+      if (Object.keys(out).length === 1) bad("Nothing to change.");
+      const r = obj(await inv(name, { input: out }));
+      return { ...r, agent: sanitizeAgent(r.agent) };
+    }
+    default:
+      throw new MgmtError("unknown_op", "That command isn't available remotely.");
+  }
+}

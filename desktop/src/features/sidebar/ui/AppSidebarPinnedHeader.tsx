@@ -1,3 +1,6 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { useNavigate } from "@tanstack/react-router";
+import { WebRemoteWatcher, useWebRemoteNav } from "@/features/bridge/ui/WebRemoteSettings";
 import {
   Activity,
   AppWindow,
@@ -160,13 +163,23 @@ export function AppSidebarPrimaryMenu({
   selectedView,
   testIdScope,
 }: AppSidebarPrimaryMenuProps) {
-  const { pins } = usePinnedSites();
+  const { pins: allPins } = usePinnedSites();
+  const web = !isTauri();
+  const remoteNav = useWebRemoteNav();
+  const navigate = useNavigate();
+  // The Buzz term page (/buzz-term, also the instructions state) highlights Buzz term, never Agents.
+  const onBuzzTermPage = web && selectedView === "buzzTerm";
+  // Agents is NEVER greyed out: it always opens the Agents page (the relay-bridge list + what to enable for management).
+  // Buzz term is plain greyed out while unavailable; clicking opens an instructions page.
+  const terminalLocked = web && !remoteNav.terminal;
+  const pins = isTauri() ? allPins : []; // web/mobile: pinned sites are desktop-only (docs/pwa-web-differences.md #1)
   const { preferences, counts } = useSidebarMenuCounts();
   const terminalPanel = useTerminalPanel();
   const buzzTermActive = isLeftNavBuzzTermActive(terminalPanel);
   const rowTestId = (id: string) => scopedPrimaryMenuTestId(testIdScope, id);
   return (
     <>
+      {web ? <WebRemoteWatcher /> : null}
       <SidebarHeader
         className="relative z-40 cursor-default select-none px-2 pb-0 pt-0"
         data-tauri-drag-region={dragRegion ? true : undefined}
@@ -317,13 +330,19 @@ export function AppSidebarPrimaryMenu({
               />
             </SidebarMenuItem>
           </PrimaryTabRow>
-          <PrimaryTabRow label="Buzz Term" target={{ kind: "buzz-term" }}>
+          <PrimaryTabRow label={web ? "Buzz term" : "Buzz Term"} target={{ kind: "buzz-term" }}>
             <SidebarMenuItem>
               <SidebarMenuButton
-                className="data-[active=true]:font-normal"
+                className={`data-[active=true]:font-normal${terminalLocked ? " opacity-50" : ""}`}
                 data-testid={rowTestId("open-buzz-term-view")}
-                isActive={buzzTermActive}
+                data-unavailable={terminalLocked ? "true" : undefined}
+                isActive={buzzTermActive || onBuzzTermPage}
                 onClick={() => {
+                  if (web) {
+                    // Always opens the Buzz term page; while unavailable it shows the instructions (row stays greyed).
+                    void navigate({ to: "/buzz-term" });
+                    return;
+                  }
                   // Open Term before park so pin restore sees left-nav Term
                   // active and PinnedSiteSurface does not re-show on top.
                   openTerminalPanel("maximized", "all");
@@ -333,7 +352,7 @@ export function AppSidebarPrimaryMenu({
                 type="button"
               >
                 <SquareTerminal className="h-4 w-4" />
-                <SidebarMenuLabel>Buzz Term</SidebarMenuLabel>
+                <SidebarMenuLabel>{web ? "Buzz term" : "Buzz Term"}</SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </PrimaryTabRow>

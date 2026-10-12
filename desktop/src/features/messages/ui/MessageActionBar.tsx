@@ -54,6 +54,7 @@ import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ProtectedMessageAction } from "@protected-feature-components";
+import { RelayImg } from "@/shared/ui/RelayImg";
 
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
@@ -374,7 +375,7 @@ function QuickReactionButton({
           type="button"
         >
           {mediaUrl ? (
-            <img
+            <RelayImg
               alt={emoji}
               className="h-5 w-5 object-contain"
               draggable={false}

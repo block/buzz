@@ -1,5 +1,6 @@
 import * as React from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { isTauri } from "@tauri-apps/api/core";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 
 import { PinnedSiteScreen } from "@/features/pinned-sites/ui/PinnedSiteScreen";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -10,6 +11,7 @@ export const Route = createFileRoute("/pins/$pinId")({
 
 function PinnedSiteRouteComponent() {
   const { pinId } = Route.useParams();
+  if (!isTauri()) return <Navigate to="/" replace />; // pinned sites do not exist on web
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="agents" />}>
       <PinnedSiteScreen pinId={pinId} />

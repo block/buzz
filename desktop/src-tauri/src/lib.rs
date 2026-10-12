@@ -42,6 +42,7 @@ pub mod nostr_convert;
 mod observed_unread;
 mod persona_catalog;
 mod pin_webview;
+mod remote_access;
 mod playground_webview;
 mod popout_window;
 mod prevent_sleep;
@@ -55,7 +56,6 @@ mod team_catalog;
 mod templates;
 mod terminal_runtime;
 #[cfg_attr(not(test), allow(dead_code))]
-mod terminal_transport;
 #[cfg(target_os = "macos")]
 mod tray_menu;
 mod unread_catch_up;
@@ -216,6 +216,7 @@ pub fn run() {
         .manage(build_app_state())
         .manage(html_preview::HtmlPreviewStore::default())
         .manage(ClipboardState::new())
+        .manage(remote_access::RemoteAccessState::default())
         .manage(PendingCommunityDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
@@ -871,6 +872,13 @@ pub fn run() {
             pin_webview::pin_webview_inspect,
             pin_webview::pin_webview_close_inspect,
             pin_webview::pin_webview_screenshot,
+            remote_access::remote_access_status,
+            remote_access::remote_access_set_enabled,
+            remote_access::remote_access_set_terminals,
+            remote_access::remote_access_set_term_config,
+            remote_access::remote_access_set_agents,
+            remote_access::remote_access_set_terminal_ttl,
+            remote_access::remote_mgmt_reply,
             playground_webview::playground_probe,
             playground_webview::playground_webview_show,
             playground_webview::playground_webview_hide,
@@ -1097,12 +1105,14 @@ pub fn run() {
             }
         }
         RunEvent::ExitRequested { code, .. } => {
+            remote_access::shutdown_blocking(app_handle);
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);
             }
             shut_down_app(app_handle, &run_shutdown_done);
         }
         RunEvent::Exit => {
+            remote_access::shutdown_blocking(app_handle);
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]

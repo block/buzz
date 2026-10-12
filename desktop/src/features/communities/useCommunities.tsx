@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ReactNode } from "react";
+import type { Context, ReactNode } from "react";
 
 import type { Community } from "./types";
 import {
@@ -155,7 +155,17 @@ export type UseCommunitiesReturn = {
   reorderCommunities: (orderedIds: string[]) => void;
 };
 
-const CommunitiesContext = createContext<UseCommunitiesReturn | null>(null);
+// One context instance per page, kept on globalThis: a dev hot reload of this module used to create a second context while the
+// mounted provider still served the first, so every consumer threw "must be used within a CommunitiesProvider" until a reload.
+const CTX_KEY = "__buzzCommunitiesContext";
+const CommunitiesContext: Context<UseCommunitiesReturn | null> =
+  ((globalThis as Record<string, unknown>)[CTX_KEY] as Context<UseCommunitiesReturn | null> | undefined) ??
+  ((globalThis as Record<string, unknown>)[CTX_KEY] = createContext<UseCommunitiesReturn | null>(null)) as Context<UseCommunitiesReturn | null>;
+
+/** Like useCommunities, but null outside a CommunitiesProvider (leaf hooks that can degrade, e.g. relay-scoped queries). */
+export function useOptionalCommunities(): UseCommunitiesReturn | null {
+  return useContext(CommunitiesContext);
+}
 
 export function CommunitiesProvider({ children }: { children: ReactNode }) {
   const value = useCommunitiesInternal();

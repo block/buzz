@@ -11,6 +11,7 @@ import {
   POPOVER_SHADOW_STYLE,
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
+import { RelayImg } from "@/shared/ui/RelayImg";
 
 type EmojiAutocompleteProps = {
   suggestions: EmojiSuggestion[];
@@ -93,7 +94,7 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
               type="button"
             >
               {suggestion.url ? (
-                <img
+                <RelayImg
                   alt={`:${suggestion.id}:`}
                   src={suggestion.url}
                   className="h-5 w-5 object-contain"

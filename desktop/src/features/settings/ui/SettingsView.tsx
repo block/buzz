@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
@@ -32,6 +33,7 @@ import {
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 import {
   renderSettingsSection,
+  DESKTOP_ONLY_SETTINGS_SECTIONS,
   settingsSections,
   type SettingsPanelProps,
   type SettingsSection,
@@ -63,7 +65,7 @@ export const settingsNavGroups: Array<{
       "huddle",
       "shortcuts",
       "buzz-term",
-      "pinned-sites",
+      ...(isTauri() ? (["pinned-sites"] as SettingsSection[]) : []), // web: pinned sites are desktop-only (docs/pwa-web-differences.md #1)
       "custom-emoji",
       "local-archive",
       "channel-templates",
@@ -187,6 +189,8 @@ export function SettingsView({
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
     return settingsSections.filter((s) => {
+      // Web: desktop-only sections (Compute, Mobile, Updates, Hosted communities, Invites, Admin).
+      if (DESKTOP_ONLY_SETTINGS_SECTIONS.includes(s.value) && !isTauri()) return false;
       // Feature gate check. Manifest is preview-only — if the gate id is in
       // the manifest, it's preview and needs an opt-in; if it's not, it's
       // stable and renders unconditionally (fail-open).
@@ -307,7 +311,8 @@ export function SettingsView({
         </SidebarHeader>
 
         <SidebarContent>
-          {myMembershipQuery.isPending ? (
+          {/* Web: invites are desktop-only, so no invite-permission status here. */}
+          {isTauri() && myMembershipQuery.isPending ? (
             <div
               className="mx-3 flex items-center gap-2 rounded-md border border-sidebar-border px-3 py-2 text-xs text-sidebar-foreground/70"
               data-testid="community-access-loading"
@@ -316,7 +321,7 @@ export function SettingsView({
               Checking invite permissions…
             </div>
           ) : null}
-          {myMembershipQuery.isError ? (
+          {isTauri() && myMembershipQuery.isError ? (
             <div
               className="mx-3 space-y-2 rounded-md border border-destructive/40 px-3 py-2 text-xs text-sidebar-foreground"
               data-testid="community-access-error"
@@ -335,7 +340,7 @@ export function SettingsView({
               </button>
             </div>
           ) : null}
-          {shouldWarnMissingMembershipSnapshot(myMembershipQuery.data) ? (
+          {isTauri() && shouldWarnMissingMembershipSnapshot(myMembershipQuery.data) ? (
             <div
               className="mx-3 flex items-start gap-2 rounded-md border border-amber-500/40 px-3 py-2 text-xs text-sidebar-foreground"
               data-testid="community-access-snapshot-missing"

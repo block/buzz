@@ -11,6 +11,7 @@ import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastE
 import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
+import { useAgentProfileLive } from "@/features/agents/lib/useAgentProfileLive";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
@@ -27,6 +28,7 @@ import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
+import { NeedsDirect } from "@/features/bridge/ui/DesktopData";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
@@ -104,6 +106,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   } = props;
 
   const isArchived = useIsArchivedPredicate();
+  useAgentProfileLive(React.useMemo(() => agents.map((a) => a.pubkey), [agents]));
   const bestiePubkey = useProtectedBestiePubkey(agents)?.toLowerCase() ?? null;
   const { groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents, isArchived),
@@ -133,12 +136,15 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
           <div className={IDENTITY_CARD_GRID_CLASS}>
-            <CreateIdentityCard
-              ariaLabel="New agent"
-              dataTestId="new-agent-card"
-              disabled={isPersonasPending}
-              onClick={onOpenCatalog}
-            />
+            {/* Web: adding needs the desktop over Direct, so the + card only shows while it's connected. */}
+            <NeedsDirect>
+              <CreateIdentityCard
+                ariaLabel="New agent"
+                dataTestId="new-agent-card"
+                disabled={isPersonasPending}
+                onClick={onOpenCatalog}
+              />
+            </NeedsDirect>
             {groups.map((group) => {
               const profileAgent = pickProfileAgent(group.agents, isArchived);
               return (
@@ -272,7 +278,12 @@ function AgentPersonaCard({
   onStartPersona: (persona: AgentPersona) => void;
 }) {
   const availability = getAvailability(agent?.pubkey);
-  const title = persona.displayName;
+  const profileQuery = useUserProfileQuery(agent?.pubkey);
+  // The linked agent's own name (its profile name, then its stored name), so a rename shows on the card; the persona's name
+  // when no agent is linked.
+  const title = agent
+    ? profileQuery.data?.displayName?.trim() || agent.name?.trim() || persona.displayName
+    : persona.displayName;
   // Card face second line: the authored description when one exists;
   // otherwise fall back to the model label as before.
   const subtitle =
@@ -284,7 +295,6 @@ function AgentPersonaCard({
       defaultModel,
     });
   const isActive = agent ? isManagedAgentActive(agent) : false;
-  const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
     ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
     : persona.avatarUrl;

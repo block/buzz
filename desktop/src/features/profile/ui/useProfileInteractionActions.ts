@@ -25,6 +25,7 @@ import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
+import { huddlesAvailable } from "@/features/huddle/lib/huddlesAvailable";
 
 export type ProfileInteractionAction = "huddle" | "message" | "wave";
 
@@ -115,7 +116,7 @@ export function useProfileInteractionActions({
         isCommunityBot,
         viewerIsOwner: viewerIsOwner === true,
       }));
-  const canHuddle = canInteract && (availability?.huddle ?? canMessage);
+  const canHuddle = huddlesAvailable() && canInteract && (availability?.huddle ?? canMessage);
   const selfProfileQuery = useProfileQuery(enabled && canWave);
 
   React.useEffect(() => {

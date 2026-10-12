@@ -2,11 +2,11 @@ import {
   DndContext,
   DragOverlay,
   KeyboardSensor,
-  PointerSensor,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
 import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
+import { useSidebarDragSensors } from "@/shared/lib/dndSensors";
 import {
   SortableContext,
   arrayMove,
@@ -124,7 +124,7 @@ function CommunityButton({
               aria-current={isActive ? "true" : undefined}
               aria-label={tooltipLabel}
               className={cn(
-                "relative flex h-9 w-9 items-center justify-center touch-none outline-hidden focus:outline-none focus-visible:outline-none",
+                "relative flex h-9 w-9 items-center justify-center touch-pan-y select-none [-webkit-touch-callout:none] outline-hidden focus:outline-none focus-visible:outline-none",
                 isDragging && "opacity-30",
               )}
               data-testid={`community-rail-button-${community.id}`}
@@ -327,8 +327,10 @@ export function CommunityRail({
     React.useState<Community | null>(null);
   const [draggingId, setDraggingId] = React.useState<string | null>(null);
 
+  const [mouseSensor, touchSensor] = useSidebarDragSensors();
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    mouseSensor,
+    touchSensor,
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     }),

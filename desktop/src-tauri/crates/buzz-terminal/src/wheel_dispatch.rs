@@ -6,13 +6,13 @@
 //!    forward as cursor up/down so TUIs like `less` / `vim` scroll.
 //! 3. **Otherwise**: move the emulator scrollback (handled by the caller).
 
-use buzz_terminal::Terminal;
+use crate::Terminal;
 
-use super::scroll_sign::DomLines;
+use crate::scroll_sign::DomLines;
 
 /// What `terminal_scroll` should do with a DOM wheel delta.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum WheelAction {
+pub enum WheelAction {
     /// Negate and scroll the emulator viewport (existing scrollback path).
     Scrollback(DomLines),
     /// Bytes to write to the PTY (mouse reports or cursor keys).
@@ -24,7 +24,7 @@ pub(super) enum WheelAction {
 /// `dom_lines` uses the DOM sign: negative is the gesture that scrolls a page
 /// toward the top (wheel "up"). Zero is a no-op that yields empty Pty bytes
 /// rather than a scrollback call, so the command can skip work.
-pub(super) fn plan(terminal: &Terminal, dom_lines: DomLines) -> WheelAction {
+pub fn plan(terminal: &Terminal, dom_lines: DomLines) -> WheelAction {
     let lines = dom_lines.0;
     if lines == 0 {
         return WheelAction::Pty(Vec::new());
@@ -115,7 +115,7 @@ fn encode_alternate_scroll(dom_lines: i32, app_cursor: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buzz_terminal::{Fences, Size};
+    use crate::{Fences, Size};
 
     fn term_with(feed: &[u8]) -> Terminal {
         let (mut term, actions) = Terminal::new(

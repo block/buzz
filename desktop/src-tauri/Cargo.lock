@@ -1131,6 +1131,7 @@ dependencies = [
  "buzz-core",
  "buzz-media",
  "buzz-persona",
+ "buzz-remote-access",
  "buzz-sdk",
  "buzz-terminal",
  "buzz-voice",
@@ -1254,6 +1255,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-remote-access"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "buzz-terminal",
+ "futures-util",
+ "getrandom 0.2.17",
+ "hex",
+ "nostr 0.44.7",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+]
+
+[[package]]
 name = "buzz-sdk"
 version = "0.1.0"
 dependencies = [
@@ -1273,6 +1291,9 @@ dependencies = [
  "libc",
  "parking_lot",
  "portable-pty",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

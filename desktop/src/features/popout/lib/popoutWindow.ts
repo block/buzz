@@ -121,8 +121,26 @@ export function readPopoutPayload(
   }
 }
 
+/** Web build: a pop-out tab carries its label in the `?popout=` query param (payload in localStorage). */
+export const WEB_POPOUT_QUERY_PARAM = "popout";
+
+function webPopoutLabel(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const label = new URLSearchParams(window.location.search).get(
+      WEB_POPOUT_QUERY_PARAM,
+    );
+    return label?.startsWith(POPOUT_WINDOW_LABEL_PREFIX) &&
+      /^[a-zA-Z0-9_-]+$/.test(label)
+      ? label
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function currentPopoutLabel(): string | null {
-  if (!isTauri()) return null;
+  if (!isTauri()) return webPopoutLabel();
   try {
     const label = getCurrentWindow().label;
     return label.startsWith(POPOUT_WINDOW_LABEL_PREFIX) ? label : null;
@@ -281,6 +299,20 @@ export async function openPopoutWindow(input: {
     openEmbeddedWindow({ label, payload });
     return;
   }
+  if (!isTauri()) {
+    // Web build: no OS windows. Channel/thread pop-outs become a new browser tab.
+    if (input.channelId && (input.kind === "thread" || input.kind === "split")) {
+      const { openConversationInNewTab } = await import(
+        "@/platform/web/openTab"
+      );
+      await openConversationInNewTab({
+        channelId: input.channelId,
+        threadId: input.threadId,
+        title: input.title,
+      });
+    }
+    return;
+  }
   writePopoutPayload(label, payload);
   // OS playground/split reparents the one live WKWebView. Park the main
   // overlay and hide on main so the stage can claim it in the pop-out.
@@ -290,9 +322,6 @@ export async function openPopoutWindow(input: {
   ) {
     dismissPlayground();
     void hidePlaygroundWebview(input.playground.sid);
-  }
-  if (!isTauri()) {
-    return;
   }
   await invoke(
     "open_popout_window",

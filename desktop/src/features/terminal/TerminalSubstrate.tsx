@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { ChevronRight, Maximize2, Minimize2, Plus, X } from "lucide-react";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
@@ -23,9 +24,23 @@ import {
   TerminalGrid,
 } from "./terminalRenderer";
 import {
+  type TermFontSize,
   terminalCellMetricsForFontSize,
   useTermPreferences,
 } from "./termPreferences.ts";
+import { TerminalTouchBar } from "./TerminalTouchBar";
+import {
+  type StickyMods,
+  type TouchAction,
+  TouchGestures,
+  applyStickyModifiers,
+  detectTouchUi,
+  fontSizeForPinch,
+  getTouchFontSize,
+  keyboardInset,
+  setTouchFontSize,
+  subscribeTouchFontSize,
+} from "./touchTerminal";
 
 export type TerminalViewportSize = {
   columns: number;
@@ -79,8 +94,25 @@ type TerminalSubstrateProps = {
   onTerminalFocusChange: (focused: boolean) => void;
   onSelectSession: (id: string) => void;
   onCloseSession: (id: string) => void;
-  onNewSession: () => void;
+  /** New tab; `kind` comes from the + menu when herdr is the Session host ("shell" = plain Terminal, "herdr" = herdr). */
+  onNewSession: (kind?: "shell" | "herdr") => void;
+  /** Session host is herdr: + opens a small Terminal / herdr menu instead of creating a tab directly. */
+  herdrNewTab?: boolean;
+  /** False hides the + (web: the desktop's 3-terminal cap is reached). */
+  canAddTab?: boolean;
+  /** Phone/tablet behaviour (defaults to "the primary pointer is a finger"; desktop mice are unchanged). */
+  touchUi?: boolean;
 };
+
+/** Zero-width placeholder kept in the hidden input on touch so iOS has something to delete (and keeps repeating backspace). */
+const TOUCH_SENTINEL = "\u200b";
+const TOUCH_SEED = TOUCH_SENTINEL.repeat(64);
+
+/** Touch scroll gain: 1:1 for slow drags (precise), up to 3x for fast flicks; mouse-tracking TUIs get 2x more (wheel = 1 line). */
+function touchScrollGain(speedPxPerMs: number, mouseTracking: boolean): number {
+  const accel = 1 + Math.min(2, Math.max(0, speedPxPerMs - 0.3) * 1.5);
+  return mouseTracking ? accel * 2 : accel;
+}
 
 function isToggleChord(event: KeyboardEvent): boolean {
   return (
@@ -120,12 +152,22 @@ export function TerminalSubstrate({
   onSelectSession,
   onCloseSession,
   onNewSession,
+  herdrNewTab = false,
+  canAddTab = true,
+  touchUi: touchUiProp,
 }: TerminalSubstrateProps) {
   const { terminalPalette } = useTheme();
   const termPrefs = useTermPreferences();
+  const touchUi = React.useMemo(() => touchUiProp ?? detectTouchUi(), [touchUiProp]);
+  const pinchedFont = React.useSyncExternalStore(
+    subscribeTouchFontSize,
+    getTouchFontSize,
+    () => null,
+  );
+  const effectiveFontSize = (touchUi && pinchedFont ? pinchedFont : termPrefs.fontSize) as TermFontSize;
   const cellMetrics: CellMetrics = React.useMemo(
-    () => terminalCellMetricsForFontSize(termPrefs.fontSize),
-    [termPrefs.fontSize],
+    () => terminalCellMetricsForFontSize(effectiveFontSize),
+    [effectiveFontSize],
   );
   const CELL_WIDTH = cellMetrics.width;
   const CELL_HEIGHT = cellMetrics.height;
@@ -195,6 +237,42 @@ export function TerminalSubstrate({
     );
     return Number.isFinite(stored) ? stored : 320;
   });
+  // ── touch ──
+  const [mods, setMods] = React.useState<StickyMods>({ ctrl: false, alt: false, meta: false });
+  const [selectMode, setSelectMode] = React.useState(false);
+  const [newTabMenu, setNewTabMenu] = React.useState<{ left: number; top: number } | null>(null);
+  const newTabMenuRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!newTabMenu) return;
+    const away = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (!newTabMenuRef.current?.contains(t) && !t?.closest?.('[data-testid="terminal-new-tab"]')) setNewTabMenu(null);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setNewTabMenu(null);
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", esc, true);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("keydown", esc, true);
+    };
+  }, [newTabMenu]);
+  const selectModeRef = React.useRef(selectMode);
+  selectModeRef.current = selectMode;
+  const modsRef = React.useRef(mods);
+  modsRef.current = mods;
+  const gesturesRef = React.useRef(new TouchGestures({ longPressMs: 500 }));
+  const longPressTimerRef = React.useRef(0);
+  const touchScrollRef = React.useRef({ remainderPx: 0 });
+  const touchPointRef = React.useRef({ x: 0, y: 0 });
+  const pinchBaseRef = React.useRef<number | null>(null);
+  const effectiveFontRef = React.useRef<number>(effectiveFontSize);
+  effectiveFontRef.current = effectiveFontSize;
+  type CellPos = { row: number; col: number };
+  const [touchSel, setTouchSel] = React.useState<{ anchor: CellPos; head: CellPos; done: boolean } | null>(null);
+  const touchSelRef = React.useRef(touchSel);
+  touchSelRef.current = touchSel;
+  const [pasteBox, setPasteBox] = React.useState(false);
+  const [kb, setKb] = React.useState({ open: false, top: 0, height: 0, width: 0 });
   const banner = React.useMemo(
     () =>
       buildTerminalBanner(
@@ -218,11 +296,268 @@ export function TerminalSubstrate({
 
   const sendInput = React.useEffectEvent((text: string) => {
     if (!text) return;
+    let out = text;
+    if (touchUi && (modsRef.current.ctrl || modsRef.current.alt || modsRef.current.meta)) {
+      const applied = applyStickyModifiers(text, modsRef.current);
+      out = applied.text;
+      if (applied.used) setMods({ ctrl: false, alt: false, meta: false });
+    }
     setWelcomeVisible(false);
     setCursorPainted(true);
     setCursorReset((current) => current + 1);
-    onInput(text);
+    onInput(out);
   });
+  const cellAt = (clientX: number, clientY: number): CellPos => {
+    const canvas = canvasRef.current;
+    const metrics = cellMetricsRef.current;
+    const vp = viewportRef.current;
+    if (!canvas) return { row: 0, col: 0 };
+    const bounds = canvas.getBoundingClientRect();
+    return {
+      col: Math.max(0, Math.min(vp.columns - 1, Math.floor((clientX - bounds.left) / metrics.width))),
+      row: Math.max(0, Math.min(vp.rows - 1, Math.floor((clientY - bounds.top) / metrics.height))),
+    };
+  };
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // legacy path (older iOS / insecure contexts)
+    }
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      area.remove();
+    }
+  };
+  const pasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) sendInput(encodePaste(text, bracketedPaste));
+      setTouchSel(null);
+      textareaRef.current?.focus({ preventScroll: true });
+    } catch {
+      // Safari only reads the clipboard behind its own "Paste" bubble; offer a box to paste into instead.
+      setPasteBox(true);
+    }
+  };
+  const sendMouseAt = (cell: CellPos, action: "press" | "release") => {
+    onMouseRef.current?.({ button: "left", action, column: cell.col + 1, row: cell.row + 1 });
+  };
+  const applyTouchActions = (actions: TouchAction[]) => {
+    for (const action of actions) {
+      switch (action.type) {
+        case "tap": {
+          setTouchSel(null);
+          setPasteBox(false);
+          setOwner("terminal");
+          textareaRef.current?.focus({ preventScroll: true });
+          if (mouseReportingRef.current && onMouseRef.current) {
+            const cell = cellAt(action.x, action.y);
+            sendMouseAt(cell, "press");
+            sendMouseAt(cell, "release");
+          }
+          break;
+        }
+        case "scroll": {
+          // Touch: track velocity for inertia and scale fast swipes (and mouse-tracking TUIs, where one wheel step is one
+          // line) so a single swipe covers many lines. Fractions accumulate; nothing is throttled or dropped.
+          let dy = action.dy;
+          if (touchUi) {
+            const now = performance.now();
+            const v = touchVelRef.current;
+            const dt = Math.max(1, now - v.t);
+            v.v = 0.8 * (dy / dt) + 0.2 * v.v; // px/ms, smoothed
+            v.t = now;
+            if (!inertiaActiveRef.current) dy *= touchScrollGain(Math.abs(v.v), mouseReportingRef.current);
+          }
+          const result = accumulateScrollLines(touchScrollRef.current, dy, cellMetricsRef.current.height);
+          touchScrollRef.current = result.state;
+          if (result.lines === 0) break;
+          if (mouseReportingRef.current && onMouseRef.current) {
+            const cell = cellAt(touchPointRef.current.x, touchPointRef.current.y);
+            for (let i = 0; i < Math.abs(result.lines); i += 1) {
+              onMouseRef.current({
+                button: result.lines < 0 ? "wheelUp" : "wheelDown",
+                action: "press",
+                column: cell.col + 1,
+                row: cell.row + 1,
+              });
+            }
+          } else {
+            onScrollRef.current(result.lines);
+          }
+          break;
+        }
+        case "longpress": {
+          const cell = cellAt(action.x, action.y);
+          // Mouse-tracking apps (Herder, vim, tmux…): a long press is a right-click at that cell; no local selection.
+          if (mouseReportingRef.current && onMouseRef.current && !selectModeRef.current) {
+            gesturesRef.current.kill();
+            onMouseRef.current({ button: "right", action: "press", column: cell.col + 1, row: cell.row + 1 });
+            onMouseRef.current({ button: "right", action: "release", column: cell.col + 1, row: cell.row + 1 });
+            navigator.vibrate?.(12);
+            break;
+          }
+          const word = gridRef.current?.wordAt(cell.row, cell.col) ?? null;
+          setPasteBox(false);
+          setTouchSel({
+            anchor: { row: cell.row, col: word?.start ?? cell.col },
+            head: { row: cell.row, col: word?.end ?? cell.col },
+            done: false,
+          });
+          navigator.vibrate?.(8);
+          break;
+        }
+        case "select": {
+          const cell = cellAt(action.x, action.y);
+          setTouchSel((c) => (c ? { ...c, head: cell } : c));
+          break;
+        }
+        case "selectEnd":
+          setTouchSel((c) => (c ? { ...c, done: true } : c));
+          break;
+        case "pinch": {
+          pinchBaseRef.current ??= effectiveFontRef.current;
+          const size = fontSizeForPinch(pinchBaseRef.current, action.scale);
+          if (size !== effectiveFontRef.current) setTouchFontSize(size);
+          break;
+        }
+        case "pinchEnd":
+          pinchBaseRef.current = null;
+          break;
+        case "cancel":
+          setTouchSel(null);
+          break;
+      }
+    }
+  };
+  const touchDown = (event: React.PointerEvent) => {
+    stopInertia();
+    touchVelRef.current = { v: 0, t: performance.now() };
+    setOwner("terminal");
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // ignore
+    }
+    touchPointRef.current = { x: event.clientX, y: event.clientY };
+    touchScrollRef.current = { remainderPx: 0 };
+    const gestures = gesturesRef.current;
+    applyTouchActions(gestures.down(event.pointerId, event.clientX, event.clientY, performance.now()));
+    if (selectModeRef.current && gestures.state === "pending") {
+      // Select mode: the drag selects rendered cells (works in the alternate screen too); no scroll, no long-press timer.
+      gestures.beginSelect();
+      const cell = cellAt(event.clientX, event.clientY);
+      setTouchSel({ anchor: cell, head: cell, done: false });
+      window.clearTimeout(longPressTimerRef.current);
+      return;
+    }
+    window.clearTimeout(longPressTimerRef.current);
+    if (gestures.state === "pending") {
+      longPressTimerRef.current = window.setTimeout(
+        () => applyTouchActions(gestures.timeout(performance.now())),
+        gestures.longPressMs,
+      );
+    }
+  };
+  const touchVelRef = React.useRef({ v: 0, t: 0 });
+  const inertiaRafRef = React.useRef(0);
+  const inertiaActiveRef = React.useRef(false);
+  const stopInertia = () => {
+    window.cancelAnimationFrame(inertiaRafRef.current);
+    inertiaRafRef.current = 0;
+    inertiaActiveRef.current = false;
+  };
+  React.useEffect(() => () => window.cancelAnimationFrame(inertiaRafRef.current), []);
+  const touchMove = (event: React.PointerEvent) => {
+    touchPointRef.current = { x: event.clientX, y: event.clientY };
+    const actions = gesturesRef.current.move(event.pointerId, event.clientX, event.clientY, performance.now());
+    if (actions.length > 0) window.clearTimeout(longPressTimerRef.current);
+    applyTouchActions(actions);
+  };
+  const touchUp = (event: React.PointerEvent) => {
+    window.clearTimeout(longPressTimerRef.current);
+    const wasScrolling = gesturesRef.current.state === "scroll";
+    applyTouchActions(gesturesRef.current.up(event.pointerId, performance.now()));
+    // Inertia: keep scrolling with the release velocity, decaying like native momentum.
+    const v0 = touchVelRef.current;
+    if (wasScrolling && performance.now() - v0.t < 80 && Math.abs(v0.v) > 0.25) {
+      let v = v0.v * touchScrollGain(Math.abs(v0.v), mouseReportingRef.current);
+      let last = performance.now();
+      inertiaActiveRef.current = true;
+      const step = (t: number) => {
+        const dt = Math.min(48, t - last);
+        last = t;
+        v *= Math.pow(0.995, dt); // ~0.92 per 16 ms frame
+        if (Math.abs(v) < 0.03) return stopInertia();
+        applyTouchActions([{ type: "scroll", dy: v * dt }]);
+        inertiaRafRef.current = window.requestAnimationFrame(step);
+      };
+      inertiaRafRef.current = window.requestAnimationFrame(step);
+    }
+  };
+  const touchCancel = () => {
+    window.clearTimeout(longPressTimerRef.current);
+    applyTouchActions(gesturesRef.current.cancel());
+  };
+  const copySelection = async () => {
+    const sel = touchSelRef.current;
+    const grid = gridRef.current;
+    if (!sel || !grid) return;
+    const text = grid.textBetweenCells(sel.anchor.row, sel.anchor.col, sel.head.row, sel.head.col);
+    if (text) await copyToClipboard(text);
+    setTouchSel(null);
+    setSelectMode(false); // Copy returns to scroll mode
+    textareaRef.current?.focus({ preventScroll: true });
+  };
+  // Touch: the on-screen keyboard opens only from the keyboard button (toggle). Elsewhere the hidden input stays inputmode="none",
+  // so taps/focus reclaims never pop the keyboard (a hardware keyboard still types).
+  const [kbWanted, setKbWantedState] = React.useState(false);
+  // Synchronous mirror: the toggle decides from this, never from a stale render.
+  const kbWantedRef = React.useRef(false);
+  const setKbWanted = (on: boolean) => {
+    kbWantedRef.current = on;
+    setKbWantedState(on);
+  };
+  /** Until this time (ms) after an intentional open, blur/close detection is ignored (our own blur→focus, the keyboard animating in). */
+  const kbOpenGuardRef = React.useRef(0);
+  const toggleKeyboard = () => {
+    const area = textareaRef.current;
+    if (!area) return;
+    if (touchUi) {
+      if (kbWantedRef.current) {
+        kbOpenGuardRef.current = 0;
+        setKbWanted(false);
+        area.inputMode = "none";
+        area.blur();
+        return;
+      }
+      window.dispatchEvent(new Event("buzz:collapse-sidebar"));
+      setOwner("terminal");
+      kbOpenGuardRef.current = performance.now() + 600;
+      setKbWanted(true);
+      // All synchronous inside the tap (iOS only shows the keyboard for a focus in the user gesture). Re-focus so the new
+      // inputmode takes effect; the blur this causes is inside the guard, so it can't flip the toggle back off.
+      area.inputMode = "text";
+      if (document.activeElement === area) area.blur();
+      area.focus({ preventScroll: true });
+      return;
+    }
+    if (document.activeElement === area) area.blur();
+    else {
+      setOwner("terminal");
+      area.focus({ preventScroll: true });
+    }
+  };
+  const isTouchPointer = (event: React.PointerEvent) => touchUi && event.pointerType !== "mouse";
   /**
    * Reclaim the hidden textarea so printables keep reaching the PTY.
    * `hard` schedules rAF + rAF + setTimeout(0) after an immediate focus —
@@ -583,6 +918,94 @@ export function TerminalSubstrate({
     }
   };
 
+  // iOS keeps the layout viewport full-height when the keyboard opens; follow the visual viewport so the terminal and key bar
+  // stay above it.
+  React.useEffect(() => {
+    if (!touchUi) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    // One layout pass per frame while the keyboard animates (no thrash); the canvas refits from the new box and keeps the cursor row.
+    let raf = 0;
+    const apply = () => {
+      raf = 0;
+      const next = keyboardInset(vv, window.innerHeight);
+      setKb((c) => (c.open === next.open && c.top === next.top && c.height === next.height ? c : next));
+      if (next.open && (window.scrollY || document.documentElement.scrollTop)) window.scrollTo(0, 0);
+    };
+    const update = () => {
+      if (!raf) raf = window.requestAnimationFrame(apply);
+    };
+    apply();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, [touchUi]);
+  React.useEffect(() => {
+    if (touchUi) setTouchSel(null);
+  }, [touchUi, activeSessionId]);
+
+  // Touch: iOS auto-repeats a held backspace only as beforeinput delete events (no keydown repeat) and only while the input has
+  // something to delete; after a while it accelerates to word deletes. Each event goes to the PTY at once: one DEL per char
+  // repeat, one ^W per word repeat (same as native). No per-event DOM work: the cancelled event leaves the 64-char sentinel
+  // buffer untouched, so it's only reseeded on focus or after real typing.
+  React.useEffect(() => {
+    const area = textareaRef.current;
+    if (!touchUi || !area) return;
+    const seed = () => {
+      if (area.value !== TOUCH_SEED) {
+        area.value = TOUCH_SEED;
+        area.setSelectionRange(TOUCH_SEED.length, TOUCH_SEED.length);
+      }
+    };
+    const onBeforeInput = (event: InputEvent) => {
+      const seq = event.inputType === "deleteContentBackward" ? "\x7f" : event.inputType === "deleteWordBackward" ? "\x17" : null;
+      if (!seq) return;
+      event.preventDefault();
+      sendInput(seq);
+    };
+    area.addEventListener("beforeinput", onBeforeInput);
+    area.addEventListener("focus", seed);
+    seed();
+    return () => {
+      area.removeEventListener("beforeinput", onBeforeInput);
+      area.removeEventListener("focus", seed);
+    };
+  }, [touchUi]);
+
+  // Touch (iPad/iPhone Safari, PWA): size from the real visible area instead of trusting flex/100vh, which left maximized at
+  // ~3/4 height. Maximized pins to the content surface's box down to the visual viewport's bottom; docked keeps its height within
+  // the real height. Recomputed on viewport/orientation/surface resize. Desktop (non-touch) is untouched.
+  const [touchBox, setTouchBox] = React.useState<{ top: number; left: number; width: number; bottom: number; vh: number } | null>(null);
+  React.useEffect(() => {
+    if (!touchUi) return;
+    const surface = substrateRef.current?.closest("[data-buzz-content-surface]") as HTMLElement | null;
+    const vv = window.visualViewport;
+    const update = () => {
+      const vh = vv ? vv.height + vv.offsetTop : window.innerHeight;
+      const r = surface?.getBoundingClientRect();
+      const next = r
+        ? { top: Math.round(r.top), left: Math.round(r.left), width: Math.round(r.width), bottom: Math.max(0, Math.round(window.innerHeight - vh)), vh: Math.round(vh) }
+        : null;
+      setTouchBox((c) => (c && next && c.top === next.top && c.left === next.left && c.width === next.width && c.bottom === next.bottom && c.vh === next.vh ? c : next));
+    };
+    update();
+    const ro = surface ? new ResizeObserver(update) : null;
+    if (surface) ro?.observe(surface);
+    vv?.addEventListener("resize", update);
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      ro?.disconnect();
+      vv?.removeEventListener("resize", update);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, [touchUi, mode]);
+
   // Native non-passive wheel: React's delegated onWheel is passive in the
   // browsers we ship, so preventDefault there cannot stop the outer UI from
   // stealing the gesture. Match AppTopChrome / useScrollBoundaryLock.
@@ -734,9 +1157,29 @@ export function TerminalSubstrate({
       data-terminal-mode={mode}
       data-terminal-owner={owner}
       data-terminal-visible={visible ? "true" : "false"}
+      data-touch-ui={touchUi ? "true" : undefined}
+      data-keyboard-open={touchUi && kb.open ? "true" : undefined}
       style={{
         ...terminalStyle,
-        ...(mode === "docked" ? { height: dockHeight } : undefined),
+        ...(mode === "docked"
+          ? { height: touchUi && touchBox ? Math.min(dockHeight, Math.round(touchBox.vh * 0.7)) : dockHeight }
+          : undefined),
+        ...(touchUi && touchBox && mode === "maximized" && visible && !kb.open
+          ? {
+              position: "fixed" as const,
+              inset: "auto",
+              top: touchBox.top,
+              left: touchBox.left,
+              width: touchBox.width,
+              bottom: touchBox.bottom,
+              height: "auto",
+              paddingBottom: "env(safe-area-inset-bottom)",
+              zIndex: 30,
+            }
+          : undefined),
+        ...(touchUi && kb.open
+          ? { position: "fixed" as const, inset: "auto", left: 0, right: 0, top: kb.top, height: kb.height, zIndex: 60 }
+          : undefined),
       }}
     >
       {mode === "docked" ? (
@@ -893,14 +1336,55 @@ export function TerminalSubstrate({
               </button>
             </div>
           ))}
+          {canAddTab ? (
           <button
             aria-label="New Buzz Term tab"
+            aria-haspopup={herdrNewTab ? "menu" : undefined}
+            aria-expanded={herdrNewTab ? newTabMenu !== null : undefined}
             className="buzz-terminal-new-tab"
-            onClick={() => runTabAction(onNewSession)}
+            data-testid="terminal-new-tab"
+            onClick={(event) => {
+              if (!herdrNewTab) return runTabAction(() => onNewSession());
+              const r = event.currentTarget.getBoundingClientRect();
+              setNewTabMenu((m) => (m ? null : { left: r.left, top: r.bottom + 4 }));
+            }}
             type="button"
           >
             <Plus />
           </button>
+          ) : null}
+          {newTabMenu
+            ? createPortal(
+                <div
+                  className="buzz-terminal-newtab-menu"
+                  data-testid="terminal-new-tab-menu"
+                  ref={newTabMenuRef}
+                  role="menu"
+                  style={{ left: Math.max(4, Math.min(newTabMenu.left, window.innerWidth - 164)), top: newTabMenu.top }}
+                >
+                  {(
+                    [
+                      ["shell", "Terminal"],
+                      ["herdr", "herdr"],
+                    ] as const
+                  ).map(([kind, label]) => (
+                    <button
+                      data-testid={`terminal-new-tab-${kind}`}
+                      key={kind}
+                      onClick={() => {
+                        setNewTabMenu(null);
+                        runTabAction(() => onNewSession(kind));
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>,
+                document.body,
+              )
+            : null}
         </div>
         <div className="buzz-terminal-readout">
           <button
@@ -929,6 +1413,11 @@ export function TerminalSubstrate({
         className="buzz-terminal-viewport px-5 pt-2"
         data-testid="buzz-terminal-viewport"
         onPointerDown={(event) => {
+          if (isTouchPointer(event)) {
+            event.preventDefault();
+            touchDown(event);
+            return;
+          }
           if (event.button > 2) return;
           // Always claim keyboard focus on viewport interaction — even before
           // the canvas exists. herdr (and other mouse-mode TUIs) call
@@ -998,6 +1487,10 @@ export function TerminalSubstrate({
           }
         }}
         onPointerMove={(event) => {
+          if (isTouchPointer(event)) {
+            touchMove(event);
+            return;
+          }
           const canvas = canvasRef.current;
           if (!canvas) return;
           const bounds = canvas.getBoundingClientRect();
@@ -1053,6 +1546,10 @@ export function TerminalSubstrate({
           if (result.lines !== 0) onScrollRef.current(result.lines);
         }}
         onPointerUp={(event) => {
+          if (isTouchPointer(event)) {
+            touchUp(event);
+            return;
+          }
           const canvas = canvasRef.current;
           const metrics = cellMetricsRef.current;
           if (mouseReportingRef.current && onMouseRef.current && canvas) {
@@ -1097,6 +1594,10 @@ export function TerminalSubstrate({
           );
         }}
         onPointerCancel={(event) => {
+          if (isTouchPointer(event)) {
+            touchCancel();
+            return;
+          }
           if (pointerScrollRef.current.id === event.pointerId) {
             pointerScrollRef.current.id = -1;
           }
@@ -1110,6 +1611,10 @@ export function TerminalSubstrate({
           reclaimTerminalInputFocus({ hard: true, claimOwner: true });
         }}
         onContextMenu={(event) => {
+          if (touchUi) {
+            event.preventDefault();
+            return;
+          }
           // No custom Term menu — always suppress the browser menu. Native
           // contextmenu after right-click steals focus from the hidden
           // textarea asynchronously; hard reclaim races that steal.
@@ -1195,6 +1700,33 @@ export function TerminalSubstrate({
             </div>
           ))}
         </div>
+        {touchUi && touchSel ? (
+          <TouchSelectionOverlay
+            sel={touchSel}
+            metrics={cellMetrics}
+            columns={viewport.columns}
+            canvas={canvasRef.current}
+            onCopy={() => void copySelection()}
+            onPaste={() => void pasteFromClipboard()}
+            onDone={() => setTouchSel(null)}
+          />
+        ) : null}
+        {touchUi && pasteBox ? (
+          <textarea
+            aria-label="Paste here"
+            autoFocus
+            className="buzz-terminal-pastebox"
+            data-testid="terminal-pastebox"
+            placeholder="Long-press, Paste, then tap away"
+            onPaste={(event) => {
+              event.preventDefault();
+              sendInput(encodePaste(event.clipboardData.getData("text/plain"), bracketedPaste));
+              setPasteBox(false);
+              textareaRef.current?.focus({ preventScroll: true });
+            }}
+            onBlur={() => setPasteBox(false)}
+          />
+        ) : null}
         {welcomeVisible && banner ? (
           <canvas className="buzz-terminal-welcome" ref={bannerCanvasRef} />
         ) : null}
@@ -1203,6 +1735,14 @@ export function TerminalSubstrate({
           autoCapitalize="off"
           autoComplete="off"
           className="buzz-terminal-input"
+          inputMode={touchUi && !kbWanted ? "none" : undefined}
+          onBlur={() => {
+            // iOS "Done"/swipe-down dismissed the keyboard: back to tap-safe mode (not our own re-focus right after an open)
+            if (touchUi && kbWantedRef.current && performance.now() >= kbOpenGuardRef.current) {
+              setKbWanted(false);
+              if (textareaRef.current) textareaRef.current.inputMode = "none";
+            }
+          }}
           onCompositionEnd={() => {
             handoffRef.current = reduceHandoff(handoffRef.current, {
               type: "composition-end",
@@ -1215,8 +1755,11 @@ export function TerminalSubstrate({
           }}
           onInput={(event) => {
             if (handoffRef.current.composing) return;
-            const committed = event.currentTarget.value;
-            event.currentTarget.value = "";
+            const raw = event.currentTarget.value;
+            // touch: the sentinel isn't user text; if it vanished without a cancelable beforeinput, that was a delete
+            const committed = touchUi ? raw.replaceAll(TOUCH_SENTINEL, "") : raw;
+            if (touchUi && !raw.includes(TOUCH_SENTINEL) && !committed) sendInput("\x7f");
+            event.currentTarget.value = touchUi ? TOUCH_SEED : "";
             if (!committed) return;
             // Capture/textarea keydown already forwarded this printable.
             if (printableKeyHandledRef.current === committed) {
@@ -1255,9 +1798,90 @@ export function TerminalSubstrate({
           tabIndex={0}
         />
       </div>
+      {touchUi ? (
+        <TerminalTouchBar
+          ctrl={mods.ctrl}
+          alt={mods.alt}
+          meta={!!mods.meta}
+          onToggleCtrl={() => setMods((m) => ({ ...m, ctrl: !m.ctrl }))}
+          onToggleAlt={() => setMods((m) => ({ ...m, alt: !m.alt }))}
+          onToggleMeta={() => setMods((m) => ({ ...m, meta: !m.meta }))}
+          selectMode={selectMode}
+          onToggleSelect={() => {
+            setSelectMode((on) => !on);
+            setTouchSel(null);
+          }}
+          onKey={(seq) => sendInput(seq)}
+          onPaste={() => void pasteFromClipboard()}
+          keyboardOpen={kb.open}
+          onToggleKeyboard={toggleKeyboard}
+        />
+      ) : null}
       <div aria-live="polite" className="sr-only">
         {owner === "terminal" ? "Buzz Term mode" : "Buzz mode"}
       </div>
     </section>
+  );
+}
+
+function TouchSelectionOverlay({
+  sel,
+  metrics,
+  columns,
+  canvas,
+  onCopy,
+  onPaste,
+  onDone,
+}: {
+  sel: { anchor: { row: number; col: number }; head: { row: number; col: number }; done: boolean };
+  metrics: CellMetrics;
+  columns: number;
+  canvas: HTMLCanvasElement | null;
+  onCopy: () => void;
+  onPaste: () => void;
+  onDone: () => void;
+}) {
+  const [a, b] =
+    sel.anchor.row < sel.head.row || (sel.anchor.row === sel.head.row && sel.anchor.col <= sel.head.col)
+      ? [sel.anchor, sel.head]
+      : [sel.head, sel.anchor];
+  const left = canvas?.offsetLeft ?? 0;
+  const top = canvas?.offsetTop ?? 0;
+  const rects: React.ReactNode[] = [];
+  for (let row = a.row; row <= b.row; row += 1) {
+    const c0 = row === a.row ? a.col : 0;
+    const c1 = row === b.row ? b.col : columns - 1;
+    rects.push(
+      <div
+        key={row}
+        className="buzz-terminal-touch-sel"
+        style={{
+          left: left + c0 * metrics.width,
+          top: top + row * metrics.height,
+          width: (c1 - c0 + 1) * metrics.width,
+          height: metrics.height,
+        }}
+      />,
+    );
+  }
+  return (
+    <>
+      <div aria-hidden="true" data-testid="terminal-touch-selection" style={{ pointerEvents: "none" }}>
+        {rects}
+      </div>
+      {sel.done ? (
+        <div
+          className="buzz-terminal-touch-menu"
+          data-testid="terminal-touch-menu"
+          style={{ left: Math.max(8, left + a.col * metrics.width), top: Math.max(4, top + a.row * metrics.height - 44) }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+        >
+          <button type="button" onClick={onCopy}>Copy</button>
+          <button type="button" onClick={onPaste}>Paste</button>
+          <button type="button" onClick={onDone}>Done</button>
+        </div>
+      ) : null}
+    </>
   );
 }

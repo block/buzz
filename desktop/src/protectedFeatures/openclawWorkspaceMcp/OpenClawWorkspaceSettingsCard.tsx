@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { StatusChip } from "@/features/bridge/ui/DesktopData";
 import { relayClient } from "@/shared/api/relayClient";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { useFeatureEnabled } from "@/shared/features";
@@ -94,14 +95,21 @@ export function OpenClawWorkspaceSettingsCard() {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="font-medium text-foreground">OpenClaw workspace</h3>
-          <p className="mt-0.5 text-sm text-muted-foreground/70">
-            {connected
-              ? status?.connectedViaRelay
-                ? "Connected via relay"
-                : "Connected"
-              : "Not connected"}
-          </p>
+          <h3 className="flex items-center gap-2 font-medium text-foreground">
+            OpenClaw workspace
+            {(() => {
+              // Same chip and states as the web OpenClaw status.
+              const expired = !!status?.expiresAt && Date.parse(status.expiresAt) < Date.now();
+              const [tone, label] = error
+                ? (["red", "Error"] as const)
+                : connected && !expired
+                  ? (["green", "Connected"] as const)
+                  : expired
+                    ? (["amber", "Expired"] as const)
+                    : (["amber", "Not set up"] as const);
+              return <StatusChip testId="openclaw-status-chip" tone={tone}>{label}</StatusChip>;
+            })()}
+          </h3>
           {connected ? (
             <p className="mt-1 text-sm text-muted-foreground/70">
               Expires {formatExpiry(status?.expiresAt)}
@@ -210,9 +218,7 @@ export function OpenClawWorkspaceSettingsCard() {
                   emitOpenClawWorkspaceStatusChanged();
                   if (next.connected) {
                     toast.success(
-                      next.connectedViaRelay
-                        ? "OpenClaw workspace connected via relay."
-                        : "OpenClaw workspace connected.",
+                      "OpenClaw workspace connected.",
                     );
                   } else {
                     toast.message(

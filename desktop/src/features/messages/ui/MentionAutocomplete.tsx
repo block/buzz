@@ -16,7 +16,7 @@ import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncateNpub } from "@/shared/lib/pubkey";
-import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
+import { getPlatformKeysById, isShortcutUnavailableOnWeb } from "@/shared/lib/keyboard-shortcuts";
 
 export type MentionSuggestion = {
   pubkey?: string;
@@ -88,7 +88,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   const listRef = React.useRef<HTMLDivElement>(null);
   const keepPinnedSwitchId = React.useId();
   const handledOptionsRequestRef = React.useRef(0);
-  const alwaysAddressShortcut = getPlatformKeysById("always-address-agent");
+  const alwaysAddressShortcut = isShortcutUnavailableOnWeb("always-address-agent") ? null : getPlatformKeysById("always-address-agent");
 
   React.useEffect(() => {
     const activeItem = listRef.current?.querySelector<HTMLElement>(

@@ -1,0 +1,26 @@
+/* Web/PWA-only layout fixes (unlayered so they win over the app's @layer base rules). */
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+html,
+body {
+  height: 100dvh;
+}
+#root {
+  height: 100dvh;
+  min-height: 100dvh;
+  box-sizing: border-box;
+  /* viewport-fit=cover + black-translucent status bar: keep content out of the notch / home indicator */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+@media (pointer: coarse) {
+  /* iOS Safari zooms the page when a focused field is < 16px */
+  input,
+  textarea,
+  select,
+  [contenteditable="true"] {
+    font-size: max(16px, 1em);
+  }
+}

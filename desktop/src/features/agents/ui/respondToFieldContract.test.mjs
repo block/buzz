@@ -79,8 +79,10 @@ test("the Only me line names the owner's agents, not the owner alone", () => {
   // on that, so a line promising the owner alone would overstate the boundary.
   assert.match(
     collapsedSource,
-    /mode === "owner-only" \? \( <p[^>]*> Only you and your agents can send instructions\./,
+    /mode === "owner-only" \? \( <> <p[^>]*> Only you and your agents can send instructions\./,
   );
+  assert.match(collapsedSource, /<OwnerOnlyMembers agents=/);
+  assert.match(collapsedSource, /<DesktopDataNotice what=/);
 });
 
 test("primary respond-to copy does not expose implementation jargon", () => {
