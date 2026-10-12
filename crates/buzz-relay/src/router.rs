@@ -962,10 +962,125 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
         return CorsLayer::new();
     }
 
+    // Browsers do not treat `Access-Control-Allow-Headers: *` as covering `Authorization`, and every relay HTTP call from
+    // the web client is NIP-98 / Blossom authorized — so list the request headers (and methods) explicitly.
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
+        .allow_methods(CORS_ALLOWED_METHODS.to_vec())
+        .allow_headers(CORS_ALLOWED_HEADERS.to_vec())
+        .expose_headers(CORS_EXPOSED_HEADERS.to_vec())
+        .max_age(std::time::Duration::from_secs(600))
+}
+
+/// Methods the web client uses against relay HTTP endpoints (POST /query /events, PUT /upload, GET/HEAD /media, DELETE).
+const CORS_ALLOWED_METHODS: [axum::http::Method; 6] = [
+    axum::http::Method::GET,
+    axum::http::Method::HEAD,
+    axum::http::Method::POST,
+    axum::http::Method::PUT,
+    axum::http::Method::DELETE,
+    axum::http::Method::OPTIONS,
+];
+
+/// Request headers sent by the web client (NIP-98/Blossom auth, JSON bodies, NIP-11 Accept, Blossom upload hash, media ranges).
+const CORS_ALLOWED_HEADERS: [axum::http::HeaderName; 6] = [
+    axum::http::header::AUTHORIZATION,
+    axum::http::header::CONTENT_TYPE,
+    axum::http::header::ACCEPT,
+    axum::http::header::RANGE,
+    axum::http::HeaderName::from_static("x-sha-256"),
+    axum::http::HeaderName::from_static("x-content-type"),
+];
+
+/// Response headers the web client may read cross-origin.
+const CORS_EXPOSED_HEADERS: [axum::http::HeaderName; 4] = [
+    axum::http::header::CONTENT_LENGTH,
+    axum::http::header::CONTENT_RANGE,
+    axum::http::header::ACCEPT_RANGES,
+    axum::http::header::ETAG,
+];
+
+#[cfg(test)]
+mod cors_tests {
+    use super::build_cors_layer;
+    use axum::{body::Body, http::Request, routing::post, Router};
+    use tower::ServiceExt;
+
+    fn app(origins: &[&str]) -> Router {
+        let o: Vec<String> = origins.iter().map(|s| s.to_string()).collect();
+        Router::new()
+            .route("/query", post(|| async { "[]" }))
+            .layer(build_cors_layer(&o))
+    }
+
+    async fn preflight(app: Router, origin: &str) -> axum::http::Response<Body> {
+        app.oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/query")
+                .header("origin", origin)
+                .header("access-control-request-method", "POST")
+                .header(
+                    "access-control-request-headers",
+                    "authorization,content-type",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn preflight_from_configured_web_origin_allows_authorization() {
+        let res = preflight(
+            app(&["https://buzz.huladesk.com", "https://hulabuzz.huladesk.com"]),
+            "https://hulabuzz.huladesk.com",
+        )
+        .await;
+        let h = res.headers();
+        assert_eq!(
+            h.get("access-control-allow-origin").unwrap(),
+            "https://hulabuzz.huladesk.com"
+        );
+        let allow = h
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(allow.contains("authorization"), "allow-headers: {allow}");
+        assert!(allow.contains("content-type"), "allow-headers: {allow}");
+        assert!(!allow.contains('*'), "must not rely on wildcard: {allow}");
+        let methods = h
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            methods.contains("POST") && methods.contains("PUT"),
+            "allow-methods: {methods}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_from_unlisted_origin_gets_no_allow_origin() {
+        let res = preflight(
+            app(&["https://buzz.huladesk.com"]),
+            "https://evil.huladesk.com",
+        )
+        .await;
+        assert!(res.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_origin_list_stays_permissive_for_dev() {
+        let res = preflight(app(&[]), "http://localhost:5173").await;
+        assert_eq!(
+            res.headers().get("access-control-allow-origin").unwrap(),
+            "*"
+        );
+    }
 }
 
 #[cfg(test)]
