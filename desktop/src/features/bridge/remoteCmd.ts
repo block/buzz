@@ -66,7 +66,9 @@ export async function proxyCmd<T = unknown>(name: string, args?: Record<string, 
   try {
     return (await slot(() => d.call("cmd", { name, args: args ?? {} }))) as T;
   } catch (e) {
-    throw new Error(directErrorCopy(e));
+    const err = new Error(directErrorCopy(e)) as Error & { code?: string };
+    err.code = (e as { code?: string })?.code;
+    throw err;
   }
 }
 
@@ -82,6 +84,35 @@ export const PROXIED_READS: Record<string, () => unknown> = {
 
 /** Commands the web can answer itself: prefer the desktop's answer when Direct is live, else (or if that call fails) the web's own. */
 const PREFER_DESKTOP = new Set(["get_presence"]);
+
+const CACHE_PREFIX = "buzz-desktop-cache:";
+const memCache = new Map<string, unknown>();
+const cacheKey = (name: string, a: unknown) => `${name}:${JSON.stringify(a ?? {})}`;
+function readCache(key: string): unknown {
+  if (memCache.has(key)) return memCache.get(key);
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (raw === null) return undefined;
+    const v = JSON.parse(raw);
+    memCache.set(key, v);
+    return v;
+  } catch {
+    return undefined;
+  }
+}
+function writeCache(key: string, v: unknown) {
+  memCache.set(key, v);
+  try {
+    localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(v)); // already sanitized by the desktop (no secrets)
+  } catch {
+    /* storage full or denied */
+  }
+}
+/** True when this device has a remembered desktop agent list (the desktop-style Agents page can draw without Direct). */
+export function hasCachedDesktopAgents(): boolean {
+  const v = readCache(cacheKey("list_managed_agents", undefined));
+  return Array.isArray(v);
+}
 
 export function installProxyHandlers(handlers: Record<string, (a?: any) => unknown>) {
   for (const name of CMD_NAMES) {
@@ -100,6 +131,18 @@ export function installProxyHandlers(handlers: Record<string, (a?: any) => unkno
       continue;
     }
     const empty = name in PROXIED_READS ? PROXIED_READS[name] : null;
-    handlers[name] = (a) => (empty && !proxyDirectLive() ? empty() : proxyCmd(name, a));
+    if (!empty) {
+      handlers[name] = (a) => proxyCmd(name, a);
+      continue;
+    }
+    // Reads: the desktop's answer when Direct is live (remembered), else the last known answer (so the desktop-style pages keep
+    // showing your agents while reconnecting), else empty.
+    handlers[name] = async (a) => {
+      const key = cacheKey(name, a);
+      if (!proxyDirectLive()) return readCache(key) ?? empty();
+      const v = await proxyCmd(name, a);
+      writeCache(key, v);
+      return v;
+    };
   }
 }

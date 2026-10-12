@@ -9,7 +9,8 @@ import { hiddenAgentCount, NO_RUNNING_AGENTS, visibleRelayAgents } from "../rela
 import { useBridgeAgents } from "../useBridgeAgents";
 import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
-import { PathBadge, useDirectState } from "./DirectAgentsPanel";
+import { PathBadge, useDirectAutoReconnect, useDirectState } from "./DirectAgentsPanel";
+import { hasCachedDesktopAgents } from "../remoteCmd";
 import { useRemoteHostsFor } from "./WebRemoteSettings";
 
 function ago(s: number): string {
@@ -17,6 +18,9 @@ function ago(s: number): string {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   return `${Math.floor(s / 3600)}h ago`;
 }
+
+/** The old relay-only list (kept for reference/tests); the page always uses the desktop-style layout now. */
+const LEGACY_RELAY_PANEL = false as boolean;
 
 export function MyAgentsPanel() {
   const pubkey = useIdentityQuery().data?.pubkey;
@@ -44,6 +48,7 @@ export function MyAgentsPanel() {
     if (autoOk && direct) void direct.autoConnect();
   }, [autoOk, direct]);
   React.useEffect(() => () => direct?.resetAuto(), [direct]);
+  useDirectAutoReconnect(direct, autoOk, b.presence);
   if (!b.available) return null;
   const directLive = dstate.live && !!direct;
   const connectDirect = () => {
@@ -64,6 +69,29 @@ export function MyAgentsPanel() {
   const selectedAgent = selected
     ? b.snapshot?.agents.find((a) => a.pubkey === selected)
     : undefined;
+  // The desktop-style Agents page below draws from Direct, or from the last known desktop data while reconnecting: never fall
+  // back to the old relay-only list then; show a slim status line instead (read-only until Direct is back).
+  // JM: always the desktop-style layout; Direct only gates control (start/stop/edit/add), never the look.
+  if (!LEGACY_RELAY_PANEL) {
+    return (
+      <div data-testid="my-agents" data-presence={b.presence} data-slim="1" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        {directLive ? (
+          <PathBadge direct={direct} canDirect managementOn={managementOn} onConnect={connectDirect} busy={connecting} unreachable={false} />
+        ) : (
+          <span data-testid="agents-reconnect-banner" className="rounded-md border border-border/60 px-2 py-1">
+            {offline
+              ? `Desktop offline${age !== null ? ` · last seen ${ago(age)}` : ""} · ${hasCachedDesktopAgents() ? "showing your last known agents; " : ""}controls are off until it's back`
+              : `Reconnecting to your desktop… · ${hasCachedDesktopAgents() ? "showing your last known agents; " : ""}controls are off until Direct is back`}
+            {dstate.state === "failed" && !connecting ? (
+              <button type="button" className="ml-2 underline" data-testid="direct-connect" onClick={connectDirect}>
+                Retry
+              </button>
+            ) : null}
+          </span>
+        )}
+      </div>
+    );
+  }
   if (selected && selectedAgent)
     return (
       <AgentDetail

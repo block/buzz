@@ -25,7 +25,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { directAgentsFor } from "../directAgents";
 import { acquireProxyDirect } from "../remoteCmd";
 import { useBridgeAgents } from "../useBridgeAgents";
-import { useDirectState } from "./DirectAgentsPanel";
+import { useDirectAutoReconnect, useDirectState } from "./DirectAgentsPanel";
 import { getTerminalBackend, setTerminalBackend } from "@/features/terminal/terminalClient";
 import { configureWebTermHub, getWebTermHub } from "../webTermHub";
 import { StatusChip } from "./DesktopData";
@@ -216,6 +216,7 @@ export function useDirectSession(opts?: { auto?: boolean }) {
     if (autoOk && direct) void direct.autoConnect();
   }, [autoOk, direct]);
   React.useEffect(() => () => direct?.resetAuto(), [direct]);
+  useDirectAutoReconnect(opts?.auto !== false ? direct : null, autoOk, b.presence);
   const live = useDirectState(direct).live;
   React.useEffect(() => {
     void queryClient.invalidateQueries({ predicate: (q) => DESKTOP_QUERY.test(String(q.queryKey[0])) });

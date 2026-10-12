@@ -56,6 +56,26 @@ export function PathBadge(props: { direct: DirectAgents | null; canDirect: boole
   );
 }
 
+/**
+ * While a page that uses Direct is open: when the desktop's heartbeat comes back (presence turns online) or the window regains
+ * focus/visibility, reconnect a dropped Direct connection on its own (one signer prompt per new connection; none after a decline).
+ */
+export function useDirectAutoReconnect(direct: DirectAgents | null, ok: boolean, presence: string) {
+  React.useEffect(() => {
+    if (!direct || !ok) return;
+    const go = () => {
+      if (document.visibilityState === "visible") void direct.autoReconnect();
+    };
+    go(); // presence/ok just became true (heartbeat resumed)
+    window.addEventListener("focus", go);
+    document.addEventListener("visibilitychange", go);
+    return () => {
+      window.removeEventListener("focus", go);
+      document.removeEventListener("visibilitychange", go);
+    };
+  }, [direct, ok, presence]);
+}
+
 /** Direct list refresh cadence while the page is visible (the desktop's listener has no push channel yet). */
 export const DIRECT_POLL_MS = 3_000;
 

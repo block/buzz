@@ -106,6 +106,13 @@ export class DirectAgents {
       /* the badge shows the reason and a Retry control; the relay keeps working */
     }
   }
+  /** Reconnect on its own after the connection dropped (heartbeat back, window refocused) — never after the user declined. */
+  async autoReconnect(): Promise<void> {
+    if (this.live || this.connecting) return;
+    if (this.lastError?.code === "declined") return;
+    this.autoTried = false;
+    await this.autoConnect();
+  }
   /** Called when the Agents page closes, so the next visit may connect automatically again. */
   resetAuto() {
     this.autoTried = false;
@@ -189,6 +196,8 @@ export function directErrorCopy(e: unknown): string {
       return "The signed connection expired. Connect again to continue.";
     case "busy":
       return "Your desktop is busy with other requests. Try again in a moment.";
+    case "unknown_op":
+      return "Reload your desktop to see this (it's running an older version of the app).";
     default:
       return e.detail || `The desktop refused the request (${e.code}).`;
   }
