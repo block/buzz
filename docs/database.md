@@ -18,7 +18,7 @@ PostgreSQL stores data. The application owns behavior.
 | Concern | Today | Target |
 |---|---|---|
 | Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. SchemaBot plans each change from it in review and applies it. |
-| Who applies DDL | Opt-in startup migrations (`BUZZ_AUTO_MIGRATE`), `buzz-admin migrate`, and partition creation at relay startup and on a schedule | A reviewed external workflow. The serving relay runs no DDL, and its database role cannot. |
+| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | A reviewed external workflow. The serving relay runs no DDL, and its database role cannot. Monthly partition creation moves out of the relay under BUZZ-178. Changes to partitioned tables (`events`, `delivery_log`) are outside SchemaBot's envelope: it refuses `CREATE TABLE ... PARTITION OF` on a live parent and concurrent index builds on partitioned parents. |
 | Integrity between tables | Some foreign keys, including `ON DELETE CASCADE` and `ON DELETE SET NULL` | None in the database. The owning application transaction checks references and performs deletes explicitly. |
 | Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
@@ -77,14 +77,54 @@ Dropping or narrowing an existing trigger or function is welcome. Follow the
 retirement sequence below.
 
 **Transitional exception: the community write fence.** Until the fence moves
-into application writers, every new table with a `community_id` column MUST be
-fenced. Do this by calling the existing helper,
-`SELECT attach_community_write_fence('<table>')`, in the migration and in
-`schema/triggers/<table>.sql`. The table also goes in the deletion store's
-`EXPECTED_SCOPED_TABLES`. Without these steps, the migration lint fails, the
-relay's serving-catalog check refuses to start, and community deletion reports
-catalog drift. The call attaches an existing, generic trigger; it defines no
-new behavior. No other trigger attachment is permitted.
+into application writers (BUZZ-315), every new *tenant-owned* table with a
+`community_id` column MUST be fenced by calling the existing helper,
+`SELECT attach_community_write_fence('<table>')`. The call attaches an
+existing, generic trigger; it defines no new behavior. No other trigger
+attachment is permitted. Follow the checklist below.
+
+A table whose `community_id` only records provenance, and whose rows must stay
+writable while that community is being deleted (the deletion control plane,
+`product_feedback`, `rate_limit_violations`, `operator_listener_outbox`), MUST
+NOT be fenced. Prefer naming the column something other than `community_id`,
+as `relay_admin_actions.report_community_id` does, so the catalog does not
+treat the table as scoped. If the column must be named `community_id`, the
+table MUST be added to `community_write_fence_excluded_table` in the same
+migration and in `schema/functions/`. That edit is part of this exception, and
+the only permitted change to an existing function.
+
+**Nothing cheap catches a missing fence.** Know what actually fails:
+
+- Community deletion's exact-set catalog check
+  (`community deletion catalog drift (missing=…, unknown=…)`) and its
+  write-fence drift check fail closed.
+- Relay startup fails only when the binary lists the table in
+  `EXPECTED_SCOPED_TABLES` and the database has no live fence on it. A binary
+  that does not list the table starts normally.
+- Postgres-gated, migration-mode tests that run catalog validation on a fully
+  migrated database fail.
+
+No static lint requires the attach call. Desired-state bootstraps run
+`schema/community_write_fence.sql`, which fences every `community_id` table
+automatically. Most tests use desired state, so a migration that forgets the
+call passes them. The PR MUST run the migration-mode tests.
+
+#### Checklist: adding a tenant-owned `community_id` table
+
+All in the same PR:
+
+- [ ] `SELECT attach_community_write_fence('<table>')` in the migration.
+- [ ] `schema/triggers/<table>.sql` with the same call, plus its `\i` line.
+- [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`).
+- [ ] The table in `PURGE_SCOPED_TABLES` in the same file, ordered child
+      before parent. A table missing here keeps its rows after the purge, and
+      deletion verification fails closed.
+- [ ] The hard-coded fence set in
+      `deletion_surface_parity_between_migration_0029_and_schema_sql`
+      (`crates/buzz-db/src/runtime/migration.rs`).
+- [ ] The migration count in `embedded_migrator_contains_consolidated_initial_schema`.
+- [ ] A run of the Postgres-gated migration-mode tests (see
+      [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md)).
 
 A `DO` block in a migration is not a persisted function. It MAY guard
 idempotent DDL, as migration `0049` does. It MUST NOT be used to run data
@@ -100,8 +140,8 @@ For a new reference:
   writing transaction. Lock it or otherwise serialize against a concurrent
   delete when a dangling reference would be unsafe.
 - Delete or detach dependent rows explicitly in the transaction that deletes
-  the parent. Community deletion MUST cover the new table; see the fence
-  exception under Rule 1.
+  the parent. Community deletion MUST cover the new table; see the checklist
+  under Rule 1.
 - Make readers tolerate a missing parent. Without a database constraint, a
   dangling row is possible after an unsupported write, and readers MUST NOT
   panic or leak data across communities when they meet one.
@@ -112,8 +152,9 @@ deletes to ship first, then the constraint drop as a separate contract step.
 ### 3. Backfills are not migrations
 
 A migration MUST contain schema changes only. It MUST NOT `UPDATE`, `INSERT`,
-or `DELETE` existing rows, and MUST NOT run any statement whose work grows with
-table size.
+or `DELETE` existing rows, and MUST NOT scan or rewrite a table while holding a
+write-blocking lock. Scans that do not block writes, such as
+`VALIDATE CONSTRAINT` or a bounded concurrent index build, are allowed (Rule 6).
 
 - Historical data repair MUST be a backfill definition that conforms to
   [data-backfills.md](data-backfills.md): stable ID, finite upper bound,
@@ -123,8 +164,10 @@ table size.
   explains why and what breaks otherwise.
 - Constant seed rows that a new table or registry needs, such as an
   `_operator_global_tables` entry, are schema, not backfill. They MAY ship in a
-  migration. They MUST also appear in `schema/seeds/` and
-  `scripts/reconcile-schema-after-pgschema.sql`.
+  migration and MUST also appear in `schema/seeds/`. A seed row the running
+  relay reads (today only `replica_heartbeat`) MUST also be converged and
+  asserted in `scripts/reconcile-schema-after-pgschema.sql`. Rows read only by
+  the static lint, such as `_operator_global_tables`, do not go there.
 
 ### 4. Change every schema location
 
@@ -133,12 +176,12 @@ that changes the schema MUST update all of these that apply:
 
 | Location | What goes there |
 |---|---|
-| `migrations/NNNN_<name>.sql` | The forward migration for existing databases. Use the next free number; rebase and renumber on a collision. |
+| `migrations/NNNN_<name>.sql` | The forward migration for existing databases. Use the next free number; rebase and renumber on a collision. Never edit a merged migration: its checksum changes, and relays that run the migrator fail with sqlx `VersionMismatch`. Fix forward in a new migration. |
 | `schema/tables/public/<table>.sql` | The table's final `CREATE TABLE` and its `CREATE INDEX` statements, one table per file. This is the SchemaBot-readable source. |
 | `schema/schema.sql` | An `\i` line for each new file, after the tables it depends on. |
-| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here, and Rule 1 forbids additions to `functions/` and `triggers/`. |
+| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here. Rule 1 forbids additions to `functions/` and `triggers/`, except the fence attachment and exclusion it describes. |
 | `scripts/reconcile-schema-after-pgschema.sql` | Idempotent convergence, plus a live assertion, for anything `pgschema` does not preserve: seed rows, some storage parameters, partition attachment, and the shapes listed in AGENTS.md *Common Gotchas* #7. |
-| `crates/buzz-push-gateway/migrations/` | Push-gateway schema, which lives in its own database. It has no desired-state directory today, but every rule here still applies. |
+| `crates/buzz-push-gateway/migrations/` **and** the relay copies | The six `push_gateway_*` tables have two homes. The gateway applies its own migration history to its own database, through a pre-install/pre-upgrade Helm Job ([push-gateway-deployment.md](push-gateway-deployment.md)). The relay schema also defines them: `migrations/` (`0015`, `0043`, `0045`, `0060`), `schema/tables/public/push_gateway_*.sql`, and `schema/seeds/push_gateway_*.sql`. A gateway schema change goes in both, as relay `0060` mirrors gateway `0006`. Every rule here applies to both. |
 
 A fresh desired-state database and a migrated database MUST converge on the
 same live catalog. The layout test
@@ -155,8 +198,13 @@ and operator-global tables are listed explicitly.
 
 ### 5. Every schema change is backward compatible with the running app
 
-Production does not run migrations automatically. An operator applies them
-while the current relay keeps serving traffic, then deploys the new relay.
+These rules assume migrations are applied separately from deploys. The relay
+binary defaults `BUZZ_AUTO_MIGRATE` to off, but the Helm chart defaults
+`migrate.autoMigrate` to `true`. Production MUST set
+`migrate.autoMigrate=false`. With it on, the new pod migrates at boot, and
+`helm rollback` starts an old binary that runs the migrator against a newer
+schema and fails (see below). An operator applies the migrations while the
+current relay keeps serving traffic, then deploys the new relay.
 For a period, therefore, the **old relay runs against the new schema**. If the
 new relay is rolled back, the old relay runs against the new schema again.
 Every migration MUST be safe for the currently deployed release to read and
@@ -196,7 +244,7 @@ historical data needs no backfill.
 | Add a `NOT NULL` column without a default | Old `INSERT`s omit it and fail | Add it nullable, deploy writers, backfill, then add the constraint (see below) |
 | Rename a column or table | Old queries reference the old name | Add the new name, dual-write, backfill, move readers, then drop the old name |
 | Change a column type | Old binds and decodes mismatch, and the change may rewrite the table | Add a new column and migrate through the expand/contract sequence |
-| Add `CHECK`, `UNIQUE`, or a narrower index | Old writes violate it, or an old `ON CONFLICT` target no longer matches an index | Deploy writers that satisfy it, backfill, then add it. Keep every index an old `ON CONFLICT` names until no deployed code uses it |
+| Add `CHECK`, `UNIQUE`, or a narrower index | Old writes violate it, or an old `ON CONFLICT` target no longer matches an index | Deploy writers that satisfy it, backfill, then add it. Add a `CHECK` as `NOT VALID`, then `VALIDATE CONSTRAINT` in a later step. Keep every index an old `ON CONFLICT` names until no deployed code uses it |
 | Add an enum value that new code writes | Old code fails to decode the unknown variant | Deploy readers that accept the value, then deploy writers that produce it |
 | Drop a column, table, index, trigger, function, or FK | Old code reads it or relies on its side effect | Contract step only, after the release that stops relying on it is fully deployed |
 | Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed until the new release deploys. Serving is unaffected. | Expected and safe. Keep the gap between expand and deploy short, and do not run community deletion during it |
@@ -222,7 +270,11 @@ ALTER TABLE t ALTER COLUMN col SET NOT NULL;
 ALTER TABLE t DROP CONSTRAINT t_col_not_null;
 ```
 
-The desired-state file declares only the final `col ... NOT NULL`.
+The desired-state file declares only the final `col ... NOT NULL`, and that
+change lands in the same PR as migration C. Until then, the desired state keeps
+the column nullable. Between A and C, migrated databases carry
+`t_col_not_null` and fresh ones do not, so exclude that constraint from any
+parity assertion on the table for that window.
 
 #### Retiring a trigger, function, or foreign key
 
