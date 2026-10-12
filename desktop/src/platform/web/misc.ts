@@ -1,3 +1,4 @@
+import { openExternalUrl } from "@/shared/lib/externalLinks";
 // window / webview / app / path / plugin shims (web: no-ops or browser equivalents)
 const noop = async () => undefined;
 const win = new Proxy(
@@ -36,7 +37,7 @@ export const getVersion = async () =>
   (import.meta.env.VITE_APP_VERSION as string) || "web";
 export const homeDir = async () => "/";
 export const openUrl = async (url: string) => {
-  window.open(url, "_blank", "noopener,noreferrer");
+  openExternalUrl(url);
 };
 export const relaunch = async () => location.reload();
 export const isPermissionGranted = async () =>

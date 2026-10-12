@@ -49,7 +49,9 @@ const overflowers = (page) => page.evaluate(() => { const W = document.documentE
   check("opens on the Channels tab", (await page.getAttribute('[data-testid="phone-tab-channels"]', "aria-current")) === "page" && await page.isVisible('[data-testid="phone-channels-screen"]'));
   const tb = await page.locator('[data-testid="phone-tabbar"]').boundingBox();
   const gap = 844 - (tb.y + tb.height);
-  check("standalone: tab bar sits just above the home indicator (gap 20–34px)", gap >= 20 && gap <= 34, `bottom gap=${Math.round(gap)}`);
+  check("standalone: pill floats with a clear gap above the home indicator (≥ inset + 6px)", gap >= 40 && gap <= 48, `bottom gap=${Math.round(gap)}`);
+  const bg = await page.evaluate(() => [getComputedStyle(document.documentElement).backgroundColor, getComputedStyle(document.body).backgroundColor]);
+  check("standalone: page background painted (no grey strip under the shell)", bg.every((c) => c && c !== "rgba(0, 0, 0, 0)"), bg.join(" / "));
   const vh = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--phone-vh"));
   check("standalone: shell uses the full height", parseInt(vh) >= 844, vh);
   const order = await page.$$eval('[data-testid="phone-tabbar"] > button', (bs) => bs.map((x) => x.getAttribute("data-testid").replace("phone-tab-", "")));
@@ -61,6 +63,16 @@ const overflowers = (page) => page.evaluate(() => { const W = document.documentE
   await page.waitForTimeout(600);
   check("channels list: no docked menu row while scrolling", !(await page.locator('[data-testid="phone-channels-screen"] [data-testid="sidebar-menu-dock"]').isVisible().catch(() => false)));
   await page.screenshot({ path: `${out}/b2-1-standalone-channels.png` });
+  await page.locator('[data-testid="phone-channels-screen"] [data-testid="channel-general"]').first().tap(); await page.waitForTimeout(2500);
+  const st = await page.evaluate(() => ({ focusedEditable: !!document.activeElement?.isContentEditable || /INPUT|TEXTAREA/.test(document.activeElement?.tagName || ""), scrollY: window.scrollY, root: document.getElementById("root")?.scrollTop ?? 0, html: document.documentElement.scrollTop }));
+  check("opening a channel does not raise the keyboard (composer not auto-focused)", !st.focusedEditable, JSON.stringify(st));
+  // simulate iOS scrolling the document to a focused field, then blurring: it must snap back
+  await page.evaluate(() => { document.documentElement.scrollTop = 300; document.getElementById("root").scrollTop = 300; window.scrollTo(0, 300); document.body.focus(); document.dispatchEvent(new FocusEvent("focusout")); });
+  await page.waitForTimeout(400);
+  const st2 = await page.evaluate(() => ({ y: window.scrollY, root: document.getElementById("root")?.scrollTop ?? 0, html: document.documentElement.scrollTop, msgs: document.querySelectorAll('[data-testid="message-row"]').length, firstVisible: [...document.querySelectorAll('[data-testid="message-row"]')].some((r) => { const b = r.getBoundingClientRect(); return b.top >= 0 && b.bottom <= innerHeight; }) }));
+  check("stale document scroll resets so messages are in view", st2.y === 0 && st2.root === 0 && st2.html === 0 && st2.firstVisible, JSON.stringify(st2));
+  await page.screenshot({ path: `${out}/b3-channel-open.png` });
+  await page.tap('[data-testid="phone-back"]').catch(() => {}); await page.waitForTimeout(800);
   await meTab.tap(); await page.waitForTimeout(800);
   const rows = await page.$$eval('[data-testid="phone-me-screen"] [data-testid^="phone-me-"]:not([data-testid$="-count"])', (bs) => bs.map((x) => x.getAttribute("data-testid").replace("phone-me-", "")).filter(x => x !== "screen"));
   check("Me rows in sidebar order, Settings last, Workflows hidden by default", rows.join(",") === "projects,agents,bots,browsers,settings", rows.join(","));
@@ -107,6 +119,9 @@ const overflowers = (page) => page.evaluate(() => { const W = document.documentE
   check("floating button shows the tab count", (await btn.innerText().catch(() => "")).trim() === "2", await btn.innerText().catch(() => "none"));
   const bb = await btn.boundingBox();
   check("button sits top-left under the safe area", bb && bb.x <= 12 && bb.y >= 47 && bb.y <= 60, JSON.stringify(bb));
+  const padTop = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('[data-testid="phone-channels-screen"]')?.closest(".phone-fullscreen") || document.querySelector(".phone-fullscreen")).paddingTop));
+  check("no back button: switcher floats over content (no extra header space)", padTop <= 48, `padding-top=${padTop}`);
+  await page.screenshot({ path: `${out}/b3-switcher-overlay.png` });
   await btn.tap(); await page.waitForTimeout(400);
   const list = page.locator('[data-testid="phone-tab-switcher-list"]');
   const rowText = await list.innerText().catch(() => "");
@@ -141,6 +156,18 @@ for (const w of [390, 375]) {
     const sec = id.replace("settings-nav-", "");
     const ov = await overflowers(page);
     if (ov.length) bad.push(`${sec}: ${ov.slice(0, 3).join(" ")}`);
+    if (sec === "appearance") {
+      // The accent picker only shows for non-Buzz themes: pick another theme style first.
+      await page.tap('[data-testid="theme-style-trigger"]').catch(() => {}); await page.waitForTimeout(500);
+      const opts = page.locator('[data-testid="theme-style-options"] button');
+      const n = await opts.count();
+      for (let i = 0; i < n && !(await page.locator('[data-testid="accent-color-options"]').count()); i++) { await opts.nth(i).tap().catch(() => {}); await page.waitForTimeout(500); }
+      const last = page.locator('[data-testid="accent-color-options"] button').last();
+      await last.tap().catch(() => {}); await page.waitForTimeout(400);
+      const ap = await page.evaluate(() => { const W = document.documentElement.clientWidth; const sw = [...document.querySelectorAll('[data-testid="accent-color-options"] button')].map((b) => b.getBoundingClientRect()); const sc = document.querySelector('[data-testid="settings-content-scroll"]'); const h = [...document.querySelectorAll('[data-testid="settings-panel-appearance"] p')][0]?.getBoundingClientRect(); return { allIn: sw.length > 0 && sw.every((r) => r.left >= 0 && r.right <= W + 0.5), n: sw.length, scrollLeft: sc?.scrollLeft ?? -1, titleLeft: h ? Math.round(h.left) : -1 }; });
+      await page.screenshot({ path: `${out}/b3-appearance-${w}.png` });
+      check(`appearance @${w}: accent swatches fit and the page is not shifted`, ap.allIn && ap.scrollLeft === 0 && ap.titleLeft >= 8, JSON.stringify(ap));
+    }
     if (sec === "appearance" || sec === "profile") await page.screenshot({ path: `${out}/b2-settings-${sec}-${w}.png`, fullPage: false });
     await page.tap('[data-testid="phone-settings-back"]'); await page.waitForTimeout(400);
   }

@@ -23,3 +23,22 @@ test("hardened anchors open in a new browsing context with noopener noreferrer",
   assert.equal(hardenExternalAnchor(inApp, O), false);
   assert.equal(inApp.target, "");
 });
+
+test("iOS standalone detection and Safari scheme", async () => {
+  const { isIosStandalone, safariSchemeUrl } = await import("./externalLinks.ts");
+  const win = (ua, standalone, mm = false) => ({ navigator: { userAgent: ua, standalone, platform: "iPhone", maxTouchPoints: 5 }, matchMedia: () => ({ matches: mm }) });
+  const IOS = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15";
+  assert.equal(isIosStandalone(win(IOS, true)), true);
+  assert.equal(isIosStandalone(win(IOS, false, true)), true);
+  assert.equal(isIosStandalone(win(IOS, false)), false);
+  assert.equal(isIosStandalone(win("Mozilla/5.0 (Linux; Android 14)", false, true)), false);
+  assert.equal(safariSchemeUrl("https://example.com/a?b=1"), "x-safari-https://example.com/a?b=1");
+  assert.equal(safariSchemeUrl("mailto:x@y.z"), null);
+});
+
+test("iOS version parsing", async () => {
+  const { iosMajorVersion } = await import("./externalLinks.ts");
+  assert.equal(iosMajorVersion("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X)"), 18);
+  assert.equal(iosMajorVersion("Mozilla/5.0 (iPhone; CPU iPhone OS 16_7_2 like Mac OS X)"), 16);
+  assert.equal(iosMajorVersion("Mozilla/5.0 (Macintosh) Version/26.0 Safari/605.1.15"), 26);
+});

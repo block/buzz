@@ -10,9 +10,15 @@
   --phone-tabbar-bottom: calc(var(--phone-safe-bottom) + var(--phone-tabbar-gap));
   --phone-tabbar-h: calc(var(--phone-tabbar-bar-h) + var(--phone-tabbar-bottom) + var(--phone-tabbar-gap));
 }
-/* Installed PWA: the bar sits just above the home indicator (the inset already clears it; no extra gap). */
+/* Installed PWA: the pill floats with a clear gap above the home indicator. iOS sometimes reports a 0 bottom inset
+   (layout viewport already ends above the indicator), so keep at least 14px either way. */
 [data-phone][data-phone-standalone] {
-  --phone-tabbar-bottom: max(6px, calc(var(--phone-safe-bottom) - 8px));
+  --phone-tabbar-bottom: max(14px, calc(var(--phone-safe-bottom) + 6px));
+}
+/* Whatever iOS paints outside the app shell (below a short layout viewport) matches the app, so no grey strip. */
+[data-phone],
+[data-phone] body {
+  background-color: hsl(var(--sidebar-background, var(--background)));
 }
 /* The shell follows the visual viewport (--phone-vh, set from JS; 100dvh fallback) so it shrinks with the keyboard,
    and starts below the status bar / Dynamic Island. */
@@ -59,14 +65,18 @@
   background: rgba(255, 255, 255, 0.16);
 }
 /* Content stops above the tab bar. */
+/* The page itself runs to the screen bottom (its own background shows around the floating pill); only its
+   content stops above the bar. */
 [data-phone][data-phone-tabbar] [data-buzz-content-surface] {
-  margin-bottom: var(--phone-tabbar-h) !important;
+  margin-bottom: 0 !important;
+  padding-bottom: var(--phone-tabbar-h) !important;
 }
 /* Full-screen phone list screens (Channels list, Me) sit between the top inset and the tab bar. */
 [data-phone] .phone-fullscreen {
   position: fixed;
-  inset: 0 0 var(--phone-tabbar-h) 0;
+  inset: 0;
   padding-top: var(--phone-safe-top);
+  padding-bottom: var(--phone-tabbar-h);
   z-index: 110;
   background: hsl(var(--sidebar-background, var(--background)));
   display: flex;
@@ -182,8 +192,9 @@
 /* Settings on phone: full-screen list, then a full-screen section with a back button. */
 [data-phone] .phone-settings {
   position: fixed;
-  inset: 0 0 var(--phone-tabbar-h) 0;
+  inset: 0;
   padding-top: var(--phone-safe-top);
+  padding-bottom: var(--phone-tabbar-h);
   z-index: 110;
   display: flex;
   flex-direction: column;
@@ -217,10 +228,6 @@
   border-left: 0 !important;
   border-right: 0 !important;
   border-radius: 0 !important;
-  margin-left: -1rem !important;
-  margin-right: -1rem !important;
-  width: auto !important;
-  max-width: none !important;
   box-shadow: none !important;
 }
 /* Profile: smaller avatar block, no tall empty band above the fields. */
@@ -237,7 +244,6 @@
   margin-bottom: -2rem !important;
 }
 [data-phone]:not([data-phone-tabbar]) .phone-settings {
-  bottom: 0;
   padding-bottom: var(--phone-safe-bottom);
 }
 /* Search lives only in the Search tab on phone. */
@@ -292,8 +298,32 @@
 [data-phone] .phone-settings * {
   min-width: 0;
 }
+/* clip (not hidden): a hidden-overflow box can still be scrolled sideways by focus/scrollIntoView (that shifted
+   Appearance left so its text looked cut off). */
+[data-phone] .phone-settings .phone-settings-scroll,
 [data-phone] .phone-settings [data-testid^="settings-panel-"] {
-  overflow-x: hidden;
+  overflow-x: clip !important;
+}
+/* Accent swatches wrap instead of scrolling past the edge; theme preview scales to fit. */
+[data-phone] .phone-settings [data-testid="accent-color-options"] {
+  max-width: 100% !important;
+  width: 100%;
+  overflow: visible !important;
+}
+[data-phone] .phone-settings [data-testid="accent-color-options"] > div {
+  width: auto !important;
+  min-width: 0 !important;
+  flex-wrap: wrap !important;
+  justify-content: flex-start !important;
+}
+[data-phone] .phone-settings [data-testid="theme-style-trigger"],
+[data-phone] .phone-settings [data-testid="theme-style-selected-preview"],
+[data-phone] .phone-settings [data-testid="theme-style-options"] {
+  max-width: 100%;
+}
+[data-phone] .phone-settings [data-testid="theme-style-selected-preview"] > * {
+  max-width: 100%;
+  height: auto;
 }
 [data-phone] .phone-settings [data-testid^="settings-panel-"] :is(p, span, label, h2, h3, h4) {
   overflow-wrap: anywhere;
@@ -356,11 +386,8 @@
 [data-phone][data-phone-tab-switcher] [data-testid="app-top-chrome"] [data-testid="phone-back"] {
   left: 50px;
 }
-[data-phone][data-phone-tab-switcher] .phone-settings-header {
+[data-phone][data-phone-tab-switcher] .phone-settings .phone-settings-header {
   padding-left: 50px;
-}
-[data-phone][data-phone-tab-switcher] .phone-fullscreen {
-  padding-top: calc(var(--phone-safe-top) + 44px);
 }
 [data-phone][data-phone-tab-switcher] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tabs {
   padding-left: 48px;

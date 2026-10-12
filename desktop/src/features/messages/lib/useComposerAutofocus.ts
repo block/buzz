@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { isPhoneLayout } from "@/shared/lib/phoneLayout";
+
 /**
  * Focus the composer editor on mount and whenever the active draft key
  * changes (channel switch, thread open).
@@ -37,6 +39,9 @@ export function useComposerAutofocus(
   React.useEffect(() => {
     if (disabledRef.current) return;
     if (typeof document === "undefined") return;
+    // Phone: never raise the soft keyboard on open. On iOS (esp. the installed PWA) a programmatic focus shows
+    // the keyboard and scrolls the layout viewport to the caret, leaving the opened channel/thread blank above.
+    if (isPhoneLayout()) return;
     const active = document.activeElement as HTMLElement | null;
     if (active && active !== document.body) {
       const tag = active.tagName;

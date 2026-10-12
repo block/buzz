@@ -49,8 +49,23 @@ function installPhoneViewportHeight(mql: MediaQueryList): void {
     // indicator insets subtracted), leaving a dead band under the tab bar. Without the keyboard, use the full height.
     if (standalone && !keyboard) h = Math.max(h, window.innerHeight, maxH);
     root.style.setProperty("--phone-vh", `${Math.round(h)}px`);
-    if (vv && (window.scrollY !== 0 || vv.offsetTop !== 0)) window.scrollTo(0, 0);
+    resetDocumentScroll();
   };
+  // iOS scrolls the document (and sometimes #root) to reveal a focused field; the shell is fixed-height, so any
+  // leftover offset after the keyboard closes or a route change shows a blank screen. Pin everything back to 0.
+  const resetDocumentScroll = () => {
+    if (!mql.matches) return;
+    if (window.scrollY !== 0 || window.scrollX !== 0 || (vv && vv.offsetTop !== 0)) window.scrollTo(0, 0);
+    for (const el of [document.documentElement, document.body, document.getElementById("root")]) {
+      if (el && (el.scrollTop !== 0 || el.scrollLeft !== 0)) {
+        el.scrollTop = 0;
+        el.scrollLeft = 0;
+      }
+    }
+  };
+  document.addEventListener("focusout", () => window.setTimeout(resetDocumentScroll, 50), true);
+  window.addEventListener("hashchange", () => window.setTimeout(resetDocumentScroll, 0));
+  window.addEventListener("scroll", resetDocumentScroll, { passive: true });
   sync();
   vv?.addEventListener("resize", sync);
   vv?.addEventListener("scroll", sync);
