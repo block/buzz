@@ -91,7 +91,6 @@ export const CMD_WRITES = [
   "update_managed_agent",
   "create_persona",
   "update_persona",
-  "set_global_agent_config",
 ] as const;
 const PROMPT_MAX = 20_000;
 async function runtimeIdFor(deps: CmdDeps, id: string): Promise<void> {
@@ -183,20 +182,6 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       const id = str(i.id, "Persona", 100) ?? bad("Choose an agent definition.");
       const r = await inv(name, { input: { id, ...(await personaFields(i, deps)) } });
       return sanitizePersona(r);
-    }
-    case "set_global_agent_config": {
-      // Only provider, model and preferred runtime are editable remotely; env vars stay exactly as stored on the desktop.
-      const c = obj(a.config);
-      const cur = obj(await inv("get_global_agent_config"));
-      const next: Record<string, unknown> = { ...cur };
-      for (const [k, max] of [["provider", 100], ["model", 100]] as const) if (k in c) next[k] = str(c[k], k, max) ?? null;
-      if ("preferred_runtime" in c) {
-        const rt = str(c.preferred_runtime, "Harness", 100);
-        if (rt) await runtimeIdFor(deps, rt);
-        next.preferred_runtime = rt ?? null;
-      }
-      const r = obj(await inv(name, { config: next }));
-      return { ...r, ...("config" in r ? { config: sanitizeGlobal(r.config) } : {}) };
     }
     case "stop_managed_agent":
       return sanitizeAgent(await inv(name, { pubkey: pubkey(a.pubkey) }));

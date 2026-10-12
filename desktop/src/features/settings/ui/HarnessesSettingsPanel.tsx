@@ -124,7 +124,16 @@ export function HarnessesSettingsPanel() {
             rows.map((r) => (
               <div key={r.id} className="flex items-center justify-between py-2" data-testid="web-runtime-row">
                 <span>{r.label}{r.source === "custom" ? " (custom)" : ""}</span>
-                <span className="text-xs text-muted-foreground">{r.availability === "available" ? "Ready" : r.installHint || "Not installed"}</span>
+                {r.availability === "available" ? (
+                  <span
+                    className="inline-flex shrink-0 items-center rounded-md bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+                    data-testid={`web-runtime-ready-${r.id}`}
+                  >
+                    Ready
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{r.installHint || "Not installed"}</span>
+                )}
               </div>
             ))
           )}

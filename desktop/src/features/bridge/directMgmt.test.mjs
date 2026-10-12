@@ -177,19 +177,10 @@ test("cmd: personas (the Add agent dialog) forward only allow-listed fields and 
   assert.equal(raw.at(-1)[1].input.id, "p9");
 });
 
-test("cmd: agent defaults change only provider/model/harness; env vars are kept from the desktop", async () => {
-  const raw = [];
-  const d = cmdDeps();
-  d.invokeRaw = async (cmd, args) => {
-    raw.push([cmd, args]);
-    if (cmd === "get_global_agent_config") return { env_vars: { A: "real-secret" }, provider: "old", model: null, preferred_runtime: null };
-    if (cmd === "discover_acp_providers") return [{ id: "goose", command: "goose-acp", availability: "available", source: "builtin" }];
-    return { config: { env_vars: { A: "real-secret" } }, restarted: 0 };
-  };
-  const r = await handleMgmt("cmd", { name: "set_global_agent_config", args: { config: { env_vars: { EVIL: "1" }, provider: "anthropic", model: "m", preferred_runtime: "goose" } } }, d);
-  assert.deepEqual(raw.find((c) => c[0] === "set_global_agent_config")[1].config, { env_vars: { A: "real-secret" }, provider: "anthropic", model: "m", preferred_runtime: "goose" });
-  assert.ok(!JSON.stringify(r).includes("real-secret"));
-  assert.equal(await code(handleMgmt("cmd", { name: "set_global_agent_config", args: { config: { preferred_runtime: "nope" } } }, d)), "runtime_unavailable");
+test("cmd: agent defaults are read-only from the web (no set_global_agent_config)", async () => {
+  const { CMD_WRITES, CMD_READS } = await import("./directCmd.ts");
+  assert.ok(!CMD_WRITES.includes("set_global_agent_config"));
+  assert.ok(CMD_READS.includes("get_global_agent_config"));
 });
 
 test("cmd get_presence returns only valid presence entries and rejects bad keys", async () => {

@@ -1,6 +1,38 @@
 import { AgentDefaultsEditor } from "@/features/agents/ui/AgentDefaultsEditor";
+import { useAcpRuntimesQueryForced } from "@/features/agents/acpRuntimesQuery";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 import { SettingsOptionGroup } from "./SettingsOptionGroup";
+
+/** Web: the desktop's defaults as plain text (read-only; they are changed on the desktop). */
+function WebAgentDefaults() {
+  const { globalConfig, isLoading } = useGlobalAgentConfig();
+  const runtimes = useAcpRuntimesQueryForced().data ?? [];
+  const rt = globalConfig.preferred_runtime;
+  const harness = rt ? (runtimes.find((r) => r.id === rt)?.label ?? rt) : null;
+  const rows: [string, string | null, string][] = [
+    ["Default harness", harness, "agent-defaults-harness"],
+    ["Provider", globalConfig.provider, "agent-defaults-provider"],
+    ["Model", globalConfig.model, "agent-defaults-model"],
+  ];
+  return (
+    <div data-testid="agent-defaults-readonly">
+      <dl className="divide-y divide-border/55 text-sm">
+        {rows.map(([label, value, id]) => (
+          <div key={id} className="flex items-center justify-between gap-4 py-2">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="truncate font-medium" data-testid={id}>
+              {isLoading ? "…" : value || "Not set"}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-3 text-xs text-muted-foreground" data-testid="agent-defaults-web-note">
+        These are your desktop's defaults. Change them on your desktop in Settings → Agents.
+      </p>
+    </div>
+  );
+}
 
 export function AgentDefaultsSettingsCard() {
   const { web, live } = useDesktopData();
@@ -15,16 +47,10 @@ export function AgentDefaultsSettingsCard() {
           <p className="text-sm text-muted-foreground" data-testid="agent-defaults-needs-direct">
             Your desktop's agent defaults appear here once this device has a Direct connection to it.
           </p>
+        ) : web ? (
+          <WebAgentDefaults />
         ) : (
-          <>
-            {web ? (
-              <p className="mb-3 text-xs text-muted-foreground" data-testid="agent-defaults-web-note">
-                These are your desktop's defaults. Provider, model and harness can be changed here; environment variable values stay on your desktop.
-              </p>
-            ) : null}
-            {/* Remount when the connection goes live so the editor loads the desktop's values, not the empty ones. */}
-            <AgentDefaultsEditor key={live ? "live" : "idle"} layout="flat" />
-          </>
+          <AgentDefaultsEditor layout="flat" />
         )}
       </div>
     </SettingsOptionGroup>
