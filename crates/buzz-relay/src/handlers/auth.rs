@@ -233,6 +233,16 @@ pub(crate) struct FinalAdmissionCheck {
     pub(crate) owner_was_relay_member_at_admission: bool,
 }
 
+fn admission_db_error_class(error: &buzz_db::DbError) -> &'static str {
+    match error {
+        buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut) => "pool_timeout",
+        buzz_db::DbError::Sqlx(sqlx::Error::PoolClosed) => "pool_closed",
+        buzz_db::DbError::Sqlx(sqlx::Error::Io(_)) => "io_error",
+        error if error.is_statement_cancelled() => "statement_cancelled",
+        _ => "database_error",
+    }
+}
+
 /// Final ban and relay-membership verdict for an authenticating socket.
 ///
 /// Callers bind the socket to `pubkey` first (the registry a ban's or
@@ -294,8 +304,13 @@ pub(crate) async fn final_admission_check(
                 .await
             {
                 Ok(is_member) => is_member,
-                Err(_) => {
-                    warn!("captured-owner membership snapshot failed at admission; denying");
+                Err(error) => {
+                    warn!(
+                        community = %community,
+                        pubkey = %pubkey.to_hex(),
+                        error_class = admission_db_error_class(&error),
+                        "captured-owner membership writer check failed at admission; denying"
+                    );
                     final_check.denial = Some(AdmissionDenial {
                         metric: "owner_membership_check_error",
                         reason: "error: internal error checking relay membership",
