@@ -2,7 +2,7 @@
 // with kind-40003 edits applying link-preview suppression). activity / agent_activity stay empty, as on desktop.
 // Batched for remote signers: one relay query carries both the mention and approval filters, and a second one
 // fetches edits for the found mentions — at most 2 signed requests, each well under the 10-filter cap.
-// NIP-OA owner verification is not ported on web, so only the author's own edits suppress previews.
+// Edits by the author or the author's verified NIP-OA owner suppress previews (owner check: nipOa.ts), as on desktop.
 
 type Ev = { id: string; kind: number; pubkey: string; content: string; created_at: number; tags: string[][] };
 type Filter = Record<string, unknown>;
@@ -34,6 +34,7 @@ export async function getFeed(
   args: FeedArgs,
   myPubkey: string,
   query: (filters: Filter[]) => Promise<Ev[]>,
+  ownerOf: (profiles: Ev[]) => Map<string, string> = () => new Map(),
 ) {
   const since = args?.since;
   const cap = Math.min(args?.limit ?? 50, 100);
@@ -59,9 +60,13 @@ export async function getFeed(
     : [];
 
   const mentionIds = mentionEvents.map((e) => e.id);
-  const edits = mentionIds.length
-    ? await query([{ kinds: [EDIT_KIND], "#e": mentionIds }]).catch(() => [] as Ev[])
+  const authors = [...new Set(mentionEvents.map((e) => e.pubkey))];
+  // One request: edits of the mentions + the mention authors' profiles (for NIP-OA owner edits).
+  const extra = mentionIds.length
+    ? await query([{ kinds: [EDIT_KIND], "#e": mentionIds }, { kinds: [0], authors }]).catch(() => [] as Ev[])
     : [];
+  const edits = extra.filter((e) => e.kind === EDIT_KIND);
+  const owners = ownerOf(extra.filter((e) => e.kind === 0));
   const byId = new Map(mentionEvents.map((e) => [e.id, e]));
   const suppressed = new Set<string>();
   for (const edit of edits) {
@@ -69,7 +74,7 @@ export async function getFeed(
     if (!edit.tags.some((t) => t.length === 2 && t[0] === "link-preview" && t[1] === "none")) continue;
     const target = edit.tags.find((t) => t[0] === "e")?.[1];
     const original = target ? byId.get(target) : undefined;
-    if (original && original.pubkey === edit.pubkey) suppressed.add(original.id);
+    if (original && (original.pubkey === edit.pubkey || owners.get(original.pubkey) === edit.pubkey)) suppressed.add(original.id);
   }
 
   const mentions = mentionEvents.map((e) => feedItem(e, "mention", suppressed));

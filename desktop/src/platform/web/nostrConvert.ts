@@ -1,3 +1,4 @@
+import { profileValidOaOwner } from "./nipOa";
 // TS port of the pure converters in desktop/src-tauri/src/nostr_convert.rs (S1 subset: channels, members, profiles).
 import type { NostrEvent } from "./nostrTypes";
 
@@ -139,7 +140,7 @@ function parseJson(s: string): Record<string, unknown> {
 }
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 
-/** NOTE: NIP-OA owner-tag verification (profile_valid_oa_owner_pubkey) is NOT ported in S1 → owner_pubkey null, is_agent false. */
+/** owner_pubkey: verified NIP-OA owner (profile_valid_oa_owner_pubkey port, nipOa.ts). */
 export function profileInfoFromEvent(e: NostrEvent) {
   const v = parseJson(e.content);
   return {
@@ -148,7 +149,7 @@ export function profileInfoFromEvent(e: NostrEvent) {
     avatar_url: str(v.picture),
     about: str(v.about),
     nip05_handle: str(v.nip05),
-    owner_pubkey: null as string | null,
+    owner_pubkey: profileValidOaOwner(e) as string | null,
     has_profile_event: true,
   };
 }
@@ -179,8 +180,8 @@ export function usersBatchFromEvents(
       name: str(v.name),
       avatar_url: str(v.picture),
       nip05_handle: str(v.nip05),
-      owner_pubkey: null,
-      is_agent: false,
+      owner_pubkey: profileValidOaOwner(ev),
+      is_agent: profileValidOaOwner(ev) !== null,
     };
   }
   return { profiles, missing: requested.filter((pk) => !(pk in profiles)) };

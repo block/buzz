@@ -7,6 +7,7 @@ import { relayHttpBase } from "./relayConfig";
 import { getRelayMediaBlobUrl, isRelayMediaUrl } from "./relayMedia";
 import { channelDetailFromEvent, channelInfoFromEvent, firstTag } from "./nostrConvert";
 import type { NostrEvent } from "./nostrTypes";
+import { profileValidOaOwner } from "./nipOa";
 
 type Args = Record<string, any> | undefined;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -83,14 +84,14 @@ function userHit(ev: NostrEvent): UserHit {
     /* bad kind:0 */
   }
   const s = (k: string) => (typeof v[k] === "string" ? (v[k] as string) : null);
-  // NIP-OA owner verification is not ported on web yet: never trust an unverified auth tag (same as nostrConvert).
+  const owner = profileValidOaOwner(ev);
   return {
     pubkey: ev.pubkey,
     display_name: s("display_name") ?? s("name"),
     avatar_url: s("picture"),
     nip05_handle: s("nip05"),
-    owner_pubkey: null,
-    is_agent: false,
+    owner_pubkey: owner,
+    is_agent: owner !== null,
   };
 }
 function matchScore(q: string, display: string, nip05: string, pk: string) {

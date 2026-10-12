@@ -156,3 +156,18 @@ export async function submitSignedEvent(
     throw new RelayHttpError(`relay rejected event: ${r.message}`);
   return r;
 }
+
+/** GET a relay JSON endpoint with NIP-98 (port of relay/get.rs get_relay_json), e.g. /workflows/<id>/runs. */
+export async function getRelayJson<T = unknown>(pathWithQuery: string): Promise<T> {
+  if (!pathWithQuery.startsWith("/")) throw new Error("relay GET path must begin with '/'");
+  const url = `${relayHttpBase()}${pathWithQuery}`;
+  const auth = await nip98Header("GET", url, null, 1);
+  let res: Response;
+  try {
+    res = await fetch(relayFetchUrl(relayHttpBase(), pathWithQuery), { headers: { Authorization: auth, Accept: "application/json" } });
+  } catch (e) {
+    throw new RelayHttpError(`relay unreachable: could not connect to relay (${e instanceof Error ? e.message : e})`);
+  }
+  if (!res.ok) throw new RelayHttpError(await relayError(res));
+  return (await res.json()) as T;
+}

@@ -3,6 +3,8 @@
 import { capabilityGroupFor, groupPolicy } from "./capabilities";
 import { chatHandlers } from "./chat";
 import { parityHandlers } from "./parity";
+import { parity2Handlers } from "./parity2";
+import { ownersFromProfiles } from "./nipOa";
 import { getFeed, type FeedArgs } from "./feed";
 import { queryRelay } from "./relayHttp";
 import {
@@ -55,8 +57,6 @@ const EMPTY_LIST = [
   "list_relay_agents",
   "discover_acp_providers",
   "fetch_persona_catalog",
-  // Teams are local desktop state (no relay-hosted catalog is read from the browser yet): an empty catalog, not an error.
-  "fetch_team_catalog",
   "discover_backend_providers",
   "reconcile_managed_agent_runtimes",
 ];
@@ -204,7 +204,7 @@ export const handlers: Record<string, Handler> = {
         feed: { mentions: [], needs_action: [], activity: [], agent_activity: [] },
         meta: { since: 0, total: 0, generated_at: Math.floor(Date.now() / 1000) },
       };
-    return getFeed(a as FeedArgs, me, (filters) => queryRelay(filters as never) as never);
+    return getFeed(a as FeedArgs, me, (filters) => queryRelay(filters as never) as never, (p) => ownersFromProfiles(p as never));
   },
   get_voice_input_mode: () => "push_to_talk",
   get_audio_output_device: () => "",
@@ -221,6 +221,8 @@ for (const c of NULL_CMDS) handlers[c] = () => null;
 installProxyHandlers(handlers);
 // Object-shaped placeholder (desktop returns { archived: string[] }); an empty array crashed the profile panel.
 handlers.list_archived_identities = () => ({ archived: [] });
+// web parity round 2 (pure relay ports) take precedence over the placeholder lists above
+Object.assign(handlers, parity2Handlers);
 
 export class NativeOnlyError extends Error {
   constructor(

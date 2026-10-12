@@ -9,6 +9,8 @@ const shim = (f: string) => path.resolve(__dirname, "src/platform/web", f);
 const protectedOn = process.env.VITE_BUZZ_BESTIE === "1";
 
 let outDirResolved: string | undefined;
+// One id per build: baked into the bundle and written to /version.json so open apps can tell a newer build is live.
+const BUILD_ID = process.env.VITE_BUZZ_WEB_BUILD_ID || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 export default defineConfig(({ command }) => ({
   plugins: [
@@ -31,7 +33,7 @@ export default defineConfig(({ command }) => ({
         // Also GET/HEAD /media/<sha>.<ext> (auth-gated images) and PUT /upload | /media/upload (attachments).
         server.middlewares.use(async (req, res, next) => {
           const m = req.url?.match(
-            /^\/__relay\/([^/]+)(\/(?:query|events|upload|media\/upload|media\/[\da-f]{64}(?:\.thumb)?\.[a-z0-9]{2,5}))(?:\?.*)?$/i,
+            /^\/__relay\/([^/]+)(\/(?:query|events|upload|media\/upload|media\/[\da-f]{64}(?:\.thumb)?\.[a-z0-9]{2,5}|workflows\/[\da-f-]{36}\/runs(?:\/[\da-f-]{36}\/approvals)?))(\?.*)?$/i,
           );
           const method = req.method ?? "";
           const allowed = m
@@ -53,7 +55,7 @@ export default defineConfig(({ command }) => ({
               if (req.headers[h]) headers[h] = String(req.headers[h]);
             if (hasBody && !headers["content-type"])
               headers["content-type"] = "application/json";
-            const r = await fetch(base + m[2], {
+            const r = await fetch(base + m[2] + (m[3] ?? ""), {
               method,
               headers,
               body: hasBody ? Buffer.concat(chunks) : undefined,
@@ -86,11 +88,15 @@ export default defineConfig(({ command }) => ({
             path.join(out, "index.web.html"),
             path.join(out, "index.html"),
           );
+        if (fs.existsSync(out))
+          fs.writeFileSync(path.join(out, "version.json"), JSON.stringify({ build: BUILD_ID }) + "\n");
       },
     },
   ],
   define: {
     "import.meta.env.VITE_BUZZ_PLATFORM": JSON.stringify("web"),
+    // dev server: no build id → the update check stays off (tests set it through VITE_BUZZ_WEB_BUILD_ID)
+    "import.meta.env.VITE_BUZZ_WEB_BUILD_ID": JSON.stringify(command === "build" || process.env.VITE_BUZZ_WEB_BUILD_ID ? BUILD_ID : ""),
     // Default relay: prod builds → wss://buzz.huladesk.com; dev server → ws://localhost:3000. Override with VITE_BUZZ_RELAY_URL.
     "import.meta.env.VITE_BUZZ_RELAY_URL": JSON.stringify(
       process.env.VITE_BUZZ_RELAY_URL ||
