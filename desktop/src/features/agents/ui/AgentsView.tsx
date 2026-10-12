@@ -36,10 +36,13 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { MyAgentsPanel } from "@/features/bridge/ui/MyAgentsPanel";
+import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
+  const desktopData = useDesktopData();
+  const controlsOff = desktopData.web && !desktopData.live; // web without Direct: look stays, control is off
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
@@ -184,7 +187,8 @@ export function AgentsView() {
                   </Button>
                   {runningAgentCount > 0 ? (
                     <Button
-                      disabled={isActionPending}
+                      disabled={isActionPending || controlsOff}
+                      title={controlsOff ? "Needs a Direct connection" : undefined}
                       onClick={() => {
                         void agents.handleBulkStopRunning();
                       }}
