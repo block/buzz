@@ -91,7 +91,10 @@ as `relay_admin_actions.report_community_id` does, so the catalog does not
 treat the table as scoped. If the column must be named `community_id`, the
 table MUST be added to `community_write_fence_excluded_table` in the same
 migration and in `schema/functions/`. That edit is part of this exception, and
-the only permitted change to an existing function.
+the only permitted change to an existing function. Either route removes the
+table from every automatic deletion surface, so it also needs the
+provenance-only checklist below. Without it, rows that name a deleted
+community survive deletion and no check fails.
 
 **Nothing cheap catches a missing fence.** Know what actually fails:
 
@@ -125,6 +128,32 @@ All in the same PR:
 - [ ] The migration count in `embedded_migrator_contains_consolidated_initial_schema`.
 - [ ] A run of the Postgres-gated migration-mode tests (see
       [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md)).
+
+#### Checklist: adding a provenance-only table
+
+For a table that records which community a row came from but is not owned by
+that community. All in the same PR:
+
+- [ ] Register it as operator-global in all three places: the
+      `_operator_global_tables` seed row in the migration, `schema/seeds/`, and
+      the hard-coded name list in `operator_global_tables()`
+      (`crates/buzz-db/src/runtime/migration.rs`). The lint ignores a registry
+      row whose name is not on that list, and without registration the
+      `community_id NOT NULL` and key-leads-with-`community_id` lints fail.
+- [ ] Choose and implement its community-deletion disposition in
+      `crates/buzz-db/src/store/deletion.rs`:
+  - **sever:** set the provenance column to `NULL` in the `BindingsRemoved`
+    step, as `product_feedback` and `rate_limit_violations` are;
+  - **delete and verify:** add it to `RELAY_ADMIN_TABLES` with a row source,
+    as the `relay_admin_*` tables are; or
+  - **retain on purpose:** add it to `CONTROL_PLANE_TABLES` and state the
+    reason in the PR.
+- [ ] Use the `community_write_fence_excluded_table` edit only if the column
+      must be named `community_id`; otherwise give the column another name.
+- [ ] A Postgres-gated deletion test that seeds a row for the target community
+      and asserts the chosen disposition after
+      `verify_postgres_logically_deleted`, as the existing tests do for
+      `product_feedback` and `relay_admin_*`.
 
 A `DO` block in a migration is not a persisted function. It MAY guard
 idempotent DDL, as migration `0049` does. It MUST NOT be used to run data
@@ -194,7 +223,8 @@ against `schema.sql` does not count.
 
 The existing migration lints still apply. Every tenant-scoped table has
 `community_id NOT NULL`, every key on a scoped table leads with `community_id`,
-and operator-global tables are listed explicitly.
+and operator-global tables are registered in all three places listed in the
+provenance-only checklist under Rule 1.
 
 ### 5. Every schema change is backward compatible with the running app
 
