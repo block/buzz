@@ -2746,6 +2746,7 @@ mod tests {
                 "contribute",
                 "fingerprint",
                 "outcome",
+                "recheck",
                 "request",
                 "trail",
                 "verify"
@@ -2785,7 +2786,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 6),
             ("social", 7),
-            ("trust", 6),
+            ("trust", 7),
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),
