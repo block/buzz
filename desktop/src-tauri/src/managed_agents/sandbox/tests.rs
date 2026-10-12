@@ -64,6 +64,7 @@ fn sandboxed_command_wraps_the_harness_with_the_local_profile() {
         [
             "wrap",
             "--silent",
+            "--allow-cwd",
             "--profile",
             "buzz-agent-local",
             "--read",

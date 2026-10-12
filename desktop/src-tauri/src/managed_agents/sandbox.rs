@@ -188,6 +188,9 @@ fn wrap_args(sandbox: &AgentSandbox, grants: &SandboxGrants, acp_command: &Path)
     let mut args: Vec<OsString> = vec![
         "wrap".into(),
         "--silent".into(),
+        // Grant the nest workdir (at the profile's `workdir.access`) without
+        // nono's interactive prompt, which fails without a terminal.
+        "--allow-cwd".into(),
         "--profile".into(),
         sandbox.profile.clone().into(),
     ];

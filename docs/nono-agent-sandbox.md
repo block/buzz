@@ -147,7 +147,7 @@ In `spawn_agent_child`, replace
 (`managed_agents/sandbox.rs`) that returns either the unwrapped command or:
 
 ```
-nono wrap --silent --profile buzz-agent-local \
+nono wrap --silent --allow-cwd --profile buzz-agent-local \
   --workdir <nest> \
   --allow <resolved REPOS target, if it is a symlink outside the nest> \
   -- <resolved_acp_command>

@@ -92,7 +92,7 @@ error if it is invalid. To check it yourself with the nono bundled in Buzz
 NONO=/Applications/Buzz.app/Contents/MacOS/nono
 $NONO profile validate buzz-agent-local
 # Show what an agent would be allowed to access:
-cd ~/.buzz && $NONO wrap --dry-run --profile buzz-agent-local -- /usr/bin/true
+cd ~/.buzz && $NONO wrap --allow-cwd --dry-run --profile buzz-agent-local -- /usr/bin/true
 ```
 
 ## Troubleshooting
