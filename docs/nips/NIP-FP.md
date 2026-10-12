@@ -1,22 +1,26 @@
 NIP-FP
 ======
 
-Work Fingerprints
------------------
+Work Trails and Fingerprints
+----------------------------
 
 `draft` `optional`
 
-**Depends on**: NIP-01 (events, addressable events), NIP-34 (git statuses and repository state), NIP-OA (owner attestation). Interacts with NIP-32 (labels), NIP-09 (deletion), and NIP-11 (relay information).
+**Depends on**: NIP-01 (events, addressable events), NIP-10 (replies), NIP-32 (labels), NIP-34 (git statuses and repository state), NIP-OA (owner attestation). Interacts with NIP-09 (deletion) and NIP-11 (relay information).
 
 ## Abstract
 
-A **work fingerprint** is a signed, replaceable index of events that its author *selects* as evidence of their work. This NIP defines the fingerprint event, the outcome vocabulary a verifier reads from ordinary events, how a verifier discovers outcomes the index leaves out, and the report a verifier produces.
+Work inside a community leaves a trail of signed events: what was **requested**, what someone **contributed**, and what happened to that **exact** contribution. This NIP defines how a viewer reads that trail locally, inside the community it already reads, under the policy `buzz.work/v1`: request → contribution(s) → outcome(s).
 
-The report keeps three things apart: what the subject **selected**, what the viewer **observed** by fetching events itself, and how the viewer **interprets** those events under a named policy. This NIP defines no score, tier, rank, or verdict.
+It defines an opt-in typed convention for non-code work on ordinary channel messages, the outcome label that judges one exact submission, how code statuses bind to one exact pull-request revision, how a reader discovers work that has no outcome, and the plain [work trail](#work-trail) it reports.
+
+A **work fingerprint** is optional: a signed, replaceable index of events its author *selects* as evidence of their work, for sharing selected work later. It grants no access and proves no completeness, and the local trail does not need one.
+
+Every view keeps three things apart: what someone **selected**, what the viewer **observed** by fetching events itself, and how the viewer **interprets** those events under a named policy. This NIP defines no score, tier, rank, or verdict.
 
 ## Motivation
 
-Someone meets a key they have never worked with, often in a community they do not share, and has to make a bounded decision: offer it a small, revocable job or not. The evidence already exists as signed events: patches, merges, issue closures, answers, corrections. Nothing assembles it, and an author-curated list hides whatever it leaves out.
+Someone has to make a bounded decision about a key: offer it a specific, revocable task, see where a project stands, or discuss someone's work with evidence instead of memory. The first case is local: the viewer and the work share a community. The evidence already exists as signed events: patches, merges, issue closures, answers, corrections. Nothing assembles it, and an author-curated list hides whatever it leaves out.
 
 A signature proves who authored an event. It does not prove the work was good, that a merge was authorized, that two keys belong to different people, or that nothing contrary exists. A fingerprint therefore carries no authority of its own. It is a starting point. The verifier fetches the selected events from their origin, checks the authority of every claimed outcome against the rules in force at the time, looks for contrary outcomes by subject and by issuer, and reports what it could not see.
 
@@ -27,6 +31,7 @@ This NIP does not define completeness. A fingerprint never claims to list all of
 This NIP does not define ledger inclusion, inclusion receipts, or checkpoints.
 This NIP does not grant access. Presenting or verifying a fingerprint changes no membership or permission.
 This NIP does not establish that distinct keys belong to distinct people.
+This NIP does not automate staffing, hiring, ranking, or access decisions, and does not require a cross-community exchange.
 
 ## Terminology
 
@@ -40,14 +45,63 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY as defined in RFC
 - **scope**: an origin plus the filter the verifier sent to it.
 - **cutoff**: the `until` bound of every discovery query. Nothing after the cutoff is observed.
 - **owner link**: a NIP-OA `auth` tag that verifies on an observed event.
+- **request / contribution / outcome**: the three roles of a [work trail](#work-trail). They are roles, not a limit of three events.
+- **revision**: one exact contribution event. A later revision is a different event with its own outcomes.
 
 ## Kinds
 
 | Kind | Name | Signer | Class | Status |
 |------|------|--------|-------|--------|
+| `9` with a `buzz.work/<role>/v1` `t` tag | Typed request, commitment, update, or submission | requester or contributor | regular | proposed convention |
+| `1985` in namespace `buzz.wot` | Outcome label on one exact submission | anyone; authority is read, not assumed | regular | NIP-32 kind; Buzz acceptance below |
 | `30340` | Work fingerprint | subject | addressable | provisional |
 
+The typed messages are ordinary NIP-29 channel messages: they keep their `h` tag and the channel's existing read and write rules. No new kind is needed for a local trail.
+
+Buzz relays built with `KIND_LABEL` accept kind `1985` only on this first, target-derived slice: exactly one `e` naming a stored event in an **open**, live, non-DM channel of the same community; exactly one `h` equal to that event's channel; exactly one `p` equal to that event's signer; at least one `l`; and no other NIP-32 target (`a`, `r`, `t`, `q`). The relay derives the channel from the stored target, never from the label's own `h`, then applies the channel's normal write gates. Labels on private channels, DMs, global events, and unknown targets are rejected with one indistinguishable reason, so the write path reveals nothing about events the writer cannot already see. Private work outcomes wait for target-inherited access.
+
 `30340` is provisional. It is unassigned in the NIPs registry, and it MUST NOT be treated as stable until it is registered. Buzz relays built with `KIND_WORK_FINGERPRINT` in `buzz-core/src/kind.rs` accept it as a community-global member write and advertise the `nip-fp` NIP-11 extension. Relays without it reject unregistered kinds, so there a fingerprint travels as a [transport bundle](#transport-bundle-pre-registration).
+
+## Work trail
+
+### Non-code work
+
+A typed message is a kind `9` channel message with JSON `content` and exactly one `t` tag that starts with `buzz.work/`, naming a known role and version (`buzz.work/<role>/v1`). Unknown versions, malformed content, untyped messages, and root-only replies are conversation, never work or acceptance.
+
+| Role | `t` | Required tags | `content` |
+|---|---|---|---|
+| request | `buzz.work/request/v1` | `h`; no thread reply | `title`, `task_type`, `acceptance_criteria` (non-empty strings) |
+| commitment | `buzz.work/commitment/v1` | `h`; `e` root and `e` reply both the request; `p` the requester | `summary` |
+| update | `buzz.work/update/v1` | as commitment | `summary`, `state` (`working` or `blocked`) |
+| submission | `buzz.work/submission/v1` | as commitment; optional `q` naming the previous submission | `summary`, `artifact` (inline text or an immutable revision locator), `artifact_revision` |
+
+A request is top-level: Buzz relays only accept a thread reply to a top-level message, and a typed request must not be moved into or manufactured from ordinary conversation. Its signer is the requester. A commitment claims responsibility, not completion; an update is the contributor's statement, not verified progress. A mutable URL alone is not a verified artifact revision.
+
+The JSON `content` appears as raw text in clients that do not read this convention. That is a known limitation of this opt-in slice, not the finished experience; readers render the trail, not the raw JSON.
+
+An **outcome** is a `buzz.wot` label (kind `1985`) on one exact submission. Its `e` names the submission and its origin, its `p` the submission's signer, and its `h` the submission's channel; all three are derived from the fetched submission. Its `l` value is `accepted`, `corrected`, `rejected`, `disputed`, or `reused`, and its `content` is JSON: `reason` (non-empty), `criteria_checked` (non-empty array), `evidence_refs` (array). These record what the reviewer says they checked. Only the request's signer is authorized for that request; anyone else's label is an attributed opinion. Acceptance of one submission never transfers to another.
+
+### Code work
+
+Code reuses NIP-34: `1621` issues as requests, `1617` patches, `1618` pull requests and `1619` pull-request updates as contributions, `1630`–`1633` statuses as outcomes, `30617` for authority and `30618` for ref state. No convention yet links a pull request to an issue; a reader shows **request not linked** and never infers one. A close is a close, not poor work. A merge is delivery evidence, not proof of correctness or of independent review.
+
+**Revisions.** A `1618` is revision R1, pinned by its id and its signed `c` tip commit. A `1619` is a later revision only when it has exactly one each of `E`, `P`, `a`, and `c`; its `E` names a fetched, valid `1618`; its `P` is that `1618`'s signer; its `a` is the same repository, fetched from the same origin; and it is signed by the `1618`'s signer. Delegated update signers are unresolved in this version, even with an owner link. A `1619` does not name the revision before it, and a reader does not invent that edge. Updates are discovered by their uppercase `E`.
+
+**Statuses.** A status whose only reference is `e` root is a claim about the pull request as a whole: a root-only `1631` reads **PR-level merge claim; judged revision unknown**, even when only R1 is visible. A status judges one revision only with `e` root naming the `1618` and exactly one `e` reply naming that `1618` or a valid `1619` of it. An invalid, ambiguous, unavailable, or mismatched reply leaves the status revision-unknown. A reader never falls back to the newest tip or to `created_at` order, and a later revision never inherits an earlier one's outcome. Ref corroboration of a `merge-commit` (see [Outcome vocabulary](#outcome-vocabulary)) is a separate check: it shows a branch pointed at a commit, not which revision was reviewed.
+
+Writers check the revision before signing (`buzz pr status --revision`), and readers check it again. Buzz relays do not enforce revision binding, so other writers can publish claims a reader cannot validate; those stay revision-unknown, never trusted outcomes.
+
+**Patch series.** An applied status on a `1617` series is a series-level claim with the judged revision unknown, until linked `q` references can be fetched and validated in the same repository.
+
+### Reading a trail
+
+A trail starts from a request, one contribution, or an actor, inside a declared scope: the origin, the channels and repositories the viewer may read, and `since`/`until` bounds. Reading from an actor finds that key's typed requests and contributions and its code work in the declared scope, so work with no outcome and work nobody selected are visible.
+
+The reader fetches every event it reports, checks ids and signatures, discards anything outside its filter, fetches each request to identify its requester, and follows each contribution to its outcomes. It sends the origin only the constraints the relay applies before its `LIMIT` (Buzz: kinds, authors, ids, `since`, `until`, `#h`, `#e`, a single `#p`, and `#d` on addressable kinds), pages by `until` within a declared budget, and matches the rest (`#E`, `#t`, `#a`) locally. A short page is not proof of exhaustion; a capped walk, a full page inside one second, a failed query, and unsupported filtering leave coverage incomplete or unknown.
+
+**Reduction.** Outcomes are grouped by exact contribution id. Every authorized judgment and every opinion stays visible; none is picked to erase a contrary one, and none is resolved by asserted time. "Corrected C1, accepted C2" is shown as that history. Self-acceptance and same-owner merges are shown with their [relationship](#independence); unrelated keys are `unknown`, never independent. The signer is always the author of its own event: an owner link never transfers authorship. The same events, access, and policy produce the same trail.
+
+**Report.** For each task: the request (or **request not linked**), each contribution with its signer, role, exact revision, and artifact; each outcome beside the revision it judges, with signer, claim, authority, relationship, and ref corroboration; and the gaps and coverage of every query in the [coverage wording](#discovery). A trail has no rung, score, or attention count. It exposes no identifier, count, or derived state from events the viewer cannot read.
 
 ## Fingerprint event
 
@@ -123,7 +177,7 @@ Explicit outcomes on non-code work use NIP-32 labels (kind `1985`) in the provis
 }
 ```
 
-The values are `accepted`, `reused`, `corrected`, `rejected`, and `disputed`. A label SHOULD carry a `p` tag naming the work event's author, so discovery by subject finds it even when the work event is not selected. Kind `1985` is not yet accepted by Buzz relays; block/buzz#5127 registers it.
+The values are `accepted`, `reused`, `corrected`, `rejected`, and `disputed`. A label SHOULD carry a `p` tag naming the work event's author, so discovery by subject finds it even when the work event is not selected. On Buzz relays a label MUST also satisfy the [target-derived rule](#kinds); for typed work it follows the [outcome convention](#non-code-work), and its requester is the typed request's signer.
 
 ## Discovery
 
@@ -188,6 +242,8 @@ Every reported item lands in exactly one bucket, taking the first that applies:
 4. **verifiable**: fetched from its origin, signature valid, and its claim checks out under the rules above. For an outcome, that means `authorized` or `delegated`; for a work event, attributed to the subject.
 5. **unknown**: fetched, but its claim does not check out or could not be checked, e.g. a `self_asserted` status, an `opinion` label, authority at the time, an unattributed selection, or an unresolvable reference.
 
+The fingerprint report below, including its rungs and attention counts, is kept for compatibility with existing `nip-fp/default` consumers. A [work trail](#work-trail) does not use rungs or attention, and neither feeds any decision in it.
+
 **`interpretation`** names the policy and its version, gives each work item a rung, lists contrary outcomes omitted by the selection and other gaps, and states every coverage record in the wording above. Each rung carries its basis: the outcome id that supports rung 2, that signer's independence, and whether the policy marks the signer `viewer_known`.
 
 **Rungs** for a work item, selected or discovered:
@@ -237,5 +293,5 @@ Publishing a fingerprint links its subject to every selected event and, through 
 
 - block/buzz#3721 (NIP-TR, portable trust attestations, kind `48200`): defines tiers and scores; this NIP deliberately defines neither.
 - block/buzz#5880 (Web of Trust RFC): evidence-first, advisory; this NIP shares its `buzz.wot` label namespace.
-- block/buzz#5127: registers kind `1985` on Buzz relays.
+- block/buzz#5127: registers kind `1985` on Buzz relays using the label's own `h`. This NIP's [target-derived rule](#kinds) is stricter; reconciling the two is a maintainer decision.
 - NIP-32 (labels), NIP-34 (git), NIP-85 (trusted assertions), NIP-OA (owner attestation).
