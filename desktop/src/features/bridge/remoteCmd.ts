@@ -112,14 +112,44 @@ function writeCache(key: string, v: unknown) {
  * Last agent list the desktop published over the relay (the bridge snapshot, saved on every snapshot), shaped like the desktop's
  * own list so the desktop-style Agents page can draw before any Direct connection. Read-only fields only.
  */
-export function relaySnapshotAgents(): unknown[] | undefined {
+function latestRelaySnapshot(): { ts: number; agents: Record<string, unknown>[] } | undefined {
+  let best: { ts: number; agents: Record<string, unknown>[] } | undefined;
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k?.startsWith("buzz-bridge-lastlist:")) continue;
       const v = JSON.parse(localStorage.getItem(k) || "null");
       const agents = v?.snapshot?.agents;
-      if (!Array.isArray(agents)) continue;
+      const ts = Number(v?.ts ?? 0);
+      if (Array.isArray(agents) && (!best || ts > best.ts)) best = { ts, agents };
+    }
+  } catch {
+    /* storage denied */
+  }
+  return best;
+}
+
+/**
+ * Offline list: the last full Direct answer with each agent's name and live status taken from the newest relay snapshot
+ * (it is republished on every desktop change, so it is fresher than the Direct cache).
+ */
+function overlaySnapshot(list: unknown): unknown {
+  const snap = latestRelaySnapshot();
+  if (!Array.isArray(list) || !snap) return list;
+  const by = new Map(snap.agents.map((a) => [String(a.pubkey).toLowerCase(), a]));
+  return list.map((row: Record<string, unknown>) => {
+    const a = by.get(String(row.pubkey).toLowerCase());
+    return a ? { ...row, name: a.name ?? row.name, status: a.status ?? row.status, pid: a.pid ?? row.pid, last_error: a.lastError ?? null } : row;
+  });
+}
+
+export function relaySnapshotAgents(): unknown[] | undefined {
+  try {
+    {
+      const v0 = latestRelaySnapshot();
+      if (!v0) return undefined;
+      const v = { ts: v0.ts };
+      const agents = v0.agents;
       const t = new Date((v.ts ?? 0) * 1000).toISOString();
       return agents.map((a: Record<string, unknown>) => ({
         pubkey: a.pubkey, name: a.name, persona_id: a.personaId ?? null, runtime: a.runtime ?? null, team_id: null, relay_url: "",
@@ -168,7 +198,11 @@ export function installProxyHandlers(handlers: Record<string, (a?: any) => unkno
     // showing your agents while reconnecting), else empty.
     handlers[name] = async (a) => {
       const key = cacheKey(name, a);
-      if (!proxyDirectLive()) return readCache(key) ?? (name === "list_managed_agents" ? relaySnapshotAgents() : undefined) ?? empty();
+      if (!proxyDirectLive()) {
+        const cached = readCache(key);
+        if (name === "list_managed_agents") return (cached !== undefined ? overlaySnapshot(cached) : relaySnapshotAgents()) ?? empty();
+        return cached ?? empty();
+      }
       const v = await proxyCmd(name, a);
       writeCache(key, v);
       return v;

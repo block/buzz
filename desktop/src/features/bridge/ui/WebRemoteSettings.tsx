@@ -266,9 +266,23 @@ export function WebRemoteWatcher() {
   React.useEffect(() => {
     if (snapTs == null) return;
     void queryClient.invalidateQueries({ queryKey: ["presence"] });
-    // Without Direct the Agents page draws from the saved relay snapshot: redraw it when a new one arrives.
-    if (!live) void queryClient.invalidateQueries({ predicate: (q) => /agent/i.test(String(q.queryKey[0])) });
+    // Any desktop change (start/stop/crash, rename, persona edit) republishes the snapshot: refetch the agent and persona lists
+    // too: over Direct when live, else from the saved snapshot. Before, a live Direct session never refreshed on desktop changes.
+    void queryClient.invalidateQueries({ predicate: (q) => /agent|persona/i.test(String(q.queryKey[0])) });
   }, [snapTs, queryClient, live]);
+  // Edits that don't change the agent snapshot (persona renames) still show when you come back to the tab.
+  React.useEffect(() => {
+    if (!live) return;
+    const kick = () => {
+      if (document.visibilityState === "visible") void queryClient.invalidateQueries({ predicate: (q) => /agent|persona/i.test(String(q.queryKey[0])) });
+    };
+    window.addEventListener("focus", kick);
+    document.addEventListener("visibilitychange", kick);
+    return () => {
+      window.removeEventListener("focus", kick);
+      document.removeEventListener("visibilitychange", kick);
+    };
+  }, [live, queryClient]);
   return null;
 }
 /** Content of the page a greyed-out nav row opens on web/mobile: what is needed, and the exact settings to turn on. */
