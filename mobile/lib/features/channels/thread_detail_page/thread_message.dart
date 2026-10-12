@@ -154,6 +154,7 @@ class _ThreadMessage extends HookConsumerWidget {
                 bottom: Grid.quarter,
               ),
               child: MessageFooterLayout(
+                animateSize: true,
                 overlap: message.reactions.isNotEmpty ? Grid.xxs : 0,
                 child: RepaintBoundary(
                   key: messageSnapshotKey,
@@ -194,7 +195,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                     children: [
                                       Expanded(
                                         child: MessageAuthorMeta(
-                                          showTimestamp: false,
+                                          showTimestamp: true,
                                           nameStyle: messageUsernameTextStyle
                                               .copyWith(
                                                 fontSize: 13.1,
@@ -260,10 +261,6 @@ class _ThreadMessage extends HookConsumerWidget {
                               MessageContent(
                                 content: message.content,
                                 bubble: true,
-                                timestamp: formatMessageTime(message.createdAt),
-                                timestampKey: ValueKey(
-                                  'thread-message-timestamp-${message.id}',
-                                ),
                                 hasReactions: message.reactions.isNotEmpty,
                                 bubbleEnd: showAvatar,
                                 bubbleStart: showAuthor,

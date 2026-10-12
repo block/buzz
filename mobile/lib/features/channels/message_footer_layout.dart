@@ -3,28 +3,51 @@ import 'dart:math' as math;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../shared/theme/grid.dart';
-
-/// Places a footer beside one-line content, below it, or overlapping its edge.
+/// Places reactions at the bottom edge of a message.
 /// Both children remain inside the hit-test bounds, including overlapping badges.
-class MessageFooterLayout extends MultiChildRenderObjectWidget {
-  MessageFooterLayout({
+class MessageFooterLayout extends StatelessWidget {
+  /// Creates a message with overlapping reaction controls.
+  const MessageFooterLayout({
     super.key,
-    required Widget child,
-    required Widget footer,
-    this.inlineLineHeight,
+    required this.child,
+    required this.footer,
     this.overlap = 0,
-  }) : super(children: [child, footer]);
+    this.animateSize = false,
+  });
 
-  /// Maximum rendered content height eligible for an inline footer.
-  final double? inlineLineHeight;
+  /// Main message content.
+  final Widget child;
 
-  /// Space shared by the content's bottom edge and the footer.
+  /// Controls attached to the bottom of the message.
+  final Widget footer;
+
+  /// Vertical distance shared by the message and its controls.
+  final double overlap;
+
+  /// Smoothly adjusts the space occupied by added or removed reactions.
+  final bool animateSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final layout = _FooterLayout(overlap: overlap, children: [child, footer]);
+    if (!animateSize || MediaQuery.disableAnimationsOf(context)) return layout;
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeInOutCubic,
+      alignment: Alignment.topLeft,
+      clipBehavior: Clip.none,
+      child: layout,
+    );
+  }
+}
+
+class _FooterLayout extends MultiChildRenderObjectWidget {
+  const _FooterLayout({required this.overlap, required super.children});
   final double overlap;
 
   @override
   RenderObject createRenderObject(BuildContext context) =>
-      _RenderMessageFooter(inlineLineHeight, overlap);
+      _RenderMessageFooter(overlap);
 
   @override
   void updateRenderObject(
@@ -32,7 +55,6 @@ class MessageFooterLayout extends MultiChildRenderObjectWidget {
     covariant RenderBox renderObject,
   ) {
     (renderObject as _RenderMessageFooter)
-      ..lineHeight = inlineLineHeight
       ..overlap = overlap
       ..markNeedsLayout();
   }
@@ -48,9 +70,8 @@ class _RenderMessageFooter extends RenderBox
           RenderBox,
           ContainerBoxParentData<RenderBox>
         > {
-  _RenderMessageFooter(this.lineHeight, this.overlap);
+  _RenderMessageFooter(this.overlap);
 
-  double? lineHeight;
   double overlap;
 
   @override
@@ -72,23 +93,8 @@ class _RenderMessageFooter extends RenderBox
 
     final contentSize = measure(content);
     final footerSize = measure(footer);
-    const gap = Grid.xxs;
-    final inline =
-        lineHeight != null &&
-        contentSize.height <= lineHeight! + 1 &&
-        contentSize.width + gap + footerSize.width <= constraints.maxWidth;
-    final width = inline
-        ? contentSize.width + gap + footerSize.width
-        : math.max(contentSize.width, footerSize.width);
-    final footerOffset = inline
-        ? Offset(
-            contentSize.width + gap,
-            math.max(0, contentSize.height - footerSize.height),
-          )
-        : Offset(
-            lineHeight == null ? 0 : width - footerSize.width,
-            math.max(0, contentSize.height - overlap),
-          );
+    final width = math.max(contentSize.width, footerSize.width);
+    final footerOffset = Offset(0, math.max(0, contentSize.height - overlap));
     if (!dry) {
       (content.parentData! as ContainerBoxParentData<RenderBox>).offset =
           Offset.zero;

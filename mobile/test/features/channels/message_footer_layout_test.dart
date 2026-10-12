@@ -3,6 +3,46 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final reduced in [false, true]) {
+    testWidgets('reaction spacing animates both ways, reduced=$reduced', (
+      tester,
+    ) async {
+      Widget view(bool reaction) => MaterialApp(
+        home: MediaQuery(
+          data: MediaQueryData(disableAnimations: reduced),
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: MessageFooterLayout(
+              animateSize: true,
+              overlap: reaction ? 8 : 0,
+              footer: SizedBox(width: 100, height: reaction ? 32 : 0),
+              child: const SizedBox(width: 200, height: 60),
+            ),
+          ),
+        ),
+      );
+      double height() =>
+          tester.getSize(find.byType(MessageFooterLayout)).height;
+      await tester.pumpWidget(view(false));
+      await tester.pumpWidget(view(true));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        height(),
+        reduced ? equals(84) : allOf(greaterThan(60), lessThan(84)),
+      );
+      await tester.pumpAndSettle();
+      expect(height(), 84);
+      await tester.pumpWidget(view(false));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        height(),
+        reduced ? equals(60) : allOf(greaterThan(60), lessThan(84)),
+      );
+      await tester.pumpAndSettle();
+      expect(height(), 60);
+    });
+  }
+
   testWidgets(
     'overlapping reaction area is tappable and reserves its protrusion',
     (tester) async {

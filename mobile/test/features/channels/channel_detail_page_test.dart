@@ -3208,6 +3208,12 @@ void main() {
       expect(aliceTimestamp.style?.fontSize, 11);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
       expect(
+        tester
+            .getCenter(find.byKey(const ValueKey('message-timestamp-msg1')))
+            .dy,
+        closeTo(tester.getCenter(aliceName).dy, 0.01),
+      );
+      expect(
         aliceTimestamp.style?.fontSize,
         lessThan(aliceText.style!.fontSize!),
       );

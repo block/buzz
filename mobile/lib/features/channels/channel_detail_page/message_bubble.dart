@@ -159,6 +159,7 @@ class _MessageBubble extends HookConsumerWidget {
               bottom: Grid.quarter,
             ),
             child: MessageFooterLayout(
+              animateSize: true,
               overlap: message.reactions.isNotEmpty ? Grid.xxs : 0,
               child: RepaintBoundary(
                 key: messageSnapshotKey,
@@ -199,7 +200,7 @@ class _MessageBubble extends HookConsumerWidget {
                                   children: [
                                     Expanded(
                                       child: MessageAuthorMeta(
-                                        showTimestamp: false,
+                                        showTimestamp: true,
                                         nameStyle: messageUsernameTextStyle
                                             .copyWith(
                                               fontSize: 13.1,
@@ -260,10 +261,6 @@ class _MessageBubble extends HookConsumerWidget {
                             MessageContent(
                               content: message.content,
                               bubble: true,
-                              timestamp: formatMessageTime(message.createdAt),
-                              timestampKey: ValueKey(
-                                'message-timestamp-${message.id}',
-                              ),
                               hasReactions: message.reactions.isNotEmpty,
                               bubbleEnd: showAvatar,
                               bubbleStart: showAuthor,

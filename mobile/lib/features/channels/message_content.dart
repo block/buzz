@@ -1,4 +1,3 @@
-import 'message_footer_layout.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -104,12 +103,6 @@ class MessageContent extends HookConsumerWidget {
   /// Marks the first message in a sender run for rounded top corners.
   final bool bubbleStart;
 
-  /// Time displayed inside the bubble, or as a footer for attachment-only content.
-  final String? timestamp;
-
-  /// Identifies the rendered timestamp for accessibility and tests.
-  final Key? timestampKey;
-
   /// Reserves room above overlapping reactions.
   final bool hasReactions;
 
@@ -176,8 +169,6 @@ class MessageContent extends HookConsumerWidget {
     this.ownMessage = false,
     this.bubbleEnd = true,
     this.bubbleStart = true,
-    this.timestamp,
-    this.timestampKey,
     this.hasReactions = false,
     this.mentionNames = const {},
     this.mentionLabels = const {},
@@ -383,28 +374,6 @@ class MessageContent extends HookConsumerWidget {
         inlineComponents: inlineComponents,
       ),
     );
-    Widget timedContent(Widget child) {
-      if (timestamp == null) return child;
-      return MessageFooterLayout(
-        inlineLineHeight:
-            MediaQuery.textScalerOf(context).scale(style?.fontSize ?? 15) *
-            (style?.height ?? 1.2),
-        footer: Padding(
-          padding: const EdgeInsets.only(left: Grid.half),
-          child: Text(
-            timestamp!,
-            key: timestampKey,
-            style: messageTimestampTextStyle.copyWith(
-              fontSize: 11,
-              height: 17 / 11,
-              color: context.colors.onSurfaceVariant,
-            ),
-          ),
-        ),
-        child: child,
-      );
-    }
-
     final segments = bubble
         ? _bubbleSegments(finalContent, imetaByUrl)
         : const <({String text, bool attachment})>[];
@@ -415,9 +384,7 @@ class MessageContent extends HookConsumerWidget {
             children: [
               for (final (index, segment) in segments.indexed)
                 if (segment.attachment)
-                  index == segments.length - 1 && trailingGallery == null
-                      ? timedContent(renderMarkdown(segment.text))
-                      : renderMarkdown(segment.text)
+                  renderMarkdown(segment.text)
                 else
                   Container(
                     key: ValueKey('message-text-bubble-$index'),
@@ -432,11 +399,15 @@ class MessageContent extends HookConsumerWidget {
                     ),
                     decoration: ShapeDecoration(
                       color: Color.alphaBlend(
-                        context.colors.onSurface.withValues(
-                          alpha: context.colors.brightness == Brightness.dark
-                              ? (ownMessage ? 0.20 : 0.14)
-                              : (ownMessage ? 0.09 : 0.04),
-                        ),
+                        (ownMessage
+                                ? context.colors.primary
+                                : context.colors.onSurface)
+                            .withValues(
+                              alpha:
+                                  context.colors.brightness == Brightness.dark
+                                  ? (ownMessage ? 0.24 : 0.14)
+                                  : (ownMessage ? 0.12 : 0.04),
+                            ),
                         context.colors.surface,
                       ),
                       shape: _MessageBubbleShape(
@@ -447,10 +418,7 @@ class MessageContent extends HookConsumerWidget {
                             index == segments.length - 1,
                       ),
                     ),
-                    child:
-                        index == segments.length - 1 && trailingGallery == null
-                        ? timedContent(renderMarkdown(segment.text))
-                        : renderMarkdown(segment.text),
+                    child: renderMarkdown(segment.text),
                   ),
             ],
           )
@@ -462,17 +430,15 @@ class MessageContent extends HookConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (trailingGallery.content.trim().isNotEmpty) markdown,
-        timedContent(
-          _MessageImageCarousel(
-            key: ValueKey(
-              trailingGallery.items.map((item) => item.url).join('\u0000'),
-            ),
-            items: trailingGallery.items,
-            leadingOverflow: mediaCarouselLeadingOverflow,
-            trailingOverflow: mediaCarouselTrailingOverflow,
-            onReply: onMediaReply,
-            onMore: onMediaMore,
+        _MessageImageCarousel(
+          key: ValueKey(
+            trailingGallery.items.map((item) => item.url).join('\u0000'),
           ),
+          items: trailingGallery.items,
+          leadingOverflow: mediaCarouselLeadingOverflow,
+          trailingOverflow: mediaCarouselTrailingOverflow,
+          onReply: onMediaReply,
+          onMore: onMediaMore,
         ),
       ],
     );

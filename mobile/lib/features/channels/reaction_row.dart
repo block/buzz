@@ -143,7 +143,14 @@ class ReactionRow extends StatelessWidget {
             messageId: messageId,
             reaction: reaction,
             combined: combined,
-            onTap: () => onToggle(reaction.emoji),
+            onTap: () => combined
+                ? showReactionDetailSheet(
+                    context: context,
+                    channelId: channelId,
+                    reactions: reactions,
+                    initialEmoji: reaction.emoji,
+                  )
+                : onToggle(reaction.emoji),
             onLongPress: () => showReactionDetailSheet(
               context: context,
               channelId: channelId,
@@ -286,7 +293,9 @@ class _ReactionPill extends HookConsumerWidget {
           onTap: () {
             // The pill is already here, so burst straight away rather than waiting
             // for the relay echo — desktop does the same on a pill click.
-            if (!reacted && isPositiveEmojiParticle(reaction.emoji)) {
+            if (!combined &&
+                !reacted &&
+                isPositiveEmojiParticle(reaction.emoji)) {
               burstEmojiFromContext(ref, context, reaction.emoji);
             }
             onTap();
@@ -294,7 +303,7 @@ class _ReactionPill extends HookConsumerWidget {
           child: _PillSurface(
             highlighted: reacted,
             combined: combined,
-            minWidth: _pillMinWidth,
+            minWidth: combined ? 32 : _pillMinWidth,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               // Centered so a short reaction sits mid-pill once the min width kicks
@@ -302,17 +311,19 @@ class _ReactionPill extends HookConsumerWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 _ReactionEmoji(reaction: reaction, size: _pillGlyphSize),
-                const SizedBox(width: _pillGap),
-                // Desktop shows the count even at 1; hiding it made a fresh
-                // reaction jump in width the moment a second person joined.
-                Text(
-                  '${reaction.count}',
-                  style: reactionCountTextStyle.copyWith(
-                    color: reacted
-                        ? context.colors.primary
-                        : context.colors.onSurfaceVariant,
+                if (!combined) ...[
+                  const SizedBox(width: _pillGap),
+                  // Desktop shows the count even at 1; hiding it made a fresh
+                  // reaction jump in width the moment a second person joined.
+                  Text(
+                    '${reaction.count}',
+                    style: reactionCountTextStyle.copyWith(
+                      color: reacted
+                          ? context.colors.primary
+                          : context.colors.onSurfaceVariant,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),

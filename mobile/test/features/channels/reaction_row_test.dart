@@ -113,29 +113,35 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 }
 
 void main() {
-  testWidgets('combined capsule preserves individual toggles and add control', (
-    tester,
-  ) async {
-    final toggled = <String>[];
-    var added = false;
-    await _pumpRow(
-      tester,
-      combined: true,
-      reactions: [
-        _reaction(),
-        _reaction(emoji: _eyes),
-      ],
-      onToggle: toggled.add,
-      showAddButton: true,
-      onAddReaction: () => added = true,
-    );
-    await tester.tap(find.byKey(const ValueKey('reaction-pill-$_fire')));
-    await tester.tap(find.byKey(const ValueKey('reaction-pill-$_eyes')));
-    await tester.tap(find.byKey(const ValueKey('add-reaction-pill')));
-    await tester.pumpAndSettle();
-    expect(toggled, [_fire, _eyes]);
-    expect(added, isTrue);
-  });
+  testWidgets(
+    'combined capsule hides counts and opens details without toggling',
+    (tester) async {
+      final toggled = <String>[];
+      var added = false;
+      await _pumpRow(
+        tester,
+        combined: true,
+        reactions: [
+          _reaction(),
+          _reaction(emoji: _eyes),
+        ],
+        onToggle: toggled.add,
+        showAddButton: true,
+        onAddReaction: () => added = true,
+      );
+      expect(find.text('1'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('reaction-pill-$_fire')));
+      await tester.pumpAndSettle();
+      final sheet = find.byKey(const ValueKey('reaction-details-sheet'));
+      expect(sheet, findsOneWidget);
+      expect(toggled, isEmpty);
+      Navigator.of(tester.element(sheet)).pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('add-reaction-pill')));
+      await tester.pumpAndSettle();
+      expect(added, isTrue);
+    },
+  );
 
   testWidgets(
     'native reactor labels retain channel qualifications and live updates',
