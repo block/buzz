@@ -33,6 +33,7 @@ import {
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 import {
   renderSettingsSection,
+  DESKTOP_ONLY_SETTINGS_SECTIONS,
   settingsSections,
   type SettingsPanelProps,
   type SettingsSection,
@@ -212,8 +213,8 @@ export function SettingsView({
       if (s.value === "relay-admin") {
         return true;
       }
-      // Web: Compute (share compute) is a desktop-only section.
-      if (s.value === "compute" && !isTauri()) return false;
+      // Web: Compute, Mobile pairing and Updates are desktop-only sections.
+      if (DESKTOP_ONLY_SETTINGS_SECTIONS.includes(s.value) && !isTauri()) return false;
       return true;
     });
   }, [myMembershipQuery.data, featureState]);

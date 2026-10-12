@@ -141,12 +141,15 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "buzz-term",
 ];
 
+/** Sections that only exist on the desktop app: hidden from web Settings, and their URLs fall back to the default section. */
+export const DESKTOP_ONLY_SETTINGS_SECTIONS: readonly string[] = ["compute", "mobile", "updates"];
+
 export function isSettingsSection(value: unknown): value is SettingsSection {
   return (
     typeof value === "string" &&
     (SETTINGS_SECTION_VALUES as readonly string[]).includes(value) &&
     // Web: Compute (share compute) is desktop-only, so #/settings?section=compute falls back to the default section.
-    !(value === "compute" && !isTauri())
+    !(DESKTOP_ONLY_SETTINGS_SECTIONS.includes(value) && !isTauri())
   );
 }
 
@@ -918,9 +921,9 @@ export function renderSettingsSection(
     case "local-archive":
       return <LocalArchiveSettingsCard />;
     case "mobile":
-      return <MobilePairingCard currentPubkey={props.currentPubkey} />;
+      return isTauri() ? <MobilePairingCard currentPubkey={props.currentPubkey} /> : null;
     case "updates":
-      return <UpdateChecker />;
+      return isTauri() ? <UpdateChecker /> : null;
     default: {
       const exhaustiveCheck: never = section;
       return exhaustiveCheck;
