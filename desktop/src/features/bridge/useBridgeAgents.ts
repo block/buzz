@@ -64,32 +64,76 @@ const snapCache = (pubkey: string) => ({
       /* storage denied */
     }
   },
+  hbGet() {
+    try {
+      const v = JSON.parse(localStorage.getItem(HB_PREFIX + pubkey) || "null");
+      return v && v.heartbeat && typeof v.ts === "number" ? v : null;
+    } catch {
+      return null;
+    }
+  },
+  hbPut(heartbeat: unknown, ts: number) {
+    try {
+      localStorage.setItem(HB_PREFIX + pubkey, JSON.stringify({ heartbeat, ts }));
+    } catch {
+      /* storage denied */
+    }
+  },
 });
+const HB_PREFIX = "buzz-bridge-lastheartbeat:";
 
-export function useBridgeAgents(
-  pubkey: string | undefined,
-): BridgeState & {
-  available: boolean;
-  commander: BridgeCommander | null;
-  /** Signs with the member key via the remote signer and returns the event as JSON (for slice B challenges). */
-  signJson: (e: { kind: number; content: string; createdAt: number; tags: string[][] }) => Promise<string>;
-} {
-  const enabled = !isTauri() && !!pubkey;
-  const [client, setClient] = React.useState<BridgeWebClient | null>(null);
-  const [commander, setCommander] = React.useState<BridgeCommander | null>(null);
+// One bridge client per member for the whole tab: the nav, the Agents page and Settings share its relay subscription, its single
+// key-wrap decrypt and its state. Several separate clients each asked the signer to decrypt the same key wrap, so a screen
+// without the nav (Settings) sat behind "Waiting for your signer…" and never learned about the desktop.
+type Shared = { client: BridgeWebClient; commander: BridgeCommander; refs: number; stop: () => void; timer: number | null };
+const shared = new Map<string, Shared>();
+const decrypting = new Map<string, Promise<string>>();
+function decryptOnce(ct: string): Promise<string> {
+  let p = decrypting.get(ct);
+  if (!p) {
+    prioritizeDecrypt(ct); // the key wrap gates the whole list: don't queue it behind settings decrypts
+    p = nip44DecryptFromSelf(ct).finally(() => decrypting.delete(ct));
+    decrypting.set(ct, p);
+  }
+  return p;
+}
+function acquireBridge(pubkey: string): { client: BridgeWebClient; commander: BridgeCommander; release: () => void } {
+  let e = shared.get(pubkey);
+  if (!e) {
+    e = startBridge(pubkey);
+    shared.set(pubkey, e);
+  }
+  if (e.timer !== null) {
+    window.clearTimeout(e.timer);
+    e.timer = null;
+  }
+  e.refs++;
+  const entry = e;
+  let done = false;
+  return {
+    client: entry.client,
+    commander: entry.commander,
+    release: () => {
+      if (done) return;
+      done = true;
+      if (--entry.refs > 0) return;
+      // Linger briefly so moving between Agents and Settings keeps the same live client.
+      entry.timer = window.setTimeout(() => {
+        if (entry.refs > 0) return;
+        entry.stop();
+        if (shared.get(pubkey) === entry) shared.delete(pubkey);
+      }, 15_000);
+    },
+  };
+}
 
-  React.useEffect(() => {
-    if (!enabled || !pubkey) return;
+function startBridge(pubkey: string): Shared {
     const c = new BridgeWebClient(pubkey, {
-      decryptFromSelf: (ct: string) => {
-        prioritizeDecrypt(ct); // the key wrap gates the whole list: don't queue it behind settings decrypts
-        return nip44DecryptFromSelf(ct);
-      },
+      decryptFromSelf: decryptOnce,
       ...sessionCache,
       ...snapCache(pubkey),
     });
-    setClient(c);
-    setCommander(
+    const commander = (
       new BridgeCommander(
         c,
         {
@@ -103,7 +147,7 @@ export function useBridgeAgents(
           },
         },
         webDeviceId(),
-      ),
+      )
     );
     (window as unknown as { __buzzBridgeStats?: unknown }).__buzzBridgeStats =
       c.stats; // e2e/debug counters
@@ -172,13 +216,36 @@ export function useBridgeAgents(
     // After a relay reconnect, events published while we were away must be re-fetched.
     const offReconnect = relayClient.subscribeToReconnects(() => void backfill());
     const t = window.setInterval(() => c.tick(), 5_000);
-    return () => {
+    const stop = () => {
       cancelled = true;
       offReconnect();
       if (retry !== null) window.clearTimeout(retry);
       window.clearInterval(t);
       void unsub?.();
       void unsubExtra?.();
+    };
+    return { client: c, commander, refs: 0, stop, timer: null };
+}
+
+export function useBridgeAgents(
+  pubkey: string | undefined,
+): BridgeState & {
+  available: boolean;
+  commander: BridgeCommander | null;
+  /** Signs with the member key via the remote signer and returns the event as JSON (for slice B challenges). */
+  signJson: (e: { kind: number; content: string; createdAt: number; tags: string[][] }) => Promise<string>;
+} {
+  const enabled = !isTauri() && !!pubkey;
+  const [client, setClient] = React.useState<BridgeWebClient | null>(null);
+  const [commander, setCommander] = React.useState<BridgeCommander | null>(null);
+
+  React.useEffect(() => {
+    if (!enabled || !pubkey) return;
+    const h = acquireBridge(pubkey);
+    setClient(h.client);
+    setCommander(h.commander);
+    return () => {
+      h.release();
       setClient(null);
       setCommander(null);
     };

@@ -80,6 +80,9 @@ export type WebClientIO = {
   /** Last known agent list (survives reloads) so the panel can draw instantly while the live data refreshes. */
   snapGet?(): { snapshot: AgentsSnapshotBody; ts: number } | null;
   snapPut?(snapshot: AgentsSnapshotBody, ts: number): void;
+  /** Last known desktop heartbeat (survives reloads) so Settings/hosts know the desktop before the key wrap is decrypted. */
+  hbGet?(): { heartbeat: HeartbeatBody; ts: number } | null;
+  hbPut?(heartbeat: HeartbeatBody, ts: number): void;
 };
 
 export class BridgeWebClient {
@@ -124,6 +127,11 @@ export class BridgeWebClient {
     const cached = io.snapGet?.();
     if (cached)
       this.state = { ...this.state, snapshot: cached.snapshot, snapshotTs: cached.ts, lastHeardTs: cached.ts, presence: presenceOf(cached.ts), refreshing: true };
+    const hb = io.hbGet?.();
+    if (hb) {
+      const lastHeardTs = Math.max(this.state.lastHeardTs ?? 0, hb.ts);
+      this.state = { ...this.state, heartbeat: hb.heartbeat, lastHeardTs, presence: presenceOf(lastHeardTs) };
+    }
   }
 
   subscribe(fn: () => void) {
@@ -258,6 +266,7 @@ export class BridgeWebClient {
       });
     } else if (d === D_HEARTBEAT && env.type === "presence.heartbeat") {
       const lastHeardTs = Math.max(this.state.lastHeardTs ?? 0, env.ts);
+      this.io.hbPut?.(env.body as HeartbeatBody, env.ts);
       this.set({
         heartbeat: env.body as HeartbeatBody,
         lastHeardTs,
