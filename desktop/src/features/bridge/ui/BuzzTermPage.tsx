@@ -31,6 +31,8 @@ export function termFailureMessage(code: string | undefined, detail: string | un
     case "terminals_off":
     case "terminals_disabled":
       return `"Allow remote terminal" is off on ${deviceName} (Settings → Buzz Term on that computer).`;
+    case "too_many_terminals":
+      return `${deviceName} already has 3 Buzz Term sessions running from an earlier page. Reconnect to bring them back, or close them and start fresh.`;
     case "launch_failed":
       return `${deviceName} couldn't start the terminal${detail ? ` (${detail})` : ""}.`;
     default:
@@ -163,6 +165,25 @@ export function BuzzTermPage() {
               >
                 {status.state === "lost" || status.code ? "Reconnect" : "Open Buzz Term"}
               </button>
+              {status.code === "too_many_terminals" || status.code === "attach_failed" || status.code === "not_found" ? (
+                <button
+                  type="button"
+                  data-testid="buzz-term-close-old"
+                  className="ml-2 rounded-md border px-3 py-1.5 text-sm"
+                  disabled={!termReady}
+                  onClick={() => {
+                    void hub
+                      .closeAllLive()
+                      .catch(() => 0)
+                      .then(() => {
+                        hub.reset();
+                        openTerminalPanel("maximized", "all");
+                      });
+                  }}
+                >
+                  Close old sessions
+                </button>
+              ) : null}
             </div>}
           </div>
         ) : (

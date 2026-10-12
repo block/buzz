@@ -194,6 +194,7 @@ export function TerminalBootstrap({
   const previousPanelModeRef = React.useRef(panel.mode);
   const acknowledgedSequenceRef = React.useRef(new Map<string, number>());
   const reattachInFlightRef = React.useRef(false);
+  const reattachFailuresRef = React.useRef(0);
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
   /** When a term-session handoff is creating the first tab, skip blank auto-create. */
@@ -372,7 +373,6 @@ export function TerminalBootstrap({
         reattachInFlightRef.current = true;
         void backend
           .listLive()
-          .catch(() => [])
           .then((live) => {
             if (!mountedRef.current) return;
             if (live.length === 0 || sessionsRef.current.length > 0) {
@@ -381,6 +381,8 @@ export function TerminalBootstrap({
             }
             for (const t of live) createInAppSessionRef.current({ reattach: { id: t.id, title: t.title } });
           })
+          // couldn't even list (signer declined, link down): never launch blind into a full cap — report it
+          .catch((error) => fail(error))
           .finally(() => {
             reattachInFlightRef.current = false;
           });
@@ -610,9 +612,18 @@ export function TerminalBootstrap({
           if (closedSessionKeysRef.current.delete(key)) return;
           removeSession(key);
           // Desktop cap hit (e.g. detached sessions count): keep the panel and the other tabs, just say so.
+          // Reattach keeps failing (not a declined signature): close the orphans so the next open starts clean.
+          if (remote && options?.reattach && !/declin|reject|denied/i.test(String((error as Error)?.message ?? error))) {
+            reattachFailuresRef.current += 1;
+            if (reattachFailuresRef.current >= 2) {
+              reattachFailuresRef.current = 0;
+              void getTerminalBackend()?.closeAllLive?.().catch(() => 0);
+            }
+          }
           if (remote && isTooMany(error)) {
             tabLimitToast();
-            return;
+            // the only tab was refused: fall through to fail() → the page explains it and offers "Close old sessions"
+            if (sessionsRef.current.some((x) => x.key !== key)) return;
           }
           // herdr program spawn failed — fall back to a login shell instead of
           // permanently disabling Term (available=false) and leaving chrome blank.
@@ -790,7 +801,9 @@ export function TerminalBootstrap({
     }
 
     const spawnEmpty = () => {
-      if (effectiveSessionHost() === "herdr") {
+      // Web goes through createSession too: it lists the desktop's still-running terminals and reattaches them before
+      // ever launching a new one (a direct create here used to skip that and hit the 3-terminal cap after a refresh).
+      if (remote || effectiveSessionHost() === "herdr") {
         createSession();
       } else {
         // Buzz Term: attach immediately — no async host probe.

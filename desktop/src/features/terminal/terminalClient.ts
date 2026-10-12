@@ -95,6 +95,8 @@ export type TerminalBackend = {
   ): Promise<TerminalConnectionApi>;
   /** Web only: terminals still running on the desktop from an earlier connection, to rebuild the tabs. */
   listLive?(): Promise<Array<{ id: string; title?: string | null }>>;
+  /** Web only: close terminals left over from an earlier page (reattach kept failing). */
+  closeAllLive?(): Promise<number>;
   /** An attach (or later op) failed; the web uses this to show why and close the panel. */
   onError?(error: unknown): void;
 };

@@ -227,6 +227,16 @@ export class RemoteTerminalHub implements TerminalBackend {
     return conn.listTerminals();
   }
 
+  /** "Close old sessions": end every desktop terminal still running from an earlier page, so a fresh one fits under the cap. */
+  async closeAllLive(): Promise<number> {
+    this.lost = false;
+    const conn = await this.ensure();
+    const live = await conn.listTerminals();
+    const n = await conn.closeTerminals(live.filter((t) => !t.mine).map((t) => t.id));
+    this.set({ state: "connected" });
+    return n;
+  }
+
   onError(_error: unknown) {}
 
   dispose() {

@@ -254,7 +254,32 @@ export class RemoteConnection {
    * Sends term.open and waits for term.opened. Inside the connection's signed terminal window it goes without a signature;
    * otherwise (or if the desktop says the window ended, or it's an older desktop) it signs `terminal:<launchId>` first.
    */
-  private async openWithAuth(ws: WsLike, launchId: string, body: Record<string, unknown>, attach = false): Promise<Frame> {
+  /** Launches/attaches go one at a time: the first signs, the rest ride its signed window (one signer prompt, not three). */
+  private authChain: Promise<unknown> = Promise.resolve();
+  private openWithAuth(ws: WsLike, launchId: string, body: Record<string, unknown>, attach = false): Promise<Frame> {
+    const run = this.authChain.then(() => this.openWithAuthNow(ws, launchId, body, attach));
+    this.authChain = run.catch(() => {});
+    return run;
+  }
+
+  /** Close desktop terminals left from an earlier page (take each over, then close it). Returns how many closed. */
+  async closeTerminals(ids: string[]): Promise<number> {
+    const ws = this.ws;
+    if (!ws || !this.ready) throw new RemoteError("closed");
+    let n = 0;
+    for (const id of ids) {
+      try {
+        await this.openWithAuth(ws, id, {}, true);
+        ws.send(JSON.stringify({ t: "term.close", id }));
+        n++;
+      } catch {
+        // already gone, or not ours
+      }
+    }
+    return n;
+  }
+
+  private async openWithAuthNow(ws: WsLike, launchId: string, body: Record<string, unknown>, attach = false): Promise<Frame> {
     const go = async (event?: string) => {
       ws.send(JSON.stringify(attach ? { t: "term.attach", id: launchId, ...(event ? { event } : {}) } : { t: "term.open", launchId, ...body, ...(event ? { event } : {}) }));
       const want = attach ? "term.attached" : "term.opened";
