@@ -24,6 +24,37 @@ import {
 } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { SoundPicker } from "./SoundPicker";
+import { playNotificationSound } from "@/features/notifications/lib/sound";
+import { sendTestNotification } from "@/features/notifications/lib/testNotification";
+
+function TestNotificationRow({ settings }: { settings: NotificationSettings }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const run = async () => {
+    setBusy(true);
+    const r = await sendTestNotification();
+    if (r.ok && settings.slotAlertsEnabled.dm) playNotificationSound(settings.sounds.dm);
+    setResult(r);
+    setBusy(false);
+  };
+  return (
+    <SettingsOptionRow>
+      <div className="min-w-0">
+        <p className="text-sm font-medium">Test notification</p>
+        <p
+          className={cn("text-sm font-normal", result && !result.ok ? "text-destructive" : "text-muted-foreground/70")}
+          data-settings-subcopy
+          data-testid="notifications-test-result"
+        >
+          {result?.message ?? "Send a notification to check that alerts reach this device."}
+        </p>
+      </div>
+      <Button data-testid="notifications-test-button" disabled={busy} onClick={() => void run()} type="button" variant="outline">
+        {busy ? "Sending…" : "Send test notification"}
+      </Button>
+    </SettingsOptionRow>
+  );
+}
 
 export function NotificationSettingsCard({
   isUpdatingDesktopNotifications,
@@ -141,6 +172,7 @@ export function NotificationSettingsCard({
               }}
             />
           </SettingsOptionRow>
+          <TestNotificationRow settings={notificationSettings} />
         </SettingsOptionGroup>
 
         {notificationSettings.desktopEnabled ? (
