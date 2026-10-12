@@ -8,6 +8,7 @@ import {
 } from "@/features/agents/hooks";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 import { Button } from "@/shared/ui/button";
 
 import { HarnessCatalogDialog } from "./HarnessCatalogDialog";
@@ -109,6 +110,29 @@ export function HarnessesSettingsPanel() {
   }, [entries]);
 
   const isRefreshing = runtimesQuery.isFetching;
+  const { web, live } = useDesktopData();
+  if (web) {
+    // Web: the desktop's harnesses, read-only (installing or changing them happens on the desktop).
+    return (
+      <SettingsOptionGroup data-testid="settings-harnesses" description="Agent tools installed on your desktop." title="Agent runtimes">
+        <div className="divide-y divide-border/55 px-4 py-2 text-sm" data-testid="web-runtime-list">
+          {!live ? (
+            <p className="py-2 text-muted-foreground">Your desktop's runtimes appear here once this device has a Direct connection to it.</p>
+          ) : rows.length === 0 ? (
+            <p className="py-2 text-muted-foreground">No agent runtimes are ready on your desktop yet. Add one there.</p>
+          ) : (
+            rows.map((r) => (
+              <div key={r.id} className="flex items-center justify-between py-2" data-testid="web-runtime-row">
+                <span>{r.label}{r.source === "custom" ? " (custom)" : ""}</span>
+                <span className="text-xs text-muted-foreground">{r.availability === "available" ? "Ready" : r.installHint || "Not installed"}</span>
+              </div>
+            ))
+          )}
+          <p className="py-2 text-xs text-muted-foreground">Install, add or remove runtimes (including custom harnesses and ACP transports) on your desktop.</p>
+        </div>
+      </SettingsOptionGroup>
+    );
+  }
 
   return (
     <SettingsOptionGroup

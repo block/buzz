@@ -1,4 +1,5 @@
 import { ProtectedOpenClawWorkspaceSettingsCard } from "@protected-feature-components";
+import { DesktopDataNotice, DesktopOnlyNote, isWebBuild, useAutoDirectOnOpen } from "@/features/bridge/ui/DesktopData";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import {
   setKeepMentionedAgentsPinned,
@@ -22,6 +23,8 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 export function AgentsSettingsPanel() {
   const automaticallyMentionAgents = useKeepMentionedAgentsPinned();
   const showAgentThinking = useShowAgentThinking();
+  const web = isWebBuild();
+  useAutoDirectOnOpen();
 
   return (
     <section className="min-w-0" data-testid="settings-agents">
@@ -30,9 +33,16 @@ export function AgentsSettingsPanel() {
         description="Control how agents behave in conversations and run on this machine."
       />
 
-      <div className="mb-4">
-        <ProtectedOpenClawWorkspaceSettingsCard />
-      </div>
+      <DesktopDataNotice />
+      {web ? (
+        <DesktopOnlyNote title="OpenClaw workspace">
+          The OpenClaw workspace is set up and checked on your desktop (Settings → Agents). It can't be viewed or changed from the web yet.
+        </DesktopOnlyNote>
+      ) : (
+        <div className="mb-4">
+          <ProtectedOpenClawWorkspaceSettingsCard />
+        </div>
+      )}
 
       <SettingsOptionGroupList>
         <SettingsOptionGroup title="Conversations">
@@ -81,7 +91,7 @@ export function AgentsSettingsPanel() {
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>
-        <PreventSleepSettingsCard />
+        {web ? null : <PreventSleepSettingsCard />}
         <RemoteAgentManagementCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />

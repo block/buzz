@@ -35,14 +35,12 @@ export function blankEnv(e: unknown): Record<string, string> {
 export function sanitizeAgent(a: unknown): unknown {
   const r = { ...obj(a) };
   if ("env_vars" in r) r.env_vars = blankEnv(r.env_vars);
-  if ("system_prompt" in r) r.system_prompt = null;
   if ("private_key_nsec" in r) r.private_key_nsec = "";
   return r;
 }
 export function sanitizePersona(p: unknown): unknown {
   const r = { ...obj(p) };
   if ("env_vars" in r) r.env_vars = blankEnv(r.env_vars);
-  if ("system_prompt" in r) r.system_prompt = "";
   return r;
 }
 function sanitizeRuntime(e: unknown): unknown {
@@ -57,7 +55,7 @@ export function sanitizeGlobal(c: unknown): unknown {
 }
 const list = (v: unknown, f: (x: unknown) => unknown, max = 500) => (Array.isArray(v) ? v.slice(0, max).map(f) : []);
 
-export const RESPOND_MODES = ["owner-only", "anyone", "allowlist", "nobody"] as const;
+export const RESPOND_MODES = ["owner-only", "anyone", "allowlist"] as const;
 function respondFields(src: Record<string, unknown>, out: Record<string, unknown>) {
   if (src.respondTo !== undefined) {
     if (typeof src.respondTo !== "string" || !(RESPOND_MODES as readonly string[]).includes(src.respondTo)) bad("Unknown access mode.");
@@ -84,7 +82,62 @@ export const CMD_READS = [
   "agent_access_owner_only",
   "get_global_agent_config",
 ] as const;
-export const CMD_WRITES = ["start_managed_agent", "stop_managed_agent", "create_managed_agent", "update_managed_agent"] as const;
+export const CMD_WRITES = [
+  "start_managed_agent",
+  "stop_managed_agent",
+  "create_managed_agent",
+  "update_managed_agent",
+  "create_persona",
+  "update_persona",
+  "set_global_agent_config",
+] as const;
+const PROMPT_MAX = 20_000;
+async function runtimeIdFor(deps: CmdDeps, id: string): Promise<void> {
+  const cat = list(await deps.invokeRaw("discover_acp_providers", { force: false }), (x) => obj(x), 200) as Array<Record<string, unknown>>;
+  if (!cat.some((r) => r.id === id && r.availability === "available" && r.source !== "custom"))
+    throw new MgmtError("runtime_unavailable", "Custom harnesses can't be set remotely. Pick an installed harness, or edit it on the desktop.");
+}
+function behaviorOf(v: unknown): Record<string, unknown> | undefined {
+  if (v === undefined || v === null) return undefined;
+  const b = obj(v);
+  const out: Record<string, unknown> = {};
+  respondFields(b, out);
+  if (b.parallelism !== undefined) {
+    if (!Number.isInteger(b.parallelism) || (b.parallelism as number) < 1 || (b.parallelism as number) > 32) bad("Parallelism must be 1-32.");
+    out.parallelism = b.parallelism;
+  }
+  if (b.sessionPolicy !== undefined) {
+    if (b.sessionPolicy !== "channel" && b.sessionPolicy !== "thread") bad("Unknown session policy.");
+    out.sessionPolicy = b.sessionPolicy;
+  }
+  return out;
+}
+async function personaFields(i: Record<string, unknown>, deps: CmdDeps): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { displayName: str(i.displayName, "Name", 64) ?? bad("Name is required.") };
+  const prompt = typeof i.systemPrompt === "string" ? i.systemPrompt : "";
+  if (prompt.length > PROMPT_MAX) bad("The prompt is too long.");
+  out.systemPrompt = prompt;
+  if (i.description !== undefined && i.description !== null) out.description = str(i.description, "Description", 280) ?? "";
+  for (const [k, max] of [["model", 100], ["provider", 100]] as const) {
+    const v = str(i[k], k, max);
+    if (v) out[k] = v;
+  }
+  const rt = str(i.runtime, "Harness", 100);
+  if (rt) {
+    await runtimeIdFor(deps, rt);
+    out.runtime = rt;
+  }
+  const av = str(i.avatarUrl, "Avatar", 500);
+  if (av) {
+    if (!/^https?:\/\//i.test(av)) bad("The avatar must be a web link.");
+    out.avatarUrl = av;
+  }
+  const pool = i.namePool;
+  if (Array.isArray(pool)) out.namePool = pool.slice(0, 100).map((n) => str(n, "Name pool", 64) ?? bad("Invalid name pool."));
+  const beh = behaviorOf(i.behavior);
+  if (beh) out.behavior = beh;
+  return out;
+}
 export const CMD_NAMES: readonly string[] = [...CMD_READS, ...CMD_WRITES];
 
 /** The result of a proxied command, or throws MgmtError. `which` tells the caller whether the call mutates agent state. */
@@ -106,6 +159,30 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       return sanitizeGlobal(await inv(name));
     case "start_managed_agent":
       return sanitizeAgent(await inv(name, { pubkey: pubkey(a.pubkey), expectedRelayUrl: null, expectedSignerPubkey: deps.ownerPubkey ?? null, replayFloorUnix: null }));
+    case "create_persona": {
+      const r = await inv(name, { input: await personaFields(obj(a.input), deps) });
+      return sanitizePersona(r);
+    }
+    case "update_persona": {
+      const i = obj(a.input);
+      const id = str(i.id, "Persona", 100) ?? bad("Choose an agent definition.");
+      const r = await inv(name, { input: { id, ...(await personaFields(i, deps)) } });
+      return sanitizePersona(r);
+    }
+    case "set_global_agent_config": {
+      // Only provider, model and preferred runtime are editable remotely; env vars stay exactly as stored on the desktop.
+      const c = obj(a.config);
+      const cur = obj(await inv("get_global_agent_config"));
+      const next: Record<string, unknown> = { ...cur };
+      for (const [k, max] of [["provider", 100], ["model", 100]] as const) if (k in c) next[k] = str(c[k], k, max) ?? null;
+      if ("preferred_runtime" in c) {
+        const rt = str(c.preferred_runtime, "Harness", 100);
+        if (rt) await runtimeIdFor(deps, rt);
+        next.preferred_runtime = rt ?? null;
+      }
+      const r = obj(await inv(name, { config: next }));
+      return { ...r, ...("config" in r ? { config: sanitizeGlobal(r.config) } : {}) };
+    }
     case "stop_managed_agent":
       return sanitizeAgent(await inv(name, { pubkey: pubkey(a.pubkey) }));
     case "create_managed_agent": {
@@ -114,6 +191,10 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       for (const [k, max] of [["personaId", 100], ["provider", 100], ["model", 100]] as const) {
         const v = str(i[k], k, max);
         if (v) out[k] = v;
+      }
+      if (typeof i.systemPrompt === "string" && i.systemPrompt) {
+        if (i.systemPrompt.length > PROMPT_MAX) bad("The prompt is too long.");
+        out.systemPrompt = i.systemPrompt;
       }
       if (i.spawnAfterCreate === true) out.spawnAfterCreate = true;
       const cmd = str(i.agentCommand, "Harness", 500);
@@ -133,6 +214,10 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       if (i.name !== undefined) out.name = nm ?? bad("Name is required.");
       for (const [k, max] of [["provider", 100], ["model", 100]] as const)
         if (k in i) out[k] = str(i[k], k, max) ?? null;
+      if (typeof i.systemPrompt === "string") {
+        if (i.systemPrompt.length > PROMPT_MAX) bad("The prompt is too long.");
+        out.systemPrompt = i.systemPrompt;
+      }
       const cmd = str(i.agentCommand, "Harness", 500);
       if (cmd) {
         await runtimeFor(deps, cmd);

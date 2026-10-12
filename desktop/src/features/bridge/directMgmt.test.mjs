@@ -111,30 +111,31 @@ test("cmd: reads return the desktop's raw answer with secrets removed", async ()
   const agents = await handleMgmt("cmd", { name: "list_managed_agents" }, d);
   assert.equal(agents.length, 2);
   assert.deepEqual(agents[0].env_vars, { OPENAI_API_KEY: "" });
-  assert.equal(agents[0].system_prompt, null);
+  assert.equal(agents[0].system_prompt, "secret prompt", "prompts are user content: readable so the edit dialog doesn't wipe them");
   const rt = await handleMgmt("cmd", { name: "discover_acp_providers" }, d);
   assert.deepEqual(rt[1].definition_env, { K: "" });
   const g = await handleMgmt("cmd", { name: "get_global_agent_config" }, d);
   assert.deepEqual(g.env_vars, { A: "" });
   assert.equal(g.provider, "anthropic");
-  assert.ok(!JSON.stringify([agents, rt, g]).includes("secret"));
+  assert.ok(!JSON.stringify([rt, g]).includes("secret"));
+  assert.ok(!JSON.stringify(agents).includes("sk-secret"));
 });
 
 test("cmd: switch off, unknown names and a missing executor are refused", async () => {
   assert.equal(await code(handleMgmt("cmd", { name: "list_managed_agents" }, cmdDeps({ allowed: () => false }))), "agents_disabled");
   const d = cmdDeps();
-  for (const name of ["delete_managed_agent", "get_identity", "set_global_agent_config", "sign_event", "export_agent_secrets"]) assert.equal(await code(handleMgmt("cmd", { name }, d)), "unknown_op");
+  for (const name of ["delete_managed_agent", "get_identity", "delete_persona", "sign_event", "export_agent_secrets"]) assert.equal(await code(handleMgmt("cmd", { name }, d)), "unknown_op");
   assert.equal(await code(handleMgmt("cmd", { name: "list_managed_agents" }, deps())), "unknown_op");
   assert.deepEqual(d.raw, []);
 });
 
 test("cmd: create forwards only allow-listed fields, requires an installed non-custom harness, and never returns the key", async () => {
   const d = cmdDeps();
-  const r = await handleMgmt("cmd", { name: "create_managed_agent", args: { input: { name: " New ", model: "m", provider: "p", personaId: "p1", spawnAfterCreate: true, agentCommand: "goose-acp", harnessOverride: true, envVars: { A: "b" }, systemPrompt: "evil", agentArgs: ["x"], mcpCommand: "y", acpCommand: "z", relayUrl: "wss://evil" } } }, d);
+  const r = await handleMgmt("cmd", { name: "create_managed_agent", args: { input: { name: " New ", model: "m", provider: "p", personaId: "p1", spawnAfterCreate: true, agentCommand: "goose-acp", harnessOverride: true, envVars: { A: "b" }, systemPrompt: "be kind", agentArgs: ["x"], mcpCommand: "y", acpCommand: "z", relayUrl: "wss://evil" } } }, d);
   const call = d.raw.find((c) => c[0] === "create_managed_agent")[1].input;
-  assert.deepEqual(call, { name: "New", model: "m", provider: "p", personaId: "p1", spawnAfterCreate: true, agentCommand: "goose-acp", harnessOverride: true });
+  assert.deepEqual(call, { name: "New", model: "m", provider: "p", personaId: "p1", systemPrompt: "be kind", spawnAfterCreate: true, agentCommand: "goose-acp", harnessOverride: true });
   assert.equal(r.private_key_nsec, "");
-  assert.ok(!JSON.stringify(r).includes("secret"));
+  assert.ok(!JSON.stringify(r).includes("sk-secret") && !JSON.stringify(r).includes("nsec1secret"));
   assert.equal(await code(handleMgmt("cmd", { name: "create_managed_agent", args: { input: { name: "x", agentCommand: "/tmp/x" } } }, d)), "runtime_unavailable");
   assert.equal(await code(handleMgmt("cmd", { name: "create_managed_agent", args: { input: { name: "" } } }, d)), "bad_request");
 });
@@ -142,7 +143,7 @@ test("cmd: create forwards only allow-listed fields, requires an installed non-c
 test("cmd: update and start/stop validate keys; start carries the signed-in member as scope guard", async () => {
   const d = cmdDeps();
   await handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK.toUpperCase(), model: "", envVars: { A: "b" }, systemPrompt: "x" } } }, d);
-  assert.deepEqual(d.raw.find((c) => c[0] === "update_managed_agent")[1].input, { pubkey: PK, model: null });
+  assert.deepEqual(d.raw.find((c) => c[0] === "update_managed_agent")[1].input, { pubkey: PK, model: null, systemPrompt: "x" });
   assert.equal(await code(handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK } } }, d)), "bad_request");
   assert.equal(await code(handleMgmt("cmd", { name: "stop_managed_agent", args: { pubkey: "zz" } }, d)), "bad_request");
   await handleMgmt("cmd", { name: "start_managed_agent", args: { pubkey: PK } }, d);
@@ -154,6 +155,39 @@ test("cmd: access fields are validated (mode, hex keys, size)", async () => {
   const ok = await handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK, respondTo: "allowlist", respondToAllowlist: ["B".repeat(64)] } } }, d);
   assert.ok(ok);
   assert.deepEqual(d.raw.at(-1)[1].input, { pubkey: PK, respondTo: "allowlist", respondToAllowlist: ["b".repeat(64)] });
-  for (const bad of [{ respondTo: "root" }, { respondToAllowlist: ["zz"] }, { respondToAllowlist: Array(501).fill(PK) }, { respondToAllowlist: "x" }])
+  for (const bad of [{ respondTo: "root" }, { respondTo: "nobody" }, { respondToAllowlist: ["zz"] }, { respondToAllowlist: Array(501).fill(PK) }, { respondToAllowlist: "x" }])
     assert.equal(await code(handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK, ...bad } } }, d)), "bad_request");
+});
+
+test("cmd: personas (the Add agent dialog) forward only allow-listed fields and a non-custom harness id; prompts are bounded", async () => {
+  const d = cmdDeps({ invokeRaw: undefined });
+  const raw = [];
+  d.invokeRaw = async (cmd, args) => {
+    raw.push([cmd, args]);
+    if (cmd === "discover_acp_providers") return [{ id: "goose", command: "goose-acp", availability: "available", source: "builtin" }, { id: "mine", command: "/tmp/x", availability: "available", source: "custom" }];
+    return { id: "p9", display_name: "Helper", system_prompt: "be nice", env_vars: { K: "secret" } };
+  };
+  const r = await handleMgmt("cmd", { name: "create_persona", args: { input: { displayName: " Helper ", systemPrompt: "be nice", runtime: "goose", model: "m", envVars: { A: "b" }, acpCommand: "rm", catalogSource: { owner_pubkey: "x" }, behavior: { respondTo: "allowlist", respondToAllowlist: [PK], parallelism: 2, sessionPolicy: "thread" } } } }, d);
+  assert.deepEqual(raw.find((c) => c[0] === "create_persona")[1].input, { displayName: "Helper", systemPrompt: "be nice", model: "m", runtime: "goose", behavior: { respondTo: "allowlist", respondToAllowlist: [PK], parallelism: 2, sessionPolicy: "thread" } });
+  assert.deepEqual(r.env_vars, { K: "" });
+  assert.equal(await code(handleMgmt("cmd", { name: "create_persona", args: { input: { displayName: "x", systemPrompt: "", runtime: "mine" } } }, d)), "runtime_unavailable");
+  assert.equal(await code(handleMgmt("cmd", { name: "update_persona", args: { input: { id: "p9", displayName: "x", systemPrompt: "y".repeat(20001) } } }, d)), "bad_request");
+  assert.equal(await code(handleMgmt("cmd", { name: "update_persona", args: { input: { displayName: "x", systemPrompt: "" } } }, d)), "bad_request");
+  await handleMgmt("cmd", { name: "update_persona", args: { input: { id: "p9", displayName: "H", systemPrompt: "z" } } }, d);
+  assert.equal(raw.at(-1)[1].input.id, "p9");
+});
+
+test("cmd: agent defaults change only provider/model/harness; env vars are kept from the desktop", async () => {
+  const raw = [];
+  const d = cmdDeps();
+  d.invokeRaw = async (cmd, args) => {
+    raw.push([cmd, args]);
+    if (cmd === "get_global_agent_config") return { env_vars: { A: "real-secret" }, provider: "old", model: null, preferred_runtime: null };
+    if (cmd === "discover_acp_providers") return [{ id: "goose", command: "goose-acp", availability: "available", source: "builtin" }];
+    return { config: { env_vars: { A: "real-secret" } }, restarted: 0 };
+  };
+  const r = await handleMgmt("cmd", { name: "set_global_agent_config", args: { config: { env_vars: { EVIL: "1" }, provider: "anthropic", model: "m", preferred_runtime: "goose" } } }, d);
+  assert.deepEqual(raw.find((c) => c[0] === "set_global_agent_config")[1].config, { env_vars: { A: "real-secret" }, provider: "anthropic", model: "m", preferred_runtime: "goose" });
+  assert.ok(!JSON.stringify(r).includes("real-secret"));
+  assert.equal(await code(handleMgmt("cmd", { name: "set_global_agent_config", args: { config: { preferred_runtime: "nope" } } }, d)), "runtime_unavailable");
 });
