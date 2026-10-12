@@ -232,3 +232,22 @@ test("presence flips: an agent online then offline on the desktop changes the do
   desktop = {}; // the desktop omits offline agents
   assert.equal(await dot(), "offline");
 });
+
+test("cmd discover_agent_models runs only the desktop catalog's command with the desktop's env, and returns model fields only", async () => {
+  const { handleCmd } = await import("./directCmd.ts");
+  const calls = [];
+  const deps = {
+    invokeRaw: async (n, a) => {
+      calls.push([n, a]);
+      if (n === "discover_acp_providers") return [{ id: "codex", command: "codex-acp", defaultArgs: ["--acp"], availability: "available", definitionEnv: { D: "1" } }];
+      if (n === "get_global_agent_config") return { env_vars: { OPENAI_API_KEY: "desk-secret" } };
+      if (n === "discover_agent_models") return { agentName: "Codex", agentVersion: "1", models: [{ id: "gpt-5", name: "GPT-5", description: null, extra: "x" }], agentDefaultModel: "gpt-5", selectedModel: null, supportsSwitching: true, env: "leak" };
+    },
+  };
+  const out = await handleCmd("discover_agent_models", { input: { agentCommand: "codex-acp", agentArgs: ["--evil"], envVars: { X: "web" }, provider: "openai" } }, deps);
+  const sent = calls.find((c) => c[0] === "discover_agent_models")[1].input;
+  assert.deepEqual(sent, { agentCommand: "codex-acp", agentArgs: ["--acp"], provider: "openai", envVars: { OPENAI_API_KEY: "desk-secret" }, definitionEnv: { D: "1" } });
+  assert.deepEqual(out.models, [{ id: "gpt-5", name: "GPT-5", description: null }]);
+  assert.ok(!JSON.stringify(out).includes("desk-secret") && !("env" in out));
+  await assert.rejects(handleCmd("discover_agent_models", { input: { agentCommand: "/bin/sh" } }, deps), /isn't installed/);
+});

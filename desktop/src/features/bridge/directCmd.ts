@@ -83,6 +83,8 @@ export const CMD_READS = [
   "get_global_agent_config",
   "get_presence",
   "get_openclaw_workspace_mcp_status",
+  "discover_agent_models",
+  "get_agent_models",
 ] as const;
 export const CMD_WRITES = [
   "start_managed_agent",
@@ -139,6 +141,22 @@ async function personaFields(i: Record<string, unknown>, deps: CmdDeps): Promise
   if (beh) out.behavior = beh;
   return out;
 }
+/** Model list fields only (no env, paths or tokens). */
+function modelsOut(v: unknown): unknown {
+  const r = obj(v);
+  const s = (x: unknown, max = 300) => (typeof x === "string" ? x.slice(0, max) : null);
+  return {
+    agentName: s(r.agentName) ?? "",
+    agentVersion: s(r.agentVersion) ?? "",
+    models: list(r.models, (m) => {
+      const o = obj(m);
+      return { id: s(o.id) ?? "", name: s(o.name), description: s(o.description, 1000) };
+    }, 500),
+    agentDefaultModel: s(r.agentDefaultModel),
+    selectedModel: s(r.selectedModel),
+    supportsSwitching: r.supportsSwitching === true,
+  };
+}
 export const CMD_NAMES: readonly string[] = [...CMD_READS, ...CMD_WRITES];
 
 /** The result of a proxied command, or throws MgmtError. `which` tells the caller whether the call mutates agent state. */
@@ -162,6 +180,32 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       const r = obj(await inv(name, { pubkeys: keys }));
       return Object.fromEntries(Object.entries(r).filter(([k, v]) => HEX64.test(k.toLowerCase()) && (v === "online" || v === "away" || v === "offline")));
     }
+    case "discover_agent_models": {
+      // Model lists for a harness on the desktop. The web names a runtime by its command; only a command from the desktop's
+      // own catalog is run, with the catalog's args and env and the desktop's own default env (nothing the web sends is
+      // executed or injected).
+      const i = obj(a.input);
+      const want = str(i.agentCommand, "Harness", 500) ?? bad("Choose a harness.");
+      const cat = list(await inv("discover_acp_providers", { force: false }), (x) => obj(x), 200) as Array<Record<string, unknown>>;
+      const entry = cat.find((r) => r.command === want && r.availability === "available");
+      if (!entry) throw new MgmtError("runtime_unavailable", "That harness isn't installed on your desktop.");
+      const provider = str(i.provider, "Provider", 100);
+      const global = obj(await inv("get_global_agent_config"));
+      const env = global.env_vars && typeof global.env_vars === "object" ? (global.env_vars as Record<string, string>) : {};
+      return modelsOut(
+        await inv(name, {
+          input: {
+            agentCommand: entry.command,
+            agentArgs: Array.isArray(entry.defaultArgs) ? entry.defaultArgs : [],
+            ...(provider ? { provider } : {}),
+            envVars: env,
+            definitionEnv: entry.definitionEnv && typeof entry.definitionEnv === "object" ? entry.definitionEnv : {},
+          },
+        }),
+      );
+    }
+    case "get_agent_models":
+      return modelsOut(await inv(name, { pubkey: pubkey(a.pubkey) }));
     case "get_openclaw_workspace_mcp_status": {
       // Status only: no URL, token or headers leave the desktop.
       const r = obj(await inv(name));
