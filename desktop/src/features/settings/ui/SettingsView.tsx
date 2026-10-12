@@ -212,6 +212,8 @@ export function SettingsView({
       if (s.value === "relay-admin") {
         return true;
       }
+      // Web: Compute (share compute) is a desktop-only section.
+      if (s.value === "compute" && !isTauri()) return false;
       return true;
     });
   }, [myMembershipQuery.data, featureState]);

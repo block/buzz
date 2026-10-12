@@ -144,7 +144,9 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
 export function isSettingsSection(value: unknown): value is SettingsSection {
   return (
     typeof value === "string" &&
-    (SETTINGS_SECTION_VALUES as readonly string[]).includes(value)
+    (SETTINGS_SECTION_VALUES as readonly string[]).includes(value) &&
+    // Web: Compute (share compute) is desktop-only, so #/settings?section=compute falls back to the default section.
+    !(value === "compute" && !isTauri())
   );
 }
 
@@ -885,7 +887,7 @@ export function renderSettingsSection(
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":
-      return <MeshComputeSettingsCard />;
+      return isTauri() ? <MeshComputeSettingsCard /> : null;
     case "appearance":
       return <ThemeSettingsCard />;
     case "shortcuts":
