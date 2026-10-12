@@ -46,10 +46,23 @@ export function BuzzTermPage() {
   const panel = useTerminalPanel();
   // Usable as soon as the desktop advertises terminals and answers on the tailnet; the per-device switch in web Settings
   // no longer has to be found and flipped first (it can still be used to switch the nav entry off).
-  const ready = hosts.find((h) => h.supports.terminal && !h.stale && reachOf(h) !== "unreachable");
-  const why = whyTermUnavailable(hosts[0], !!b.heartbeat?.remote, hosts[0] ? reachOf(hosts[0]) : "unknown");
+  // Reachability gates everything: the panel only opens once the desktop's listener actually answered on the tailnet.
+  const cand = hosts.find((h) => h.supports.terminal && !h.stale);
+  const reach = cand ? reachOf(cand) : "unknown";
+  // No answer within ~5 s counts as unreachable (explain right away instead of an empty panel); re-armed whenever reach changes.
+  const [probeTimedOut, setProbeTimedOut] = React.useState(false);
+  React.useEffect(() => {
+    setProbeTimedOut(false);
+    if (reach !== "unknown") return;
+    const t = window.setTimeout(() => setProbeTimedOut(true), 5_000);
+    return () => window.clearTimeout(t);
+  }, [reach, cand?.id]);
+  const reachable = reach === "reachable";
+  const unreachable = reach === "unreachable" || (probeTimedOut && !reachable);
+  const why = whyTermUnavailable(cand ?? hosts[0], !!b.heartbeat?.remote, unreachable ? "unreachable" : reach);
   const c = BUZZ_TERM_UNAVAILABLE;
-  const usable = (nav.terminal || !!ready) && b.available;
+  void nav; // the web Settings switch no longer forces the page "usable" while the desktop can't be reached
+  const usable = !!cand && !unreachable && b.available;
 
   const info = b.heartbeat?.remote;
   configureWebTermHub({ info, sign: b.signJson });
@@ -66,14 +79,20 @@ export function BuzzTermPage() {
 
   // Terminals offered by the desktop and Direct up → open maximized immediately (like the desktop's left-nav Buzz Term).
   const termsOff = !!info && info.status === "on" && !info.terminals;
-  const termReady = usable && !!info && info.status === "on" && info.terminals;
+  const termReady = usable && reachable && !!info && info.status === "on" && info.terminals;
   // Terminals switched off on the desktop: close the panel so the page explains it (a brief Direct flap does not close it).
   React.useEffect(() => {
     if (termsOff) setTerminalPanelMode("closed");
   }, [termsOff]);
+  // Unreachable, terminals off, or the terminal connection dropped: fold the panel back to this page (Reconnect lives here),
+  // never leave an empty maximized shell with a "+" that can't work.
+  const mustFold = (!!cand && unreachable) || termsOff || status.state === "lost";
+  React.useEffect(() => {
+    if (mustFold && panel.mode !== "closed") setTerminalPanelMode("closed");
+  }, [mustFold, panel.mode]);
   const openedRef = React.useRef(false);
   React.useEffect(() => {
-    if (!termReady) {
+    if (!termReady || status.state === "lost") {
       openedRef.current = false; // re-arm: when Direct comes back, auto-open again
       return;
     }
@@ -82,7 +101,7 @@ export function BuzzTermPage() {
     // a pending handoff opens the panel itself with its own session; a second blank one would sit next to it
     if (peekPendingTermHandoff()) return;
     openTerminalPanel("maximized", "all");
-  }, [termReady]);
+  }, [termReady, status.state]);
 
   // A "Pass thread context to Buzz Term" handoff from the web: start its session in the terminal (a plain shell on the desktop).
   const handoffReady = termReady;
@@ -108,6 +127,7 @@ export function BuzzTermPage() {
   const d = describeRemote(b.presence, info, status.code);
   const failure = termFailureMessage(status.code, status.detail, deviceName) ?? (status.code ? d.message : "") ?? "";
   const open = () => {
+    if (!termReady) return;
     hub.reset();
     openTerminalPanel("maximized", "all");
   };
@@ -139,7 +159,7 @@ export function BuzzTermPage() {
                 data-testid="buzz-term-open"
                 className="rounded-md border px-3 py-1.5 text-sm"
                 onClick={open}
-                disabled={status.state === "connecting"}
+                disabled={status.state === "connecting" || !termReady}
               >
                 {status.state === "lost" || status.code ? "Reconnect" : "Open Buzz Term"}
               </button>
