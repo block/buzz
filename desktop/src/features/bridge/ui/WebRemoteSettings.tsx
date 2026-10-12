@@ -94,7 +94,7 @@ export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>, opts?: 
   return { b, hosts, prefs, reachOf, selected };
 }
 
-const label: Record<string, string> = { direct: "Direct", relay: "Via relay", unavailable: "Unavailable" };
+const label: Record<string, string> = { direct: "Direct", relay: "Via relay", unavailable: "Not connected" };
 
 function HostList(props: { feature: Feature; hosts: RemoteHost[]; reachOf: (h: RemoteHost) => Reach; prefs: ReturnType<typeof getWebRemotePrefs> }) {
   const { feature, reachOf, prefs } = props;
@@ -157,8 +157,8 @@ export function WebRemoteAgentManagement() {
           </p>
         </div>
       </SettingsOptionRow>
-      {agentHosts.length > 1 && (
-        <div className="px-4 pb-3">
+      {agentHosts.length > 0 && (
+        <div className="px-4 pt-3 pb-3">
           <HostList feature="agents" hosts={hosts} prefs={prefs} reachOf={reachOf} />
         </div>
       )}
@@ -187,7 +187,7 @@ export function WebRemoteTerminal() {
         </div>
       </SettingsOptionRow>
       {capable.length > 0 && (
-        <div className="px-4 pb-3">
+        <div className="px-4 pt-3 pb-3">
           <HostList feature="terminal" hosts={hosts} prefs={prefs} reachOf={reachOf} />
         </div>
       )}
