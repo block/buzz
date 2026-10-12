@@ -16,8 +16,12 @@
 
 mod assess;
 mod evidence;
+mod fetch;
+mod judge;
 mod report;
+mod trail;
 mod verifier;
+mod work;
 
 #[cfg(test)]
 mod tests;
@@ -28,8 +32,11 @@ use nostr::{EventBuilder, EventId, Filter, Kind, PublicKey, Tag};
 
 use crate::SdkError;
 
+pub use fetch::{MAX_PAGES, QUERY_LIMIT};
 pub use report::*;
+pub use trail::{Entry, Scope, Trail, TRAIL_POLICY};
 pub use verifier::Verifier;
+pub use work::{WorkRole, OUTCOME_CLAIMS, WORK_PREFIX};
 
 /// Provisional kind of a work fingerprint (addressable), as registered in
 /// [`buzz_core::kind::KIND_WORK_FINGERPRINT`].
@@ -86,7 +93,8 @@ impl Policy {
 /// One request the verifier needs answered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    /// Coverage record index; pass it back to [`Verifier::ingest`].
+    /// Handle of this query; pass it back with the answer. Reports cite
+    /// coverage records, not handles: one paged read sends several queries.
     pub scope: usize,
     /// The origin to ask, exactly as the fingerprint names it.
     pub origin: String,

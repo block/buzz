@@ -7,11 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nostr::{Event, EventId, PublicKey};
 
-use super::evidence::{self, Coord, CHANGE_KINDS};
-use super::verifier::{Step, Stored};
+use super::evidence::{self, CHANGE_KINDS};
+use super::fetch::{Step, Stored};
+use super::judge::{authority, Judge};
 use super::{
     Authority, AuthorityStatus as A, Bucket, CoverageRecord, Gap, Independence, Interpretation,
-    Item, Observed, Polarity, PolicyRef, RefCheck, RefStatus, Report, Role, Rung, Verifier,
+    Item, Observed, Polarity, PolicyRef, Report, Role, Rung, Verifier,
 };
 
 /// Who may make a claim (NIP-FP §Outcome vocabulary).
@@ -32,7 +33,8 @@ struct Work<'a> {
 
 struct Assessor<'a> {
     v: &'a Verifier,
-    owners: BTreeMap<PublicKey, BTreeSet<PublicKey>>,
+    j: Judge<'a>,
+    attention: BTreeMap<EventId, usize>,
     selected: BTreeSet<EventId>,
     reported: BTreeSet<EventId>,
     items: Vec<Item>,
@@ -43,7 +45,11 @@ impl Verifier {
     /// Finish verification and produce the three-section report.
     pub fn finish(self) -> Report {
         let mut assessor = Assessor {
-            owners: self.owners(),
+            j: Judge {
+                fetch: &self.fetch,
+                owners: self.owners(),
+            },
+            attention: self.attention(),
             selected: self.work.iter().map(|(id, _)| *id).collect(),
             reported: BTreeSet::new(),
             items: Vec::new(),
@@ -73,10 +79,10 @@ impl Verifier {
                 rungs,
                 omitted_contrary,
                 gaps,
-                coverage: self.coverage.iter().map(wording).collect(),
+                coverage: self.fetch.coverage.iter().map(wording).collect(),
             },
             observed: Observed {
-                coverage: self.coverage.clone(),
+                coverage: self.fetch.coverage.clone(),
                 items,
             },
             selection: self.selection.clone(),
@@ -86,7 +92,7 @@ impl Verifier {
 
 impl<'a> Assessor<'a> {
     fn stored(&self, id: &EventId) -> Option<&'a Stored> {
-        self.v.store.get(id)
+        self.v.fetch.store.get(id)
     }
 
     fn valid(&self, id: &EventId) -> Option<&'a Event> {
@@ -94,7 +100,7 @@ impl<'a> Assessor<'a> {
     }
 
     fn returned_by(&self, stored: &Stored, step: Step) -> bool {
-        stored.scopes.iter().any(|s| self.v.step(*s) == Some(step))
+        self.v.fetch.returned_by(stored, step)
     }
 
     fn push(
@@ -141,7 +147,7 @@ impl<'a> Assessor<'a> {
             let (bucket, reason) = match self.stored(&id) {
                 None => (Bucket::Inaccessible, self.unserved(&origin)),
                 Some(s) if !s.valid => (Bucket::Invalid, "id or signature does not verify".into()),
-                Some(s) if self.v.attributed(&s.event, &self.owners) => {
+                Some(s) if self.v.attributed(&s.event, &self.j.owners) => {
                     (Bucket::Verifiable, attribution(&s.event, self.v.subject))
                 }
                 Some(_) => (
@@ -149,7 +155,7 @@ impl<'a> Assessor<'a> {
                     "not_attributed: signer is not the subject and has no owner link to it".into(),
                 ),
             };
-            let attention = self.v.attention.get(&id).copied().unwrap_or(0);
+            let attention = self.attention.get(&id).copied().unwrap_or(0);
             let asked = self.selected_scopes(&origin);
             let item = self.push(id, Some(origin), Role::Work, bucket, reason);
             if item.scope.is_empty() {
@@ -173,11 +179,12 @@ impl<'a> Assessor<'a> {
         }
         let discovered: Vec<&'a Stored> = self
             .v
+            .fetch
             .store
             .values()
             .filter(|s| s.valid && self.returned_by(s, Step::Targets))
             .filter(|s| !self.selected.contains(&s.event.id))
-            .filter(|s| self.v.attributed(&s.event, &self.owners))
+            .filter(|s| self.v.attributed(&s.event, &self.j.owners))
             .collect();
         for stored in discovered {
             let reason = attribution(&stored.event, self.v.subject);
@@ -206,26 +213,24 @@ impl<'a> Assessor<'a> {
         work
     }
 
+    /// Records that asked `origin` for the selected events.
+    fn selected_records<'b>(&self, origin: &'b str) -> impl Iterator<Item = &'a CoverageRecord> + 'b
+    where
+        'a: 'b,
+    {
+        let fetch = &self.v.fetch;
+        fetch.coverage.iter().filter(move |record| {
+            fetch.step(record.scope) == Some(Step::Selected) && record.origin == origin
+        })
+    }
+
     /// Scopes that asked `origin` for the selected events.
     fn selected_scopes(&self, origin: &str) -> Vec<usize> {
-        (self.v.coverage.iter().zip(&self.v.sent))
-            .filter(|(record, sent)| sent.step == Step::Selected && record.origin == origin)
-            .map(|(record, _)| record.scope)
-            .collect()
+        self.selected_records(origin).map(|r| r.scope).collect()
     }
 
     fn unserved(&self, origin: &str) -> String {
-        let failure = self
-            .v
-            .coverage
-            .iter()
-            .zip(&self.v.sent)
-            .find_map(|(record, sent)| {
-                (sent.step == Step::Selected && record.origin == origin)
-                    .then(|| record.error.clone())
-                    .flatten()
-            });
-        match failure {
+        match self.selected_records(origin).find_map(|r| r.error.clone()) {
             Some(error) => format!("inaccessible: {error}"),
             None => format!("inaccessible: {origin} did not serve it to this viewer"),
         }
@@ -233,7 +238,7 @@ impl<'a> Assessor<'a> {
 
     fn requests(&mut self, work: &[Work<'a>]) {
         for w in work {
-            let Some(event) = w.event.filter(|e| self.v.attributed(e, &self.owners)) else {
+            let Some(event) = w.event.filter(|e| self.v.attributed(e, &self.j.owners)) else {
                 continue;
             };
             let Some(parent) = evidence::parent(event) else {
@@ -261,6 +266,7 @@ impl<'a> Assessor<'a> {
         let by_id: BTreeMap<EventId, &Work<'a>> = work.iter().map(|w| (w.id, w)).collect();
         let candidates: Vec<&'a Stored> = self
             .v
+            .fetch
             .store
             .values()
             .filter(|s| self.v.is_outcome_candidate(s))
@@ -309,8 +315,11 @@ impl<'a> Assessor<'a> {
     fn outcome(&mut self, event: &'a Event, w: &Work<'a>) {
         let (claim, polarity, rule) = self.claim(event, w);
         let authority = self.authority(rule, event, w.event);
-        let ref_state = (claim == "merged").then(|| self.ref_check(event, w.event));
-        let independence = self.independence(&event.pubkey);
+        let ref_state = (claim == "merged").then(|| self.j.ref_check(event, w.event));
+        let independence = match self.v.subject {
+            Some(subject) => self.j.relationship(&event.pubkey, &subject),
+            None => Independence::Unknown,
+        };
         let (bucket, reason) = match (polarity, authority.status) {
             (Polarity::Contrary, status) => (
                 Bucket::Contrary,
@@ -367,7 +376,7 @@ impl<'a> Assessor<'a> {
 
     /// Whether a valid `1631` or `1632` on `target` precedes `event`.
     fn closed_before(&self, event: &Event, target: EventId) -> bool {
-        self.v.store.values().any(|s| {
+        self.v.fetch.store.values().any(|s| {
             s.valid
                 && matches!(s.event.kind.as_u16(), 1631 | 1632)
                 && evidence::target(&s.event) == Some(target)
@@ -386,7 +395,7 @@ impl<'a> Assessor<'a> {
             Rule::AuthorOrRepo if event.pubkey == target.pubkey => {
                 authority(A::Authorized, "author of the target")
             }
-            Rule::AuthorOrRepo | Rule::Repo => self.repo_authority(event, target),
+            Rule::AuthorOrRepo | Rule::Repo => self.j.repo_authority(event, target),
         }
     }
 
@@ -410,159 +419,6 @@ impl<'a> Assessor<'a> {
         }
     }
 
-    /// The latest valid `30617` observed for `coord` at `origin`.
-    fn announcement(&self, coord: &Coord, origin: &str) -> Option<&'a Event> {
-        self.v
-            .store
-            .values()
-            .filter(|s| s.valid && s.origin == origin && self.returned_by(s, Step::Repo))
-            .map(|s| &s.event)
-            .filter(|e| e.pubkey == coord.owner && evidence::tag_value(e, "d") == Some(&coord.d))
-            .max_by_key(|e| e.created_at)
-    }
-
-    /// Maintainers in force at `at`, or `None` when the set at the time is
-    /// unknown.
-    fn maintainers_at(&self, coord: &Coord, origin: &str, at: u64) -> Option<Vec<PublicKey>> {
-        self.announcement(coord, origin)
-            .filter(|a| a.created_at.as_secs() <= at)
-            .map(evidence::maintainers)
-    }
-
-    fn repo_authority(&self, event: &Event, target: &Event) -> Authority {
-        let Some(coord) = evidence::repo(target) else {
-            return authority(
-                A::SelfAsserted,
-                "target names no repository; no signed authority",
-            );
-        };
-        if event.pubkey == coord.owner {
-            return authority(A::Authorized, &format!("owner of {coord}"));
-        }
-        let origin = self.origin_of(target);
-        let at = event.created_at.as_secs();
-        let in_force = self.maintainers_at(&coord, &origin, at);
-        if in_force.as_ref().is_some_and(|m| m.contains(&event.pubkey)) {
-            return authority(
-                A::Authorized,
-                &format!("maintainer of {coord} in force at the time"),
-            );
-        }
-        let owners = self.owners.get(&event.pubkey);
-        if owners.is_some_and(|o| o.contains(&coord.owner)) {
-            return authority(
-                A::Delegated,
-                &format!("owner link names the owner of {coord}"),
-            );
-        }
-        if let Some(m) = in_force
-            .as_ref()
-            .and_then(|m| m.iter().find(|k| owners.is_some_and(|o| o.contains(k))))
-        {
-            return authority(
-                A::Delegated,
-                &format!("owner link names {m}, a maintainer of {coord} in force"),
-            );
-        }
-        match (in_force, self.announcement(&coord, &origin)) {
-            (None, Some(a)) => authority(A::Unknown, &format!(
-                "maintainer set at the time unknown: the latest 30617 ({}) was signed after this status",
-                a.id
-            )),
-            (None, None) => authority(A::Unknown, "maintainer set at the time unknown: no 30617 observed"),
-            (Some(_), _) => authority(A::SelfAsserted, &format!(
-                "not the owner or a maintainer of {coord} in force; community push policy, if any, is not checkable from events"
-            )),
-        }
-    }
-
-    fn origin_of(&self, event: &Event) -> String {
-        self.stored(&event.id)
-            .map(|s| s.origin.clone())
-            .unwrap_or_default()
-    }
-
-    fn ref_check(&self, event: &Event, target: Option<&Event>) -> RefCheck {
-        let unverified = |basis: &str| RefCheck {
-            status: RefStatus::Unverified,
-            basis: basis.into(),
-        };
-        let (Some(target), Some(commit)) = (target, evidence::tag_value(event, "merge-commit"))
-        else {
-            return unverified("no merge-commit tag");
-        };
-        let Some(coord) = evidence::repo(target) else {
-            return unverified("target names no repository");
-        };
-        let origin = self.origin_of(target);
-        let at = event.created_at.as_secs();
-        let best = self
-            .v
-            .store
-            .values()
-            .filter(|s| s.valid && s.origin == origin && self.returned_by(s, Step::RefState))
-            .map(|s| &s.event)
-            .filter(|e| evidence::tag_value(e, "d") == Some(&coord.d))
-            .filter(|e| evidence::head_commit(e) == Some(commit))
-            .filter_map(|e| self.ref_signer(e, &coord, &origin, at).map(|who| (e, who)))
-            .min_by_key(|(e, _)| e.created_at.as_secs().abs_diff(at));
-        match best {
-            Some((state, who)) => {
-                let ts = state.created_at.as_secs();
-                let when = if ts <= at { "before" } else { "after" };
-                RefCheck {
-                    status: RefStatus::Corroborated,
-                    basis: format!(
-                        "30618 {} signed by {who} {} shows HEAD at {commit}, {}s {when} the status; a ref state does not show who authorized the merge",
-                        state.id, state.pubkey, ts.abs_diff(at)
-                    ),
-                }
-            }
-            None => unverified(&format!("no trusted 30618 observed with HEAD at {commit}")),
-        }
-    }
-
-    /// Why a `30618` signer is trusted for `coord`, if it is.
-    fn ref_signer(
-        &self,
-        state: &Event,
-        coord: &Coord,
-        origin: &str,
-        at: u64,
-    ) -> Option<&'static str> {
-        if self.v.relay_self.get(origin) == Some(&state.pubkey) {
-            Some("the origin's NIP-11 self")
-        } else if state.pubkey == coord.owner {
-            Some("the repository owner")
-        } else if self
-            .maintainers_at(coord, origin, at)
-            .is_some_and(|m| m.contains(&state.pubkey))
-        {
-            Some("a maintainer in force")
-        } else {
-            None
-        }
-    }
-
-    fn independence(&self, signer: &PublicKey) -> Independence {
-        let Some(subject) = self.v.subject else {
-            return Independence::Unknown;
-        };
-        let empty = BTreeSet::new();
-        let of_signer = self.owners.get(signer).unwrap_or(&empty);
-        let of_subject = self.owners.get(&subject).unwrap_or(&empty);
-        if *signer == subject {
-            Independence::SameSigner
-        } else if of_signer.contains(&subject)
-            || of_subject.contains(signer)
-            || !of_signer.is_disjoint(of_subject)
-        {
-            Independence::SameOwner
-        } else {
-            Independence::Unknown
-        }
-    }
-
     /// Every `merge-commit` claimed by a reported merge status, valid or not.
     fn claimed_commits(&self) -> BTreeSet<&'a str> {
         self.items
@@ -578,7 +434,7 @@ impl<'a> Assessor<'a> {
     /// merge. Other ref states are counted in coverage only.
     fn repo_items(&mut self) {
         let commits = self.claimed_commits();
-        let repo: Vec<&'a Stored> = self.v.store.values().collect();
+        let repo: Vec<&'a Stored> = self.v.fetch.store.values().collect();
         for stored in repo {
             let id = stored.event.id;
             if self.reported.contains(&id) {
@@ -604,36 +460,9 @@ impl<'a> Assessor<'a> {
                     "repository announcement signed by its owner".to_owned(),
                 )
             } else {
-                self.ref_bucket(stored)
+                self.j.ref_bucket(stored)
             };
             self.push(id, None, role, bucket, reason);
-        }
-    }
-
-    fn ref_bucket(&self, stored: &Stored) -> (Bucket, String) {
-        let state = &stored.event;
-        let at = state.created_at.as_secs();
-        let d = evidence::tag_value(state, "d").unwrap_or_default();
-        let relay = (self.v.relay_self.get(&stored.origin) == Some(&state.pubkey))
-            .then_some("the origin's NIP-11 self");
-        let trusted = || {
-            self.v
-                .store
-                .values()
-                .filter(|s| s.valid && s.origin == stored.origin && self.returned_by(s, Step::Repo))
-                .filter(|s| evidence::tag_value(&s.event, "d") == Some(d))
-                .map(|s| Coord {
-                    owner: s.event.pubkey,
-                    d: d.to_owned(),
-                })
-                .find_map(|coord| self.ref_signer(state, &coord, &stored.origin, at))
-        };
-        match relay.or_else(trusted) {
-            Some(who) => (Bucket::Verifiable, format!("ref state signed by {who}")),
-            None => (
-                Bucket::Unknown,
-                "signer is not the repository owner, a maintainer in force, or the origin's NIP-11 self".into(),
-            ),
         }
     }
 
@@ -649,7 +478,7 @@ impl<'a> Assessor<'a> {
                     viewer_known: None,
                 };
                 let Some(event) = w.event else { return rung };
-                if !self.v.attributed(event, &self.owners) {
+                if !self.v.attributed(event, &self.j.owners) {
                     rung.rung = Some(0);
                     return rung;
                 }
@@ -687,13 +516,6 @@ impl<'a> Assessor<'a> {
     }
 }
 
-fn authority(status: A, basis: &str) -> Authority {
-    Authority {
-        status,
-        basis: basis.to_owned(),
-    }
-}
-
 fn status_name(status: A) -> &'static str {
     match status {
         A::Authorized => "authorized",
@@ -713,9 +535,17 @@ fn attribution(event: &Event, subject: Option<PublicKey>) -> String {
 }
 
 /// A coverage record in the wording NIP-FP requires. Never "clean" or
-/// "no dispute".
-fn wording(record: &CoverageRecord) -> String {
-    let scope = format!("{} {} {}", record.scope, record.origin, record.request);
+/// "no dispute", and a read that may have missed events says so.
+pub(super) fn wording(record: &CoverageRecord) -> String {
+    let local = record
+        .local
+        .as_ref()
+        .map(|l| format!(", then matched locally on {l}"))
+        .unwrap_or_default();
+    let scope = format!(
+        "{} {} {}{local}",
+        record.scope, record.origin, record.request
+    );
     let before = record
         .cutoff
         .map(|t| format!(" before cutoff {t}"))
@@ -730,9 +560,9 @@ fn wording(record: &CoverageRecord) -> String {
     };
     if let Some(error) = &record.error {
         format!("inaccessible: {error} (scope {scope})")
-    } else if record.truncated {
+    } else if let Some(reason) = &record.incomplete {
         format!(
-            "truncated at {} in scope {scope}{before}; not exhaustive{discarded}",
+            "not exhaustive: {reason}; {} found in scope {scope}{before}{discarded}",
             record.returned
         )
     } else if record.returned == 0 {

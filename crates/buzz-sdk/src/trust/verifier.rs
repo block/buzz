@@ -2,43 +2,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nostr::filter::MatchEventOptions;
 use nostr::{Alphabet, Event, EventId, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
 
 use super::evidence::{
     self, Coord, ATTENTION_KINDS, KEYED_OUTCOME_KINDS, OUTCOME_KINDS, STATUS_KINDS,
 };
+use super::fetch::{Fetch, Step, Stored};
 use super::{
-    fingerprint_json, CoverageRecord, Gap, OwnerLink, Policy, Query, Request, Response, Selection,
-    SelectionItem, Validity, BUNDLE_LABEL, FINGERPRINT_KIND, MAX_SELECTIONS,
+    fingerprint_json, Gap, OwnerLink, Policy, Query, Response, Selection, SelectionItem, Validity,
+    BUNDLE_LABEL, FINGERPRINT_KIND, MAX_SELECTIONS,
 };
 use crate::SdkError;
-
-/// `limit` on every discovery query. Below the Buzz relay's page clamp, so a
-/// full page is detectable as truncation.
-pub const QUERY_LIMIT: usize = 500;
-
-/// Which discovery step a coverage record belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Step {
-    RelayInfo,
-    Selected,
-    Parents,
-    Outcomes,
-    Attention,
-    BySubject,
-    ByIssuer,
-    Repo,
-    RefState,
-    Targets,
-}
-
-impl Step {
-    /// Steps whose events may be outcomes.
-    pub(super) fn finds_outcomes(self) -> bool {
-        matches!(self, Self::Outcomes | Self::BySubject | Self::ByIssuer)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -47,20 +21,6 @@ enum Phase {
     Targets,
     Context,
     Done,
-}
-
-pub(super) struct Sent {
-    pub(super) step: Step,
-    filter: Option<Filter>,
-    answered: bool,
-}
-
-/// One fetched event, kept with every scope that returned it.
-pub(super) struct Stored {
-    pub(super) event: Event,
-    pub(super) valid: bool,
-    pub(super) origin: String,
-    pub(super) scopes: Vec<usize>,
 }
 
 /// Verifies one work fingerprint. Sans-IO: call [`Verifier::next_queries`],
@@ -77,11 +37,7 @@ pub struct Verifier {
     /// Processable selections, deduplicated, in order.
     pub(super) work: Vec<(EventId, String)>,
     pub(super) gaps: Vec<Gap>,
-    pub(super) sent: Vec<Sent>,
-    pub(super) coverage: Vec<CoverageRecord>,
-    pub(super) store: BTreeMap<EventId, Stored>,
-    pub(super) relay_self: BTreeMap<String, PublicKey>,
-    pub(super) attention: BTreeMap<EventId, usize>,
+    pub(super) fetch: Fetch,
     phase: Phase,
     repos: BTreeSet<(String, Coord)>,
 }
@@ -118,11 +74,7 @@ impl Verifier {
             subject: None,
             work: Vec::new(),
             gaps: Vec::new(),
-            sent: Vec::new(),
-            coverage: Vec::new(),
-            store: BTreeMap::new(),
-            relay_self: BTreeMap::new(),
-            attention: BTreeMap::new(),
+            fetch: Fetch::default(),
             phase: Phase::Start,
             repos: BTreeSet::new(),
         };
@@ -195,12 +147,12 @@ impl Verifier {
     }
 
     /// The queries for the next discovery round; empty when discovery is done.
+    ///
+    /// Queries of the previous round left unanswered are recorded as failed.
     pub fn next_queries(&mut self) -> Vec<Query> {
-        for (sent, record) in self.sent.iter_mut().zip(&mut self.coverage) {
-            if !sent.answered {
-                sent.answered = true;
-                record.error = Some("not answered".into());
-            }
+        let pages = self.fetch.next_pages();
+        if !pages.is_empty() {
+            return pages;
         }
         let Some(subject) = self.subject else {
             self.phase = Phase::Done;
@@ -242,124 +194,13 @@ impl Verifier {
     /// Returns [`SdkError::InvalidInput`] for an unknown or already answered
     /// scope.
     pub fn ingest(&mut self, scope: usize, response: Response) -> Result<(), SdkError> {
-        let (Some(sent), Some(record)) = (self.sent.get_mut(scope), self.coverage.get_mut(scope))
-        else {
-            return Err(SdkError::InvalidInput(format!("unknown scope {scope}")));
-        };
-        if sent.answered {
-            return Err(SdkError::InvalidInput(format!(
-                "scope {scope} already answered"
-            )));
-        }
-        sent.answered = true;
-        let step = sent.step;
-        match (response, &sent.filter) {
-            (Response::Failed(reason), _) => record.error = Some(reason),
-            (Response::RelayInfo(pk), None) => {
-                record.returned = usize::from(pk.is_some());
-                if let Some(pk) = pk {
-                    self.relay_self.insert(record.origin.clone(), pk);
-                }
-            }
-            (Response::Events(values), Some(filter)) => {
-                let filter = filter.clone();
-                let origin = record.origin.clone();
-                record.truncated =
-                    filter.ids.is_none() && filter.limit.is_some_and(|limit| values.len() >= limit);
-                let mut accepted = Vec::new();
-                for value in values {
-                    match serde_json::from_value::<Event>(value) {
-                        Ok(event) if filter.match_event(&event, MatchEventOptions::new()) => {
-                            accepted.push(event);
-                        }
-                        _ => record.discarded += 1,
-                    }
-                }
-                record.returned = accepted.len();
-                for event in accepted {
-                    self.accept(scope, step, &origin, event);
-                }
-            }
-            (_, _) => record.error = Some("response does not answer this request".into()),
-        }
-        Ok(())
-    }
-
-    fn accept(&mut self, scope: usize, step: Step, origin: &str, event: Event) {
-        let valid = event.verify().is_ok();
-        if step == Step::Attention {
-            if valid {
-                let work: BTreeSet<EventId> = self.work.iter().map(|(id, _)| *id).collect();
-                for id in evidence::e_ids(&event).into_iter().collect::<BTreeSet<_>>() {
-                    if work.contains(&id) {
-                        *self.attention.entry(id).or_default() += 1;
-                    }
-                }
-            }
-            return;
-        }
-        let entry = self.store.entry(event.id).or_insert_with(|| Stored {
-            event: event.clone(),
-            valid,
-            origin: origin.to_owned(),
-            scopes: Vec::new(),
-        });
-        if valid && !entry.valid {
-            entry.event = event;
-            entry.valid = true;
-            entry.origin = origin.to_owned();
-        }
-        entry.scopes.push(scope);
-    }
-
-    fn send(&mut self, origin: &str, step: Step, request: Request) -> Query {
-        let scope = self.sent.len();
-        let (filter, json) = match &request {
-            Request::RelayInfo => (None, serde_json::json!("nip11")),
-            Request::Events(filter) => (
-                Some(filter.clone()),
-                serde_json::to_value(filter).unwrap_or(serde_json::Value::Null),
-            ),
-        };
-        self.coverage.push(CoverageRecord {
-            scope,
-            origin: origin.to_owned(),
-            cutoff: filter.as_ref().and_then(|f| f.until).map(|t| t.as_secs()),
-            request: json,
-            returned: 0,
-            discarded: 0,
-            truncated: false,
-            error: None,
-        });
-        self.sent.push(Sent {
-            step,
-            filter,
-            answered: false,
-        });
-        Query {
-            scope,
-            origin: origin.to_owned(),
-            request,
-        }
-    }
-
-    fn ids(&mut self, origin: &str, step: Step, ids: BTreeSet<EventId>) -> Option<Query> {
-        if ids.is_empty() {
-            return None;
-        }
-        let limit = ids.len();
-        Some(self.send(
-            origin,
-            step,
-            Request::Events(Filter::new().ids(ids).limit(limit)),
-        ))
+        self.fetch.ingest(scope, response)
     }
 
     fn discovery(&self, kinds: &[u16]) -> Filter {
         Filter::new()
             .kinds(kinds.iter().map(|k| Kind::from(*k)))
             .until(Timestamp::from(self.cutoff))
-            .limit(QUERY_LIMIT)
     }
 
     fn by_origin(&self) -> BTreeMap<String, BTreeSet<EventId>> {
@@ -373,8 +214,8 @@ impl Verifier {
     fn plan_start(&mut self) -> Vec<Query> {
         let mut queries = Vec::new();
         for (origin, ids) in self.by_origin() {
-            queries.push(self.send(&origin, Step::RelayInfo, Request::RelayInfo));
-            queries.extend(self.ids(&origin, Step::Selected, ids));
+            queries.push(self.fetch.relay_info(&origin, Step::RelayInfo));
+            queries.extend(self.fetch.ids(&origin, Step::Selected, ids));
         }
         queries
     }
@@ -382,16 +223,11 @@ impl Verifier {
     fn plan_discover(&mut self, subject: PublicKey) -> Vec<Query> {
         let mut queries = Vec::new();
         for (origin, ids) in self.by_origin() {
-            let fetched: Vec<&Event> = ids
-                .iter()
-                .filter_map(|id| self.store.get(id))
-                .filter(|s| s.valid)
-                .map(|s| &s.event)
-                .collect();
+            let fetched: Vec<&Event> = ids.iter().filter_map(|id| self.fetch.valid(id)).collect();
             let parents: BTreeSet<EventId> = fetched
                 .iter()
                 .filter_map(|e| evidence::parent(e))
-                .filter(|id| !self.store.contains_key(id))
+                .filter(|id| !self.fetch.store.contains_key(id))
                 .collect();
             let repos: BTreeSet<Coord> = fetched.iter().filter_map(|e| evidence::repo(e)).collect();
             let hex: Vec<String> = ids.iter().map(EventId::to_hex).collect();
@@ -404,15 +240,15 @@ impl Verifier {
             let keyed = self
                 .discovery(&KEYED_OUTCOME_KINDS)
                 .custom_tags(tag(Alphabet::P), [subject.to_hex()]);
-            queries.extend(self.ids(&origin, Step::Parents, parents));
-            queries.push(self.send(&origin, Step::Outcomes, Request::Events(outcomes)));
-            queries.push(self.send(&origin, Step::Attention, Request::Events(attention)));
-            queries.push(self.send(&origin, Step::BySubject, Request::Events(keyed)));
+            queries.extend(self.fetch.ids(&origin, Step::Parents, parents));
+            queries.push(self.fetch.walk(&origin, Step::Outcomes, outcomes));
+            queries.push(self.fetch.walk(&origin, Step::Attention, attention));
+            queries.push(self.fetch.walk(&origin, Step::BySubject, keyed));
             for coord in repos {
                 let issuer = self
                     .discovery(&STATUS_KINDS)
                     .custom_tags(tag(Alphabet::A), [coord.to_string()]);
-                queries.push(self.send(&origin, Step::ByIssuer, Request::Events(issuer)));
+                queries.push(self.fetch.walk(&origin, Step::ByIssuer, issuer));
                 queries.extend(self.plan_repo(&origin, coord));
             }
         }
@@ -426,24 +262,23 @@ impl Verifier {
         let announcement = Filter::new()
             .kind(Kind::from(30617))
             .author(coord.owner)
-            .identifier(coord.d.clone())
-            .limit(QUERY_LIMIT);
+            .identifier(coord.d.clone());
         let state = self.discovery(&[30618]).identifier(coord.d);
         vec![
-            self.send(origin, Step::Repo, Request::Events(announcement)),
-            self.send(origin, Step::RefState, Request::Events(state)),
+            self.fetch.walk(origin, Step::Repo, announcement),
+            self.fetch.walk(origin, Step::RefState, state),
         ]
     }
 
     /// Fetch the targets of discovered outcomes, to learn their authors.
     fn plan_targets(&mut self) -> Vec<Query> {
         let mut wanted: BTreeMap<String, BTreeSet<EventId>> = BTreeMap::new();
-        for stored in self.store.values() {
+        for stored in self.fetch.store.values() {
             if !stored.valid || !self.is_outcome_candidate(stored) {
                 continue;
             }
             if let Some(target) = evidence::target(&stored.event) {
-                if !self.store.contains_key(&target) {
+                if !self.fetch.store.contains_key(&target) {
                     wanted
                         .entry(stored.origin.clone())
                         .or_default()
@@ -453,7 +288,7 @@ impl Verifier {
         }
         let mut queries = Vec::new();
         for (origin, ids) in wanted {
-            queries.extend(self.ids(&origin, Step::Targets, ids));
+            queries.extend(self.fetch.ids(&origin, Step::Targets, ids));
         }
         queries
     }
@@ -463,16 +298,13 @@ impl Verifier {
         let owners = self.owners();
         let mut parents: BTreeMap<String, BTreeSet<EventId>> = BTreeMap::new();
         let mut repos = BTreeSet::new();
-        for stored in self.store.values() {
-            let discovered = stored
-                .scopes
-                .iter()
-                .any(|s| self.step(*s) == Some(Step::Targets));
+        for stored in self.fetch.store.values() {
+            let discovered = self.fetch.returned_by(stored, Step::Targets);
             if !stored.valid || !discovered || !self.attributed(&stored.event, &owners) {
                 continue;
             }
             if let Some(parent) = evidence::parent(&stored.event) {
-                if !self.store.contains_key(&parent) {
+                if !self.fetch.store.contains_key(&parent) {
                     parents
                         .entry(stored.origin.clone())
                         .or_default()
@@ -485,16 +317,12 @@ impl Verifier {
         }
         let mut queries = Vec::new();
         for (origin, ids) in parents {
-            queries.extend(self.ids(&origin, Step::Parents, ids));
+            queries.extend(self.fetch.ids(&origin, Step::Parents, ids));
         }
         for (origin, coord) in repos {
             queries.extend(self.plan_repo(&origin, coord));
         }
         queries
-    }
-
-    pub(super) fn step(&self, scope: usize) -> Option<Step> {
-        self.sent.get(scope).map(|s| s.step)
     }
 
     /// Whether a stored event came from an outcome query and has an outcome
@@ -504,30 +332,49 @@ impl Verifier {
         stored
             .scopes
             .iter()
-            .any(|s| self.step(*s).is_some_and(Step::finds_outcomes))
+            .any(|s| self.fetch.step(*s).is_some_and(Step::finds_outcomes))
             && (kind == 5
                 || STATUS_KINDS.contains(&kind)
                 || evidence::label(&stored.event).is_some())
     }
 
     /// Owner keys of each signer, learned only from verified owner links on
-    /// validly signed events by that signer.
+    /// validly signed events by that signer. Attention events are counted,
+    /// not read for owner links.
     pub(super) fn owners(&self) -> BTreeMap<PublicKey, BTreeSet<PublicKey>> {
-        let mut owners: BTreeMap<PublicKey, BTreeSet<PublicKey>> = BTreeMap::new();
-        let mut link = |signer: PublicKey, owner: &OwnerLink| {
-            if let OwnerLink::Verified(hex) = owner {
-                if let Ok(owner) = PublicKey::from_hex(hex) {
-                    owners.entry(signer).or_default().insert(owner);
-                }
+        let mut owners = self.fetch.owners(|s| {
+            s.scopes
+                .iter()
+                .any(|scope| self.fetch.step(*scope) != Some(Step::Attention))
+        });
+        if let (Some(subject), OwnerLink::Verified(hex)) =
+            (self.subject, &self.selection.owner_link)
+        {
+            if let Ok(owner) = PublicKey::from_hex(hex) {
+                owners.entry(subject).or_default().insert(owner);
             }
-        };
-        if let Some(subject) = self.subject {
-            link(subject, &self.selection.owner_link);
-        }
-        for stored in self.store.values().filter(|s| s.valid) {
-            link(stored.event.pubkey, &evidence::owner_link(&stored.event));
         }
         owners
+    }
+
+    /// Replies, mentions and reactions found for each selected work event.
+    pub(super) fn attention(&self) -> BTreeMap<EventId, usize> {
+        let work: BTreeSet<EventId> = self.work.iter().map(|(id, _)| *id).collect();
+        let mut counts: BTreeMap<EventId, usize> = BTreeMap::new();
+        for stored in self.fetch.store.values() {
+            if !stored.valid || !self.fetch.returned_by(stored, Step::Attention) {
+                continue;
+            }
+            for id in evidence::e_ids(&stored.event)
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+            {
+                if work.contains(&id) {
+                    *counts.entry(id).or_default() += 1;
+                }
+            }
+        }
+        counts
     }
 
     /// Whether `event` counts toward the subject: signed by it, or by a key
