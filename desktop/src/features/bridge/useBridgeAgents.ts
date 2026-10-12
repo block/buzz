@@ -1,5 +1,6 @@
 // Web-only hook: subscribes to the member's own bridge events and exposes agents + desktop presence.
 import { isTauri } from "@tauri-apps/api/core";
+import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { prioritizeDecrypt } from "@/platform/web/signer/instrument";
@@ -289,6 +290,17 @@ export function useBridgeAgents(
   );
   const getSnap = React.useCallback(() => client?.state ?? EMPTY, [client]);
   const state = React.useSyncExternalStore(subscribe, getSnap);
+  // Start/stop sync: the desktop republishes its snapshot ~250 ms after any agent status change. When the statuses differ
+  // from the last snapshot, refetch the desktop-style agent list (over Direct when live, else the snapshot overlay).
+  const queryClient = useQueryClient();
+  const lastSig = React.useRef<string | null>(null);
+  const sig = agentStatusSig(state.snapshot);
+  React.useEffect(() => {
+    if (sig === null) return;
+    const prev = lastSig.current;
+    lastSig.current = sig;
+    if (prev !== null && prev !== sig) void queryClient.invalidateQueries({ queryKey: ["managed-agents"] });
+  }, [sig, queryClient]);
   return {
     ...state,
     available: enabled,
@@ -311,3 +323,12 @@ const EMPTY: BridgeState = {
   shots: new Map(),
   refreshing: false,
 };
+
+/** pubkey:status pairs of a snapshot, order-independent; null when there is no snapshot. */
+export function agentStatusSig(snapshot: { agents?: { pubkey: string; status: string }[] } | null | undefined): string | null {
+  if (!snapshot || !Array.isArray(snapshot.agents)) return null;
+  return snapshot.agents
+    .map((a) => `${String(a.pubkey).toLowerCase()}:${a.status}`)
+    .sort()
+    .join(",");
+}

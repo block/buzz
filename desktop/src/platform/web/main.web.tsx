@@ -34,6 +34,7 @@ if (!(await resumeSession())) {
 }
 startSignerBanner(signerActions);
 void import("./updateCheck").then((m) => m.startUpdateCheck()).catch(() => undefined);
+void import("./permissionPrompts").then((m) => m.startPermissionPrompts()).catch(() => undefined);
 if (import.meta.env.VITE_BUZZ_WEB_PUSH_URL) void import("./push/banner").then((m) => m.startWebPush()).catch(() => undefined);
 try {
   await import("@/main");

@@ -1,5 +1,6 @@
 // Web command registry. Only commands the S1 chat path needs are implemented (or given a safe default);
 // everything else is classified by capabilities.ts and rejects with a typed NativeOnlyError.
+import { makeLinkPreviewHandlers } from "./linkPreview";
 import { capabilityGroupFor, groupPolicy } from "./capabilities";
 import { chatHandlers } from "./chat";
 import { parityHandlers } from "./parity";
@@ -223,6 +224,8 @@ installProxyHandlers(handlers);
 handlers.list_archived_identities = () => ({ archived: [] });
 // web parity round 2 (pure relay ports) take precedence over the placeholder lists above
 Object.assign(handlers, parity2Handlers);
+// Link preview cards: only with a configured helper (server/link-preview); otherwise previews stay desktop-only.
+if (import.meta.env.VITE_BUZZ_LINK_PREVIEW_URL) Object.assign(handlers, makeLinkPreviewHandlers(String(import.meta.env.VITE_BUZZ_LINK_PREVIEW_URL)));
 
 export class NativeOnlyError extends Error {
   constructor(
