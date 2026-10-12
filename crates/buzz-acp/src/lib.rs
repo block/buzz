@@ -704,7 +704,7 @@ mod inbound_author_gate {
                 // as non-DMs. Strict mode requires an authoritative type.
                 let known = matches!(
                     channel_info.resolve_channel_metadata(buzz_event.channel_id).await,
-                    Some(info) if matches!(info.channel_type.as_str(), "dm" | "stream" | "forum")
+                    Some(info) if matches!(info.channel_type.as_str(), "dm" | "stream" | "forum" | "private")
                 );
                 if !known {
                     decision.allowed = false;
@@ -7597,7 +7597,7 @@ mod author_gate_tests {
     #[tokio::test]
     async fn strict_allowlist_rejects_implicit_principals_at_both_listener_boundaries() {
         for listener in [ListenerBoundary::Normal, ListenerBoundary::Setup] {
-            for channel_type in ["stream", "dm", "unexpected"] {
+            for channel_type in ["stream", "private", "dm", "unexpected"] {
                 for principal in ["external", "owner", "sibling"] {
                     let relay_keys = nostr::Keys::generate();
                     let relay_hex = relay_keys.public_key().to_hex();
@@ -7625,7 +7625,7 @@ mod author_gate_tests {
                         .await;
                         assert_eq!(
                             result.1,
-                            listed && channel_type == "stream",
+                            listed && matches!(channel_type, "stream" | "private"),
                             "{} {channel_type} {principal} listed={listed}",
                             listener.name()
                         );
