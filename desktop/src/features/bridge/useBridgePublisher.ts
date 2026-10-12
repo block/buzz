@@ -45,6 +45,9 @@ function deviceId(): string {
   }
 }
 
+/** Background re-read of the desktop's agent list while one runs (status changes reach the web within this). */
+export const BACKGROUND_AGENTS_REREAD_MS = 15_000;
+
 export function useBridgePublisher(
   pubkey: string | undefined,
   relayUrl: string | undefined,
@@ -362,10 +365,13 @@ export function useBridgePublisher(
   const busy = !!agents?.some((a) => a.status === "running");
   React.useEffect(() => {
     if (!enabled || !busy) return;
+    // 15 s, one at a time: every list_managed_agents re-reads agent JSON, every agent key from the keyring, personas/teams and
+    // process state. At 2 s (150x the normal 5 min cadence) the dev desktop grew to 155 GB within ~40 min.
     const t = setInterval(() => {
       if (typeof document !== "undefined" && document.hasFocus()) return; // focused: the list's own poll covers it
+      if (bridgeQueryClient.isFetching({ queryKey: managedAgentsQueryKey }) > 0) return;
       void bridgeQueryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
-    }, 2_000);
+    }, BACKGROUND_AGENTS_REREAD_MS);
     return () => clearInterval(t);
   }, [enabled, busy, bridgeQueryClient]);
   React.useEffect(() => {
