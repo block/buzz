@@ -53,9 +53,13 @@ impl Step {
 /// One fetched event, kept with every coverage record that returned it.
 pub(super) struct Stored {
     pub(super) event: Event,
+    /// The event JSON exactly as the origin served it.
+    pub(super) raw: serde_json::Value,
     pub(super) valid: bool,
     pub(super) origin: String,
     pub(super) scopes: Vec<usize>,
+    /// When the caller says it first received this copy (its clock).
+    pub(super) observed_at: Option<u64>,
 }
 
 /// One page handed out as a [`Query`].
@@ -235,7 +239,12 @@ impl Fetch {
     ///
     /// Returns [`SdkError::InvalidInput`] for an unknown or already answered
     /// handle.
-    pub(super) fn ingest(&mut self, scope: usize, response: Response) -> Result<(), SdkError> {
+    pub(super) fn ingest(
+        &mut self,
+        scope: usize,
+        response: Response,
+        observed_at: Option<u64>,
+    ) -> Result<(), SdkError> {
         let Some(sent) = self.sent.get_mut(scope) else {
             return Err(SdkError::InvalidInput(format!("unknown scope {scope}")));
         };
@@ -262,7 +271,7 @@ impl Fetch {
                 }
             }
             (Response::Events(values), Some(filter)) if !nip11 => {
-                self.events(record, &filter, values);
+                self.events(record, &filter, values, observed_at);
             }
             _ => {
                 self.coverage[record].error = Some("response does not answer this request".into());
@@ -272,35 +281,46 @@ impl Fetch {
         Ok(())
     }
 
-    fn events(&mut self, record: usize, filter: &Filter, values: Vec<serde_json::Value>) {
+    fn events(
+        &mut self,
+        record: usize,
+        filter: &Filter,
+        values: Vec<serde_json::Value>,
+        observed_at: Option<u64>,
+    ) {
         let served = values.len();
         let mut events = Vec::new();
         for value in values {
-            match serde_json::from_value::<Event>(value) {
+            match serde_json::from_value::<Event>(value.clone()) {
                 Ok(event) if filter.match_event(&event, MatchEventOptions::new()) => {
-                    events.push(event);
+                    events.push((event, value));
                 }
                 _ => self.coverage[record].discarded += 1,
             }
         }
+        let at = |(event, raw): (Event, serde_json::Value)| Fetched {
+            event,
+            raw,
+            observed_at,
+        };
         let origin = self.coverage[record].origin.clone();
         self.coverage[record].pages += 1;
         let Some(walk) = self.walks.get_mut(&record) else {
             self.coverage[record].returned += events.len();
-            for event in events {
-                store(&mut self.store, record, &origin, event);
+            for fetched in events.into_iter().map(at) {
+                store(&mut self.store, record, &origin, fetched);
             }
             return;
         };
         walk.pages += 1;
-        let oldest = events.iter().map(|e| e.created_at).min();
+        let oldest = events.iter().map(|(e, _)| e.created_at).min();
         let mut keep = Vec::new();
-        for event in events {
+        for (event, raw) in events {
             if !walk.seen.insert(event.id) {
                 continue;
             }
             if walk.local.match_event(&event, MatchEventOptions::new()) {
-                keep.push(event);
+                keep.push((event, raw));
             } else {
                 self.coverage[record].unmatched += 1;
             }
@@ -323,10 +343,17 @@ impl Fetch {
                 self.pending.push((record, page));
             }
         }
-        for event in keep {
-            store(&mut self.store, record, &origin, event);
+        for fetched in keep.into_iter().map(at) {
+            store(&mut self.store, record, &origin, fetched);
         }
     }
+}
+
+/// One served event with its JSON as served and when it arrived.
+struct Fetched {
+    event: Event,
+    raw: serde_json::Value,
+    observed_at: Option<u64>,
 }
 
 enum Paging {
@@ -371,18 +398,27 @@ fn next_page(walk: &Walk, sent: &Filter, served: usize, oldest: Option<Timestamp
     Paging::Next(walk.pushed.clone().until(until), tie)
 }
 
-fn store(store: &mut BTreeMap<EventId, Stored>, record: usize, origin: &str, event: Event) {
+fn store(store: &mut BTreeMap<EventId, Stored>, record: usize, origin: &str, fetched: Fetched) {
+    let Fetched {
+        event,
+        raw,
+        observed_at,
+    } = fetched;
     let valid = event.verify().is_ok();
     let entry = store.entry(event.id).or_insert_with(|| Stored {
         event: event.clone(),
+        raw: raw.clone(),
         valid,
         origin: origin.to_owned(),
         scopes: Vec::new(),
+        observed_at,
     });
     if valid && !entry.valid {
         entry.event = event;
+        entry.raw = raw;
         entry.valid = true;
         entry.origin = origin.to_owned();
+        entry.observed_at = observed_at;
     }
     if !entry.scopes.contains(&record) {
         entry.scopes.push(record);

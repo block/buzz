@@ -194,7 +194,7 @@ impl Verifier {
     /// Returns [`SdkError::InvalidInput`] for an unknown or already answered
     /// scope.
     pub fn ingest(&mut self, scope: usize, response: Response) -> Result<(), SdkError> {
-        self.fetch.ingest(scope, response)
+        self.fetch.ingest(scope, response, None)
     }
 
     fn discovery(&self, kinds: &[u16]) -> Filter {

@@ -15,6 +15,7 @@
 //! ```
 
 mod assess;
+mod check;
 mod evidence;
 mod fetch;
 mod judge;
@@ -35,6 +36,7 @@ use nostr::{EventBuilder, EventId, Filter, Kind, PublicKey, Tag};
 
 use crate::SdkError;
 
+pub use check::{check_evidence, EvidenceCheck};
 pub use fetch::{MAX_PAGES, QUERY_LIMIT};
 pub use report::*;
 pub use trail::{pr_revision, Entry, Scope, Trail, TRAIL_POLICY};

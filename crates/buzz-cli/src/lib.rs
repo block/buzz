@@ -2068,7 +2068,8 @@ pub enum TrustCmd {
         after_help = "Examples:\n  buzz trust trail --request <event-id> --channel <uuid> --text\n  buzz trust trail --actor <npub> --channel <uuid> --repo 30617:<owner-hex>:<d> --since 1791000000 --cutoff 1791600000"
     )]
     Trail {
-        /// Start from a typed request, a PR (kind:1618), or a patch
+        /// Start from a typed request, a code issue (kind:1621), a PR
+        /// (kind:1618), or a patch
         #[arg(long, group = "entry")]
         request: Option<String>,
         /// Start from one contribution (typed commitment/update/submission,
@@ -2094,6 +2095,18 @@ pub enum TrustCmd {
         /// Print a readable view instead of JSON
         #[arg(long)]
         text: bool,
+    },
+    /// Recheck a saved `trust trail` JSON result from its own evidence
+    /// section, without contacting any relay: every kept envelope must
+    /// verify as recorded, and every event the trail cites must have one
+    /// that verifies. Exits non-zero when it does not hold.
+    #[command(
+        after_help = "Example:\n  buzz trust trail --request <event-id> --channel <uuid> > trail.json\n  buzz trust recheck --file trail.json"
+    )]
+    Recheck {
+        /// Saved trail JSON, or `-` for stdin
+        #[arg(long)]
+        file: String,
     },
     /// Post a typed work request (`buzz.work/request/v1`) as a top-level
     /// channel message. Its signer is the requester. Typed requests cannot
@@ -2304,6 +2317,11 @@ fn normalize_auth_tag_input(input: &str) -> String {
 
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
+
+    // Rechecking a saved trail is local-only: it must not need the origin.
+    if let Cmd::Trust(TrustCmd::Recheck { ref file }) = cli.command {
+        return commands::trust::cmd_recheck(file);
+    }
 
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {

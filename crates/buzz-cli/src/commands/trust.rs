@@ -2,7 +2,8 @@
 //! (`docs/nips/NIP-FP.md`).
 //!
 //! `trail` runs the SDK's sans-IO `buzz.work/v1` reader against the current
-//! relay: request → contribution(s) → outcome(s). `request`, `contribute`
+//! relay: request → contribution(s) → outcome(s); `recheck` verifies a saved
+//! trail from its evidence section without any relay. `request`, `contribute`
 //! and `outcome` write the typed messages it reads, deriving every reference
 //! from fetched, signature-checked events.
 //!
@@ -55,6 +56,7 @@ pub async fn dispatch(cmd: TrustCmd, client: &BuzzClient) -> Result<(), CliError
             let scope = parse_scope(client.relay_url(), &channel, &repo, since, cutoff)?;
             cmd_trail(client, entry, scope, text).await
         }
+        TrustCmd::Recheck { file } => cmd_recheck(&file),
         TrustCmd::Request {
             channel,
             title,
@@ -228,8 +230,10 @@ async fn cmd_trail(
             } else {
                 Response::Failed(format!("origin {} is outside this read", query.origin))
             };
+            // Observation time is evidence metadata only; the reduction
+            // never reads it.
             trail
-                .ingest(query.scope, response)
+                .ingest_at(query.scope, response, Timestamp::now().as_secs())
                 .map_err(|e| CliError::Other(e.to_string()))?;
         }
     }
@@ -239,6 +243,27 @@ async fn cmd_trail(
         Ok(())
     } else {
         print_json(&trail)
+    }
+}
+
+/// Recheck a saved trail offline (`-` reads stdin).
+pub fn cmd_recheck(file: &str) -> Result<(), CliError> {
+    let text = if file == "-" {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(file)
+    }
+    .map_err(|e| CliError::Usage(format!("--file {file}: {e}")))?;
+    let saved: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| CliError::Usage(format!("--file {file}: not JSON: {e}")))?;
+    let check = trust::check_evidence(&saved).map_err(|e| CliError::Usage(e.to_string()))?;
+    print_json(&check)?;
+    if check.holds() {
+        Ok(())
+    } else {
+        Err(CliError::Other(
+            "saved trail does not recheck from its evidence".into(),
+        ))
     }
 }
 

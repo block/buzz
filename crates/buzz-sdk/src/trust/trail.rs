@@ -19,8 +19,9 @@ use super::fetch::{Fetch, Step, Stored};
 use super::judge::{authority, Judge};
 use super::work::{self, Message, Part, WorkRole};
 use super::{
-    AuthorityStatus as A, Contribution, ContributionRole, Gap, Independence, Outcome, OutcomeScope,
-    PolicyRef, Query, Response, Source, Task, TaskRequest, TrailScope, WorkTrail,
+    AuthorityStatus as A, Contribution, ContributionRole, Evidence, EvidenceEvent, Gap,
+    Independence, Outcome, OutcomeScope, PolicyRef, Query, Response, Source, Task, TaskRequest,
+    TrailScope, WorkTrail,
 };
 use crate::SdkError;
 
@@ -33,14 +34,20 @@ const MAX_CONTEXT_ROUNDS: usize = 8;
 /// Patch, pull request, and pull-request update.
 const CODE_KINDS: [u16; 3] = [1617, 1618, 1619];
 
+/// A code issue (NIP-34): a request.
+const ISSUE: u16 = 1621;
+
+/// How [`Evidence`] keeps envelopes.
+const EVIDENCE_FORM: &str = "each event is the NIP-01 JSON object as served; its id and signature recheck from it alone; transport bytes are not kept";
+
 /// Where a work trail starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entry {
-    /// A typed request, or a PR or patch.
+    /// A typed request, a code issue, or a PR or patch.
     Request(EventId),
     /// One contribution.
     Contribution(EventId),
-    /// Work requested or contributed by one key in the declared scope.
+    /// Tasks one key requested or contributed to, in the declared scope.
     Actor(PublicKey),
 }
 
@@ -140,7 +147,23 @@ impl Trail {
     /// Returns [`SdkError::InvalidInput`] for an unknown or already answered
     /// scope.
     pub fn ingest(&mut self, scope: usize, response: Response) -> Result<(), SdkError> {
-        self.fetch.ingest(scope, response)
+        self.fetch.ingest(scope, response, None)
+    }
+
+    /// [`Trail::ingest`], recording when the caller received the answer, in
+    /// Unix seconds by its own clock. The time is kept in [`Evidence`] only;
+    /// nothing in the trail is derived from it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Trail::ingest`].
+    pub fn ingest_at(
+        &mut self,
+        scope: usize,
+        response: Response,
+        observed_at: u64,
+    ) -> Result<(), SdkError> {
+        self.fetch.ingest(scope, response, Some(observed_at))
     }
 
     fn bounded(&self, kinds: &[u16]) -> Filter {
@@ -183,14 +206,22 @@ impl Trail {
                 if self.scope.repos.is_empty() {
                     self.gap(
                         None,
-                        "no repositories declared; code work by the actor was not searched",
+                        "no repositories declared; code work and repository statuses were not searched",
                     );
                 } else {
+                    let repos = self.scope.repos.clone();
                     let code = self
-                        .bounded(&CODE_KINDS)
+                        .bounded(&[1617, 1618, 1619, ISSUE])
                         .author(actor)
-                        .custom_tags(lower(Alphabet::A), self.scope.repos.clone());
+                        .custom_tags(lower(Alphabet::A), repos.clone());
                     queries.push(self.walk(Step::Seed, code));
+                    // Statuses in the window may judge older work and name
+                    // only the repository owner; their targets are fetched
+                    // and kept only when they are the actor's tasks.
+                    let statuses = self
+                        .bounded(&STATUS_KINDS)
+                        .custom_tags(lower(Alphabet::A), repos);
+                    queries.push(self.walk(Step::ByIssuer, statuses));
                 }
                 let keyed = self
                     .bounded(&KEYED_OUTCOME_KINDS)
@@ -203,13 +234,14 @@ impl Trail {
 
     /// Replies to typed requests, and updates of pull requests.
     fn linked(&mut self) -> Vec<Query> {
+        let tasks = self.actor_tasks();
         let requests: Vec<String> = self
-            .valid()
+            .in_scope(tasks.as_ref())
             .filter(|e| matches!(work::read(e), Message::Request(_)))
             .map(|e| e.id.to_hex())
             .collect();
         let roots: Vec<String> = self
-            .valid()
+            .in_scope(tasks.as_ref())
             .filter(|e| e.kind.as_u16() == 1618)
             .map(|e| e.id.to_hex())
             .collect();
@@ -227,11 +259,12 @@ impl Trail {
         queries
     }
 
-    /// Outcomes on every contribution and PR.
+    /// Outcomes on every contribution, PR, and issue.
     fn outcomes(&mut self) -> Vec<Query> {
+        let tasks = self.actor_tasks();
         let ids: Vec<String> = self
-            .valid()
-            .filter(|e| is_contribution(e))
+            .in_scope(tasks.as_ref())
+            .filter(|e| is_contribution(e) || e.kind.as_u16() == ISSUE)
             .map(|e| e.id.to_hex())
             .collect();
         if ids.is_empty() {
@@ -245,9 +278,10 @@ impl Trail {
 
     /// Repository authority and ref state for every repository touched.
     fn repos(&mut self) -> Vec<Query> {
+        let tasks = self.actor_tasks();
         let coords: BTreeSet<Coord> = self
-            .valid()
-            .filter(|e| CODE_KINDS.contains(&e.kind.as_u16()))
+            .in_scope(tasks.as_ref())
+            .filter(|e| CODE_KINDS.contains(&e.kind.as_u16()) || e.kind.as_u16() == ISSUE)
             .filter_map(evidence::repo)
             .collect();
         let mut queries = Vec::new();
@@ -329,6 +363,29 @@ impl Trail {
             .map(|s| &s.event)
     }
 
+    /// In an actor read, the tasks the actor requested or contributed to,
+    /// keyed as [`task_key`]; `None` for other reads, which keep every task.
+    fn actor_tasks(&self) -> Option<BTreeSet<EventId>> {
+        let Entry::Actor(actor) = self.entry else {
+            return None;
+        };
+        Some(
+            self.valid()
+                .filter(|e| e.pubkey == actor)
+                .filter_map(task_key)
+                .collect(),
+        )
+    }
+
+    /// Valid events that belong to a task in `tasks` (every task if `None`).
+    fn in_scope<'s>(
+        &'s self,
+        tasks: Option<&'s BTreeSet<EventId>>,
+    ) -> impl Iterator<Item = &'s Event> {
+        self.valid()
+            .filter(move |e| tasks.is_none_or(|t| task_key(e).is_some_and(|k| t.contains(&k))))
+    }
+
     fn found_as_outcome(&self, stored: &Stored) -> bool {
         stored
             .scopes
@@ -353,6 +410,7 @@ impl Trail {
         let mut reduce = Reduce {
             trail: &self,
             judge,
+            actor_tasks: self.actor_tasks(),
             tasks: BTreeMap::new(),
             index: BTreeMap::new(),
             gaps: self.gaps.clone(),
@@ -394,6 +452,32 @@ impl Trail {
             gaps,
             coverage: self.fetch.coverage.iter().map(wording).collect(),
             records: self.fetch.coverage.clone(),
+            evidence: self.evidence(),
+        }
+    }
+
+    /// Every fetched event as served, kept apart from the reduction.
+    fn evidence(&self) -> Evidence {
+        let events = self
+            .fetch
+            .store
+            .values()
+            .map(|s| {
+                let mut records = s.scopes.clone();
+                records.sort_unstable();
+                EvidenceEvent {
+                    id: s.event.id.to_hex(),
+                    valid: s.valid,
+                    origin: s.origin.clone(),
+                    records,
+                    observed_at: s.observed_at,
+                    event: s.raw.clone(),
+                }
+            })
+            .collect();
+        Evidence {
+            form: EVIDENCE_FORM,
+            events,
         }
     }
 }
@@ -437,6 +521,7 @@ struct Placed<'a> {
 struct Reduce<'a> {
     trail: &'a Trail,
     judge: Judge<'a>,
+    actor_tasks: Option<BTreeSet<EventId>>,
     tasks: BTreeMap<EventId, TaskBuild<'a>>,
     index: BTreeMap<EventId, Placed<'a>>,
     gaps: Vec<Gap>,
@@ -449,6 +534,13 @@ impl<'a> Reduce<'a> {
 
     fn valid(&self, id: &EventId) -> Option<&'a Event> {
         self.trail.fetch.valid(id)
+    }
+
+    /// Whether `event` is work outside an actor read's tasks.
+    fn outside(&self, event: &Event) -> bool {
+        self.actor_tasks
+            .as_ref()
+            .is_some_and(|t| task_key(event).is_none_or(|k| !t.contains(&k)))
     }
 
     fn gap(&mut self, id: EventId, reason: String) {
@@ -480,6 +572,7 @@ impl<'a> Reduce<'a> {
         self.tasks.entry(key).or_insert_with(|| {
             let mut req = TaskRequest {
                 id: None,
+                kind: None,
                 requester: None,
                 created_at: None,
                 title: None,
@@ -491,8 +584,17 @@ impl<'a> Reduce<'a> {
             if !code {
                 req.id = Some(key.to_hex());
                 req.status = match request.map(|e| (e, work::read(e))) {
+                    Some((e, _)) if e.kind.as_u16() == ISSUE => {
+                        requester = Some(e.pubkey);
+                        req.kind = Some(ISSUE);
+                        req.requester = Some(e.pubkey.to_hex());
+                        req.created_at = Some(e.created_at.as_secs());
+                        req.title = evidence::tag_value(e, "subject").map(str::to_owned);
+                        "code issue; its signer is the requester".into()
+                    }
                     Some((e, Message::Request(body))) => {
                         requester = Some(e.pubkey);
+                        req.kind = Some(9);
                         req.requester = Some(e.pubkey.to_hex());
                         req.created_at = Some(e.created_at.as_secs());
                         req.title = Some(body.title);
@@ -563,6 +665,9 @@ impl<'a> Reduce<'a> {
     fn contributions(&mut self) {
         let events: Vec<&'a Event> = self.store().filter(|s| s.valid).map(|s| &s.event).collect();
         for event in events {
+            if task_key(event).is_some() && self.outside(event) {
+                continue;
+            }
             match event.kind.as_u16() {
                 9 => match work::read(event) {
                     Message::Part(part) => {
@@ -609,6 +714,9 @@ impl<'a> Reduce<'a> {
                         "pull-request update names no single original PR (E); unresolved".into(),
                     ),
                 },
+                ISSUE => {
+                    self.task(event.id, false);
+                }
                 1617 => {
                     let root = root_e(event).unwrap_or(event.id);
                     let c = code(
@@ -813,6 +921,21 @@ impl<'a> Reduce<'a> {
         let Some(key) = evidence::target(event) else {
             return;
         };
+        match self.valid(&key) {
+            Some(target) if self.outside(target) && task_key(target).is_some() => return,
+            Some(issue) if issue.kind.as_u16() == ISSUE => {
+                return self.request_status(event, key, issue);
+            }
+            None if !self.trail.fetch.store.contains_key(&key) => {
+                return self.gap(
+                    event.id,
+                    format!(
+                        "status names {key}, which was not served; whose work it judges is unknown"
+                    ),
+                );
+            }
+            _ => {}
+        }
         let Some(task) = self
             .tasks
             .get(&key)
@@ -887,6 +1010,41 @@ impl<'a> Reduce<'a> {
                     t.task.unbound.push(outcome);
                 }
             }
+        }
+    }
+
+    /// A status of a code issue: about the request, never a contribution.
+    fn request_status(&mut self, event: &'a Event, key: EventId, issue: &'a Event) {
+        let claim = match event.kind.as_u16() {
+            1630 => "open",
+            1631 => "resolved",
+            1632 => "closed",
+            _ => "draft",
+        };
+        let authority = if event.pubkey == issue.pubkey {
+            authority(A::Authorized, "signer of the issue")
+        } else {
+            self.judge.repo_authority(event, issue)
+        };
+        let outcome = Outcome {
+            id: event.id.to_hex(),
+            kind: event.kind.as_u16(),
+            signer: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            claim,
+            scope: OutcomeScope::Request,
+            note: Some(format!(
+                "request-level {claim} claim; judges no contribution"
+            )),
+            authority,
+            relationship: self.judge.relationship(&event.pubkey, &issue.pubkey),
+            ref_state: None,
+            reason: None,
+            criteria_checked: Vec::new(),
+            evidence_refs: Vec::new(),
+        };
+        if let Some(t) = self.tasks.get_mut(&key) {
+            t.task.unbound.push(outcome);
         }
     }
 
@@ -1051,6 +1209,23 @@ pub fn pr_revision(original: &Event, revision: &Event) -> Result<(), String> {
         return Err("signed by a key other than the original PR's signer; unresolved update (delegation is not supported)".into());
     }
     Ok(())
+}
+
+/// The task an event of work belongs to: a request or issue is its own task,
+/// a typed part belongs to its request, an update to its original PR, and a
+/// patch to its series root.
+fn task_key(event: &Event) -> Option<EventId> {
+    match event.kind.as_u16() {
+        9 => match work::read(event) {
+            Message::Request(_) => Some(event.id),
+            Message::Part(part) => Some(part.request),
+            _ => None,
+        },
+        1618 | ISSUE => Some(event.id),
+        1619 => single_id(event, "E"),
+        1617 => Some(root_e(event).unwrap_or(event.id)),
+        _ => None,
+    }
 }
 
 fn is_contribution(event: &Event) -> bool {

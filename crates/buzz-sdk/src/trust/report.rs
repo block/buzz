@@ -357,6 +357,41 @@ pub struct WorkTrail {
     pub coverage: Vec<String>,
     /// Every read sent, with its counts.
     pub records: Vec<CoverageRecord>,
+    /// The signed events this read interpreted, as served. Nothing above is
+    /// derived from their observation times.
+    pub evidence: Evidence,
+}
+
+/// The signed events behind a [`WorkTrail`], kept so a saved trail can be
+/// rechecked without the origin ([`check_evidence`](super::check_evidence)).
+///
+/// It holds only what this viewer was served, and should be shared only with
+/// people who may read the same scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Evidence {
+    /// How the envelopes were kept.
+    pub form: &'static str,
+    /// Every fetched event, by id.
+    pub events: Vec<EvidenceEvent>,
+}
+
+/// One fetched event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EvidenceEvent {
+    /// Event id, as claimed.
+    pub id: String,
+    /// Whether its id and signature verified when fetched. An invalid event
+    /// supports nothing.
+    pub valid: bool,
+    /// The origin that served it.
+    pub origin: String,
+    /// Coverage records (`records[].scope`) that returned it.
+    pub records: Vec<usize>,
+    /// When this reader first received it, by the reader's clock. Not
+    /// signed, and not `created_at`.
+    pub observed_at: Option<u64>,
+    /// The NIP-01 event JSON as served.
+    pub event: serde_json::Value,
 }
 
 /// The declared scope of a work-trail read.
@@ -381,7 +416,8 @@ pub struct Task {
     pub request: TaskRequest,
     /// Contributions, each with the outcomes that judge exactly it.
     pub contributions: Vec<Contribution>,
-    /// Outcomes about the task that identify no exact revision.
+    /// Outcomes about the task that identify no exact revision, and
+    /// statuses of the request itself.
     pub unbound: Vec<Outcome>,
     /// Untyped or malformed replies. Conversation, never work or acceptance.
     pub conversation: Vec<Source>,
@@ -392,6 +428,8 @@ pub struct Task {
 pub struct TaskRequest {
     /// Request event id; `None` when no request is linked.
     pub id: Option<String>,
+    /// Its kind: `9` for a typed request, `1621` for a code issue.
+    pub kind: Option<u16>,
     /// Its signer, the requester, when verified.
     pub requester: Option<String>,
     /// `created_at` as asserted by the requester.
@@ -471,6 +509,9 @@ pub enum OutcomeScope {
     PullRequest,
     /// A patch series as a whole; the revision is unknown.
     Series,
+    /// The request itself, e.g. an issue marked resolved. Judges no
+    /// contribution.
+    Request,
 }
 
 /// One signed outcome claim.

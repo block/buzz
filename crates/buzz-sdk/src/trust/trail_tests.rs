@@ -31,6 +31,8 @@ const CUTOFF: u64 = T0 + 1_000_000;
 struct Relay {
     events: Vec<Value>,
     keys: Option<Keys>,
+    /// Refuse any filter asking for one of these kinds.
+    refuse: Vec<u16>,
 }
 
 impl Relay {
@@ -94,6 +96,11 @@ struct Run {
 }
 
 fn read(relay: &Relay, entry: Entry, scope: Scope) -> Run {
+    read_at(relay, entry, scope, None)
+}
+
+/// [`read`], recording every answer as observed at `at` when given.
+fn read_at(relay: &Relay, entry: Entry, scope: Scope, at: Option<u64>) -> Run {
     let mut trail = Trail::new(entry, scope);
     let mut filters = Vec::new();
     loop {
@@ -109,10 +116,22 @@ fn read(relay: &Relay, entry: Entry, scope: Scope) -> Run {
                 }
                 Request::Events(filter) => {
                     filters.push(filter.clone());
-                    Response::Events(relay.answer(filter))
+                    let refused = filter
+                        .kinds
+                        .as_ref()
+                        .is_some_and(|k| k.iter().any(|k| relay.refuse.contains(&k.as_u16())));
+                    if refused {
+                        Response::Failed("restricted".into())
+                    } else {
+                        Response::Events(relay.answer(filter))
+                    }
                 }
             };
-            trail.ingest(q.scope, response).expect("ingest");
+            match at {
+                Some(at) => trail.ingest_at(q.scope, response, at),
+                None => trail.ingest(q.scope, response),
+            }
+            .expect("ingest");
         }
     }
     Run {
@@ -1167,4 +1186,251 @@ fn invalid_update_links_stay_unresolved_and_never_bind() {
     assert!(notes
         .iter()
         .all(|n| n.starts_with("PR-level merge claim; judged revision unknown")));
+}
+
+#[test]
+fn saved_trail_rechecks_its_evidence_without_the_origin() {
+    let c = chain();
+    let mut relay = Relay::default();
+    for e in [&c.request, &c.commitment, &c.c2, &c.accepted] {
+        relay.add(e);
+    }
+    relay.tampered(&c.c1);
+    let entry = Entry::Request(c.request.id);
+    let first = read_at(&relay, entry, scope(c.channel, &[]), Some(T0 + 900)).trail;
+    let later = read_at(&relay, entry, scope(c.channel, &[]), Some(T0 + 950)).trail;
+
+    // Observation times are kept as evidence metadata and change nothing
+    // derived from the events.
+    assert_eq!(
+        (&first.tasks, &first.gaps, &first.coverage),
+        (&later.tasks, &later.gaps, &later.coverage)
+    );
+    let kept = |t: &WorkTrail, e: &Event| {
+        t.evidence
+            .events
+            .iter()
+            .find(|k| k.id == e.id.to_hex())
+            .cloned()
+            .unwrap_or_else(|| panic!("{} not kept", e.id))
+    };
+    let request = kept(&first, &c.request);
+    assert!(request.valid && request.origin == ORIGIN && !request.records.is_empty());
+    assert_eq!(request.observed_at, Some(T0 + 900));
+    assert_eq!(kept(&later, &c.request).observed_at, Some(T0 + 950));
+    assert_eq!(
+        request.event,
+        serde_json::to_value(&c.request).expect("json")
+    );
+    for r in &request.records {
+        assert!(
+            *r < first.records.len(),
+            "record {r} is cited but not listed"
+        );
+    }
+    // Bytes that failed verification stay kept and flagged.
+    assert!(!kept(&first, &c.c1).valid);
+
+    // The saved JSON alone rechecks: no origin is consulted.
+    let mut saved = serde_json::to_value(&first).expect("json");
+    let check = super::check_evidence(&saved).expect("check");
+    assert!(check.holds(), "{check:#?}");
+    assert_eq!(check.events, first.evidence.events.len());
+    assert_eq!(check.verified, check.events - 1);
+
+    // Editing a kept envelope is caught, and the claims it supported are
+    // no longer supported.
+    let c2 = c.c2.id.to_hex();
+    for k in saved["evidence"]["events"].as_array_mut().expect("events") {
+        if k["id"] == c2.as_str() {
+            k["event"]["content"] = Value::String("edited later".into());
+        }
+    }
+    let check = super::check_evidence(&saved).expect("check");
+    assert!(!check.holds());
+    assert!(
+        check.failed.iter().any(|f| f.starts_with(&c2)),
+        "{check:#?}"
+    );
+    assert!(check.unsupported.contains(&c2), "{check:#?}");
+    assert!(first.readable().contains("signed events kept as served"));
+}
+
+/// A repository with one older PR by the actor and one by someone else.
+struct RepoWork {
+    relay: Relay,
+    coord: String,
+    owner: Keys,
+    actor: Keys,
+    mine: Event,
+    theirs: Event,
+}
+
+fn repo_work() -> RepoWork {
+    let mut c = code(Keys::generate(), Keys::generate());
+    let other = Keys::generate();
+    let theirs = pr(&c.owner, &other, T0 + 5);
+    c.relay.add(&theirs);
+    RepoWork {
+        relay: c.relay,
+        coord: c.coord,
+        owner: c.owner,
+        actor: c.author,
+        mine: c.r1,
+        theirs,
+    }
+}
+
+/// A status as the CLI writes it: repository `a` and only the owner's `p`.
+fn repo_status(kind: GitStatus, w: &RepoWork, target: &Event, at: u64) -> Event {
+    let meta = GitStatusMeta {
+        root_event: target.id.to_hex(),
+        repo: Some(repo(&w.owner, "r")),
+        recipients: vec![w.owner.public_key().to_hex()],
+        ..GitStatusMeta::default()
+    };
+    sign(
+        build_git_status(kind, "", &meta).expect("status"),
+        &w.owner,
+        at,
+    )
+}
+
+fn windowed(w: &RepoWork, since: u64) -> Scope {
+    Scope {
+        since: Some(since),
+        ..scope(Uuid::new_v4(), std::slice::from_ref(&w.coord))
+    }
+}
+
+#[test]
+fn actor_trail_finds_repo_only_statuses_on_older_work() {
+    let mut w = repo_work();
+    let closed = repo_status(GitStatus::Closed, &w, &w.mine, T0 + 200);
+    let unrelated = repo_status(GitStatus::Closed, &w, &w.theirs, T0 + 210);
+    w.relay.add(&closed);
+    w.relay.add(&unrelated);
+    let run = read(
+        &w.relay,
+        Entry::Actor(w.actor.public_key()),
+        windowed(&w, T0 + 100),
+    );
+    let trail = &run.trail;
+
+    // The PR predates the window; the closure inside it names only the
+    // repository owner, yet it is found and attributed to the PR's signer.
+    let task = only_task(trail);
+    let mine = contribution(task, &w.mine);
+    assert_eq!(mine.signer, w.actor.public_key().to_hex());
+    let [outcome] = task.unbound.as_slice() else {
+        panic!("the closure: {task:#?}")
+    };
+    assert_eq!(outcome.id, closed.id.to_hex());
+    assert_eq!(outcome.claim, "closed");
+    assert_eq!(outcome.scope, OutcomeScope::PullRequest);
+    assert_eq!(outcome.authority.status, A::Authorized);
+
+    // Someone else's PR in the same repository is not the actor's work,
+    // and is not reported as a gap either.
+    let text = serde_json::to_string(&(&trail.tasks, &trail.gaps)).expect("json");
+    for absent in [&w.theirs, &unrelated] {
+        assert!(!text.contains(&absent.id.to_hex()), "{} leaked", absent.id);
+    }
+    assert!(trail
+        .coverage
+        .iter()
+        .any(|l| l.contains("1630") && l.contains(&w.coord)));
+    assert_honest(trail);
+}
+
+#[test]
+fn repo_status_discovery_failure_is_a_coverage_gap() {
+    let mut w = repo_work();
+    w.relay
+        .add(&repo_status(GitStatus::Closed, &w, &w.mine, T0 + 200));
+    w.relay.refuse = vec![1630];
+    let trail = read(
+        &w.relay,
+        Entry::Actor(w.actor.public_key()),
+        windowed(&w, T0 + 100),
+    )
+    .trail;
+    assert!(trail.tasks.is_empty(), "{trail:#?}");
+    assert!(
+        trail
+            .coverage
+            .iter()
+            .any(|l| l.starts_with("inaccessible: restricted") && l.contains(&w.coord)),
+        "{:#?}",
+        trail.coverage
+    );
+    assert!(trail.readable().contains("inaccessible: restricted"));
+    assert_honest(&trail);
+}
+
+#[test]
+fn issue_is_a_request_whose_statuses_judge_no_contribution() {
+    let mut w = repo_work();
+    let requester = Keys::generate();
+    let issue = sign(
+        crate::builders::build_git_issue(
+            &repo(&w.owner, "r"),
+            "Parser drops trailing commas",
+            "Steps to reproduce: …",
+            &crate::builders::GitIssueMeta::default(),
+        )
+        .expect("issue"),
+        &requester,
+        T0 + 300,
+    );
+    let resolved = repo_status(GitStatus::AppliedOrResolved, &w, &issue, T0 + 400);
+    w.relay.add(&issue);
+    w.relay.add(&resolved);
+
+    let by_request = read(&w.relay, Entry::Request(issue.id), windowed(&w, T0)).trail;
+    let by_actor = read(
+        &w.relay,
+        Entry::Actor(requester.public_key()),
+        windowed(&w, T0),
+    )
+    .trail;
+    assert_eq!(by_request.tasks, by_actor.tasks);
+    let task = only_task(&by_request);
+    let r = &task.request;
+    assert_eq!(r.id, Some(issue.id.to_hex()));
+    assert_eq!(r.kind, Some(1621));
+    assert_eq!(r.requester, Some(requester.public_key().to_hex()));
+    assert_eq!(r.title.as_deref(), Some("Parser drops trailing commas"));
+    // No pull request is linked to it, and none is inferred.
+    assert!(task.contributions.is_empty(), "{task:#?}");
+    let [status] = task.unbound.as_slice() else {
+        panic!("one request status: {task:#?}")
+    };
+    assert_eq!(status.claim, "resolved");
+    assert_eq!(status.scope, OutcomeScope::Request);
+    assert_eq!(status.authority.status, A::Authorized);
+    assert!(status
+        .note
+        .as_deref()
+        .is_some_and(|n| n.contains("judges no contribution")));
+    assert!(by_request
+        .gaps
+        .iter()
+        .all(|g| !g.reason.contains("not typed work")));
+    let text = by_request.readable();
+    for needle in [
+        "task: Parser drops trailing commas",
+        "code issue; its signer is the requester",
+        "none linked: no convention links pull requests to issues yet",
+        "request statuses (judge no contribution):",
+        &resolved.id.to_hex(),
+    ] {
+        assert!(text.contains(needle), "{needle:?} missing:\n{text}");
+    }
+    assert!(
+        !text.contains(&w.mine.id.to_hex()),
+        "an unlinked PR appeared"
+    );
+    assert_readable_honest(&text);
+    assert_honest(&by_request);
 }

@@ -8,8 +8,8 @@
 use std::fmt::Write;
 
 use super::{
-    AuthorityStatus, Contribution, ContributionRole, Independence, Outcome, OwnerLink, RefStatus,
-    Task, WorkTrail,
+    AuthorityStatus, Contribution, ContributionRole, Independence, Outcome, OutcomeScope,
+    OwnerLink, RefStatus, Task, WorkTrail,
 };
 
 impl WorkTrail {
@@ -67,6 +67,12 @@ impl WorkTrail {
         for line in &self.coverage {
             let _ = writeln!(out, "  - {line}");
         }
+        let invalid = self.evidence.events.iter().filter(|e| !e.valid).count();
+        let _ = writeln!(
+            out,
+            "\nevidence: {} signed events kept as served in the JSON output ({invalid} fail verification and support nothing)",
+            self.evidence.events.len()
+        );
         out
     }
 }
@@ -95,16 +101,30 @@ fn task_text(out: &mut String, task: &Task) {
         let _ = writeln!(out, "    criterion: {c}");
     }
     let _ = writeln!(out, "  contributions:");
-    if task.contributions.is_empty() {
+    if task.contributions.is_empty() && r.kind == Some(1621) {
+        let _ = writeln!(
+            out,
+            "    none linked: no convention links pull requests to issues yet"
+        );
+    } else if task.contributions.is_empty() {
         let _ = writeln!(out, "    none observed in this scope");
     }
     for c in &task.contributions {
         contribution_text(out, c);
     }
-    if !task.unbound.is_empty() {
-        let _ = writeln!(out, "  outcomes that name no exact revision:");
-        for o in &task.unbound {
-            outcome_text(out, o, "    ");
+    let (request, unbound): (Vec<&Outcome>, Vec<&Outcome>) = task
+        .unbound
+        .iter()
+        .partition(|o| o.scope == OutcomeScope::Request);
+    for (title, list) in [
+        ("request statuses (judge no contribution):", request),
+        ("outcomes that name no exact revision:", unbound),
+    ] {
+        if !list.is_empty() {
+            let _ = writeln!(out, "  {title}");
+            for o in list {
+                outcome_text(out, o, "    ");
+            }
         }
     }
     if !task.conversation.is_empty() {
