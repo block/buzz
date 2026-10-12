@@ -661,6 +661,8 @@ export const chatHandlers: Record<
     const pks: string[] = a?.pubkeys ?? [];
     if (!pks.length) return {};
     const evs = await queryRelay([{ kinds: [20001], authors: pks }]);
+    // Presence expires after three heartbeats: an agent that died without saying "offline" must not stay online forever.
+    const cutoff = Math.floor(Date.now() / 1000) - 3 * 60;
     const latest = new Map<string, [number, string]>();
     for (const ev of evs) {
       const pk = ev.tags.find((t) => t[0] === "p" && t[1])?.[1] ?? ev.pubkey;
@@ -669,7 +671,7 @@ export const chatHandlers: Record<
       const prev = latest.get(pk);
       if (!prev || prev[0] < ev.created_at) latest.set(pk, [ev.created_at, s]);
     }
-    return Object.fromEntries([...latest].map(([k, [, s]]) => [k, s]));
+    return Object.fromEntries([...latest].filter(([, [ts, s]]) => ts >= cutoff && s !== "offline").map(([k, [, s]]) => [k, s]));
   },
   update_profile: updateProfile,
   ensure_starter_channels: async () => ({

@@ -628,8 +628,15 @@ export function useStartManagedAgentMutation() {
     },
     onSettled: () => {
       invalidateManagedAgentQueriesInBackground(queryClient);
+      invalidatePresenceSoon(queryClient);
     },
   });
+}
+
+/** An agent's presence changes shortly after a start/stop: refresh the dots now and again once it has (dis)connected. */
+function invalidatePresenceSoon(queryClient: ReturnType<typeof useQueryClient>) {
+  void queryClient.invalidateQueries({ queryKey: ["presence"] });
+  setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["presence"] }), 3_000);
 }
 
 export function useStopManagedAgentMutation() {
@@ -639,6 +646,7 @@ export function useStopManagedAgentMutation() {
     mutationFn: (pubkey: string) => stopManagedAgent(pubkey),
     onSettled: () => {
       invalidateManagedAgentQueriesInBackground(queryClient);
+      invalidatePresenceSoon(queryClient);
     },
   });
 }

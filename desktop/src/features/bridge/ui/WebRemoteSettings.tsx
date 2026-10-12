@@ -5,7 +5,6 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "@/features/settings/ui/SettingsOptionGroup";
 import {
-  REMOTE_AGENT_MGMT_DESC,
   REMOTE_AGENT_MGMT_LABEL,
   REMOTE_TERMINAL_DESC,
   REMOTE_TERMINAL_LABEL,
@@ -29,6 +28,7 @@ import { directAgentsFor } from "../directAgents";
 import { acquireProxyDirect } from "../remoteCmd";
 import { useBridgeAgents } from "../useBridgeAgents";
 import { useDirectState } from "./DirectAgentsPanel";
+import { StatusChip } from "./DesktopData";
 
 export function useRemoteHosts(opts?: { sync?: boolean }) {
   const pubkey = useIdentityQuery().data?.pubkey;
@@ -77,6 +77,11 @@ export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>, opts?: 
       if (!h || reachOf(h) === "unreachable") setWebRemotePrefs({ terminalOn: false });
     }
     if (prefs.agentsOn && !selected("agents")) setWebRemotePrefs({ agentsOn: false });
+    // "Allow remote agent management" is a desktop setting: the web follows whatever the desktop advertises.
+    if (!prefs.agentsOn || !selected("agents")) {
+      const h = selected("agents") ?? hosts.find((x) => x.supports.agents && !x.stale) ?? hosts.find((x) => x.supports.agents);
+      if (h) setWebRemotePrefs({ agentsOn: true, agentsHost: h.id });
+    }
     // Buzz term is on by default: once the desktop advertises terminals and its tailnet address answers, turn it on here
     // (and pick that desktop) unless the user switched it off themselves. Without this the page stayed on its
     // "isn't available" instructions even though the desktop was ready.
@@ -131,33 +136,27 @@ function HostList(props: { feature: Feature; hosts: RemoteHost[]; reachOf: (h: R
   );
 }
 
+/** Web Settings → Agents: read-only. "Allow remote agent management" is set on the desktop; this shows what it reports. */
 export function WebRemoteAgentManagement() {
-  const { hosts, prefs, reachOf } = useRemoteHosts();
-  const available = hosts.some((h) => h.supports.agents);
-  const turn = (on: boolean) => {
-    const first = hosts.find((h) => h.supports.agents && !h.stale) ?? hosts.find((h) => h.supports.agents);
-    setWebRemotePrefs({ agentsOn: on, ...(on && !prefs.agentsHost && first ? { agentsHost: first.id } : {}) });
-  };
+  const { b, hosts, prefs, reachOf } = useRemoteHosts();
+  const on = b.heartbeat?.remote?.agents === true;
+  const agentHosts = hosts.filter((h) => h.supports.agents);
   return (
     <SettingsOptionGroup data-testid="web-remote-agents" title="Remote agent management">
       <SettingsOptionRow>
-        <div className="min-w-0">
-          <label className="text-sm font-medium" htmlFor="web-remote-agents-switch">
-            {REMOTE_AGENT_MGMT_LABEL}
-          </label>
+        <div className="min-w-0" data-testid="web-remote-agents-status" data-on={on ? "1" : "0"}>
+          <p className="flex items-center gap-2 text-sm font-medium">
+            {REMOTE_AGENT_MGMT_LABEL} on your desktop
+            <StatusChip tone={b.heartbeat ? (on ? "green" : "grey") : "grey"} testId="web-remote-agents-chip">
+              {b.heartbeat ? (on ? "On" : "Off") : "Unknown"}
+            </StatusChip>
+          </p>
           <p className="text-sm font-normal text-muted-foreground/70" data-settings-subcopy>
-            {REMOTE_AGENT_MGMT_DESC}
+            This is a desktop setting. Change it on your desktop in Settings → Agents.
           </p>
         </div>
-        <Switch
-          checked={prefs.agentsOn && available}
-          data-testid="web-remote-agents-toggle"
-          disabled={!available}
-          id="web-remote-agents-switch"
-          onCheckedChange={turn}
-        />
       </SettingsOptionRow>
-      {prefs.agentsOn && available && (
+      {agentHosts.length > 1 && (
         <div className="px-4 pb-3">
           <HostList feature="agents" hosts={hosts} prefs={prefs} reachOf={reachOf} />
         </div>
@@ -206,17 +205,35 @@ export function WebRemoteTerminal() {
   );
 }
 
-/** Web: binds the desktop command proxy to the agents host's shared direct client (one signed connection for the Agents page, Settings and the controls). */
-export function useBindDirectProxy() {
+/**
+ * Web: the same direct (tailnet) session the Agents page runs, for any screen that shows the desktop's data (Settings → Agents).
+ * Binds the shared client to the command proxy, connects on its own once the desktop is reachable (one signature; a declined
+ * attempt leaves the relay and a Retry, no repeated prompts), and refetches desktop-backed queries when it goes live.
+ */
+export function useDirectSession(opts?: { auto?: boolean }) {
   const rh = useRemoteHosts();
+  const b = rh.b;
+  const queryClient = useQueryClient();
   const host = rh.selected("agents") ?? rh.hosts.find((h) => h.supports.agents);
+  const transport = transportFor("agents", host, host ? rh.reachOf(host) : "unknown");
   const direct = React.useMemo(
-    () => (host?.hasDirect && rh.b.available ? directAgentsFor({ desktopId: host.id, url: host.url }, rh.b.signJson) : null),
-    [host?.id, host?.url, host?.hasDirect, rh.b.available], // eslint-disable-line react-hooks/exhaustive-deps
+    () => (host?.hasDirect && b.available ? directAgentsFor({ desktopId: host.id, url: host.url }, b.signJson) : null),
+    [host?.id, host?.url, host?.hasDirect, b.available], // eslint-disable-line react-hooks/exhaustive-deps
   );
   React.useEffect(() => acquireProxyDirect(direct), [direct]);
+  const autoOk = opts?.auto !== false && !!direct && b.available && b.heartbeat?.remote?.agents === true && transport === "direct" && b.presence !== "offline";
+  React.useEffect(() => {
+    if (autoOk && direct) void direct.autoConnect();
+  }, [autoOk, direct]);
+  React.useEffect(() => () => direct?.resetAuto(), [direct]);
+  const live = useDirectState(direct).live;
+  React.useEffect(() => {
+    void queryClient.invalidateQueries({ predicate: (q) => DESKTOP_QUERY.test(String(q.queryKey[0])) });
+  }, [live, direct, queryClient]);
   return direct;
 }
+/** Query keys whose data comes from the desktop over Direct (refetched when the connection starts or ends). */
+export const DESKTOP_QUERY = /agent|persona|runtime|acp|harness|presence|config|provider/i;
 
 /** Mounted in the left nav on web: keeps the switches consistent with what hosts offer, and exposes what the nav may show. */
 export function WebRemoteWatcher() {
@@ -231,8 +248,13 @@ export function WebRemoteWatcher() {
   // The desktop's data replaces the web's empty defaults the moment the connection goes live (and back when it ends).
   const live = useDirectState(direct).live;
   React.useEffect(() => {
-    void queryClient.invalidateQueries({ predicate: (q) => /agent|persona|runtime|acp|harness|presence/i.test(String(q.queryKey[0])) });
+    void queryClient.invalidateQueries({ predicate: (q) => DESKTOP_QUERY.test(String(q.queryKey[0])) });
   }, [live, direct, queryClient]);
+  // Any change on the desktop (agent started, stopped, crashed) republishes the bridge snapshot: refresh the presence dots then.
+  const snapTs = rh.b.snapshotTs;
+  React.useEffect(() => {
+    if (snapTs != null) void queryClient.invalidateQueries({ queryKey: ["presence"] });
+  }, [snapTs, queryClient]);
   return null;
 }
 /** Content of the page a greyed-out nav row opens on web/mobile: what is needed, and the exact settings to turn on. */

@@ -223,3 +223,21 @@ test("cmd list_managed_agents keeps status, pid, start time and error fields the
   for (const k of ["status", "pid", "last_started_at", "last_error", "needs_restart", "backend"]) assert.deepEqual(out[k], row[k]);
   assert.deepEqual(out.env_vars, { K: "" });
 });
+
+test("cmd get_openclaw_workspace_mcp_status returns status only (no url, token or headers)", async () => {
+  const { handleCmd } = await import("./directCmd.ts");
+  const inv = async () => ({ connected: true, expiresAt: "2030-01-01T00:00:00Z", connectedViaRelay: false, url: "https://secret", authorization: "Bearer x", agentsUpdated: 3 });
+  assert.deepEqual(await handleCmd("get_openclaw_workspace_mcp_status", {}, { invokeRaw: inv }), { connected: true, expiresAt: "2030-01-01T00:00:00Z", connectedViaRelay: false });
+});
+
+test("presence flips: an agent online then offline on the desktop changes the dot from online to offline", async () => {
+  const { handleCmd } = await import("./directCmd.ts");
+  const { resolveAgentAvailability } = await import("../agents/lib/useAgentAvailability.ts");
+  const PK = "e".repeat(64);
+  let desktop = { [PK]: "online" };
+  const deps = { invokeRaw: async () => desktop };
+  const dot = async () => resolveAgentAvailability((await handleCmd("get_presence", { pubkeys: [PK] }, deps))[PK], true, true);
+  assert.equal(await dot(), "online");
+  desktop = {}; // the desktop omits offline agents
+  assert.equal(await dot(), "offline");
+});

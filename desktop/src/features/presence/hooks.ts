@@ -1,4 +1,5 @@
 import * as React from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -24,6 +25,8 @@ import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
 /** Keeps focused polling for presence at the established 60-second backstop cadence. */
 export const PRESENCE_REFETCH_INTERVAL_MS = 60_000;
+/** Web only: presence refresh while visible (see usePresenceQuery). */
+export const WEB_PRESENCE_REFETCH_INTERVAL_MS = 5_000;
 /** Suppresses the focus refetch until presence data is genuinely stale.
  * The live subscription (setQueriesData) and reconnect invalidation are the
  * primary freshness paths; the 60s poll is the backstop. */
@@ -100,8 +103,11 @@ export function usePresenceQuery(
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
+  // Web: the dot must follow the desktop closely (agents going offline do not always publish an "offline" event), so poll
+  // presence on a short interval while the app is visible. Over Direct this is the desktop's own answer; otherwise the relay's.
+  const web = !isTauri();
   const refetchInterval = useFocusedRefetchInterval(
-    connected ? PRESENCE_REFETCH_INTERVAL_MS : false,
+    web ? WEB_PRESENCE_REFETCH_INTERVAL_MS : connected ? PRESENCE_REFETCH_INTERVAL_MS : false,
   );
 
   return useQuery<PresenceLookup>({
@@ -113,6 +119,7 @@ export function usePresenceQuery(
     // connections — HTTP presence calls fail anyway and consume relay quota.
     refetchInterval,
     ...presenceFocusRefetchPolicy,
+    ...(web ? { staleTime: 0 } : {}),
   });
 }
 

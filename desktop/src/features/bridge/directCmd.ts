@@ -82,6 +82,7 @@ export const CMD_READS = [
   "agent_access_owner_only",
   "get_global_agent_config",
   "get_presence",
+  "get_openclaw_workspace_mcp_status",
 ] as const;
 export const CMD_WRITES = [
   "start_managed_agent",
@@ -161,6 +162,11 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       const keys = pks.map((x) => (typeof x === "string" && HEX64.test(x.toLowerCase()) ? x.toLowerCase() : bad("Invalid pubkey.")));
       const r = obj(await inv(name, { pubkeys: keys }));
       return Object.fromEntries(Object.entries(r).filter(([k, v]) => HEX64.test(k.toLowerCase()) && (v === "online" || v === "away" || v === "offline")));
+    }
+    case "get_openclaw_workspace_mcp_status": {
+      // Status only: no URL, token or headers leave the desktop.
+      const r = obj(await inv(name));
+      return { connected: r.connected === true, expiresAt: typeof r.expiresAt === "string" ? r.expiresAt : null, connectedViaRelay: r.connectedViaRelay === true };
     }
     case "agent_access_owner_only":
       return (await inv(name)) === true;

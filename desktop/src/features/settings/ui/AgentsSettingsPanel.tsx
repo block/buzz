@@ -1,6 +1,6 @@
 import { ProtectedOpenClawWorkspaceSettingsCard } from "@protected-feature-components";
-import { useBindDirectProxy } from "@/features/bridge/ui/WebRemoteSettings";
-import { DesktopDataNotice, DesktopOnlyNote, isWebBuild, useAutoDirectOnOpen } from "@/features/bridge/ui/DesktopData";
+import { useDirectSession } from "@/features/bridge/ui/WebRemoteSettings";
+import { DesktopDataNotice, isWebBuild, WebOpenClawStatusNote } from "@/features/bridge/ui/DesktopData";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import {
   setKeepMentionedAgentsPinned,
@@ -25,9 +25,9 @@ export function AgentsSettingsPanel() {
   const automaticallyMentionAgents = useKeepMentionedAgentsPinned();
   const showAgentThinking = useShowAgentThinking();
   const web = isWebBuild();
-  // Settings has no left nav, so bind the same shared direct client here (one signature per connection) and connect when opened.
-  if (web) useBindDirectProxy(); // biome-ignore lint: web is constant for the app lifetime
-  useAutoDirectOnOpen();
+  // Same direct session as the Agents page (shared client, one signature, Via relay → Direct, Retry on decline), so opening
+  // Settings → Agents directly loads the desktop's runtimes and defaults.
+  if (web) useDirectSession(); // biome-ignore lint: web is constant for the app lifetime
 
   return (
     <section className="min-w-0" data-testid="settings-agents">
@@ -38,9 +38,7 @@ export function AgentsSettingsPanel() {
 
       <DesktopDataNotice />
       {web ? (
-        <DesktopOnlyNote title="OpenClaw workspace">
-          The OpenClaw workspace is set up and checked on your desktop (Settings → Agents). It can't be viewed or changed from the web yet.
-        </DesktopOnlyNote>
+        <WebOpenClawStatusNote />
       ) : (
         <div className="mb-4">
           <ProtectedOpenClawWorkspaceSettingsCard />
