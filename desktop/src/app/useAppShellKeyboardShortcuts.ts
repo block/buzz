@@ -45,7 +45,7 @@ export function useAppShellKeyboardShortcuts({
         !event.metaKey &&
         !event.altKey &&
         event.code === "Space";
-      if (!isHuddleShortcut) return;
+      if (!isHuddleShortcut || isShortcutUnavailableOnWeb("toggle-huddle")) return;
       if (event.repeat || event.defaultPrevented || !activeChannelId) return;
       event.preventDefault();
       window.dispatchEvent(

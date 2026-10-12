@@ -13,6 +13,7 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { huddlesAvailable } from "@/features/huddle/lib/huddlesAvailable";
 
 export function UserNameIndicators({
   className,
@@ -38,7 +39,7 @@ export function UserNameIndicators({
       fallbackStatusQuery.data?.[normalizedPubkey])
     : null;
   const status = visibleUserStatus(cachedStatus);
-  const isInHuddle = useIsUserInHuddle(normalizedPubkey);
+  const isInHuddle = useIsUserInHuddle(normalizedPubkey) && huddlesAvailable();
   const statusEmoji = status?.emoji || DEFAULT_USER_STATUS_EMOJI;
   const indicatorTextClass =
     size === "dm" ? "text-status-indicator" : "text-sm";

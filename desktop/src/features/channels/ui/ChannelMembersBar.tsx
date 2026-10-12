@@ -31,6 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { AddChannelBotDialog } from "./AddChannelBotDialog";
+import { huddlesAvailable } from "@/features/huddle/lib/huddlesAvailable";
 
 type ChannelMembersBarProps = {
   channel: Channel;
@@ -160,7 +161,7 @@ export function ChannelMembersBar({
           ? relayAgentsQuery.error.message
           : null;
 
-  const huddleIndicator = (
+  const huddleIndicator = !huddlesAvailable() ? null : (
     <HuddleIndicator
       channelId={channel.id}
       onStart={async () => {

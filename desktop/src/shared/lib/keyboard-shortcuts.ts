@@ -303,6 +303,8 @@ export const WEB_UNAVAILABLE_SHORTCUTS: ReadonlySet<string> = new Set([
   "open-settings", // ⌘,: browser settings
   "go-home", // ⇧⌘A: Chrome tab search
   "always-address-agent", // ⇧⌘M: Chrome profile switcher
+  "toggle-huddle", // huddles are desktop-only
+  "push-to-talk",
 ]);
 /** True when running in the web build (no Tauri runtime). */
 export function isWebShortcutBuild(): boolean {

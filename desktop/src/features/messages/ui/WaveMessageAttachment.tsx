@@ -15,6 +15,7 @@ import {
   AttachmentMedia,
   AttachmentTitle,
 } from "@/shared/ui/attachment";
+import { huddlesAvailable } from "@/features/huddle/lib/huddlesAvailable";
 
 type WaveMessageAttachmentProps = {
   channelId?: string | null;
@@ -78,9 +79,10 @@ export function WaveMessageAttachment({
           />
         </AttachmentTitle>
         <AttachmentDescription>
-          Start a huddle to talk to them.
+          {huddlesAvailable() ? "Start a huddle to talk to them." : "Huddles are available in the desktop app."}
         </AttachmentDescription>
       </AttachmentContent>
+      {huddlesAvailable() ? (
       <AttachmentActions>
         <AttachmentAction
           disabled={startHuddleDisabled}
@@ -91,6 +93,7 @@ export function WaveMessageAttachment({
           Start huddle
         </AttachmentAction>
       </AttachmentActions>
+      ) : null}
     </Attachment>
   );
 }
