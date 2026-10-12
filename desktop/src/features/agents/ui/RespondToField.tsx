@@ -17,6 +17,9 @@ import { useCommunityBotsQuery } from "@/features/community-bots/hooks";
 import { parsePubkeyInput as parseCanonicalPubkey } from "@/shared/lib/nostrUtils";
 import { canonicalNpub, truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
+import { DesktopDataNotice } from "@/features/bridge/ui/DesktopData";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import type { ManagedAgent } from "@/shared/api/types";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import {
   useUserSearchQuery,
@@ -335,10 +338,14 @@ export function CreateAgentRespondToField({
       ) : null}
       {mode === "anyone" ? accessWarning : null}
       {mode === "owner-only" ? (
-        <p className="text-xs text-muted-foreground">
-          Only you and your agents can send instructions.
-        </p>
+        <>
+          <p className="text-xs text-muted-foreground">
+            Only you and your agents can send instructions.
+          </p>
+          <OwnerOnlyMembers agents={managedAgentsQuery.data ?? []} />
+        </>
       ) : null}
+      <DesktopDataNotice what="Your desktop's agents" />
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
@@ -691,5 +698,24 @@ function AllowlistPicker({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Who "Only me" includes: you and your own agents (the harness gate admits the owner and every same-owner agent). */
+export function OwnerOnlyMembers({ agents }: { agents: ManagedAgent[] }) {
+  const me = useIdentityQuery().data?.pubkey;
+  return (
+    <ul className="flex flex-wrap gap-1.5 text-xs" data-testid="agent-respond-to-owner-members">
+      {me ? (
+        <li className="rounded-full border border-border/60 px-2 py-0.5" data-testid="owner-member-you">
+          You · {truncateNpub(canonicalNpub(me) ?? me)}
+        </li>
+      ) : null}
+      {agents.map((a) => (
+        <li className="rounded-full border border-border/60 px-2 py-0.5" data-testid="owner-member-agent" key={a.pubkey}>
+          {a.name}
+        </li>
+      ))}
+    </ul>
   );
 }
