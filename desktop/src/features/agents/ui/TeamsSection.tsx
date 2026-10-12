@@ -22,6 +22,7 @@ import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
 import { IDENTITY_CARD_GRID_CLASS } from "./UnifiedAgentsSection";
 import { teamCatalogCopy } from "./teamLibraryCopy";
+import { useDesktopData } from "@/features/bridge/ui/DesktopData";
 
 const TEAM_CARD_COLUMN_CLASS = "w-full";
 
@@ -203,6 +204,8 @@ function NewTeamCard({
   onDiscover: () => void;
   onImport: () => void;
 }) {
+  const { web, live } = useDesktopData();
+  if (web && !live) return null; // web: creating a team needs Direct
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>

@@ -27,6 +27,7 @@ import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
+import { NeedsDirect } from "@/features/bridge/ui/DesktopData";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
@@ -133,12 +134,15 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
           <div className={IDENTITY_CARD_GRID_CLASS}>
-            <CreateIdentityCard
-              ariaLabel="New agent"
-              dataTestId="new-agent-card"
-              disabled={isPersonasPending}
-              onClick={onOpenCatalog}
-            />
+            {/* Web: adding needs the desktop over Direct, so the + card only shows while it's connected. */}
+            <NeedsDirect>
+              <CreateIdentityCard
+                ariaLabel="New agent"
+                dataTestId="new-agent-card"
+                disabled={isPersonasPending}
+                onClick={onOpenCatalog}
+              />
+            </NeedsDirect>
             {groups.map((group) => {
               const profileAgent = pickProfileAgent(group.agents, isArchived);
               return (

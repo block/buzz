@@ -108,10 +108,39 @@ function writeCache(key: string, v: unknown) {
     /* storage full or denied */
   }
 }
+/**
+ * Last agent list the desktop published over the relay (the bridge snapshot, saved on every snapshot), shaped like the desktop's
+ * own list so the desktop-style Agents page can draw before any Direct connection. Read-only fields only.
+ */
+export function relaySnapshotAgents(): unknown[] | undefined {
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith("buzz-bridge-lastlist:")) continue;
+      const v = JSON.parse(localStorage.getItem(k) || "null");
+      const agents = v?.snapshot?.agents;
+      if (!Array.isArray(agents)) continue;
+      const t = new Date((v.ts ?? 0) * 1000).toISOString();
+      return agents.map((a: Record<string, unknown>) => ({
+        pubkey: a.pubkey, name: a.name, persona_id: a.personaId ?? null, runtime: a.runtime ?? null, team_id: null, relay_url: "",
+        acp_command: "", agent_command: "", agent_args: [], mcp_command: "", turn_timeout_seconds: 0, idle_timeout_seconds: null,
+        max_turn_duration_seconds: null, parallelism: 1, system_prompt: null, avatar_url: null, model: a.model ?? null, provider: null,
+        persona_out_of_date: false, persona_orphaned: false, needs_restart: false, env_vars: {}, status: a.status, pid: a.pid ?? null,
+        created_at: t, updated_at: t, last_started_at: a.lastStartedAt ?? null, last_stopped_at: null, last_exit_code: null,
+        last_error: a.lastError ?? null, last_error_code: null, log_path: "", start_on_app_launch: false, backend: { type: "local" },
+        backend_agent_id: null,
+      }));
+    }
+  } catch {
+    /* storage denied */
+  }
+  return undefined;
+}
+
 /** True when this device has a remembered desktop agent list (the desktop-style Agents page can draw without Direct). */
 export function hasCachedDesktopAgents(): boolean {
   const v = readCache(cacheKey("list_managed_agents", undefined));
-  return Array.isArray(v);
+  return Array.isArray(v) || !!relaySnapshotAgents()?.length;
 }
 
 export function installProxyHandlers(handlers: Record<string, (a?: any) => unknown>) {
@@ -139,7 +168,7 @@ export function installProxyHandlers(handlers: Record<string, (a?: any) => unkno
     // showing your agents while reconnecting), else empty.
     handlers[name] = async (a) => {
       const key = cacheKey(name, a);
-      if (!proxyDirectLive()) return readCache(key) ?? empty();
+      if (!proxyDirectLive()) return readCache(key) ?? (name === "list_managed_agents" ? relaySnapshotAgents() : undefined) ?? empty();
       const v = await proxyCmd(name, a);
       writeCache(key, v);
       return v;

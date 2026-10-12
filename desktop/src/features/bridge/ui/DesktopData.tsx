@@ -138,3 +138,9 @@ export function useDesktopRead<T>(name: string, args?: Record<string, unknown>):
   }, [live, name, key]);
   return st;
 }
+
+/** Renders its children only on the desktop, or on web while a Direct connection is live. */
+export function NeedsDirect(props: { children: React.ReactNode }) {
+  const { web, live } = useDesktopData();
+  return web && !live ? null : <>{props.children}</>;
+}

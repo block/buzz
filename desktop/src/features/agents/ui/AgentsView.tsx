@@ -173,6 +173,7 @@ export function AgentsView() {
             action={
               <>
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
+                  {controlsOff ? null : (
                   <Button
                     data-testid="agent-defaults-button"
                     ref={fullAiDefaultsTriggerRef}
@@ -185,6 +186,7 @@ export function AgentsView() {
                       ? "Agent defaults"
                       : "Set agent defaults"}
                   </Button>
+                  )}
                   {runningAgentCount > 0 ? (
                     <Button
                       disabled={isActionPending || controlsOff}
@@ -216,6 +218,7 @@ export function AgentsView() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
+                    {controlsOff ? null : (
                     <DropdownMenuItem
                       onSelect={() => {
                         openAiDefaults(compactActionsTriggerRef.current);
@@ -226,6 +229,7 @@ export function AgentsView() {
                         ? "Agent defaults"
                         : "Set agent defaults"}
                     </DropdownMenuItem>
+                    )}
                     {runningAgentCount > 0 ? (
                       <DropdownMenuItem
                         disabled={isActionPending}

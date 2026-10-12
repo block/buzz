@@ -264,8 +264,11 @@ export function WebRemoteWatcher() {
   // Any change on the desktop (agent started, stopped, crashed) republishes the bridge snapshot: refresh the presence dots then.
   const snapTs = rh.b.snapshotTs;
   React.useEffect(() => {
-    if (snapTs != null) void queryClient.invalidateQueries({ queryKey: ["presence"] });
-  }, [snapTs, queryClient]);
+    if (snapTs == null) return;
+    void queryClient.invalidateQueries({ queryKey: ["presence"] });
+    // Without Direct the Agents page draws from the saved relay snapshot: redraw it when a new one arrives.
+    if (!live) void queryClient.invalidateQueries({ predicate: (q) => /agent/i.test(String(q.queryKey[0])) });
+  }, [snapTs, queryClient, live]);
   return null;
 }
 /** Content of the page a greyed-out nav row opens on web/mobile: what is needed, and the exact settings to turn on. */
