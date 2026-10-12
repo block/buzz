@@ -24,6 +24,11 @@ use super::global_config::GlobalAgentConfig;
 /// Env var prefix nono reads as command-line flags.
 const NONO_ENV_PREFIX: &str = "NONO_";
 
+/// Tells `buzz-acp` it runs inside nono, so it can stop agents from applying
+/// a nested sandbox that macOS refuses (see `outer_sandbox_agent_env` in
+/// `buzz-acp`). Reserved in user env.
+pub(crate) const OUTER_SANDBOX_ENV: &str = "BUZZ_ACP_OUTER_SANDBOX";
+
 /// App-data identifier `buzz channel-templates` reads templates under. The CLI
 /// always uses the production identifier (`crates/buzz-cli/src/commands/
 /// channel_templates.rs`), whatever desktop build launched it.
@@ -154,8 +159,16 @@ fn validate_profile(nono: &Path, profile: &str) -> Result<(), String> {
 /// A sandboxed command must be finished with [`finish_sandboxed_command`].
 pub(crate) fn agent_command(sandbox: Option<&AgentSandbox>, acp_command: &Path) -> Command {
     match sandbox {
-        Some(sandbox) => Command::new(&sandbox.nono),
-        None => Command::new(acp_command),
+        Some(sandbox) => {
+            let mut command = Command::new(&sandbox.nono);
+            command.env(OUTER_SANDBOX_ENV, "nono");
+            command
+        }
+        None => {
+            let mut command = Command::new(acp_command);
+            command.env_remove(OUTER_SANDBOX_ENV);
+            command
+        }
     }
 }
 

@@ -188,10 +188,19 @@ with usage, so the mistake fails closed rather than running unsandboxed.
 ### 3. Nested sandboxes inside the agent
 
 - **Codex (macOS):** when the harness is under nono, Codex must not apply its
-  own Seatbelt. Desktop sets `BUZZ_ACP_OUTER_SANDBOX=nono`; `buzz-acp` then
-  overlays `sandbox_mode = "danger-full-access"` instead of the forced
-  `sandbox_workspace_write` overlay in `acp.rs`/`config.rs`. On Linux, Landlock
-  stacks, so the Codex sandbox stays on.
+  own Seatbelt. `codex-acp` (1.10 through 2.2, verified in the published
+  bundles) sends a `sandboxPolicy` with every turn, taken from the session's
+  agent mode, so a `CODEX_CONFIG` `sandbox_mode` would be overridden. The
+  initial mode comes from `INITIAL_AGENT_MODE` (default `agent`, which uses
+  `workspaceWrite`). Desktop sets `BUZZ_ACP_OUTER_SANDBOX=nono` (reserved in
+  user env) on sandboxed launches. On macOS, `buzz-acp` then forces
+  `INITIAL_AGENT_MODE=agent-full-access` on the Codex adapter
+  (`config::outer_sandbox_agent_env`), overriding inherited or persona values.
+  That mode also sets Codex's approval policy to `never`; nono is the boundary.
+  On Linux, Landlock stacks, so the Codex sandbox stays on.
+  - Known limitation: `codex-acp`'s agent-file change report runs one
+    internal turn with a hard-coded `readOnly` sandbox, which fails under nono
+    on macOS. That affects only that report, not agent turns.
 - **Claude Code:** its optional Bash sandbox has the same macOS nesting failure.
   Document it in the profile-error hint; do not change user Claude settings.
 

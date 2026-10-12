@@ -39,6 +39,7 @@ fn unsandboxed_command_runs_the_harness_directly() {
     let command = agent_command(None, acp);
     assert_eq!(command.get_program(), acp.as_os_str());
     assert!(args(&command).is_empty());
+    assert_eq!(env_value(&command, OUTER_SANDBOX_ENV), Some(None));
 }
 
 #[test]
@@ -54,6 +55,10 @@ fn sandboxed_command_wraps_the_harness_with_the_local_profile() {
     finish_sandboxed_command(&mut command, &sandbox, &grants, acp);
 
     assert_eq!(command.get_program(), sandbox.nono.as_os_str());
+    assert_eq!(
+        env_value(&command, OUTER_SANDBOX_ENV),
+        Some(Some(OsStr::new("nono")))
+    );
     assert_eq!(
         args(&command),
         [
