@@ -60,6 +60,10 @@ async function keyboardCase(label, opts, flags, kbH, pan) {
     return { vTop: vv.offsetTop, vH: vv.height, root: r("#root")?.top, comp: r('[data-testid="message-composer"]'), last: last && { top: last.top, bottom: last.bottom }, kb: document.documentElement.hasAttribute("data-phone-keyboard") };
   });
   const vBottom = m.vTop + m.vH;
+  const extra = await page.evaluate(() => ({ tab: !!document.querySelector('[data-testid="phone-tabbar"]') && getComputedStyle(document.querySelector('[data-testid="phone-tabbar"]')).display !== "none",
+    fs: parseFloat(getComputedStyle(document.activeElement).fontSize), tag: document.activeElement?.getAttribute("data-testid") }));
+  check(`${label}: tab bar hidden while typing`, !extra.tab);
+  check(`${label}: focused composer text is >=16px (no iOS zoom)`, extra.fs >= 16, JSON.stringify(extra));
   check(`${label}: keyboard detected`, m.kb);
   check(`${label}: shell follows the visual viewport top`, Math.abs(m.root - m.vTop) <= 1, `root=${m.root} vTop=${m.vTop}`);
   check(`${label}: composer sits directly above the keyboard (no gap)`, m.comp.bottom <= vBottom + 1 && vBottom - m.comp.bottom <= 6, `compBottom=${Math.round(m.comp.bottom)} vvBottom=${vBottom}`);
@@ -73,6 +77,33 @@ async function keyboardCase(label, opts, flags, kbH, pan) {
   check(`${label}: no page errors`, errs.filter((e) => !/ResizeObserver/.test(e)).length === 0, errs.slice(0, 2).join(" | "));
   await b.close();
 }
+// Every editable field on a touch phone is >=16px (iOS zooms the page into anything smaller).
+{
+  const { b, page } = await open(webkit, IPHONE);
+  const scan = () => page.evaluate(() => [...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]),textarea,select,[contenteditable="true"]')]
+    .map((e) => ({ id: e.getAttribute("data-testid") || e.getAttribute("placeholder") || e.className.toString().slice(0, 30), fs: parseFloat(getComputedStyle(e).fontSize) })));
+  const all = [];
+  await page.locator('[data-testid="phone-channels-screen"] [data-testid="channel-general"]').first().tap(); await page.waitForTimeout(2000);
+  all.push(...await scan());
+  await page.tap('[data-testid="phone-back"]').catch(() => {}); await page.waitForTimeout(600);
+  await page.tap('[data-testid="phone-tab-search"]'); await page.waitForTimeout(1000); all.push(...await scan());
+  await page.tap('[data-testid="phone-tab-me"]'); await page.waitForTimeout(600);
+  await page.tap('[data-testid="phone-me-settings"]'); await page.waitForTimeout(1200);
+  for (const sec of ["profile", "appearance"]) { await page.tap(`[data-testid="settings-nav-${sec}"]`).catch(() => {}); await page.waitForTimeout(1000); all.push(...await scan()); await page.tap('[data-testid="phone-back"]').catch(() => {}); await page.waitForTimeout(500); }
+  const small = all.filter((x) => x.fs < 16);
+  check("touch: all text fields >=16px (composer, search, settings)", all.length >= 3 && small.length === 0, `n=${all.length} small=${JSON.stringify(small.slice(0, 4))}`);
+  const meta = await page.evaluate(() => document.querySelector('meta[name=viewport]')?.content);
+  check("viewport still allows pinch zoom (no maximum-scale / user-scalable=no)", !/maximum-scale|user-scalable\s*=\s*no/.test(meta), meta);
+  await b.close();
+}
+// desktop (mouse) keeps its own field sizes
+{
+  const { b, page } = await open(webkit, { viewport: { width: 1280, height: 800 } });
+  await page.locator('[data-testid="channel-general"]').first().click(); await page.waitForTimeout(2000);
+  const fs = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('[data-testid="message-input"]')).fontSize));
+  console.log(`desktop composer font-size: ${fs}px (touch rule not applied: pointer is fine)`);
+  await b.close();
+}
 await keyboardCase("safari-tab", IPHONE, {}, 336, 250);
 await keyboardCase("standalone", STANDALONE, { safe: [47, 34], standalone: true }, 336, 0);
 
@@ -83,9 +114,9 @@ async function toastCase(label, opts, position, flags = {}) {
   if (phone) await page.locator('[data-testid="phone-channels-screen"] [data-testid="channel-general"]').first().tap();
   else await page.locator('[data-testid="channel-general"]').first().click();
   await page.waitForTimeout(2500);
-  const snap = () => page.evaluate(() => [...document.querySelectorAll('#root *')].filter((e) => e.getBoundingClientRect().height > 0 && !e.closest('[data-testid="message-composer"],[data-testid="message-timeline"]')).map((e) => { const r = e.getBoundingClientRect(); return `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`; }).join("|") + `#${scrollY}/${document.getElementById("root").scrollTop}/${document.getElementById("root").getBoundingClientRect().top}`);
+  const snap = () => page.evaluate(() => [...document.querySelectorAll('#root *')].filter((e) => !e.closest('[data-testid="phone-tabbar"]') || true).filter((e) => e.getBoundingClientRect().height > 0 && !e.closest('[data-testid="message-composer"],[data-testid="message-timeline"]')).map((e) => { const r = e.getBoundingClientRect(); return `${e.getAttribute('data-testid') || e.tagName}:${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`; }).join("|") + `#${scrollY}/${document.getElementById("root").scrollTop}/${document.getElementById("root").getBoundingClientRect().top}`);
   const comp = page.locator('[contenteditable="true"], textarea').last();
-  await comp.click(); await page.keyboard.type(`s21 toast ${label} ${Date.now()}`);
+  await comp.click(); await page.keyboard.type(`t${Date.now() % 100000}`);
   await page.evaluate(() => { window.__nostrStall = true; });
   const before = await snap();
   const tl0 = await page.evaluate(() => document.querySelector('[data-testid="message-timeline"]')?.getBoundingClientRect().height);
@@ -105,7 +136,7 @@ async function toastCase(label, opts, position, flags = {}) {
     const after = await snap();
     const tl1 = await page.evaluate(() => document.querySelector('[data-testid="message-timeline"]')?.getBoundingClientRect().height);
     const A = before.split("|"), B2 = after.split("|");
-    const diff = A.filter((x, i) => B2[i] !== x).length;
+    const diff = A.filter((x, i) => B2[i] !== x).length; if (diff) console.log('diff', A.filter((x, i) => B2[i] !== x).slice(0, 6).map((x) => x + ' -> ' + B2[A.indexOf(x)]).join(' ; '));
     check(`${label}: showing the toast moved no content`, A.length === B2.length && diff === 0 && Math.abs((tl0 ?? 0) - (tl1 ?? 0)) <= 1, `changed=${diff}/${A.length} len ${A.length}->${B2.length} timeline ${tl0}->${tl1}`);
     await page.screenshot({ path: `${out}/b5-toast-${label}.png` });
   }

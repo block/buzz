@@ -2,6 +2,7 @@ import * as React from "react";
 import { publishTerminalTabs } from "./terminalTabsBridge";
 import { getWebTermInfo } from "@/features/bridge/webTermHub";
 import { isTauri } from "@tauri-apps/api/core";
+import { createFrameCoalescer, createInputCoalescer } from "./webTermCoalesce";
 
 import {
   type TerminalDelivery,
@@ -536,9 +537,11 @@ export function TerminalBootstrap({
           update((session) => ({ ...session, title: "SHELL" }));
         }
       };
-      const onFrame = (delivery: TerminalDelivery) => {
+      const applyFrame = (delivery: TerminalDelivery) => {
         update((session) => ({ ...session, delivery, frame: delivery.frame }));
       };
+      // Web: merge frames that outpace the screen and render once per animation frame (desktop unchanged).
+      const onFrame = isTauri() ? applyFrame : createFrameCoalescer(applyFrame).push;
 
       const size = sizeRef.current;
       void (async () => {
@@ -884,10 +887,19 @@ export function TerminalBootstrap({
   const send = (operation: Promise<unknown> | undefined) => {
     void operation?.catch(fail);
   };
+  // Web: first key goes out immediately; a key-repeat burst rides one message (desktop unchanged).
+  const activeConnectionRef = React.useRef<TerminalConnectionApi | null | undefined>(null);
+  activeConnectionRef.current = active?.connection;
+  const sendTermInput = React.useCallback((text: string) => {
+    void activeConnectionRef.current?.input(text)?.catch(fail);
+  }, [fail]);
+  const webInput = React.useMemo(() => createInputCoalescer((text) => sendTermInput(text)), [sendTermInput]);
+  const onTermInput = isTauri() ? sendTermInput : webInput;
   const handleSplashStarted = React.useCallback(() => {
     setSplashPending(false);
   }, []);
 
+  const webResizeTimerRef = React.useRef<number | undefined>(undefined);
   const handleSize = React.useCallback(
     (size: TerminalViewportSize) => {
       sizeRef.current = size;
@@ -895,6 +907,25 @@ export function TerminalBootstrap({
         (session) => session.key === activeKey,
       )?.connection;
       if (!connection) return;
+      if (!isTauri()) {
+        // Web: the keyboard animating, a rotation or a window drag reports many sizes in a row, and each resize makes
+        // the remote app (e.g. a TUI) clear and redraw its whole screen, header/logo included. Send only the size it
+        // settles on.
+        window.clearTimeout(webResizeTimerRef.current);
+        webResizeTimerRef.current = window.setTimeout(() => {
+          const latest = sizeRef.current;
+          const sent = connectionSizesRef.current.get(connection);
+          if (!latest || (sent && sent.columns === latest.columns && sent.rows === latest.rows)) return;
+          resizeChainRef.current = resizeChainRef.current
+            .then(async () => {
+              const viewport = await connection.resize(latest.columns, latest.rows, latest.pixelWidth, latest.pixelHeight);
+              connectionSizesRef.current.set(connection, latest);
+              await connection.viewportReady(viewport);
+            })
+            .catch(fail);
+        }, 180);
+        return;
+      }
       resizeChainRef.current = resizeChainRef.current
         .then(async () => {
           const viewport = await connection.resize(
@@ -1008,7 +1039,7 @@ export function TerminalBootstrap({
           fail(error);
         });
       }}
-      onInput={(text) => send(active?.connection?.input(text))}
+      onInput={onTermInput}
       onNewSession={(kind) => createSession(kind === "shell" ? { forceShell: true } : kind === "herdr" ? { forceHerdr: true } : undefined)}
       canAddTab={!isRemoteTerminal() || sessions.length < REMOTE_TAB_CAP}
       herdrNewTab={

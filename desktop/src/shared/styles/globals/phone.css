@@ -401,3 +401,22 @@
 [data-phone][data-phone-keyboard] .composer-dock {
   --composer-dock-quiet-inset: 4px;
 }
+/* Keyboard up: the tab bar is hidden and content no longer reserves its space, so the composer sits on the
+   keyboard's accessory bar (that reserved band was the gap above the keyboard in conversations with the tab bar). */
+[data-phone][data-phone-keyboard] .phone-tabbar {
+  display: none !important;
+}
+[data-phone][data-phone-tabbar][data-phone-keyboard] [data-buzz-content-surface] {
+  padding-bottom: 0 !important;
+}
+/* iOS zooms the page in when a focused field's text is under 16px. On touch screens every editable field uses
+   16px text (instead of disabling pinch zoom with maximum-scale / user-scalable=no). */
+@media (hover: none) and (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+  textarea,
+  select,
+  [contenteditable="true"],
+  [contenteditable=""] {
+    font-size: 16px !important;
+  }
+}

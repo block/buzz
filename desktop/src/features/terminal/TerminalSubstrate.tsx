@@ -294,6 +294,7 @@ export function TerminalSubstrate({
     setOwner("buzz");
   });
 
+  const lastCursorResetRef = React.useRef(0);
   const sendInput = React.useEffectEvent((text: string) => {
     if (!text) return;
     let out = text;
@@ -302,10 +303,16 @@ export function TerminalSubstrate({
       out = applied.text;
       if (applied.used) setMods({ ctrl: false, alt: false, meta: false });
     }
+    // Send first; the cosmetic state below re-renders this large component, so on touch it is throttled
+    // (key repeat would otherwise re-render on every event).
+    onInput(out);
     setWelcomeVisible(false);
     setCursorPainted(true);
-    setCursorReset((current) => current + 1);
-    onInput(out);
+    const now = performance.now();
+    if (!touchUi || now - lastCursorResetRef.current > 250) {
+      lastCursorResetRef.current = now;
+      setCursorReset((current) => current + 1);
+    }
   });
   const cellAt = (clientX: number, clientY: number): CellPos => {
     const canvas = canvasRef.current;

@@ -56,6 +56,20 @@ function installPhoneViewportHeight(mql: MediaQueryList): void {
     // composer then sits right above the keyboard with the list filling the space above.
     const top = vv && keyboard ? Math.max(0, Math.round(vv.offsetTop)) : 0;
     root.style.setProperty("--phone-vv-top", `${top}px`);
+    // Installed iOS app: with the keyboard up iOS can also scroll the page, and fixed elements then render offset
+    // from where top/offsetTop says (the frame showed a band above the header). Measure where the frame really is
+    // and correct by the difference, so its top lands on the visible area's top.
+    if (keyboard && vv) {
+      window.requestAnimationFrame(() => {
+        const el = document.getElementById("root");
+        if (!el || !root.hasAttribute("data-phone-keyboard")) return;
+        const drift = Math.round(el.getBoundingClientRect().top - vv.offsetTop);
+        if (Math.abs(drift) >= 2) {
+          const cur = parseFloat(root.style.getPropertyValue("--phone-vv-top")) || 0;
+          root.style.setProperty("--phone-vv-top", `${cur - drift}px`);
+        }
+      });
+    }
   };
   // iOS scrolls the document (and sometimes #root) to reveal a focused field; the shell is fixed-height, so any
   // leftover offset after the keyboard closes or a route change shows a blank screen. Pin everything back to 0.
