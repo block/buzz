@@ -32,8 +32,30 @@ read-only diagnostics. Setup authority is scoped to the disposable community.
 
 ## Local rehearsal
 
-On the candidate branch, use the isolated local workflow in [TESTING.md](../../TESTING.md)
-and run the route guard and complete affected suites before staging:
+Rehearse on an integrated candidate that includes BUZZ-269
+([#8239](https://github.com/block/buzz/pull/8239)); the route guard below is not
+present on the BUZZ-270 documentation-only branch. Use only task-owned,
+isolated local PostgreSQL and Redis services. Do not reuse the default Buzz
+Desktop/development services, a shared database, or a hosted database.
+
+Before running the PostgreSQL wrapper, configure the environment as documented
+in [CONTRIBUTING.md](../../CONTRIBUTING.md#postgresql-backed-tests) and
+[the database testing guide](../../crates/buzz-db/TESTING.md#run-the-lane-locally):
+
+- `BUZZ_POSTGRES_ADMIN_URL` is mandatory and must point to a maintenance database
+  on the isolated PostgreSQL service. Its role must be able to create and drop
+  disposable databases; the full privilege-boundary inventory also requires
+  `CREATEROLE` and membership in `pg_read_all_stats`, or an ephemeral superuser.
+- Set `PGHOST`, `PGPORT`, `PGUSER`, and `PGPASSWORD` for the same isolated service,
+  plus `REDIS_URL` for isolated Redis. PostgreSQL client tools must be on `PATH`
+  unless `PG_BIN_DIR` is set.
+- Set any `DATABASE_URL`, `BUZZ_TEST_DATABASE_URL`, or `TEST_DATABASE_URL` used by
+  the package tests to disposable databases on that service, never the default
+  shared development database. The wrapper creates run-scoped source/per-test
+  databases and attempts to remove them on exit.
+
+With those prerequisites configured, run the route guard and complete affected
+suites before staging:
 
 ```sh
 . ./bin/activate-hermit
@@ -42,9 +64,9 @@ cargo test --no-fail-fast -p buzz-db -p buzz-relay
 scripts/postgres-test-run.sh
 ```
 
-The guard is available on the route-coverage branch. Record the exact candidate
-HEAD, database/Redis isolation, commands, outcomes, failures, and skips. These
-results are source validation; retain staging evidence separately.
+Record the exact integrated candidate HEAD, database/Redis isolation, commands,
+outcomes, failures, and skips. These results are source validation; retain
+staging evidence separately.
 
 ## Fixtures and baseline
 
