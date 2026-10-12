@@ -66,22 +66,24 @@ NIP-05, policy documents, and health probes have no authenticated community
 principal. Anonymous policy-receipt acceptance is pre-membership and has no
 principal to restrict. Invite claim is also pre-membership, but it carries a
 verified NIP-98 principal and remains restriction-enforced: its coverage remains
-pending in the inventory until BUZZ-268 qualifies the updated
-v1/v2 lifecycle:
-retain valid unexpired v1 codes and mint only v2, with a 72-hour default and
-30-day maximum lifetime. Both formats reject banned claimants and owners
-transactionally, and issuer bans permanently invalidate v2. For v1, an unset
-operator `invalid_after` uses natural expiry; when set, the code rejects at or
+pending in the inventory until BUZZ-268 lands and qualifies the updated
+v1/v2 lifecycle. After BUZZ-268 lands, the intended contract is to retain valid
+unexpired v1 codes and mint only v2, with a 72-hour default and 30-day maximum
+lifetime. Both formats will reject banned claimants and owners transactionally,
+and issuer bans will permanently invalidate v2. For v1, an unset operator
+`invalid_after` will use natural expiry; when set, the code will reject at or
 after that absolute boundary, while an earlier code expiry still takes effect.
-That operator boundary does not affect v2. Legacy v1 codes have no issuer
+That operator boundary will not affect v2. Legacy v1 codes have no issuer
 identity, so issuer-specific revocation remains limited until a verified fleet
-drain or security approval. Relay-operator APIs, deployment-admin APIs,
+drain or security approval. This sibling contract, including the operator
+cutoff, is not implemented by BUZZ-269. Relay-operator APIs, deployment-admin APIs,
 NIP-FI commands, the localhost Git hook, and the gated mesh test endpoint use
 separate auth planes; their exemption reason is recorded on each route row.
-Workflow webhooks use a secret-authenticated caller with no user principal, but
-run admission must also check the saved workflow owner's community ban. This
-coverage remains explicitly pending BUZZ-272. It is not an exemption for banned
-owners. BUZZ-269 currently has two pending sibling cases: invite claim and
+Workflow webhooks use a secret-authenticated caller with no user principal.
+After BUZZ-272 lands, run admission will also check the saved workflow owner's
+community ban. That behavior is not implemented by BUZZ-269, and its coverage
+remains explicitly pending BUZZ-272; the pending row is not an exemption for
+banned owners. BUZZ-269 currently has two pending sibling cases: invite claim and
 workflow-owner webhook admission; final integration requires zero pending rows.
 
 Root and huddle admission, final-admission races, fail-closed reads, owner-to-
