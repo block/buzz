@@ -74,6 +74,8 @@ type Session = {
 type CreateSessionOptions = {
   /** New-tab menu "Terminal": a plain login shell even when the Session host is herdr (web: asks the desktop for a shell). */
   forceShell?: boolean;
+  /** + menu "herdr": explicit choice — never fall back to a plain shell just because an attach tab exists. */
+  forceHerdr?: boolean;
   termSessionSid?: string | null;
   pendingLaunchCommand?: string | null;
   extraEnv?: Record<string, string>;
@@ -369,7 +371,7 @@ export function TerminalBootstrap({
       // Open chrome immediately so left-nav / ⌘J never flash an empty panel
       // while the herdr probe runs.
       openTerminalPanel(reopenMode, scope);
-      if (existing) {
+      if (existing && !options?.forceHerdr) {
         // Attach tab already live — New tab (+) opens another in-app shell
         // (plain open never createWorkspace).
         createInAppSessionRef.current(options);
@@ -383,7 +385,8 @@ export function TerminalBootstrap({
             createInAppSessionRef.current(options);
             return;
           }
-          const result = await openInHerdr({ createWorkspace: false });
+          // Explicit herdr pick with an attach tab already open: add a new herdr workspace and focus that tab.
+          const result = await openInHerdr({ createWorkspace: Boolean(existing && options?.forceHerdr) });
           if (result.ok) {
             // Re-check reuse: a parallel open may have created the attach tab.
             const again = findHerdrAttachSession(
@@ -912,7 +915,7 @@ export function TerminalBootstrap({
         });
       }}
       onInput={(text) => send(active?.connection?.input(text))}
-      onNewSession={(kind) => createSession(kind === "shell" ? { forceShell: true } : undefined)}
+      onNewSession={(kind) => createSession(kind === "shell" ? { forceShell: true } : kind === "herdr" ? { forceHerdr: true } : undefined)}
       herdrNewTab={
         isRemoteTerminal() ? getWebTermInfo()?.termHost === "herdr" : getTermPreferences().sessionHost === "herdr"
       }
