@@ -721,4 +721,10 @@ export const chatHandlers: Record<
     publish(9021, [["h", a?.channelId]]).then(() => undefined),
   leave_channel: (a) =>
     publish(9022, [["h", a?.channelId]]).then(() => undefined),
+  // hide_dm: mirror of src-tauri hide_dm (events::build_dm_hide). Kind 41012 with ["h", channelId]; the
+  // relay records it and fetchChannels already filters hidden DMs, so this persists across devices like desktop.
+  hide_dm: (a) =>
+    publishNow(41012, [["h", String(a?.channelId ?? "")]]).then(
+      () => undefined,
+    ),
 };
