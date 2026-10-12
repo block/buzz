@@ -8,6 +8,7 @@ import {
   getRemotePrefs,
   setAgentManagement,
   setSignatureTtl,
+  setTerminalSignatureTtl,
   setTerminalsAllowed,
   subscribeRemoteAccess,
 } from "@/features/bridge/remoteAccessStore";
@@ -20,7 +21,7 @@ export const REMOTE_AGENT_MGMT_DESC =
   "Lets your signed-in devices list your agents and start, stop, message and create agents on this computer, over your tailnet when reachable or via the relay otherwise. On a direct (tailnet) connection it also allows full agent management: create, rename, change provider, model, persona and working directory, and delete. Does not allow terminals or file access. A signed connection stays valid for the duration you choose below, then your signer is asked again.";
 export const REMOTE_TERMINAL_LABEL = "Allow remote terminal";
 export const REMOTE_TERMINAL_DESC =
-  "Lets your signed-in devices open a shell, or attach to a herdr session, on this computer over your tailnet only. Each launch requires a fresh signature from your signer. Off by default. Turning off closes open terminals.";
+  "Lets your signed-in devices open a shell, or attach to a herdr session, on this computer over your tailnet only. A signed terminal stays valid for the duration you choose below; after that, the next launch asks your signer again. Off by default. Turning off closes open terminals.";
 
 export const ttlLabel = (s: number) => (s < 3600 ? `${s / 60} minutes` : s === 3600 ? "1 hour" : `${s / 3600} hours`);
 
@@ -109,7 +110,7 @@ export function RemoteTerminalCard() {
   return <DesktopRemoteTerminalCard />;
 }
 function DesktopRemoteTerminalCard() {
-  const { status, error, busy, run } = useRemote();
+  const { status, error, busy, run, prefs } = useRemote();
   if (!status) return null;
   const canEnable = status.tailscaleUp || status.terminals;
   return (
@@ -133,6 +134,30 @@ function DesktopRemoteTerminalCard() {
             id="remote-terminals-switch"
             onCheckedChange={(on) => void run(() => setTerminalsAllowed(on))}
           />
+        </SettingsOptionRow>
+        <SettingsOptionRow>
+          <div className="min-w-0">
+            <label className="text-sm font-medium" htmlFor="remote-term-sig-ttl">
+              Signed connection lasts
+            </label>
+            <p className="text-sm font-normal text-muted-foreground/70" data-settings-subcopy>
+              After this, a device must sign a fresh challenge with your signer before it can open another terminal.
+            </p>
+          </div>
+          <select
+            className="rounded-md border bg-background px-2 py-1 text-sm"
+            data-testid="remote-term-sig-ttl"
+            disabled={!status.terminals}
+            id="remote-term-sig-ttl"
+            onChange={(e) => setTerminalSignatureTtl(Number(e.target.value))}
+            value={prefs.termSigTtlS}
+          >
+            {SIG_TTL_OPTIONS_S.map((s) => (
+              <option key={s} value={s}>
+                {ttlLabel(s)}
+              </option>
+            ))}
+          </select>
         </SettingsOptionRow>
       </SettingsOptionGroup>
       {error && <p className="text-sm text-destructive">{error}</p>}

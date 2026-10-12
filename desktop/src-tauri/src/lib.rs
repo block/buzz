@@ -877,6 +877,7 @@ pub fn run() {
             remote_access::remote_access_set_terminals,
             remote_access::remote_access_set_term_config,
             remote_access::remote_access_set_agents,
+            remote_access::remote_access_set_terminal_ttl,
             remote_access::remote_mgmt_reply,
             playground_webview::playground_probe,
             playground_webview::playground_webview_show,

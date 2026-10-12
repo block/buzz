@@ -498,3 +498,43 @@ async fn pty_backend_honors_default_directory_and_shell_and_falls_back_safely() 
     assert_eq!(resolve_shell(Some(&PathBuf::from("/bin/sh")), Some("/bin/bash".into())), PathBuf::from("/bin/sh"));
     assert_eq!(resolve_shell(Some(&PathBuf::from("/etc/hosts")), Some("/bin/bash".into())), PathBuf::from("/bin/bash")); // not executable
 }
+
+#[tokio::test]
+async fn terminal_signature_window_allows_unsigned_launches_until_it_expires() {
+    let keys = Keys::generate();
+    let opened = Arc::new(Mutex::new(vec![]));
+    let mut cfg = ServerConfig::new(keys.public_key(), "dsk1", vec![ORIGIN.into()]);
+    cfg.backend = Some(Arc::new(Echo { opened: opened.clone() }));
+    cfg.term_session_ttl = Duration::from_secs(2);
+    let srv = RemoteServer::start(cfg, 0).await.unwrap();
+    let mut ws = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    let ready = auth(&mut ws, &keys).await;
+    assert_eq!(ready["termSessionTtlS"], 2);
+    assert!(ready["signedUntil"].as_u64().unwrap() > 0);
+    srv.set_terminals_enabled(true);
+    // no signature yet: refused
+    send(&mut ws, json!({"t":"term.open","launchId":"launch-0001","cols":80,"rows":24})).await;
+    assert_eq!(recv(&mut ws).await["code"], "term_signature_required");
+    // signed launch starts the window
+    send(&mut ws, json!({"t":"term.challenge","launchId":"launch-0001"})).await;
+    let c = recv(&mut ws).await;
+    let ev = sign(&keys, c["nonce"].as_str().unwrap(), c["connId"].as_str().unwrap(), "dsk1", "terminal:launch-0001", None);
+    send(&mut ws, json!({"t":"term.open","launchId":"launch-0001","cols":80,"rows":24,"event":ev})).await;
+    let r = recv(&mut ws).await;
+    assert_eq!(r["t"], "term.opened");
+    assert!(r["termSignedUntil"].as_u64().unwrap() > 0);
+    recv(&mut ws).await; // prompt
+    // inside the window: no signature needed
+    send(&mut ws, json!({"t":"term.open","launchId":"launch-0002","cols":80,"rows":24})).await;
+    assert_eq!(recv(&mut ws).await["t"], "term.opened");
+    recv(&mut ws).await;
+    // after it ends: a fresh signature is required again
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    send(&mut ws, json!({"t":"term.open","launchId":"launch-0003","cols":80,"rows":24})).await;
+    assert_eq!(recv(&mut ws).await["code"], "term_signature_required");
+    // the terminal lifetime is changeable at runtime (clamped to 24 h)
+    srv.set_terminal_session_ttl(Duration::from_secs(48 * 3600));
+    let mut ws2 = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    assert_eq!(auth(&mut ws2, &keys).await["termSessionTtlS"], 24 * 3600);
+    srv.shutdown();
+}

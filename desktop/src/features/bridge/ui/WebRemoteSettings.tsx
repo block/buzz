@@ -6,6 +6,7 @@ import { SettingsOptionGroup, SettingsOptionRow } from "@/features/settings/ui/S
 import {
   REMOTE_AGENT_MGMT_LABEL,
   REMOTE_TERMINAL_LABEL,
+  ttlLabel,
 } from "@/features/settings/ui/RemoteAccessSettingsCard";
 import {
   type Feature,
@@ -23,7 +24,7 @@ import {
 } from "../remoteHosts";
 import { useQueryClient } from "@tanstack/react-query";
 import { directAgentsFor } from "../directAgents";
-import { acquireProxyDirect } from "../remoteCmd";
+import { acquireProxyDirect, getProxyDirect } from "../remoteCmd";
 import { useBridgeAgents } from "../useBridgeAgents";
 import { useDirectAutoReconnect, useDirectState } from "./DirectAgentsPanel";
 import { getTerminalBackend, setTerminalBackend } from "@/features/terminal/terminalClient";
@@ -137,11 +138,39 @@ function HostList(props: { feature: Feature; hosts: RemoteHost[]; reachOf: (h: R
   );
 }
 
+const clockTime = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+/** Re-renders every 30 s so "signed until" lines drop off when they pass. */
+function useTick() {
+  const [, bump] = React.useReducer((x: number) => x + 1, 0);
+  React.useEffect(() => {
+    const t = setInterval(bump, 30_000);
+    return () => clearInterval(t);
+  }, []);
+}
+/** Read-only "Signed connection lasts" row plus the live "Direct · signed until" line for one feature. */
+function SignedRows(props: { ttlS: number | undefined; until: number; testId: string; known: boolean }) {
+  useTick();
+  const live = props.until > Date.now();
+  return (
+    <SettingsOptionRow>
+      <div className="min-w-0" data-testid={props.testId}>
+        <p className="text-sm font-medium">Signed connection lasts</p>
+        <p className="text-sm font-normal text-muted-foreground/70" data-settings-subcopy>
+          {props.known && props.ttlS ? ttlLabel(props.ttlS) : "Unknown"}
+          {live ? ` · Direct · signed until ${clockTime(props.until)}` : " · not signed on this device"}
+        </p>
+      </div>
+    </SettingsOptionRow>
+  );
+}
+
 /** Web Settings → Agents: read-only. "Allow remote agent management" is set on the desktop; this shows what it reports. */
 export function WebRemoteAgentManagement() {
   const { b, hosts, prefs, reachOf } = useRemoteHosts();
   const on = b.heartbeat?.remote?.agents === true;
   const agentHosts = hosts.filter((h) => h.supports.agents);
+  const direct = getProxyDirect();
+  const { expiresAt, live } = useDirectState(direct);
   return (
     <SettingsOptionGroup data-testid="web-remote-agents" title="Remote agent management">
       <SettingsOptionRow>
@@ -157,6 +186,7 @@ export function WebRemoteAgentManagement() {
           </p>
         </div>
       </SettingsOptionRow>
+      <SignedRows known={!!b.heartbeat} testId="web-remote-agents-ttl" ttlS={b.heartbeat?.remote?.sigTtlS} until={live ? expiresAt : 0} />
       {agentHosts.length > 0 && (
         <div className="px-4 pt-3 pb-3">
           <HostList feature="agents" hosts={hosts} prefs={prefs} reachOf={reachOf} />
@@ -171,6 +201,8 @@ export function WebRemoteTerminal() {
   const { b, hosts, prefs, reachOf } = useRemoteHosts();
   const on = b.heartbeat?.remote?.terminals === true;
   const capable = hosts.filter((h) => h.supports.terminal);
+  const hub = getWebTermHub();
+  React.useSyncExternalStore(hub.subscribe, hub.getStatus);
   return (
     <SettingsOptionGroup data-testid="web-remote-terminal" title="Remote terminal">
       <SettingsOptionRow>
@@ -186,6 +218,7 @@ export function WebRemoteTerminal() {
           </p>
         </div>
       </SettingsOptionRow>
+      <SignedRows known={!!b.heartbeat} testId="web-remote-terminal-ttl" ttlS={b.heartbeat?.remote?.termSigTtlS} until={hub.termSignedUntil()} />
       {capable.length > 0 && (
         <div className="px-4 pt-3 pb-3">
           <HostList feature="terminal" hosts={hosts} prefs={prefs} reachOf={reachOf} />

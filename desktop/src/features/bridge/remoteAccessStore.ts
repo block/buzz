@@ -19,16 +19,19 @@ export type RemoteAccessStatus = {
 // Desktop-side preferences for "Allow remote agent management" (frontend-persisted; relay commands are gated on it).
 const PREF_AGENTS = "buzz-remote-agent-mgmt";
 const PREF_TTL = "buzz-remote-sig-ttl";
-export type RemotePrefs = { agentManagement: boolean; sigTtlS: number };
+const PREF_TERM_TTL = "buzz-remote-term-sig-ttl";
+export type RemotePrefs = { agentManagement: boolean; sigTtlS: number; termSigTtlS: number };
+const validTtl = (n: number) => ((SIG_TTL_OPTIONS_S as readonly number[]).includes(n) ? n : SIG_TTL_DEFAULT_S);
 export function getRemotePrefs(): RemotePrefs {
   try {
     const ttl = Number(localStorage.getItem(PREF_TTL));
     return {
       agentManagement: localStorage.getItem(PREF_AGENTS) === "1",
-      sigTtlS: (SIG_TTL_OPTIONS_S as readonly number[]).includes(ttl) ? ttl : SIG_TTL_DEFAULT_S,
+      sigTtlS: validTtl(ttl),
+      termSigTtlS: validTtl(Number(localStorage.getItem(PREF_TERM_TTL))),
     };
   } catch {
-    return { agentManagement: false, sigTtlS: SIG_TTL_DEFAULT_S };
+    return { agentManagement: false, sigTtlS: SIG_TTL_DEFAULT_S, termSigTtlS: SIG_TTL_DEFAULT_S };
   }
 }
 export const isAgentManagementAllowed = () => getRemotePrefs().agentManagement;
@@ -71,6 +74,21 @@ export async function pushAgentConfig(): Promise<void> {
   } catch {
     /* older build without the command */
   }
+}
+
+/** Remote terminal signature lifetime, pushed to the listener (applies to terminal signatures made from now on). */
+export async function pushTermTtl(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await invoke("remote_access_set_terminal_ttl", { ttlS: getRemotePrefs().termSigTtlS });
+  } catch {
+    /* older build without the command */
+  }
+}
+export function setTerminalSignatureTtl(seconds: number): void {
+  if ((SIG_TTL_OPTIONS_S as readonly number[]).includes(seconds)) localStorage.setItem(PREF_TERM_TTL, String(seconds));
+  void pushTermTtl();
+  emit();
 }
 
 export function desktopId(): string {
@@ -156,6 +174,7 @@ export async function setRemoteAccessEnabled(enabled: boolean): Promise<void> {
   if (enabled) {
     await pushTermConfig();
     await pushAgentConfig();
+    await pushTermTtl();
   }
   set(await invoke<RemoteAccessStatus>("remote_access_set_enabled", { enabled, desktopId: desktopId() }));
 }
@@ -181,6 +200,7 @@ export function remoteInfoForHeartbeat(): RemoteInfo | undefined {
     ...(herdr() ? { termSession: getTermPreferences().sessionName } : {}),
     agents: prefs.agentManagement,
     sigTtlS: prefs.sigTtlS,
+    termSigTtlS: prefs.termSigTtlS,
   };
 }
 
@@ -191,6 +211,7 @@ if (isTauri()) {
   let last = JSON.stringify(termConfigArgs());
   void pushTermConfig();
   void pushAgentConfig();
+  void pushTermTtl();
   subscribeTermPreferences(() => {
     emit();
     const now = JSON.stringify(termConfigArgs());

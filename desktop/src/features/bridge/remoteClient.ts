@@ -93,6 +93,9 @@ export class RemoteConnection {
   /** One connect signature covers the whole connection; it ends at `expiresAt` (ms) and the web signs again. */
   sessionTtlS = 0;
   expiresAt = 0;
+  /** End (ms) of this connection's signed terminal window: launches before it skip the signer. 0 = none yet. */
+  termSignedUntil = 0;
+  termSessionTtlS = 0;
   onClose: (() => void) | null = null;
 
   private info: { desktopId: string; url: string };
@@ -219,6 +222,8 @@ export class RemoteConnection {
     this.agents = ready.agents === true;
     this.sessionTtlS = typeof ready.sessionTtlS === "number" ? ready.sessionTtlS : 0;
     this.expiresAt = this.sessionTtlS ? Date.now() + this.sessionTtlS * 1000 : 0;
+    this.termSessionTtlS = typeof ready.termSessionTtlS === "number" ? ready.termSessionTtlS : 0;
+    this.termSignedUntil = 0;
     this.ping = setInterval(() => ws.send(JSON.stringify({ t: "ping" })), 30_000);
   }
 
@@ -241,7 +246,32 @@ export class RemoteConnection {
     return (r.result ?? {}) as T;
   }
 
-  /** Each launch asks the signer for a fresh signature (purpose terminal:<launchId>). */
+  /**
+   * Sends term.open and waits for term.opened. Inside the connection's signed terminal window it goes without a signature;
+   * otherwise (or if the desktop says the window ended, or it's an older desktop) it signs `terminal:<launchId>` first.
+   */
+  private async openWithAuth(ws: WsLike, launchId: string, body: Record<string, unknown>): Promise<Frame> {
+    const go = async (event?: string) => {
+      ws.send(JSON.stringify({ t: "term.open", launchId, ...body, ...(event ? { event } : {}) }));
+      const opened = await this.waitFor((f) => f.t === "term.opened" && f.id === launchId, 30_000);
+      if (typeof opened.termSignedUntil === "number" && opened.termSignedUntil > 0) this.termSignedUntil = opened.termSignedUntil * 1000;
+      return opened;
+    };
+    if (this.termSignedUntil > Date.now() + 5_000) {
+      try {
+        return await go();
+      } catch (e) {
+        // window over (or an older desktop that needs a signature every launch): sign this launch instead
+        if (!(e instanceof RemoteError) || (e.code !== "term_signature_required" && e.code !== "bad_event")) throw e;
+        this.termSignedUntil = 0;
+      }
+    }
+    ws.send(JSON.stringify({ t: "term.challenge", launchId }));
+    const challenge = await this.waitFor((f) => f.t === "challenge" && f.purpose === `terminal:${launchId}`);
+    return go(await this.signChallenge(challenge, `terminal:${launchId}`));
+  }
+
+  /** Signs a terminal launch, which starts a signed window (the desktop's terminal lifetime) for later launches. */
   async openTerminal(
     opts: { cols: number; rows: number; session?: string; host?: "shell" | "herdr" },
     onData: (b: Uint8Array) => void,
@@ -250,14 +280,10 @@ export class RemoteConnection {
     const ws = this.ws;
     if (!ws || !this.ready) throw new RemoteError("closed");
     const launchId = crypto.randomUUID();
-    ws.send(JSON.stringify({ t: "term.challenge", launchId }));
-    const challenge = await this.waitFor((f) => f.t === "challenge" && f.purpose === `terminal:${launchId}`);
-    const event = await this.signChallenge(challenge, `terminal:${launchId}`);
     this.termOut.set(launchId, { data: onData, closed: onClosed });
-    ws.send(JSON.stringify({ t: "term.open", launchId, cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null, event }));
     let scrollback: number | undefined;
     try {
-      const opened = await this.waitFor((f) => f.t === "term.opened" && f.id === launchId, 30_000);
+      const opened = await this.openWithAuth(ws, launchId, { cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null });
       scrollback = typeof opened.scrollback === "number" ? opened.scrollback : undefined;
     } catch (e) {
       this.termOut.delete(launchId);
@@ -272,8 +298,8 @@ export class RemoteConnection {
   }
 
   /**
-   * Open a terminal whose emulator runs on the desktop (the same one Buzz Term uses). Each launch still asks the signer for a
-   * fresh `terminal:<launchId>` signature. Frames that beat `term.opened` (the bootstrap snapshot usually does) are buffered
+   * Open a terminal whose emulator runs on the desktop (the same one Buzz Term uses). Launches inside the signed terminal window skip the
+   * signer; otherwise it signs `terminal:<launchId>`. Frames that beat `term.opened` (the bootstrap snapshot usually does) are buffered
    * and replayed to `onMsg` right after, in order.
    */
   async openEmuTerminal(
@@ -284,18 +310,12 @@ export class RemoteConnection {
     const ws = this.ws;
     if (!ws || !this.ready) throw new RemoteError("closed");
     const launchId = crypto.randomUUID();
-    ws.send(JSON.stringify({ t: "term.challenge", launchId }));
-    const challenge = await this.waitFor((f) => f.t === "challenge" && f.purpose === `terminal:${launchId}`);
-    const event = await this.signChallenge(challenge, `terminal:${launchId}`);
     const entry = { on: null as ((m: EmuMessage) => void) | null, pre: [] as EmuMessage[] };
     this.emus.set(launchId, entry);
     this.termOut.set(launchId, { data: () => {}, closed: onClosed });
-    ws.send(
-      JSON.stringify({ t: "term.open", launchId, cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null, emu: true, event }),
-    );
     let opened: Frame;
     try {
-      opened = await this.waitFor((f) => f.t === "term.opened" && f.id === launchId, 30_000);
+      opened = await this.openWithAuth(ws, launchId, { cols: opts.cols, rows: opts.rows, session: opts.session ?? null, host: opts.host ?? null, emu: true });
     } catch (e) {
       this.emus.delete(launchId);
       this.termOut.delete(launchId);

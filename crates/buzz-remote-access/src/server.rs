@@ -4,7 +4,10 @@
 //!   server -> {"t":"ready","desktopId":..,"terminals":bool} | {"t":"error","code":..} then close
 //!   client -> {"t":"ping"} -> {"t":"pong"}                      (also keeps the idle timer alive)
 //!   client -> {"t":"term.challenge","launchId":..}              -> {"t":"challenge", ...}
-//!   client -> {"t":"term.open","launchId","cols","rows","session"?,"event":..} purpose "terminal:<launchId>"
+//!   client -> {"t":"term.open","launchId","cols","rows","session"?,"event"?:..} purpose "terminal:<launchId>"
+//!     The first launch needs a signed `terminal:<launchId>` challenge; that starts a signed terminal window of the desktop's
+//!     terminal lifetime, during which further launches on the same connection may omit `event`. After it ends, a launch
+//!     without a fresh signature is refused with "term_signature_required" (the web then asks the signer again).
 //!   server -> {"t":"term.opened","id"} / {"t":"term.out","id","data":b64} / {"t":"term.closed","id"}
 //!   client -> {"t":"term.in","id","data":b64} / {"t":"term.resize","id","cols","rows"} / {"t":"term.close","id"}
 //!   client -> {"t":"mgmt","id","op","params"}                   -> {"t":"mgmt.result","id","ok":bool,"result"|"error"}
@@ -105,6 +108,8 @@ pub struct ServerConfig {
     pub mgmt: Option<Arc<dyn ManagementBackend>>,
     /// How long one signed connection (one connect signature) stays valid; clamped to [`MAX_SESSION_TTL`].
     pub session_ttl: Duration,
+    /// How long one terminal signature lets further launches skip the signer on that connection; clamped like `session_ttl`.
+    pub term_session_ttl: Duration,
 }
 
 impl ServerConfig {
@@ -121,6 +126,7 @@ impl ServerConfig {
             backend: None,
             mgmt: None,
             session_ttl: Duration::from_secs(3600),
+            term_session_ttl: Duration::from_secs(3600),
         }
     }
 }
@@ -131,6 +137,7 @@ struct Shared {
     terminals_enabled: AtomicBool,
     agents_enabled: AtomicBool,
     ttl_s: AtomicU64,
+    term_ttl_s: AtomicU64,
     conns: AtomicUsize,
     terms: AtomicUsize,
     kill: broadcast::Sender<()>,
@@ -151,12 +158,14 @@ impl RemoteServer {
         let (kill, _) = broadcast::channel(8);
         let (stop, _) = broadcast::channel(1);
         let ttl0 = clamp_ttl(cfg.session_ttl).as_secs();
+        let term_ttl0 = clamp_ttl(cfg.term_session_ttl).as_secs();
         let shared = Arc::new(Shared {
             book: Mutex::new(ChallengeBook::new(cfg.member, cfg.desktop_id.clone())),
             cfg,
             terminals_enabled: AtomicBool::new(false), // terminals are off by default
             agents_enabled: AtomicBool::new(false),
             ttl_s: AtomicU64::new(ttl0),
+            term_ttl_s: AtomicU64::new(term_ttl0),
             conns: AtomicUsize::new(0),
             terms: AtomicUsize::new(0),
             kill,
@@ -206,6 +215,10 @@ impl RemoteServer {
     pub fn set_session_ttl(&self, ttl: Duration) {
         self.shared.ttl_s.store(clamp_ttl(ttl).as_secs(), Ordering::SeqCst);
     }
+    /// Changes the terminal signature lifetime for terminal signatures made from now on (clamped to 24 h).
+    pub fn set_terminal_session_ttl(&self, ttl: Duration) {
+        self.shared.term_ttl_s.store(clamp_ttl(ttl).as_secs(), Ordering::SeqCst);
+    }
     pub fn terminals_enabled(&self) -> bool {
         self.shared.terminals_enabled.load(Ordering::SeqCst)
     }
@@ -229,7 +242,7 @@ fn err(code: &str) -> Message {
 }
 
 fn challenge_frame(sh: &Shared, conn_id: &str, purpose: Option<&str>) -> Message {
-    let c = sh.book.lock().unwrap().issue(conn_id, now_secs());
+    let c = sh.book.lock().unwrap_or_else(|p| p.into_inner()).issue(conn_id, now_secs());
     let mut v = serde_json::to_value(&c).unwrap();
     v["t"] = "challenge".into();
     if let Some(p) = purpose {
@@ -279,7 +292,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                 return Err("auth_required");
             }
             let ev = v["event"].as_str().unwrap_or("");
-            return match sh.book.lock().unwrap().verify(ev, &conn_id, now_secs()) {
+            return match sh.book.lock().unwrap_or_else(|p| p.into_inner()).verify(ev, &conn_id, now_secs()) {
                 Ok(Purpose::Connect) => Ok(()),
                 Ok(_) => Err("wrong_purpose"),
                 Err(e) => Err(e.code()),
@@ -292,7 +305,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
     if let Err(code) = authed {
         let _ = out_tx.send(err(code)).await;
         let _ = out_tx.send(Message::Close(None)).await;
-        sh.book.lock().unwrap().drop_connection(&conn_id);
+        sh.book.lock().unwrap_or_else(|p| p.into_inner()).drop_connection(&conn_id);
         let _ = writer.await;
         return;
     }
@@ -305,12 +318,16 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                 "terminals":sh.terminals_enabled.load(Ordering::SeqCst),
                 "agents":sh.agents_enabled.load(Ordering::SeqCst),
                 "sessionTtlS":ttl.as_secs(),
+                "signedUntil":now_secs() + ttl.as_secs(),
+                "termSessionTtlS":sh.term_ttl_s.load(Ordering::SeqCst),
             })
             .to_string(),
         ))
         .await;
     let expires = tokio::time::Instant::now() + ttl;
     let mgmt_inflight = Arc::new(AtomicUsize::new(0));
+    // End of this connection's signed terminal window (unix seconds); None until a terminal launch is signed.
+    let mut term_signed_until: Option<u64> = None;
 
     // 2. authenticated loop
     let mut terms: HashMap<String, mpsc::Sender<TermInput>> = HashMap::new();
@@ -413,7 +430,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
             }
             "term.open" => {
                 let lid = v["launchId"].as_str().unwrap_or("").to_string();
-                let reply = open_terminal(&sh, &conn_id, &v, &lid, &mut terms, &mut emus, &out_tx).await;
+                let reply = open_terminal(&sh, &conn_id, &v, &lid, &mut terms, &mut emus, &out_tx, &mut term_signed_until).await;
                 if let Err(code) = reply {
                     let _ = out_tx.send(Message::text(json!({"t":"error","code":code,"id":lid}).to_string())).await;
                 }
@@ -490,7 +507,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
         }
         let _ = t.send(TermInput::Close).await;
     }
-    sh.book.lock().unwrap().drop_connection(&conn_id);
+    sh.book.lock().unwrap_or_else(|p| p.into_inner()).drop_connection(&conn_id);
     let _ = out_tx.send(Message::Close(None)).await;
     let _ = writer.await;
 }
@@ -503,17 +520,34 @@ async fn open_terminal(
     terms: &mut HashMap<String, mpsc::Sender<TermInput>>,
     emus: &mut HashMap<String, Arc<EmuSession>>,
     out_tx: &mpsc::Sender<Message>,
+    term_signed_until: &mut Option<u64>,
 ) -> Result<(), &'static str> {
     if !sh.terminals_enabled.load(Ordering::SeqCst) {
         return Err("terminals_disabled");
     }
     let backend = sh.cfg.backend.clone().ok_or("no_backend")?;
     let want = Purpose::parse(&format!("terminal:{lid}")).ok_or("bad_launch_id")?;
-    // a fresh signature for THIS launch; a connection signature is not enough
-    let got = sh.book.lock().unwrap().verify(v["event"].as_str().unwrap_or(""), conn_id, now_secs()).map_err(|e| e.code())?;
-    if got != want {
-        return Err("wrong_purpose");
+    let event = v["event"].as_str().unwrap_or("");
+    let now = now_secs();
+    if event.is_empty() {
+        // no signature: only allowed inside this connection's signed terminal window
+        if !term_window_open(*term_signed_until, now) {
+            return Err("term_signature_required");
+        }
+    } else {
+        // a signature for THIS launch; a connection signature is not enough. It (re)starts the signed terminal window.
+        let got = sh
+            .book
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .verify(event, conn_id, now)
+            .map_err(|e| e.code())?;
+        if got != want {
+            return Err("wrong_purpose");
+        }
+        *term_signed_until = Some(now + sh.term_ttl_s.load(Ordering::SeqCst));
     }
+    let signed_until = term_signed_until.unwrap_or(0);
     if terms.contains_key(lid) {
         return Err("already_open");
     }
@@ -553,7 +587,7 @@ async fn open_terminal(
             Ok((session, sub, viewport, done)) => {
                 emus.insert(lid.to_string(), session);
                 let _ = out_tx
-                    .send(Message::text(json!({"t":"term.opened","id":lid,"emu":true,"scrollback":scrollback,"subscriptionId":sub.to_string(),"viewport":viewport}).to_string()))
+                    .send(Message::text(json!({"t":"term.opened","id":lid,"emu":true,"termSignedUntil":signed_until,"scrollback":scrollback,"subscriptionId":sub.to_string(),"viewport":viewport}).to_string()))
                     .await;
                 let (sh2, out2, id) = (sh.clone(), out_tx.clone(), lid.to_string());
                 tokio::spawn(async move {
@@ -570,7 +604,7 @@ async fn open_terminal(
             }
         }
     }
-    let _ = out_tx.send(Message::text(json!({"t":"term.opened","id":lid,"scrollback":handle.scrollback}).to_string())).await;
+    let _ = out_tx.send(Message::text(json!({"t":"term.opened","id":lid,"termSignedUntil":signed_until,"scrollback":handle.scrollback}).to_string())).await;
     let (sh2, out2, id) = (sh.clone(), out_tx.clone(), lid.to_string());
     let mut output = handle.output;
     tokio::spawn(async move {
@@ -594,4 +628,22 @@ fn emu_reply(id: &str, v: &Value, res: Result<Value, String>) -> Message {
         Err(e) => json!({"t":"emu.reply","id":id,"rid":rid,"ok":false,"error":e.chars().take(200).collect::<String>()}),
     }
     .to_string())
+}
+
+/// True while a connection's signed terminal window is open at `now` (unix seconds).
+pub fn term_window_open(until: Option<u64>, now: u64) -> bool {
+    until.is_some_and(|u| now < u)
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::term_window_open;
+    #[test]
+    fn terminal_window_needs_a_signature_and_expires() {
+        assert!(!term_window_open(None, 100));
+        assert!(term_window_open(Some(200), 100));
+        assert!(term_window_open(Some(200), 199));
+        assert!(!term_window_open(Some(200), 200));
+        assert!(!term_window_open(Some(200), 500));
+    }
 }

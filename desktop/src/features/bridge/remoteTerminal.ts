@@ -151,6 +151,8 @@ export class RemoteTerminalHub implements TerminalBackend {
     return () => void this.listeners.delete(l);
   };
   getStatus = (): HubStatus => this.status;
+  /** End (ms) of the live connection's signed terminal window, 0 if none (no connection or no launch signed yet). */
+  termSignedUntil = (): number => (this.conn?.ready ? this.conn.termSignedUntil : 0);
   private set(s: HubStatus) {
     this.status = s;
     for (const l of this.listeners) l();

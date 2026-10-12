@@ -14,7 +14,7 @@ const MAX_OPEN: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Purpose {
     Connect,
-    /// A fresh signature is required for every terminal launch; `launch_id` is chosen by the browser.
+    /// Signs one terminal launch (`launch_id` is chosen by the browser) and starts the connection's signed terminal window.
     Terminal(String),
 }
 

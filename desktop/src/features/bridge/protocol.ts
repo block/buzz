@@ -231,6 +231,8 @@ export type RemoteInfo = {
   agents?: boolean;
   /** How long one signed connection challenge stays valid on this desktop (seconds). */
   sigTtlS?: number;
+  /** Remote terminal "Signed connection lasts" (seconds). */
+  termSigTtlS?: number;
 };
 
 /** Connection-signature lifetimes offered on the desktop (max 24 h, default 1 h). */

@@ -47,6 +47,8 @@ pub struct RemoteAccessState {
     inner: Arc<AsyncMutex<Inner>>,
     term: Arc<StdMutex<TermConfig>>,
     agents: Arc<StdMutex<AgentConfig>>,
+    /// Remote terminal "Signed connection lasts": how long one terminal signature covers further launches.
+    term_ttl: Arc<StdMutex<Duration>>,
     pending: Pending,
 }
 
@@ -74,6 +76,7 @@ impl Default for RemoteAccessState {
             })),
             term: Arc::new(StdMutex::new(TermConfig::default())),
             agents: Arc::new(StdMutex::new(AgentConfig { enabled: false, ttl: Duration::from_secs(3600) })),
+            term_ttl: Arc::new(StdMutex::new(Duration::from_secs(3600))),
             pending: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -259,6 +262,7 @@ pub async fn remote_access_set_enabled(
     cfg.mgmt = Some(Arc::new(AppMgmt { app: app.clone(), pending: state.pending.clone() }));
     let ac = state.agents.lock().map_err(|e| e.to_string())?.clone();
     cfg.session_ttl = ac.ttl;
+    cfg.term_session_ttl = *state.term_ttl.lock().unwrap_or_else(|p| p.into_inner());
     let server = RemoteServer::start(cfg, 0).await.map_err(|e| e.to_string())?;
     server.set_agents_enabled(ac.enabled);
     let port = server.addr.port();
@@ -355,6 +359,18 @@ pub async fn remote_access_set_agents(
     }
     inner.agents = on && inner.server.is_some();
     Ok(snapshot(&inner).await)
+}
+
+/// Remote terminal signature lifetime (seconds, 60 s to 24 h): after one signed launch, further launches on that connection
+/// skip the signer until it ends. Applies to terminal signatures made from now on.
+#[tauri::command]
+pub async fn remote_access_set_terminal_ttl(state: State<'_, RemoteAccessState>, ttl_s: u64) -> Result<(), String> {
+    let ttl = Duration::from_secs(ttl_s).clamp(Duration::from_secs(60), MAX_SESSION_TTL);
+    *state.term_ttl.lock().unwrap_or_else(|p| p.into_inner()) = ttl;
+    if let Some(server) = state.inner.lock().await.server.as_ref() {
+        server.set_terminal_session_ttl(ttl);
+    }
+    Ok(())
 }
 
 /// The frontend's answer to a `remote-mgmt-request` event.
