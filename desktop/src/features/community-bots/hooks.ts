@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-query";
 
 import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
-import { useCommunities } from "@/features/communities/useCommunities";
+import { useOptionalCommunities } from "@/features/communities/useCommunities";
 import { invokeTauri } from "@/shared/api/tauri";
 
 import { fetchCommunityBots, uninstallCommunityBot } from "./lib/catalog";
@@ -29,8 +29,8 @@ export const communityBotsRemoteAgentsQueryKey = [
 ] as const;
 
 function useCommunityBotsRelayUrl(): string {
-  const { activeCommunity } = useCommunities();
-  return activeCommunity?.relayUrl ?? "";
+  // Optional: rendered outside the provider (isolated dialogs/tests) it just has no relay instead of crashing the tree.
+  return useOptionalCommunities()?.activeCommunity?.relayUrl ?? "";
 }
 
 export function useCommunityBotsQuery(enabled = true) {
