@@ -2,6 +2,7 @@
 // Reads/writes go through relayHttp (NIP-98 signed by the extension). Live updates + history paging use the shared
 // relayClientSession WebSocket (NIP-42 AUTH signed via create_auth_event → signer).
 import { getSigner, signerPubkey } from "./signer";
+import { buildObserverControlEvent, decryptObserverEvent } from "./observer";
 import { markBootReady, noteSigner } from "./signer/instrument";
 import { queryRelay, queryRelayHttp, submitSignedEvent } from "./relayHttp";
 import { relayHttpBase, wsToHttp } from "./relayConfig";
@@ -705,6 +706,8 @@ export const chatHandlers: Record<
   },
   send_channel_message: sendChannelMessage,
   open_dm: openDm,
+  decrypt_observer_event: decryptObserverEvent,
+  build_observer_control_event: buildObserverControlEvent,
   add_reaction: addReaction,
   remove_reaction: removeReaction,
   delete_message: deleteMessage,
