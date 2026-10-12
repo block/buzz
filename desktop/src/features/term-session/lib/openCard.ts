@@ -1,3 +1,6 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { getTerminalBackend } from "@/features/terminal/terminalClient";
+import { withEnvExports } from "@/features/bridge/termHandoff";
 import { toast } from "sonner";
 
 import type { TermSessionCard } from "./types.ts";
@@ -24,13 +27,26 @@ export async function openTermSessionCard(
   card: TermSessionCard,
   context: OpenTermSessionCardContext,
 ): Promise<{ launchCommand: string; extraEnv: Record<string, string> } | null> {
+  const web = !isTauri();
+  if (web && !getTerminalBackend()) {
+    toast.error(
+      "Opening this session needs Buzz Term on your desktop: turn on Allow remote terminal there and connect this device over Tailscale.",
+    );
+    return null;
+  }
   let prepared;
   try {
+    // Web: answered by the desktop over the Direct connection (directCmd), the same command its own Open runs.
     prepared = await prepareTermSessionLaunch(card);
   } catch (error) {
-    const message =
+    const raw =
       error instanceof Error ? error.message : String(error ?? "Launch failed");
-    toast.error(message);
+    const code = (error as { code?: string } | null)?.code;
+    toast.error(
+      web && (code === "needs_direct" || /Direct connection|not available in the web app/i.test(raw))
+        ? "Opening a Buzz Term session from the web needs a Direct connection to your desktop. Open the Agents page or Settings to connect, then try again."
+        : raw,
+    );
     return null;
   }
 
@@ -57,7 +73,12 @@ export async function openTermSessionCard(
     );
   }
 
-  const { launchCommand, extraEnv } = buildLaunchFromPrepare(card, prepared);
+  const built = buildLaunchFromPrepare(card, prepared);
+  // A remote (web) terminal is a fresh shell on the desktop with no spawn-time env, so the env goes into the typed line.
+  const launchCommand = web
+    ? withEnvExports(built.launchCommand, built.extraEnv)
+    : built.launchCommand;
+  const extraEnv = built.extraEnv;
   requestTermSessionOpen({
     sid: card.sid,
     channelId: context.channelId,

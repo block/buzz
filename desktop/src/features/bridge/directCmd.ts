@@ -97,6 +97,7 @@ export const CMD_WRITES = [
   "update_managed_agent",
   "create_persona",
   "update_persona",
+  "prepare_term_session_launch",
 ] as const;
 const PROMPT_MAX = 20_000;
 async function runtimeIdFor(deps: CmdDeps, id: string): Promise<void> {
@@ -224,6 +225,27 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
       return list(await inv(name), sanitizePersona, 200);
     case "discover_acp_providers":
       return list(await inv(name, { force: a.force === true }), sanitizeRuntime, 200);
+    case "prepare_term_session_launch": {
+      // Term-session card Open from the web: the desktop writes the card's prompt file (and, for Claude, its MCP config) exactly
+      // as its own Open does. Only paths come back; the shell line is typed into a remote terminal, which keeps its own
+      // "Allow remote terminal" switch and signed-duration checks.
+      const i = obj(a.input);
+      const sid = str(i.sid, "Session", 128) ?? bad("Missing session id.");
+      if (!/^[A-Za-z0-9_-]+$/.test(sid)) bad("Invalid session id.");
+      const tool = i.tool === "claude" || i.tool === "codex" ? i.tool : bad("Harness must be claude or codex.");
+      const prompt = typeof i.prompt === "string" && i.prompt.length > 0 ? i.prompt : bad("Missing prompt.");
+      if (prompt.length > 200_000) bad("The prompt is too long.");
+      const cwd = i.cwd == null ? null : (str(i.cwd, "Directory", 4096) ?? null);
+      const r = obj(await inv(name, { input: { sid, tool, prompt, cwd, openclawWorkspace: i.openclawWorkspace === true } }));
+      const path = (v: unknown) => (typeof v === "string" ? v.slice(0, 4096) : null);
+      return {
+        promptPath: path(r.promptPath) ?? "",
+        claudeConfigDir: path(r.claudeConfigDir),
+        openclawWired: r.openclawWired === true,
+        userSignerDir: path(r.userSignerDir),
+        buzzDevMcpWired: r.buzzDevMcpWired === true,
+      };
+    }
     case "get_agent_config_surface":
       return configSurfaceOut(await inv(name, { pubkey: await managedPubkey(deps, a.pubkey) }));
     case "get_managed_agent_log": {
