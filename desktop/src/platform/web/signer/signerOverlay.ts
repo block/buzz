@@ -2,7 +2,7 @@
 //  * runBootGate(): before the app boots with a saved NIP-46 session, prove the signer answers; otherwise a full-screen
 //    "Your signer isn't responding" state with Retry / Reconnect signer / Sign out replaces the blank splash.
 //  * startSignerBanner(): mid-session, a non-blocking banner with the same actions once health turns unresponsive.
-import { signerHealth, type SignerHealthReason } from "./signerHealth";
+import { BANNER_SILENCE_MS, signerHealth, type SignerHealthReason } from "./signerHealth";
 
 export type SignerActions = {
   /** Round-trip probe; true if the signer answered. */
@@ -156,8 +156,16 @@ export async function runBootGate(a: SignerActions): Promise<void> {
 /** Non-blocking banner shown while health is unresponsive after the app has booted. */
 export function startSignerBanner(a: SignerActions) {
   let el: HTMLDivElement | null = null;
+  let recheck: ReturnType<typeof setTimeout> | undefined;
   const render = () => {
     const h = signerHealth.get();
+    clearTimeout(recheck);
+    // Timeouts/long waits: only a sustained silence counts (one slow request that later answers must not flash the banner).
+    const sustained = h.reason === "revoked" || h.reason === "probe-failed" || Date.now() - signerHealth.lastAlive() >= BANNER_SILENCE_MS;
+    if (h.state === "unresponsive" && !sustained && !el) {
+      recheck = setTimeout(render, Math.max(250, BANNER_SILENCE_MS - (Date.now() - signerHealth.lastAlive())));
+      return;
+    }
     if (h.state !== "unresponsive") {
       el?.remove();
       el = null;

@@ -8,7 +8,10 @@
 export type SignerHealthState = "ok" | "slow" | "unresponsive" | "no-session" | "reconnecting";
 export type SignerHealthReason = "timeout" | "revoked" | "probe-failed" | "long-wait" | "none";
 
-export const UNRESPONSIVE_AFTER = 2;
+export const UNRESPONSIVE_AFTER = 3;
+/** The mid-session banner for timeout/long-wait only shows after this long with no answer at all (iOS NIP-46 round trips via the
+ *  relay are slow, more so while the signer app is backgrounded). Revoked answers and failed probes still show at once. */
+export const BANNER_SILENCE_MS = 12_000;
 /** Which signer is active. Remote (NIP-46) signers answer in seconds; a NIP-07 extension may wait on a popup the user must click. */
 export type ActiveSignerKind = "nip07" | "nip46" | null;
 /** NIP-07: only call the extension unresponsive after this long with nothing answered (popup approvals are slow). */
