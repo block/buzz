@@ -243,6 +243,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                 MessageContent(
                                   content: message.content,
                                   bubble: true,
+                                  bubbleTail: showAvatar,
                                   ownMessage:
                                       currentPubkey?.toLowerCase() == pk,
                                   mentionNames: resolvedMentionNames,

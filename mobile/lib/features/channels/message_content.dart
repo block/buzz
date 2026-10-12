@@ -40,6 +40,7 @@ import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
 part 'message_content/bubble_segments.dart';
+part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
@@ -95,6 +96,9 @@ class MessageContent extends HookConsumerWidget {
 
   /// Distinguishes messages authored by the signed-in identity.
   final bool ownMessage;
+
+  /// Adds a left-facing tail to the final text segment in a sender run.
+  final bool bubbleTail;
 
   /// Display names for mentioned pubkeys, extracted from event p-tags.
   /// Keys are lowercase pubkeys, values are display names.
@@ -157,6 +161,7 @@ class MessageContent extends HookConsumerWidget {
     required this.content,
     this.bubble = false,
     this.ownMessage = false,
+    this.bubbleTail = true,
     this.mentionNames = const {},
     this.mentionLabels = const {},
     this.agentMentionPubkeys = const {},
@@ -361,15 +366,15 @@ class MessageContent extends HookConsumerWidget {
         inlineComponents: inlineComponents,
       ),
     );
+    final segments = bubble
+        ? _bubbleSegments(finalContent, imetaByUrl)
+        : const <({String text, bool attachment})>[];
     final markdown = bubble
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              for (final (index, segment) in _bubbleSegments(
-                finalContent,
-                imetaByUrl,
-              ).indexed)
+              for (final (index, segment) in segments.indexed)
                 if (segment.attachment)
                   renderMarkdown(segment.text)
                 else
@@ -380,7 +385,7 @@ class MessageContent extends HookConsumerWidget {
                       horizontal: Grid.xs,
                       vertical: Grid.xxs,
                     ),
-                    decoration: BoxDecoration(
+                    decoration: ShapeDecoration(
                       color: Color.alphaBlend(
                         context.colors.onSurface.withValues(
                           alpha: context.colors.brightness == Brightness.dark
@@ -389,8 +394,11 @@ class MessageContent extends HookConsumerWidget {
                         ),
                         context.colors.surface,
                       ),
-                      borderRadius: BorderRadius.circular(
-                        Radii.dialog - Grid.xxs,
+                      shape: _MessageBubbleShape(
+                        tail:
+                            bubbleTail &&
+                            trailingGallery == null &&
+                            index == segments.length - 1,
                       ),
                     ),
                     child: renderMarkdown(segment.text),

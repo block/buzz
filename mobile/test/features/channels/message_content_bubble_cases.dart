@@ -8,6 +8,23 @@ void bubbleContentTests() {
           'message-text-bubble-',
         ),
   );
+  testWidgets('only a group-ending bubble paints a left tail', (tester) async {
+    for (final tail in [false, true]) {
+      await tester.pumpWidget(
+        _testable(
+          MessageContent(content: 'Hello', bubble: true, bubbleTail: tail),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final decoration =
+          tester.widget<Container>(bubbles).decoration! as ShapeDecoration;
+      final bounds = decoration.shape
+          .getOuterPath(Offset.zero & tester.getSize(bubbles))
+          .getBounds();
+      expect(bounds.left, tail ? lessThan(0) : equals(0));
+    }
+  });
+
   testWidgets('photo gallery stays outside its caption bubble', (tester) async {
     await tester.pumpWidget(
       _testable(
@@ -42,7 +59,7 @@ void bubbleContentTests() {
       expect(bubbles, findsOneWidget);
       expect(tester.getSize(bubbles).width, lessThan(160));
       final decoration =
-          tester.widget<Container>(bubbles).decoration! as BoxDecoration;
+          tester.widget<Container>(bubbles).decoration! as ShapeDecoration;
       expect(decoration.color, isNotNull);
       expect(
         find.descendant(of: bubbles, matching: _findRich('Hello')),

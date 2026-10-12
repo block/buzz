@@ -21,10 +21,12 @@ Widget _testable({
 );
 
 void main() {
-  Finder sendTranslation() => find.descendant(
-    of: find.byType(LocalMessageSendTransition),
-    matching: find.byType(FractionalTranslation),
-  );
+  Finder sendTranslation() => find
+      .descendant(
+        of: find.byType(LocalMessageSendTransition),
+        matching: find.byType(Transform),
+      )
+      .first;
 
   test('local send claims expire before a later navigation', () {
     final markedAt = DateTime(2026);
@@ -51,10 +53,13 @@ void main() {
   testWidgets('local send rises from behind the composer', (tester) async {
     await tester.pumpWidget(_testable());
 
-    var transition = tester.widget<FractionalTranslation>(sendTranslation());
+    var transition = tester.widget<Transform>(sendTranslation());
     expect(
-      transition.translation,
-      const Offset(0, localMessageSendTransitionStartOffset),
+      Offset(
+        transition.transform.getTranslation().x,
+        transition.transform.getTranslation().y,
+      ),
+      const Offset(0, 24 * localMessageSendTransitionStartOffset),
     );
     expect(
       find.descendant(
@@ -65,16 +70,22 @@ void main() {
     );
 
     await tester.pump(localMessageSendTransitionDuration ~/ 2);
-    transition = tester.widget<FractionalTranslation>(sendTranslation());
-    expect(transition.translation.dy, greaterThan(0));
+    transition = tester.widget<Transform>(sendTranslation());
+    expect(transition.transform.getTranslation().y, greaterThan(0));
     expect(
-      transition.translation.dy,
-      lessThan(localMessageSendTransitionStartOffset),
+      transition.transform.getTranslation().y,
+      lessThan(24 * localMessageSendTransitionStartOffset),
     );
 
     await tester.pump(localMessageSendTransitionDuration);
-    transition = tester.widget<FractionalTranslation>(sendTranslation());
-    expect(transition.translation, Offset.zero);
+    transition = tester.widget<Transform>(sendTranslation());
+    expect(
+      Offset(
+        transition.transform.getTranslation().x,
+        transition.transform.getTranslation().y,
+      ),
+      Offset.zero,
+    );
   });
 
   testWidgets('an avatar row starts deeper behind the composer', (
@@ -84,24 +95,39 @@ void main() {
       _testable(startOffsetFactor: localMessageSendTransitionAvatarStartOffset),
     );
 
-    final transition = tester.widget<FractionalTranslation>(sendTranslation());
+    final transition = tester.widget<Transform>(sendTranslation());
     expect(
-      transition.translation,
-      const Offset(0, localMessageSendTransitionAvatarStartOffset),
+      Offset(
+        transition.transform.getTranslation().x,
+        transition.transform.getTranslation().y,
+      ),
+      const Offset(0, 24 * localMessageSendTransitionAvatarStartOffset),
     );
   });
 
   testWidgets('ordinary messages do not animate', (tester) async {
     await tester.pumpWidget(_testable(animate: false));
 
-    final transition = tester.widget<FractionalTranslation>(sendTranslation());
-    expect(transition.translation, Offset.zero);
+    final transition = tester.widget<Transform>(sendTranslation());
+    expect(
+      Offset(
+        transition.transform.getTranslation().x,
+        transition.transform.getTranslation().y,
+      ),
+      Offset.zero,
+    );
   });
 
   testWidgets('reduced motion skips the send translation', (tester) async {
     await tester.pumpWidget(_testable(reduceMotion: true));
 
-    final transition = tester.widget<FractionalTranslation>(sendTranslation());
-    expect(transition.translation, Offset.zero);
+    final transition = tester.widget<Transform>(sendTranslation());
+    expect(
+      Offset(
+        transition.transform.getTranslation().x,
+        transition.transform.getTranslation().y,
+      ),
+      Offset.zero,
+    );
   });
 }
