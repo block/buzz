@@ -89,7 +89,8 @@ void actionRowTests() {
         final actionBody = tester.getRect(body);
         final actionAuthor = tester.getRect(author);
         expect(actionBody.left, regularBody.left - Grid.xs);
-        expect(actionAuthor.left, regularAuthor.left);
+        expect(actionAuthor.left, regularAuthor.left - Grid.xs);
+        expect(regularAuthor.left, regularBody.left);
         expect(
           actionBody.top - actionAuthor.bottom,
           closeTo(regularBody.top - regularAuthor.bottom - Grid.xxs, 0.01),

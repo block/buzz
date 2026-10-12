@@ -97,8 +97,11 @@ class MessageContent extends HookConsumerWidget {
   /// Distinguishes messages authored by the signed-in identity.
   final bool ownMessage;
 
-  /// Adds a left-facing tail to the final text segment in a sender run.
-  final bool bubbleTail;
+  /// Marks the final message in a sender run for rounded corners and dots.
+  final bool bubbleEnd;
+
+  /// Marks the first message in a sender run for rounded top corners.
+  final bool bubbleStart;
 
   /// Display names for mentioned pubkeys, extracted from event p-tags.
   /// Keys are lowercase pubkeys, values are display names.
@@ -161,7 +164,8 @@ class MessageContent extends HookConsumerWidget {
     required this.content,
     this.bubble = false,
     this.ownMessage = false,
-    this.bubbleTail = true,
+    this.bubbleEnd = true,
+    this.bubbleStart = true,
     this.mentionNames = const {},
     this.mentionLabels = const {},
     this.agentMentionPubkeys = const {},
@@ -395,8 +399,9 @@ class MessageContent extends HookConsumerWidget {
                         context.colors.surface,
                       ),
                       shape: _MessageBubbleShape(
-                        tail:
-                            bubbleTail &&
+                        start: bubbleStart && index == 0,
+                        end:
+                            bubbleEnd &&
                             trailingGallery == null &&
                             index == segments.length - 1,
                       ),

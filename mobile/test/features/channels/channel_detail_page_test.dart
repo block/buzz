@@ -3193,22 +3193,19 @@ void main() {
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      expect(aliceText.style?.fontSize, messageUsernameTextStyle.fontSize);
+      expect(aliceText.style?.fontSize, 13.1);
       expect(aliceText.style?.fontWeight, messageUsernameTextStyle.fontWeight);
-      expect(aliceText.style?.height, messageUsernameTextStyle.height);
+      expect(aliceText.style?.height, 17 / 13.1);
       final aliceUsername = tester.widget<Text>(
         find.byKey(const ValueKey('message-username-msg1')),
       );
       final aliceTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('message-timestamp-msg1')),
       );
-      expect(aliceUsername.style?.fontSize, messageMetadataTextStyle.fontSize);
+      expect(aliceUsername.style?.fontSize, 13.1);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
-      expect(aliceUsername.style?.height, messageMetadataTextStyle.height);
-      expect(
-        aliceTimestamp.style?.fontSize,
-        messageTimestampTextStyle.fontSize,
-      );
+      expect(aliceUsername.style?.height, 17 / 13.1);
+      expect(aliceTimestamp.style?.fontSize, 11);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
       expect(
         aliceTimestamp.style?.fontSize,
@@ -8694,7 +8691,7 @@ void main() {
           final huddleBody = tester.getRect(findRichText(huddleEvent.action));
 
           expect(huddleAuthor.top - huddleAvatar.top, Grid.half);
-          expect(huddleAuthor.left, regularAuthor.left);
+          expect(huddleAuthor.left, regularAuthor.left - Grid.xs);
           expect(
             regularAvatar.bottom,
             closeTo(regularBody.bottom + Grid.xxs + Grid.quarter, 0.01),
@@ -12207,10 +12204,7 @@ void main() {
       final threadTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('thread-message-timestamp-thread-root')),
       );
-      expect(
-        threadTimestamp.style?.fontSize,
-        messageTimestampTextStyle.fontSize,
-      );
+      expect(threadTimestamp.style?.fontSize, 11);
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('thread-message-row-thread-root')),

@@ -196,11 +196,28 @@ class _MessageBubble extends HookConsumerWidget {
                                 Padding(
                                   padding: const EdgeInsets.only(
                                     bottom: Grid.quarter,
+                                    left: Grid.xs,
                                   ),
                                   child: Row(
                                     children: [
                                       Expanded(
                                         child: MessageAuthorMeta(
+                                          nameStyle: messageUsernameTextStyle
+                                              .copyWith(
+                                                fontSize: 13.1,
+                                                height: 17 / 13.1,
+                                              ),
+                                          metadataStyle:
+                                              messageMetadataTextStyle.copyWith(
+                                                fontSize: 13.1,
+                                                height: 17 / 13.1,
+                                              ),
+                                          timestampStyle:
+                                              messageTimestampTextStyle
+                                                  .copyWith(
+                                                    fontSize: 11,
+                                                    height: 17 / 11,
+                                                  ),
                                           displayName: displayName,
                                           username: messageUsernameLabel(
                                             profile,
@@ -250,7 +267,8 @@ class _MessageBubble extends HookConsumerWidget {
                               MessageContent(
                                 content: message.content,
                                 bubble: true,
-                                bubbleTail: showAvatar,
+                                bubbleEnd: showAvatar,
+                                bubbleStart: showAuthor,
                                 ownMessage: currentPubkey?.toLowerCase() == pk,
                                 mentionNames: resolvedMentionNames,
                                 mentionLabels: mentionLabels,

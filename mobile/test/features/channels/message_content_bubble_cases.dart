@@ -8,11 +8,11 @@ void bubbleContentTests() {
           'message-text-bubble-',
         ),
   );
-  testWidgets('only a group-ending bubble paints a left tail', (tester) async {
+  testWidgets('only a group-ending bubble paints thought dots', (tester) async {
     for (final tail in [false, true]) {
       await tester.pumpWidget(
         _testable(
-          MessageContent(content: 'Hello', bubble: true, bubbleTail: tail),
+          MessageContent(content: 'Hello', bubble: true, bubbleEnd: tail),
         ),
       );
       await tester.pumpAndSettle();
