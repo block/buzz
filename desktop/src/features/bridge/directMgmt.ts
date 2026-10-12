@@ -11,13 +11,10 @@ import type {
 } from "@/shared/api/types";
 import { CMD_MAX_TEXT } from "./protocol";
 
-export class MgmtError extends Error {
-  code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-  }
-}
+import { handleCmd, type RawInvoke } from "./directCmd";
+import { MgmtError } from "./mgmtError";
+
+export { MgmtError };
 
 export type MgmtDeps = {
   /** "Allow remote agent management" on this desktop. */
@@ -30,6 +27,10 @@ export type MgmtDeps = {
   updateAgent(input: UpdateManagedAgentInput): Promise<{ agent: ManagedAgent; profileSyncError?: string | null }>;
   runtimes(): Promise<AcpRuntimeCatalogEntry[]>;
   personas(): Promise<Array<{ id: string; displayName: string }>>;
+  /** Raw desktop command call for the proxied web UI ("cmd" op); only allow-listed names ever reach it. */
+  invokeRaw?: RawInvoke;
+  /** The signed-in member (scope guard for start). */
+  ownerPubkey?: string;
 };
 
 export const MGMT_OPS = [
@@ -42,6 +43,7 @@ export const MGMT_OPS = [
   "agent.update",
   "providers.list",
   "personas.list",
+  "cmd",
 ] as const;
 export type MgmtOp = (typeof MGMT_OPS)[number];
 
@@ -105,6 +107,11 @@ export async function handleMgmt(op: string, params: unknown, deps: MgmtDeps): P
     return a;
   };
   switch (op as MgmtOp) {
+    case "cmd": {
+      if (!deps.invokeRaw) throw new MgmtError("unknown_op", "That operation isn't supported.");
+      const name = text(p.name, "name", 100) as string;
+      return handleCmd(name, p.args, { invokeRaw: deps.invokeRaw, ownerPubkey: deps.ownerPubkey });
+    }
     case "agents.list":
       return { agents: (await deps.listAgents()).slice(0, 200).map(summarizeAgent) };
     case "providers.list":

@@ -10,6 +10,7 @@ import { sendChannelMessage } from "@/shared/api/tauriMessages";
 import { startManagedAgent, stopManagedAgent } from "@/shared/api/tauriManagedAgents";
 import { managedAgentsQueryKey } from "@/features/agents/hooks";
 import { listPersonas } from "@/shared/api/tauriPersonas";
+import { CMD_WRITES } from "./directCmd";
 import { handleMgmt, mgmtErrorString, type MgmtDeps } from "./directMgmt";
 import { isAgentManagementAllowed, refreshRemoteAccess, subscribeRemoteAccess } from "./remoteAccessStore";
 
@@ -25,12 +26,17 @@ export function realMgmtDeps(pubkey: string | undefined): MgmtDeps {
     createAgent: createManagedAgent,
     updateAgent: updateManagedAgent,
     runtimes: () => discoverAcpRuntimes(),
+    invokeRaw: (cmd, args) => invoke(cmd, args),
+    ownerPubkey: pubkey,
     personas: async () => (await listPersonas()).map((p) => ({ id: p.id, displayName: p.displayName })),
   };
 }
 
 /** Ops that change agent state: the desktop's own agent lists (and the bridge snapshot) must refresh after them. */
 const MUTATING_OPS = new Set(["agent.start", "agent.stop", "agent.create", "agent.rename", "agent.update"]);
+const MUTATING_CMDS = new Set<string>(CMD_WRITES);
+const isMutating = (op: string, params: unknown) =>
+  MUTATING_OPS.has(op) || (op === "cmd" && MUTATING_CMDS.has(String((params as { name?: unknown } | null)?.name)));
 
 export function useRemoteAccessEvents(pubkey?: string): void {
   const queryClient = useQueryClient();
@@ -52,7 +58,7 @@ export function useRemoteAccessEvents(pubkey?: string): void {
       } catch (err) {
         await invoke("remote_mgmt_reply", { reqId, ok: false, error: mgmtErrorString(err) }).catch(() => {});
       } finally {
-        if (MUTATING_OPS.has(op)) void queryClientRef.current.invalidateQueries({ queryKey: managedAgentsQueryKey });
+        if (isMutating(op, params)) void queryClientRef.current.invalidateQueries({ queryKey: managedAgentsQueryKey });
       }
     }).then((u) => (cancelled ? u() : unlistens.push(u)));
     void listen("remote-access-changed", () => void refreshRemoteAccess()).then((u) => (cancelled ? u() : unlistens.push(u)));

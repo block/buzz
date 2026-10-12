@@ -14,6 +14,7 @@ import {
   pickFilesFromBrowser,
   uploadRelayMedia,
 } from "./relayMedia";
+import { installProxyHandlers } from "@/features/bridge/remoteCmd";
 import { getSigner, signOutSigner, signerPubkey } from "./signer";
 
 type Args = Record<string, any> | undefined;
@@ -205,6 +206,8 @@ for (const c of EMPTY_LIST) handlers[c] = () => [];
 for (const c of FALSE_CMDS) handlers[c] = () => false;
 for (const c of NOOP) handlers[c] = () => undefined;
 for (const c of NULL_CMDS) handlers[c] = () => null;
+// Desktop agent data/commands: answered by the desktop over the direct connection (see features/bridge/remoteCmd.ts).
+installProxyHandlers(handlers);
 // Object-shaped placeholder (desktop returns { archived: string[] }); an empty array crashed the profile panel.
 handlers.list_archived_identities = () => ({ archived: [] });
 

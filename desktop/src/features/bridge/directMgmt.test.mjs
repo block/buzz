@@ -84,3 +84,76 @@ test("unknown operations are refused; errors serialize as '<code>: <message>'", 
   assert.equal(mgmtErrorString(new MgmtError("bad_request", "Name is required.")), "bad_request: Name is required.");
   assert.match(mgmtErrorString(new Error("boom")), /^failed: boom/);
 });
+
+// ── desktop command proxy ("cmd" op) ─────────────────────────────────────────
+const rawAgent = (o = {}) => ({ pubkey: PK, name: "Ann", status: "stopped", env_vars: { OPENAI_API_KEY: "sk-secret" }, system_prompt: "secret prompt", ...o });
+function cmdDeps(over = {}) {
+  const raw = [];
+  const d = deps({
+    ownerPubkey: "e".repeat(64),
+    invokeRaw: async (cmd, args) => {
+      raw.push([cmd, args]);
+      if (cmd === "list_managed_agents") return [rawAgent(), rawAgent({ pubkey: "b".repeat(64), status: "running" })];
+      if (cmd === "discover_acp_providers") return [{ id: "goose", command: "goose-acp", availability: "available", source: "builtin" }, { id: "mine", command: "/tmp/x", availability: "available", source: "custom", definition_env: { K: "v" } }];
+      if (cmd === "create_managed_agent") return { agent: rawAgent({ name: args.input.name }), private_key_nsec: "nsec1secret", spawn_error: null };
+      if (cmd === "update_managed_agent") return { agent: rawAgent() };
+      if (cmd === "get_global_agent_config") return { env_vars: { A: "secret" }, provider: "anthropic", model: "m", preferred_runtime: null };
+      return null;
+    },
+    ...over,
+  });
+  d.raw = raw;
+  return d;
+}
+
+test("cmd: reads return the desktop's raw answer with secrets removed", async () => {
+  const d = cmdDeps();
+  const agents = await handleMgmt("cmd", { name: "list_managed_agents" }, d);
+  assert.equal(agents.length, 2);
+  assert.deepEqual(agents[0].env_vars, { OPENAI_API_KEY: "" });
+  assert.equal(agents[0].system_prompt, null);
+  const rt = await handleMgmt("cmd", { name: "discover_acp_providers" }, d);
+  assert.deepEqual(rt[1].definition_env, { K: "" });
+  const g = await handleMgmt("cmd", { name: "get_global_agent_config" }, d);
+  assert.deepEqual(g.env_vars, { A: "" });
+  assert.equal(g.provider, "anthropic");
+  assert.ok(!JSON.stringify([agents, rt, g]).includes("secret"));
+});
+
+test("cmd: switch off, unknown names and a missing executor are refused", async () => {
+  assert.equal(await code(handleMgmt("cmd", { name: "list_managed_agents" }, cmdDeps({ allowed: () => false }))), "agents_disabled");
+  const d = cmdDeps();
+  for (const name of ["delete_managed_agent", "get_identity", "set_global_agent_config", "sign_event", "export_agent_secrets"]) assert.equal(await code(handleMgmt("cmd", { name }, d)), "unknown_op");
+  assert.equal(await code(handleMgmt("cmd", { name: "list_managed_agents" }, deps())), "unknown_op");
+  assert.deepEqual(d.raw, []);
+});
+
+test("cmd: create forwards only allow-listed fields, requires an installed non-custom harness, and never returns the key", async () => {
+  const d = cmdDeps();
+  const r = await handleMgmt("cmd", { name: "create_managed_agent", args: { input: { name: " New ", model: "m", provider: "p", personaId: "p1", spawnAfterCreate: true, agentCommand: "goose-acp", harnessOverride: true, envVars: { A: "b" }, systemPrompt: "evil", agentArgs: ["x"], mcpCommand: "y", acpCommand: "z", relayUrl: "wss://evil" } } }, d);
+  const call = d.raw.find((c) => c[0] === "create_managed_agent")[1].input;
+  assert.deepEqual(call, { name: "New", model: "m", provider: "p", personaId: "p1", spawnAfterCreate: true, agentCommand: "goose-acp", harnessOverride: true });
+  assert.equal(r.private_key_nsec, "");
+  assert.ok(!JSON.stringify(r).includes("secret"));
+  assert.equal(await code(handleMgmt("cmd", { name: "create_managed_agent", args: { input: { name: "x", agentCommand: "/tmp/x" } } }, d)), "runtime_unavailable");
+  assert.equal(await code(handleMgmt("cmd", { name: "create_managed_agent", args: { input: { name: "" } } }, d)), "bad_request");
+});
+
+test("cmd: update and start/stop validate keys; start carries the signed-in member as scope guard", async () => {
+  const d = cmdDeps();
+  await handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK.toUpperCase(), model: "", envVars: { A: "b" }, systemPrompt: "x" } } }, d);
+  assert.deepEqual(d.raw.find((c) => c[0] === "update_managed_agent")[1].input, { pubkey: PK, model: null });
+  assert.equal(await code(handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK } } }, d)), "bad_request");
+  assert.equal(await code(handleMgmt("cmd", { name: "stop_managed_agent", args: { pubkey: "zz" } }, d)), "bad_request");
+  await handleMgmt("cmd", { name: "start_managed_agent", args: { pubkey: PK } }, d);
+  assert.equal(d.raw.find((c) => c[0] === "start_managed_agent")[1].expectedSignerPubkey, "e".repeat(64));
+});
+
+test("cmd: access fields are validated (mode, hex keys, size)", async () => {
+  const d = cmdDeps();
+  const ok = await handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK, respondTo: "allowlist", respondToAllowlist: ["B".repeat(64)] } } }, d);
+  assert.ok(ok);
+  assert.deepEqual(d.raw.at(-1)[1].input, { pubkey: PK, respondTo: "allowlist", respondToAllowlist: ["b".repeat(64)] });
+  for (const bad of [{ respondTo: "root" }, { respondToAllowlist: ["zz"] }, { respondToAllowlist: Array(501).fill(PK) }, { respondToAllowlist: "x" }])
+    assert.equal(await code(handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK, ...bad } } }, d)), "bad_request");
+});

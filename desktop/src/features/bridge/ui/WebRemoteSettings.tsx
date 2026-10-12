@@ -24,7 +24,11 @@ import {
   updateReach,
   transportFor,
 } from "../remoteHosts";
+import { useQueryClient } from "@tanstack/react-query";
+import { directAgentsFor } from "../directAgents";
+import { setProxyDirect } from "../remoteCmd";
 import { useBridgeAgents } from "../useBridgeAgents";
+import { useDirectState } from "./DirectAgentsPanel";
 
 export function useRemoteHosts(opts?: { sync?: boolean }) {
   const pubkey = useIdentityQuery().data?.pubkey;
@@ -204,7 +208,23 @@ export function WebRemoteTerminal() {
 
 /** Mounted in the left nav on web: keeps the switches consistent with what hosts offer, and exposes what the nav may show. */
 export function WebRemoteWatcher() {
-  useRemoteHosts({ sync: true });
+  const rh = useRemoteHosts({ sync: true });
+  const queryClient = useQueryClient();
+  // Bind the desktop command proxy to the agents host's direct client (one signed connection shared with the Agents page).
+  const host = rh.selected("agents") ?? rh.hosts.find((h) => h.supports.agents);
+  const direct = React.useMemo(
+    () => (host?.hasDirect && rh.b.available ? directAgentsFor({ desktopId: host.id, url: host.url }, rh.b.signJson) : null),
+    [host?.id, host?.url, host?.hasDirect, rh.b.available], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  React.useEffect(() => {
+    setProxyDirect(direct);
+    return () => setProxyDirect(null);
+  }, [direct]);
+  // The desktop's data replaces the web's empty defaults the moment the connection goes live (and back when it ends).
+  const live = useDirectState(direct).live;
+  React.useEffect(() => {
+    void queryClient.invalidateQueries({ predicate: (q) => /agent|persona|runtime|acp|harness/i.test(String(q.queryKey[0])) });
+  }, [live, direct, queryClient]);
   return null;
 }
 /** Content of the page a greyed-out nav row opens on web/mobile: what is needed, and the exact settings to turn on. */

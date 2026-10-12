@@ -9,7 +9,7 @@ import { hiddenAgentCount, NO_RUNNING_AGENTS, visibleRelayAgents } from "../rela
 import { useBridgeAgents } from "../useBridgeAgents";
 import { AgentControls } from "./AgentControls";
 import { AgentDetail } from "./AgentDetail";
-import { DirectAgentsSection, PathBadge, useDirectState } from "./DirectAgentsPanel";
+import { PathBadge, useDirectState } from "./DirectAgentsPanel";
 import { useRemoteHostsFor } from "./WebRemoteSettings";
 
 function ago(s: number): string {
@@ -111,7 +111,6 @@ export function MyAgentsPanel() {
         busy={connecting}
         unreachable={transport === "relay" && !!host?.hasDirect}
       />
-      {directLive && direct && <DirectAgentsSection direct={direct} snapshotTs={b.snapshotTs} />}
       {!managementOn && (
         <div
           data-testid="agents-management-info"
