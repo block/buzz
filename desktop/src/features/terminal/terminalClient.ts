@@ -1,3 +1,4 @@
+import * as React from "react";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 
 import type { TerminalFrame } from "./terminalRenderer";
@@ -25,6 +26,8 @@ export type TerminalAttachRequest = {
   args?: string[];
   /** Optional scrollback depth. Omit for 10_000. */
   scrollback?: number;
+  /** Web only: force this session to a plain shell on the desktop even when its Buzz Term setting is herdr (handoff sessions). */
+  remoteHost?: "shell";
 };
 
 export type TerminalViewport = TerminalFrame["viewport"];
@@ -55,7 +58,65 @@ export type TerminalDelivery = {
   acknowledge: () => Promise<void>;
 };
 
-export class TerminalConnection {
+/** What the Bootstrap/Substrate need from a terminal session; the desktop (Tauri) and the web (remote listener) both provide it. */
+export interface TerminalConnectionApi {
+  readonly sessionId: string;
+  readonly subscriptionId: string;
+  readonly viewport: TerminalViewport;
+  input(data: string): Promise<void>;
+  resize(columns: number, rows: number, pixelWidth: number, pixelHeight: number): Promise<TerminalViewport>;
+  viewportReady(viewport: TerminalViewport): Promise<void>;
+  scroll(lines: number): Promise<void>;
+  mouse(event: {
+    button: "left" | "middle" | "right" | "wheelUp" | "wheelDown";
+    action: "press" | "release" | "move";
+    column: number;
+    row: number;
+    shift?: boolean;
+    meta?: boolean;
+    ctrl?: boolean;
+  }): Promise<boolean>;
+  focus(focused: boolean): Promise<void>;
+  detach(): Promise<void>;
+  close(): Promise<void>;
+}
+
+/**
+ * Where sessions come from when this is not the Tauri desktop. The web app registers a backend that talks to the member's
+ * desktop over the direct listener; the desktop never registers one.
+ */
+export type TerminalBackend = {
+  attach(
+    request: TerminalAttachRequest,
+    onMessage: (message: Exclude<TerminalMessage, { type: "frame" }>) => void,
+    onFrame: (delivery: TerminalDelivery) => void,
+  ): Promise<TerminalConnectionApi>;
+  /** An attach (or later op) failed; the web uses this to show why and close the panel. */
+  onError?(error: unknown): void;
+};
+
+let backend: TerminalBackend | null = null;
+const backendListeners = new Set<() => void>();
+export function setTerminalBackend(next: TerminalBackend | null) {
+  if (backend === next) return;
+  backend = next;
+  for (const l of backendListeners) l();
+}
+export function getTerminalBackend(): TerminalBackend | null {
+  return backend;
+}
+export function useTerminalBackend(): TerminalBackend | null {
+  return React.useSyncExternalStore(
+    (l) => {
+      backendListeners.add(l);
+      return () => backendListeners.delete(l);
+    },
+    getTerminalBackend,
+    () => null,
+  );
+}
+
+export class TerminalConnection implements TerminalConnectionApi {
   readonly sessionId: string;
   readonly subscriptionId: string;
   readonly viewport: TerminalViewport;
@@ -70,8 +131,11 @@ export class TerminalConnection {
     request: TerminalAttachRequest,
     onMessage: (message: Exclude<TerminalMessage, { type: "frame" }>) => void,
     onFrame: (delivery: TerminalDelivery) => void,
-  ): Promise<TerminalConnection> {
-    if (!isTauri()) throw new Error("terminal sessions require Buzz Desktop");
+  ): Promise<TerminalConnectionApi> {
+    if (!isTauri()) {
+      if (backend) return backend.attach(request, onMessage, onFrame);
+      throw new Error("terminal sessions require Buzz Desktop");
+    }
 
     let connection: TerminalConnection | null = null;
     const pending: TerminalMessage[] = [];

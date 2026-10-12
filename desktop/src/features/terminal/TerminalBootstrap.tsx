@@ -4,8 +4,11 @@ import { isTauri } from "@tauri-apps/api/core";
 import {
   type TerminalDelivery,
   TerminalConnection,
+  type TerminalConnectionApi,
   type TerminalFrameMessage,
   type TerminalMessage,
+  getTerminalBackend,
+  useTerminalBackend,
 } from "./terminalClient";
 import {
   TerminalSubstrate,
@@ -50,7 +53,7 @@ type TerminalContext = {
 
 type Session = {
   key: string;
-  connection: TerminalConnection | null;
+  connection: TerminalConnectionApi | null;
   delivery: TerminalDelivery | null;
   frame: TerminalFrameMessage | undefined;
   title: string;
@@ -97,6 +100,21 @@ function report(error: unknown) {
   console.error("terminal session failed", error);
 }
 
+/**
+ * Web: sessions come from the member's desktop through a registered backend (the Buzz term page registers it) instead of the
+ * Tauri runtime. The desktop's own Buzz Term settings apply there, so this device's local Session host / shell / cwd / scrollback
+ * settings are ignored: it always asks for a plain launch and the desktop decides shell vs herdr.
+ */
+function isRemoteTerminal(): boolean {
+  return !isTauri() && getTerminalBackend() !== null;
+}
+function effectiveSessionHost(): "buzz-term" | "herdr" {
+  return isRemoteTerminal() ? "buzz-term" : getTermPreferences().sessionHost;
+}
+function effectiveOpenMode(): "docked" | "maximized" {
+  return isRemoteTerminal() ? "maximized" : getTermPreferences().openMode;
+}
+
 export function TerminalBootstrap({
   channelId,
   channelName,
@@ -128,17 +146,26 @@ export function TerminalBootstrap({
   const identityRef = React.useRef<{ npub: string; relayUrl: string } | null>(
     null,
   );
-  identityRef.current = npub && relayUrl ? { npub, relayUrl } : null;
+  const remote = useTerminalBackend() !== null && !isTauri();
+  identityRef.current =
+    npub && relayUrl
+      ? { npub, relayUrl }
+      : remote
+        ? { npub: npub ?? "web", relayUrl: relayUrl ?? "web" }
+        : null;
   const mountedRef = React.useRef(true);
   const sizeRef = React.useRef(INITIAL_SIZE);
   const resizeChainRef = React.useRef(Promise.resolve());
   const connectionSizesRef = React.useRef(
-    new WeakMap<TerminalConnection, TerminalViewportSize>(),
+    new WeakMap<TerminalConnectionApi, TerminalViewportSize>(),
   );
   const closedSessionKeysRef = React.useRef(new Set<string>());
   const [sessions, setSessions] = React.useState<Session[]>([]);
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
-  const [available, setAvailable] = React.useState(() => isTauri());
+  const [tauriAvailable, setAvailable] = React.useState(() => isTauri());
+  // A registered remote backend means "available" from the start; a failed attach reports through the backend instead of
+  // permanently switching Term off, so the page can offer Reconnect.
+  const available = remote || tauriAvailable;
   const panel = useTerminalPanel();
   const [renderedMode, setRenderedMode] = React.useState<
     "docked" | "maximized"
@@ -237,6 +264,11 @@ export function TerminalBootstrap({
 
   const fail = React.useCallback((error: unknown) => {
     report(error);
+    if (isRemoteTerminal()) {
+      getTerminalBackend()?.onError?.(error);
+      setTerminalPanelMode("closed");
+      return;
+    }
     setAvailable(false);
   }, []);
 
@@ -287,8 +319,7 @@ export function TerminalBootstrap({
     ) => {
       const sessionKey = herdrAttachKey(result.sessionName);
       const existing = findHerdrAttachSession(sessionKey);
-      const prefs = getTermPreferences();
-      const mode = panel.mode === "closed" ? prefs.openMode : panel.mode;
+      const mode = panel.mode === "closed" ? effectiveOpenMode() : panel.mode;
       openTerminalPanel(mode, panel.tabScope);
       if (existing) {
         setActiveKey(existing.key);
@@ -316,7 +347,7 @@ export function TerminalBootstrap({
 
       // Fast path: Buzz Term host — create the in-app PTY immediately (no async
       // herdr probe) so the panel never sits empty.
-      if (getTermPreferences().sessionHost !== "herdr") {
+      if (effectiveSessionHost() !== "herdr") {
         createInAppSessionRef.current(options);
         return;
       }
@@ -326,7 +357,7 @@ export function TerminalBootstrap({
       const prefs = getTermPreferences();
       const sessionKey = herdrAttachKey(prefs.sessionName);
       const existing = findHerdrAttachSession(sessionKey);
-      const reopenMode = panel.mode === "closed" ? prefs.openMode : panel.mode;
+      const reopenMode = panel.mode === "closed" ? effectiveOpenMode() : panel.mode;
       const scope = panel.tabScope;
       // Open chrome immediately so left-nav / ⌘J never flash an empty panel
       // while the herdr probe runs.
@@ -450,19 +481,24 @@ export function TerminalBootstrap({
       const size = sizeRef.current;
       void (async () => {
         const prefs = getTermPreferences();
-        const cwd = await resolveTermCwdForAttach({
-          preference: prefs.cwd,
-          handoffCwd: options?.cwd,
-          homeDir,
-        });
+        // Remote: the desktop picks the directory (its own setting); a path from this device or a card means nothing there.
+        const cwd = remote
+          ? undefined
+          : await resolveTermCwdForAttach({
+              preference: prefs.cwd,
+              handoffCwd: options?.cwd,
+              homeDir,
+            });
         return TerminalConnection.attach(
           {
             ...spawnContext,
             threadId: spawnContext.threadId ?? undefined,
             ...size,
-            ...(options?.extraEnv ? { extraEnv: options.extraEnv } : {}),
+            ...(options?.extraEnv && !remote ? { extraEnv: options.extraEnv } : {}),
             ...(cwd ? { cwd } : {}),
-            ...(prefs.shell ? { shell: prefs.shell } : {}),
+            ...(prefs.shell && !remote ? { shell: prefs.shell } : {}),
+            // a handoff launch line is typed into a shell, so never into the desktop's herdr UI
+            ...(remote && options?.pendingLaunchCommand ? { remoteHost: "shell" as const } : {}),
             ...(herdrAttach
               ? { program: herdrAttach.bin, args: herdrAttach.argv }
               : {}),
@@ -529,7 +565,7 @@ export function TerminalBootstrap({
           fail(error);
         });
     },
-    [available, fail, removeSession, resolveSpawnContext],
+    [available, fail, remote, removeSession, resolveSpawnContext],
   );
   createInAppSessionRef.current = createInAppSession;
 
@@ -540,7 +576,7 @@ export function TerminalBootstrap({
         ? sessionsRef.current.find((session) => session.key === liveKey)
         : null;
       if (live && !live.closing) {
-        openTerminalPanel(getTermPreferences().openMode, "channel");
+        openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
         setActiveKey(live.key);
         return;
       }
@@ -548,7 +584,11 @@ export function TerminalBootstrap({
       void (async () => {
         // Card Open + herdr host: create ONE focused workspace, send handoff
         // command into its root pane, then show/reuse the in-app herdr attach.
-        if (request.launchCommand.trim() && (await shouldOpenInHerdr())) {
+        if (
+          !remote &&
+          request.launchCommand.trim() &&
+          (await shouldOpenInHerdr())
+        ) {
           const result = await openInHerdr({
             createWorkspace: true,
             cwd: request.cwd,
@@ -583,23 +623,24 @@ export function TerminalBootstrap({
         }
 
         if (
+          !remote &&
           !contextRef.current &&
           !sessionsRef.current.at(-1)?.context &&
           !lastSpawnContextRef.current
         ) {
-          openTerminalPanel(getTermPreferences().openMode, "channel");
+          openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
           return;
         }
         if (!request.launchCommand.trim()) {
-          openTerminalPanel(getTermPreferences().openMode, "channel");
+          openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
           return;
         }
         if (!available) {
-          openTerminalPanel(getTermPreferences().openMode, "channel");
+          openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
           return;
         }
         skipAutoCreateRef.current = true;
-        openTerminalPanel(getTermPreferences().openMode, "channel");
+        openTerminalPanel(effectiveOpenMode(), remote ? "all" : "channel");
         createInAppSession({
           termSessionSid: request.sid,
           pendingLaunchCommand: request.launchCommand,
@@ -616,7 +657,7 @@ export function TerminalBootstrap({
         }, 0);
       })();
     },
-    [available, createInAppSession, openOrReuseHerdrAttach],
+    [available, createInAppSession, openOrReuseHerdrAttach, remote],
   );
 
   React.useEffect(() => {
@@ -677,13 +718,13 @@ export function TerminalBootstrap({
       const canSpawn =
         Boolean(contextRef.current) ||
         Boolean(lastSpawnContextRef.current) ||
-        (getTermPreferences().sessionHost === "herdr" &&
-          Boolean(identityRef.current));
+        remote ||
+        (effectiveSessionHost() === "herdr" && Boolean(identityRef.current));
       if (!canSpawn) return;
     }
 
     const spawnEmpty = () => {
-      if (getTermPreferences().sessionHost === "herdr") {
+      if (effectiveSessionHost() === "herdr") {
         createSession();
       } else {
         // Buzz Term: attach immediately — no async host probe.
@@ -721,6 +762,7 @@ export function TerminalBootstrap({
     context,
     createSession,
     panel.mode,
+    remote,
     tabScope,
     visibleSessions,
   ]);
@@ -801,7 +843,8 @@ export function TerminalBootstrap({
           ? sessions.length > 0 ||
             Boolean(context) ||
             Boolean(lastSpawnContextRef.current) ||
-            (getTermPreferences().sessionHost === "herdr" &&
+            remote ||
+            (effectiveSessionHost() === "herdr" &&
               Boolean(identityRef.current))
           : Boolean(context))
       }
