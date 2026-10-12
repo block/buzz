@@ -133,7 +133,7 @@ crates/
 desktop/              # Tauri 2 + React 19 desktop app
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
-migrations/           # SQL migrations (applied by operators; opt-in at relay startup via BUZZ_AUTO_MIGRATE)
+migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; production applies them separately — see docs/database.md)
 schema/               # Desired-state schema (schema/tables/public/ is the SchemaBot source)
 scripts/              # Dev tooling
 .env.example          # Config template — copy to .env before running
