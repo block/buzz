@@ -23,9 +23,23 @@ import {
   TerminalGrid,
 } from "./terminalRenderer";
 import {
+  type TermFontSize,
   terminalCellMetricsForFontSize,
   useTermPreferences,
 } from "./termPreferences.ts";
+import { TerminalTouchBar } from "./TerminalTouchBar";
+import {
+  type StickyMods,
+  type TouchAction,
+  TouchGestures,
+  applyStickyModifiers,
+  detectTouchUi,
+  fontSizeForPinch,
+  getTouchFontSize,
+  keyboardInset,
+  setTouchFontSize,
+  subscribeTouchFontSize,
+} from "./touchTerminal";
 
 export type TerminalViewportSize = {
   columns: number;
@@ -80,6 +94,8 @@ type TerminalSubstrateProps = {
   onSelectSession: (id: string) => void;
   onCloseSession: (id: string) => void;
   onNewSession: () => void;
+  /** Phone/tablet behaviour (defaults to "the primary pointer is a finger"; desktop mice are unchanged). */
+  touchUi?: boolean;
 };
 
 function isToggleChord(event: KeyboardEvent): boolean {
@@ -120,12 +136,20 @@ export function TerminalSubstrate({
   onSelectSession,
   onCloseSession,
   onNewSession,
+  touchUi: touchUiProp,
 }: TerminalSubstrateProps) {
   const { terminalPalette } = useTheme();
   const termPrefs = useTermPreferences();
+  const touchUi = React.useMemo(() => touchUiProp ?? detectTouchUi(), [touchUiProp]);
+  const pinchedFont = React.useSyncExternalStore(
+    subscribeTouchFontSize,
+    getTouchFontSize,
+    () => null,
+  );
+  const effectiveFontSize = (touchUi && pinchedFont ? pinchedFont : termPrefs.fontSize) as TermFontSize;
   const cellMetrics: CellMetrics = React.useMemo(
-    () => terminalCellMetricsForFontSize(termPrefs.fontSize),
-    [termPrefs.fontSize],
+    () => terminalCellMetricsForFontSize(effectiveFontSize),
+    [effectiveFontSize],
   );
   const CELL_WIDTH = cellMetrics.width;
   const CELL_HEIGHT = cellMetrics.height;
@@ -195,6 +219,23 @@ export function TerminalSubstrate({
     );
     return Number.isFinite(stored) ? stored : 320;
   });
+  // ── touch ──
+  const [mods, setMods] = React.useState<StickyMods>({ ctrl: false, alt: false });
+  const modsRef = React.useRef(mods);
+  modsRef.current = mods;
+  const gesturesRef = React.useRef(new TouchGestures());
+  const longPressTimerRef = React.useRef(0);
+  const touchScrollRef = React.useRef({ remainderPx: 0 });
+  const touchPointRef = React.useRef({ x: 0, y: 0 });
+  const pinchBaseRef = React.useRef<number | null>(null);
+  const effectiveFontRef = React.useRef<number>(effectiveFontSize);
+  effectiveFontRef.current = effectiveFontSize;
+  type CellPos = { row: number; col: number };
+  const [touchSel, setTouchSel] = React.useState<{ anchor: CellPos; head: CellPos; done: boolean } | null>(null);
+  const touchSelRef = React.useRef(touchSel);
+  touchSelRef.current = touchSel;
+  const [pasteBox, setPasteBox] = React.useState(false);
+  const [kb, setKb] = React.useState({ open: false, top: 0, height: 0, width: 0 });
   const banner = React.useMemo(
     () =>
       buildTerminalBanner(
@@ -218,11 +259,182 @@ export function TerminalSubstrate({
 
   const sendInput = React.useEffectEvent((text: string) => {
     if (!text) return;
+    let out = text;
+    if (touchUi && (modsRef.current.ctrl || modsRef.current.alt)) {
+      const applied = applyStickyModifiers(text, modsRef.current);
+      out = applied.text;
+      if (applied.used) setMods({ ctrl: false, alt: false });
+    }
     setWelcomeVisible(false);
     setCursorPainted(true);
     setCursorReset((current) => current + 1);
-    onInput(text);
+    onInput(out);
   });
+  const cellAt = (clientX: number, clientY: number): CellPos => {
+    const canvas = canvasRef.current;
+    const metrics = cellMetricsRef.current;
+    const vp = viewportRef.current;
+    if (!canvas) return { row: 0, col: 0 };
+    const bounds = canvas.getBoundingClientRect();
+    return {
+      col: Math.max(0, Math.min(vp.columns - 1, Math.floor((clientX - bounds.left) / metrics.width))),
+      row: Math.max(0, Math.min(vp.rows - 1, Math.floor((clientY - bounds.top) / metrics.height))),
+    };
+  };
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // legacy path (older iOS / insecure contexts)
+    }
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      area.remove();
+    }
+  };
+  const pasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) sendInput(encodePaste(text, bracketedPaste));
+      setTouchSel(null);
+      textareaRef.current?.focus({ preventScroll: true });
+    } catch {
+      // Safari only reads the clipboard behind its own "Paste" bubble; offer a box to paste into instead.
+      setPasteBox(true);
+    }
+  };
+  const sendMouseAt = (cell: CellPos, action: "press" | "release") => {
+    onMouseRef.current?.({ button: "left", action, column: cell.col + 1, row: cell.row + 1 });
+  };
+  const applyTouchActions = (actions: TouchAction[]) => {
+    for (const action of actions) {
+      switch (action.type) {
+        case "tap": {
+          setTouchSel(null);
+          setPasteBox(false);
+          setOwner("terminal");
+          textareaRef.current?.focus({ preventScroll: true });
+          if (mouseReportingRef.current && onMouseRef.current) {
+            const cell = cellAt(action.x, action.y);
+            sendMouseAt(cell, "press");
+            sendMouseAt(cell, "release");
+          }
+          break;
+        }
+        case "scroll": {
+          const result = accumulateScrollLines(touchScrollRef.current, action.dy, cellMetricsRef.current.height);
+          touchScrollRef.current = result.state;
+          if (result.lines === 0) break;
+          if (mouseReportingRef.current && onMouseRef.current) {
+            const cell = cellAt(touchPointRef.current.x, touchPointRef.current.y);
+            for (let i = 0; i < Math.abs(result.lines); i += 1) {
+              onMouseRef.current({
+                button: result.lines < 0 ? "wheelUp" : "wheelDown",
+                action: "press",
+                column: cell.col + 1,
+                row: cell.row + 1,
+              });
+            }
+          } else {
+            onScrollRef.current(result.lines);
+          }
+          break;
+        }
+        case "longpress": {
+          const cell = cellAt(action.x, action.y);
+          const word = gridRef.current?.wordAt(cell.row, cell.col) ?? null;
+          setPasteBox(false);
+          setTouchSel({
+            anchor: { row: cell.row, col: word?.start ?? cell.col },
+            head: { row: cell.row, col: word?.end ?? cell.col },
+            done: false,
+          });
+          navigator.vibrate?.(8);
+          break;
+        }
+        case "select": {
+          const cell = cellAt(action.x, action.y);
+          setTouchSel((c) => (c ? { ...c, head: cell } : c));
+          break;
+        }
+        case "selectEnd":
+          setTouchSel((c) => (c ? { ...c, done: true } : c));
+          break;
+        case "pinch": {
+          pinchBaseRef.current ??= effectiveFontRef.current;
+          const size = fontSizeForPinch(pinchBaseRef.current, action.scale);
+          if (size !== effectiveFontRef.current) setTouchFontSize(size);
+          break;
+        }
+        case "pinchEnd":
+          pinchBaseRef.current = null;
+          break;
+        case "cancel":
+          setTouchSel(null);
+          break;
+      }
+    }
+  };
+  const touchDown = (event: React.PointerEvent) => {
+    setOwner("terminal");
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // ignore
+    }
+    touchPointRef.current = { x: event.clientX, y: event.clientY };
+    touchScrollRef.current = { remainderPx: 0 };
+    const gestures = gesturesRef.current;
+    applyTouchActions(gestures.down(event.pointerId, event.clientX, event.clientY, performance.now()));
+    window.clearTimeout(longPressTimerRef.current);
+    if (gestures.state === "pending") {
+      longPressTimerRef.current = window.setTimeout(
+        () => applyTouchActions(gestures.timeout(performance.now())),
+        gestures.longPressMs,
+      );
+    }
+  };
+  const touchMove = (event: React.PointerEvent) => {
+    touchPointRef.current = { x: event.clientX, y: event.clientY };
+    const actions = gesturesRef.current.move(event.pointerId, event.clientX, event.clientY, performance.now());
+    if (actions.length > 0) window.clearTimeout(longPressTimerRef.current);
+    applyTouchActions(actions);
+  };
+  const touchUp = (event: React.PointerEvent) => {
+    window.clearTimeout(longPressTimerRef.current);
+    applyTouchActions(gesturesRef.current.up(event.pointerId, performance.now()));
+  };
+  const touchCancel = () => {
+    window.clearTimeout(longPressTimerRef.current);
+    applyTouchActions(gesturesRef.current.cancel());
+  };
+  const copySelection = async () => {
+    const sel = touchSelRef.current;
+    const grid = gridRef.current;
+    if (!sel || !grid) return;
+    const text = grid.textBetweenCells(sel.anchor.row, sel.anchor.col, sel.head.row, sel.head.col);
+    if (text) await copyToClipboard(text);
+    setTouchSel(null);
+    textareaRef.current?.focus({ preventScroll: true });
+  };
+  const toggleKeyboard = () => {
+    const area = textareaRef.current;
+    if (!area) return;
+    if (document.activeElement === area) area.blur();
+    else {
+      setOwner("terminal");
+      area.focus({ preventScroll: true });
+    }
+  };
+  const isTouchPointer = (event: React.PointerEvent) => touchUi && event.pointerType !== "mouse";
   /**
    * Reclaim the hidden textarea so printables keep reaching the PTY.
    * `hard` schedules rAF + rAF + setTimeout(0) after an immediate focus —
@@ -583,6 +795,29 @@ export function TerminalSubstrate({
     }
   };
 
+  // iOS keeps the layout viewport full-height when the keyboard opens; follow the visual viewport so the terminal and key bar
+  // stay above it.
+  React.useEffect(() => {
+    if (!touchUi) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => {
+      const next = keyboardInset(vv, window.innerHeight);
+      setKb((c) => (c.open === next.open && c.top === next.top && c.height === next.height ? c : next));
+      if (next.open) window.scrollTo(0, 0);
+    };
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, [touchUi]);
+  React.useEffect(() => {
+    if (touchUi) setTouchSel(null);
+  }, [touchUi, activeSessionId]);
+
   // Native non-passive wheel: React's delegated onWheel is passive in the
   // browsers we ship, so preventDefault there cannot stop the outer UI from
   // stealing the gesture. Match AppTopChrome / useScrollBoundaryLock.
@@ -734,9 +969,14 @@ export function TerminalSubstrate({
       data-terminal-mode={mode}
       data-terminal-owner={owner}
       data-terminal-visible={visible ? "true" : "false"}
+      data-touch-ui={touchUi ? "true" : undefined}
+      data-keyboard-open={touchUi && kb.open ? "true" : undefined}
       style={{
         ...terminalStyle,
         ...(mode === "docked" ? { height: dockHeight } : undefined),
+        ...(touchUi && kb.open
+          ? { position: "fixed" as const, inset: "auto", left: 0, right: 0, top: kb.top, height: kb.height, zIndex: 60 }
+          : undefined),
       }}
     >
       {mode === "docked" ? (
@@ -929,6 +1169,11 @@ export function TerminalSubstrate({
         className="buzz-terminal-viewport px-5 pt-2"
         data-testid="buzz-terminal-viewport"
         onPointerDown={(event) => {
+          if (isTouchPointer(event)) {
+            event.preventDefault();
+            touchDown(event);
+            return;
+          }
           if (event.button > 2) return;
           // Always claim keyboard focus on viewport interaction — even before
           // the canvas exists. herdr (and other mouse-mode TUIs) call
@@ -998,6 +1243,10 @@ export function TerminalSubstrate({
           }
         }}
         onPointerMove={(event) => {
+          if (isTouchPointer(event)) {
+            touchMove(event);
+            return;
+          }
           const canvas = canvasRef.current;
           if (!canvas) return;
           const bounds = canvas.getBoundingClientRect();
@@ -1053,6 +1302,10 @@ export function TerminalSubstrate({
           if (result.lines !== 0) onScrollRef.current(result.lines);
         }}
         onPointerUp={(event) => {
+          if (isTouchPointer(event)) {
+            touchUp(event);
+            return;
+          }
           const canvas = canvasRef.current;
           const metrics = cellMetricsRef.current;
           if (mouseReportingRef.current && onMouseRef.current && canvas) {
@@ -1097,6 +1350,10 @@ export function TerminalSubstrate({
           );
         }}
         onPointerCancel={(event) => {
+          if (isTouchPointer(event)) {
+            touchCancel();
+            return;
+          }
           if (pointerScrollRef.current.id === event.pointerId) {
             pointerScrollRef.current.id = -1;
           }
@@ -1110,6 +1367,10 @@ export function TerminalSubstrate({
           reclaimTerminalInputFocus({ hard: true, claimOwner: true });
         }}
         onContextMenu={(event) => {
+          if (touchUi) {
+            event.preventDefault();
+            return;
+          }
           // No custom Term menu — always suppress the browser menu. Native
           // contextmenu after right-click steals focus from the hidden
           // textarea asynchronously; hard reclaim races that steal.
@@ -1195,6 +1456,33 @@ export function TerminalSubstrate({
             </div>
           ))}
         </div>
+        {touchUi && touchSel ? (
+          <TouchSelectionOverlay
+            sel={touchSel}
+            metrics={cellMetrics}
+            columns={viewport.columns}
+            canvas={canvasRef.current}
+            onCopy={() => void copySelection()}
+            onPaste={() => void pasteFromClipboard()}
+            onDone={() => setTouchSel(null)}
+          />
+        ) : null}
+        {touchUi && pasteBox ? (
+          <textarea
+            aria-label="Paste here"
+            autoFocus
+            className="buzz-terminal-pastebox"
+            data-testid="terminal-pastebox"
+            placeholder="Long-press, Paste, then tap away"
+            onPaste={(event) => {
+              event.preventDefault();
+              sendInput(encodePaste(event.clipboardData.getData("text/plain"), bracketedPaste));
+              setPasteBox(false);
+              textareaRef.current?.focus({ preventScroll: true });
+            }}
+            onBlur={() => setPasteBox(false)}
+          />
+        ) : null}
         {welcomeVisible && banner ? (
           <canvas className="buzz-terminal-welcome" ref={bannerCanvasRef} />
         ) : null}
@@ -1255,9 +1543,83 @@ export function TerminalSubstrate({
           tabIndex={0}
         />
       </div>
+      {touchUi ? (
+        <TerminalTouchBar
+          ctrl={mods.ctrl}
+          alt={mods.alt}
+          onToggleCtrl={() => setMods((m) => ({ ...m, ctrl: !m.ctrl }))}
+          onToggleAlt={() => setMods((m) => ({ ...m, alt: !m.alt }))}
+          onKey={(seq) => sendInput(seq)}
+          onPaste={() => void pasteFromClipboard()}
+          keyboardOpen={kb.open}
+          onToggleKeyboard={toggleKeyboard}
+        />
+      ) : null}
       <div aria-live="polite" className="sr-only">
         {owner === "terminal" ? "Buzz Term mode" : "Buzz mode"}
       </div>
     </section>
+  );
+}
+
+function TouchSelectionOverlay({
+  sel,
+  metrics,
+  columns,
+  canvas,
+  onCopy,
+  onPaste,
+  onDone,
+}: {
+  sel: { anchor: { row: number; col: number }; head: { row: number; col: number }; done: boolean };
+  metrics: CellMetrics;
+  columns: number;
+  canvas: HTMLCanvasElement | null;
+  onCopy: () => void;
+  onPaste: () => void;
+  onDone: () => void;
+}) {
+  const [a, b] =
+    sel.anchor.row < sel.head.row || (sel.anchor.row === sel.head.row && sel.anchor.col <= sel.head.col)
+      ? [sel.anchor, sel.head]
+      : [sel.head, sel.anchor];
+  const left = canvas?.offsetLeft ?? 0;
+  const top = canvas?.offsetTop ?? 0;
+  const rects: React.ReactNode[] = [];
+  for (let row = a.row; row <= b.row; row += 1) {
+    const c0 = row === a.row ? a.col : 0;
+    const c1 = row === b.row ? b.col : columns - 1;
+    rects.push(
+      <div
+        key={row}
+        className="buzz-terminal-touch-sel"
+        style={{
+          left: left + c0 * metrics.width,
+          top: top + row * metrics.height,
+          width: (c1 - c0 + 1) * metrics.width,
+          height: metrics.height,
+        }}
+      />,
+    );
+  }
+  return (
+    <>
+      <div aria-hidden="true" data-testid="terminal-touch-selection" style={{ pointerEvents: "none" }}>
+        {rects}
+      </div>
+      {sel.done ? (
+        <div
+          className="buzz-terminal-touch-menu"
+          data-testid="terminal-touch-menu"
+          style={{ left: Math.max(8, left + a.col * metrics.width), top: Math.max(4, top + a.row * metrics.height - 44) }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+        >
+          <button type="button" onClick={onCopy}>Copy</button>
+          <button type="button" onClick={onPaste}>Paste</button>
+          <button type="button" onClick={onDone}>Done</button>
+        </div>
+      ) : null}
+    </>
   );
 }

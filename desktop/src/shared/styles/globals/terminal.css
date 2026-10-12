@@ -334,4 +334,88 @@
       transition: none;
     }
   }
+
+  /* Touch (phones/tablets): key bar, selection, keyboard-aware layout. */
+  .buzz-terminal-substrate[data-touch-ui="true"] {
+    overscroll-behavior: none;
+    -webkit-touch-callout: none;
+  }
+  .buzz-terminal-substrate[data-touch-ui="true"] .buzz-terminal-viewport {
+    flex: 1 1 0;
+    height: auto;
+  }
+  .buzz-terminal-substrate[data-touch-ui="true"] .buzz-terminal-input {
+    font-size: 16px; /* >=16px stops iOS zooming the page on focus */
+    left: 0;
+    top: 0;
+    pointer-events: none;
+  }
+  .buzz-terminal-touchbar {
+    background: hsl(var(--background, 0 0% 100%));
+    border-top: 1px solid hsl(var(--border, 0 0% 80%));
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+    -webkit-overflow-scrolling: touch;
+  }
+  .buzz-terminal-substrate[data-keyboard-open="true"] .buzz-terminal-touchbar {
+    padding-bottom: 6px;
+  }
+  .buzz-terminal-touch-key {
+    background: hsl(var(--muted, 0 0% 94%));
+    border: 1px solid hsl(var(--border, 0 0% 80%));
+    border-radius: 8px;
+    color: inherit;
+    flex: 1 0 auto;
+    font: 600 14px "JetBrains Mono", monospace;
+    min-height: 40px;
+    min-width: 40px;
+    padding: 0 10px;
+    touch-action: manipulation;
+    user-select: none;
+  }
+  .buzz-terminal-touch-key-on {
+    background: hsl(var(--primary, 220 90% 50%));
+    color: hsl(var(--primary-foreground, 0 0% 100%));
+  }
+  .buzz-terminal-touch-sel {
+    background: rgba(80, 140, 255, 0.35);
+    pointer-events: none;
+    position: absolute;
+  }
+  .buzz-terminal-touch-menu {
+    background: hsl(var(--popover, 0 0% 100%));
+    border: 1px solid hsl(var(--border, 0 0% 80%));
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    position: absolute;
+    z-index: 5;
+  }
+  .buzz-terminal-touch-menu button {
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: inherit;
+    font: 600 14px system-ui, sans-serif;
+    min-height: 36px;
+    padding: 0 12px;
+  }
+  .buzz-terminal-pastebox {
+    background: hsl(var(--popover, 0 0% 100%));
+    border: 1px solid hsl(var(--border, 0 0% 80%));
+    border-radius: 8px;
+    color: inherit;
+    font-size: 16px;
+    left: 12px;
+    padding: 10px;
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    z-index: 6;
+  }
 }
