@@ -117,40 +117,57 @@ function collectMembers(events: NostrEvent[]) {
 async function fetchChannels(
   includeOpenDirectory: boolean,
 ): Promise<ChannelInfo[]> {
+  // Every relay HTTP request needs its own NIP-98 signature (payload-bound, replay-checked). With a remote NIP-46 signer
+  // (Primal on iOS) each signature is a multi-second round trip, so the channel list is built from as few requests as
+  // possible: round 1 = my memberships + DM visibility, round 2 = channel metadata + missing member lists + recency.
   const my = me();
-  const [chain, openMeta, hiddenDms] = await Promise.all([
-    (async () => {
-      const memberEvents = await queryAll({ kinds: [39002], "#p": [my] });
-      const ids = [
-        ...new Set(memberEvents.map(dTag).filter((x): x is string => !!x)),
-      ].sort();
-      const meta = ids.length
-        ? await queryRelay([{ kinds: [39000], "#d": ids, limit: ids.length }])
-        : [];
-      return { meta, memberEvents };
-    })(),
+  const isDmVisibility = (e: NostrEvent) => e.kind === KIND_DM_VISIBILITY;
+  const [round1, openMeta] = await Promise.all([
+    queryRelay([
+      { kinds: [39002], "#p": [my], limit: DIRECTORY_PAGE_SIZE },
+      { kinds: [KIND_DM_VISIBILITY], "#p": [my], limit: 1 },
+    ]),
     includeOpenDirectory
       ? queryAll({ kinds: [39000] })
       : Promise.resolve([] as NostrEvent[]),
-    queryRelay([{ kinds: [KIND_DM_VISIBILITY], "#p": [my], limit: 1 }])
-      .then((evs) => {
-        const latest = evs.reduce<NostrEvent | null>(
-          (a, e) => (!a || e.created_at > a.created_at ? e : a),
-          null,
-        );
-        return new Set(
-          latest
-            ? latest.tags.filter((t) => t[0] === "h" && t[1]).map((t) => t[1])
-            : [],
-        );
-      })
-      .catch(() => new Set<string>()),
   ]);
+  let memberEvents = round1.filter((e) => e.kind === 39002);
+  if (memberEvents.length >= DIRECTORY_PAGE_SIZE)
+    memberEvents = await queryAll({ kinds: [39002], "#p": [my] }); // rare: page through the full membership set
+  const latestVis = round1
+    .filter(isDmVisibility)
+    .reduce<NostrEvent | null>((a, e) => (!a || e.created_at > a.created_at ? e : a), null);
+  const hiddenDms = new Set(
+    latestVis ? latestVis.tags.filter((t) => t[0] === "h" && t[1]).map((t) => t[1]) : [],
+  );
+  const membership = collectMembers(memberEvents);
+  const ids = [...new Set(memberEvents.map(dTag).filter((x): x is string => !!x))].sort();
+  const openIds = openMeta.map(dTag).filter((x): x is string => !!x && !ids.includes(x));
+  const allIds = [...ids, ...openIds];
+  const missing = allIds.filter((id) => !membership.has(id));
 
-  const membership = collectMembers(chain.memberEvents);
-  const memberIds = new Set(chain.meta.map(dTag));
+  const round2: NostrEvent[] = [];
+  if (ids.length || allIds.length) {
+    const recency = (id: string) => ({ kinds: RECENCY_KINDS, "#h": [id], limit: 1 });
+    // First request carries metadata + missing members + as many recency filters as fit one batch.
+    const head: Filter[] = [];
+    if (ids.length) head.push({ kinds: [39000], "#d": ids, limit: ids.length });
+    if (missing.length) head.push({ kinds: [39002], "#d": missing, limit: missing.length });
+    const room = Math.max(0, LAST_MESSAGE_BATCH - head.length);
+    const first = [...head, ...allIds.slice(0, room).map(recency)];
+    round2.push(...(await queryRelay(first)));
+    for (let i = room; i < allIds.length; i += LAST_MESSAGE_BATCH)
+      round2.push(
+        ...(await queryRelay(allIds.slice(i, i + LAST_MESSAGE_BATCH).map(recency)).catch(() => [])),
+      );
+  }
+  const meta = round2.filter((e) => e.kind === 39000);
+  for (const [k, v] of collectMembers(round2.filter((e) => e.kind === 39002))) membership.set(k, v);
+  const messages = round2.filter((e) => e.kind !== 39000 && e.kind !== 39002);
+
+  const memberIds = new Set(meta.map(dTag));
   const channels: ChannelInfo[] = [];
-  for (const ev of chain.meta) {
+  for (const ev of meta) {
     const c = channelInfoFromEvent(ev, true);
     if (c) channels.push(c);
   }
@@ -160,46 +177,19 @@ async function fetchChannels(
     const c = channelInfoFromEvent(ev, false);
     if (c) channels.push(c);
   }
-
-  if (channels.length) {
-    const ids = channels.map((c) => c.id);
-    const missing = ids.filter((id) => !membership.has(id));
-    const lastFilters = ids.map((id) => ({
-      kinds: RECENCY_KINDS,
-      "#h": [id],
-      limit: 1,
-    }));
-    const [members, messages] = await Promise.all([
-      missing.length
-        ? queryRelay([
-            { kinds: [39002], "#d": missing, limit: missing.length },
-          ]).catch(() => [])
-        : Promise.resolve([]),
-      (async () => {
-        const out: NostrEvent[] = [];
-        for (let i = 0; i < lastFilters.length; i += LAST_MESSAGE_BATCH)
-          out.push(
-            ...(await queryRelay(lastFilters.slice(i, i + LAST_MESSAGE_BATCH))),
-          );
-        return out;
-      })(),
-    ]);
-    for (const [k, v] of collectMembers(members)) membership.set(k, v);
-    const lastBy = new Map<string, number>();
-    for (const ev of messages) {
-      const h = firstTag(ev, "h");
-      if (h && ev.created_at > (lastBy.get(h) ?? 0))
-        lastBy.set(h, ev.created_at);
+  const lastBy = new Map<string, number>();
+  for (const ev of messages) {
+    const h = firstTag(ev, "h");
+    if (h && ev.created_at > (lastBy.get(h) ?? 0)) lastBy.set(h, ev.created_at);
+  }
+  for (const c of channels) {
+    const pk = membership.get(c.id);
+    if (pk) {
+      c.member_count = pk.length;
+      c.member_pubkeys = pk;
     }
-    for (const c of channels) {
-      const pk = membership.get(c.id);
-      if (pk) {
-        c.member_count = pk.length;
-        c.member_pubkeys = pk;
-      }
-      const ts = lastBy.get(c.id);
-      if (ts) c.last_message_at = timestampToIso(ts);
-    }
+    const ts = lastBy.get(c.id);
+    if (ts) c.last_message_at = timestampToIso(ts);
   }
   return hiddenDms.size
     ? channels.filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id))
