@@ -16,6 +16,7 @@ import {
   AttachmentTitle,
 } from "@/shared/ui/attachment";
 import { huddlesAvailable } from "@/features/huddle/lib/huddlesAvailable";
+import { WebHuddleNotice } from "@/features/huddle/components/WebHuddleNotice";
 
 type WaveMessageAttachmentProps = {
   channelId?: string | null;
@@ -62,7 +63,7 @@ export function WaveMessageAttachment({
     ],
   );
 
-  return (
+  const card = (
     <Attachment
       className="buzz-wave-hover-trigger mt-1 max-w-md"
       data-testid="message-wave-attachment"
@@ -78,9 +79,11 @@ export function WaveMessageAttachment({
             text={fallbackText}
           />
         </AttachmentTitle>
-        <AttachmentDescription>
-          {huddlesAvailable() ? "Start a huddle to talk to them." : "Huddles are available in the desktop app."}
-        </AttachmentDescription>
+        {huddlesAvailable() ? (
+          <AttachmentDescription>
+            Start a huddle to talk to them.
+          </AttachmentDescription>
+        ) : null}
       </AttachmentContent>
       {huddlesAvailable() ? (
       <AttachmentActions>
@@ -96,4 +99,5 @@ export function WaveMessageAttachment({
       ) : null}
     </Attachment>
   );
+  return huddlesAvailable() ? card : <WebHuddleNotice>{card}</WebHuddleNotice>;
 }

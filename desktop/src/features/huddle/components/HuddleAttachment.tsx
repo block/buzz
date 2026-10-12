@@ -23,6 +23,8 @@ import {
   AttachmentTitle,
 } from "@/shared/ui/attachment";
 import { useHuddle } from "../HuddleContext";
+import { huddlesAvailable } from "../lib/huddlesAvailable";
+import { WebHuddleNotice } from "./WebHuddleNotice";
 import { isHuddleStartStale } from "../lib/huddleCardState";
 import { formatHuddleActionError } from "../lib/huddleError";
 
@@ -249,6 +251,48 @@ export function HuddleAttachment({
           </AttachmentDescription>
         </AttachmentContent>
       </Attachment>
+    );
+  }
+
+  if (!huddlesAvailable()) {
+    // Web: read-only card, no Join/View; tapping explains huddles are desktop-only.
+    return (
+      <WebHuddleNotice>
+        <Attachment
+          className={cn("w-96 max-w-full shadow-none", className)}
+          data-testid="huddle-attachment"
+          data-huddle-state={displayEnded ? "ended" : "active"}
+        >
+          <AttachmentMedia>
+            <Headphones />
+          </AttachmentMedia>
+          <AttachmentContent>
+            <AttachmentTitle>
+              {displayEnded ? (
+                <>
+                  Huddle<span aria-hidden="true"> · </span>Ended
+                </>
+              ) : (
+                `${message.author || "Someone"} started a huddle`
+              )}
+            </AttachmentTitle>
+            <AttachmentDescription>
+              {participantLabel(participantCount)}
+            </AttachmentDescription>
+          </AttachmentContent>
+          {displayEnded ? null : (
+            <AttachmentActions>
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+                data-testid="huddle-web-chip"
+              >
+                <Headphones className="h-3 w-3" />
+                Huddle
+              </span>
+            </AttachmentActions>
+          )}
+        </Attachment>
+      </WebHuddleNotice>
     );
   }
 
