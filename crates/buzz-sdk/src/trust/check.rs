@@ -2,9 +2,12 @@
 //! without the origin.
 //!
 //! Every kept envelope is verified again, and every event the trail cites
-//! must have one that verifies. This shows the cited events are intact; it
-//! does not re-derive the interpretation, which a new read reproduces from
-//! the same events, scope, and policy.
+//! must have one that verifies. This authenticates the cited events only.
+//! It does not check anything the reader wrote around them: summaries and
+//! the interpretation, authority and relationship labels, fetch provenance
+//! (origin, coverage records, observation times are unsigned), or coverage
+//! and completeness. A new read reproduces those from the same events,
+//! scope, and policy. [`NOT_CHECKED`] says so in every result.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,6 +16,15 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::SdkError;
+
+/// What a recheck does not establish, carried in every [`EvidenceCheck`] so
+/// a passing result cannot be read as a verified trail.
+pub const NOT_CHECKED: &[&str] = &[
+    "summaries and the interpretation of events",
+    "authority and relationship labels",
+    "fetch provenance: origin, coverage records and observation times are unsigned",
+    "coverage or completeness: only events the viewer was served are kept",
+];
 
 /// What rechecking a saved trail found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,6 +38,8 @@ pub struct EvidenceCheck {
     pub failed: Vec<String>,
     /// Events the trail cites with no envelope that verifies.
     pub unsupported: Vec<String>,
+    /// What this check does not establish ([`NOT_CHECKED`]).
+    pub not_checked: &'static [&'static str],
 }
 
 impl EvidenceCheck {
@@ -71,6 +85,7 @@ pub fn check_evidence(saved: &Value) -> Result<EvidenceCheck, SdkError> {
         verified,
         failed,
         unsupported,
+        not_checked: NOT_CHECKED,
     })
 }
 

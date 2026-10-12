@@ -2099,7 +2099,11 @@ pub enum TrustCmd {
     /// Recheck a saved `trust trail` JSON result from its own evidence
     /// section, without contacting any relay: every kept envelope must
     /// verify as recorded, and every event the trail cites must have one
-    /// that verifies. Exits non-zero when it does not hold.
+    /// that verifies. Exits non-zero when it does not hold. This
+    /// authenticates the signed events only; it does not check the saved
+    /// summaries, authority or relationship labels, fetch provenance, or
+    /// completeness (listed under `not_checked`). Run a new `trust trail`
+    /// to reproduce those.
     #[command(
         after_help = "Example:\n  buzz trust trail --request <event-id> --channel <uuid> > trail.json\n  buzz trust recheck --file trail.json"
     )]

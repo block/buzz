@@ -73,6 +73,10 @@ impl WorkTrail {
             "\nevidence: {} signed events kept as served in the JSON output ({invalid} fail verification and support nothing)",
             self.evidence.events.len()
         );
+        let _ = writeln!(
+            out,
+            "  `trust recheck` authenticates those events offline, not this view, its labels, provenance or coverage"
+        );
         out
     }
 }

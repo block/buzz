@@ -1314,6 +1314,19 @@ fn saved_trail_rechecks_its_evidence_without_the_origin() {
     assert_eq!(check.events, first.evidence.events.len());
     assert_eq!(check.verified, check.events - 1);
 
+    // The recheck authenticates envelopes, not what the reader wrote around
+    // them: an edited summary or authority label still passes, and every
+    // result says so.
+    let mut relabeled = saved.clone();
+    relabeled["tasks"][0]["contributions"][0]["summary"] = Value::String("rewritten".into());
+    let check = super::check_evidence(&relabeled).expect("check");
+    assert!(check.holds());
+    assert_eq!(check.not_checked, super::check::NOT_CHECKED);
+    let unchecked = check.not_checked.join("; ");
+    for needle in ["summaries", "authority", "provenance", "completeness"] {
+        assert!(unchecked.contains(needle), "{needle} missing: {unchecked}");
+    }
+
     // Editing a kept envelope is caught, and the claims it supported are
     // no longer supported.
     let c2 = c.c2.id.to_hex();
@@ -1330,6 +1343,9 @@ fn saved_trail_rechecks_its_evidence_without_the_origin() {
     );
     assert!(check.unsupported.contains(&c2), "{check:#?}");
     assert!(first.readable().contains("signed events kept as served"));
+    assert!(first
+        .readable()
+        .contains("authenticates those events offline, not this view"));
 }
 
 /// A repository with one older PR by the actor and one by someone else.
