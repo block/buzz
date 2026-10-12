@@ -67,6 +67,10 @@ export function BuzzTermPage() {
   // Terminals offered by the desktop and Direct up → open maximized immediately (like the desktop's left-nav Buzz Term).
   const termsOff = !!info && info.status === "on" && !info.terminals;
   const termReady = usable && !!info && info.status === "on" && info.terminals;
+  // Terminals switched off on the desktop: close the panel so the page explains it (a brief Direct flap does not close it).
+  React.useEffect(() => {
+    if (termsOff) setTerminalPanelMode("closed");
+  }, [termsOff]);
   const openedRef = React.useRef(false);
   React.useEffect(() => {
     if (!termReady) {
