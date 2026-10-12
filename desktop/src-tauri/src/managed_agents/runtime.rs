@@ -863,7 +863,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     // Last change to the command: everything after `--` is the harness argv.
     if let Some(sandbox) = &sandbox {
         let demo_config_home = crate::build_identity::demo_config_home()?;
-        let templates_dir = super::sandbox::cli_templates_dir();
+        let data_reads = super::sandbox::buzz_data_reads();
         let binaries: Vec<&std::path::Path> = [
             Some(resolved_acp_command.as_path()),
             Some(std::path::Path::new(&resolved_agent_command)),
@@ -878,7 +878,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
             home: dirs::home_dir().as_deref(),
             nest: super::nest_dir().as_deref(),
             demo_config_home: demo_config_home.as_deref(),
-            templates_dir: templates_dir.as_deref(),
+            data_reads: &data_reads,
         });
         super::sandbox::finish_sandboxed_command(
             &mut command,

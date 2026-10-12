@@ -239,8 +239,8 @@ pub(crate) struct GrantInputs<'a> {
     pub nest: Option<&'a Path>,
     /// Demo-build agent config root, read-write when present.
     pub demo_config_home: Option<&'a Path>,
-    /// Channel-templates directory `buzz channel-templates` reads.
-    pub templates_dir: Option<&'a Path>,
+    /// Buzz-owned data directories agents read ([`buzz_data_reads`]).
+    pub data_reads: &'a [PathBuf],
 }
 
 /// Compute the per-launch grants. Only existing directories are granted, and
@@ -269,9 +269,7 @@ pub(crate) fn spawn_grants(inputs: &GrantInputs<'_>) -> SandboxGrants {
                 .filter(|dir| dir.starts_with(home)),
         );
     }
-    // `buzz channel-templates` reads only this subdirectory of the desktop's
-    // app-data directory; the rest of it (agent keys) stays out of reach.
-    read.extend(inputs.templates_dir.map(Path::to_path_buf));
+    read.extend(inputs.data_reads.iter().cloned());
 
     let mut allow = Vec::new();
     // A user-configured repos directory is a symlink out of the nest.
@@ -296,8 +294,24 @@ pub(crate) fn spawn_grants(inputs: &GrantInputs<'_>) -> SandboxGrants {
     grants
 }
 
+/// Buzz-owned data directories agents read: the templates
+/// `buzz channel-templates` uses, and the Node runtime and npm tools Buzz
+/// installs (`claude-agent-acp`, `codex-acp`). An npm tool's `bin/` entry links
+/// into the prefix's `lib/node_modules`, so the whole prefix is granted. The
+/// rest of the desktop's app-data directory (agent keys) stays out of reach.
+pub(crate) fn buzz_data_reads() -> Vec<PathBuf> {
+    [
+        cli_templates_dir(),
+        super::buzz_managed_npm_prefix(),
+        super::buzz_managed_node_root(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// The directory `buzz channel-templates` reads templates from.
-pub(crate) fn cli_templates_dir() -> Option<PathBuf> {
+fn cli_templates_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|dir| dir.join(CLI_TEMPLATES_BUNDLE_IDENTIFIER).join("templates"))
 }
 

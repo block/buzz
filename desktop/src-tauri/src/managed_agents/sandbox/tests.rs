@@ -138,7 +138,7 @@ fn grants_for(fixture: &GrantFixture, binaries: &[&Path], path_env: &str) -> San
         home: Some(&fixture.home),
         nest: Some(&fixture.nest),
         demo_config_home: None,
-        templates_dir: None,
+        data_reads: &[],
     })
 }
 
@@ -204,7 +204,7 @@ fn grants_allow_the_demo_config_home() {
         home: Some(&f.home),
         nest: Some(&f.nest),
         demo_config_home: Some(&demo),
-        templates_dir: None,
+        data_reads: &[],
     });
 
     assert_eq!(grants.allow, [demo]);
@@ -250,10 +250,13 @@ fn invalid_profile_refuses_with_the_validator_errors() {
 }
 
 #[test]
-fn grants_read_only_the_templates_dir() {
+fn grants_read_only_buzz_data_dirs() {
     let f = grant_fixture();
     let templates = f.root.join("app-data/xyz.block.buzz.app/templates");
+    let node_tools = f.root.join("app-data/Buzz/node-tools");
     fs::create_dir_all(&templates).unwrap();
+    fs::create_dir_all(&node_tools).unwrap();
+    let missing = f.root.join("app-data/Buzz/runtimes/node");
 
     let grants = spawn_grants(&GrantInputs {
         binaries: &[],
@@ -261,8 +264,24 @@ fn grants_read_only_the_templates_dir() {
         home: Some(&f.home),
         nest: Some(&f.nest),
         demo_config_home: None,
-        templates_dir: Some(&templates),
+        data_reads: &[templates.clone(), node_tools.clone(), missing],
     });
 
-    assert_eq!(grants.read, [templates]);
+    assert_eq!(grants.read, [templates, node_tools]);
+    assert!(grants.allow.is_empty());
+}
+
+/// Buzz's npm tools are `bin/` links into `lib/node_modules`; granting only
+/// the binary's directory left `claude-agent-acp` unable to load its code.
+#[test]
+fn buzz_data_reads_cover_managed_node_tools() {
+    let reads = buzz_data_reads();
+    for dir in [
+        crate::managed_agents::buzz_managed_npm_prefix(),
+        crate::managed_agents::buzz_managed_node_root(),
+        cli_templates_dir(),
+    ] {
+        let dir = dir.expect("data dir");
+        assert!(reads.contains(&dir), "{} missing", dir.display());
+    }
 }

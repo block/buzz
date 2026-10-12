@@ -14,7 +14,8 @@ Agents **can**:
 - Read and write their workspace, the Buzz nest (`~/.buzz`; `~/.buzz-dev` for
   dev builds), including a `REPOS` folder you pointed somewhere else.
 - Run the tools on your `PATH`, and use common toolchains (Node, Bun, Python,
-  Rust, Go, Nix, mise, Homebrew) and their caches.
+  Rust, Go, Nix, mise, Homebrew) and their caches. They can also read the Node
+  runtime and agent adapters Buzz installs, such as `claude-agent-acp`.
 - Use their own state: `~/.claude`, `~/.codex`, Goose config, and the macOS
   keychain (for Claude Code and Codex logins). On macOS also `~/.cache` and
   `~/Library/Caches`.
