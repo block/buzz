@@ -25,7 +25,7 @@ class _MessageBubbleShape extends ShapeBorder {
           rect,
           topLeft: start ? round : joined,
           topRight: round,
-          bottomLeft: end ? round : joined,
+          bottomLeft: joined,
           bottomRight: round,
         ),
       );

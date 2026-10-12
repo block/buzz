@@ -115,7 +115,7 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
 void main() {
   testWidgets(
-    'combined capsule hides counts and opens details without toggling',
+    'combined capsule shows total count and opens details without toggling',
     (tester) async {
       final toggled = <String>[];
       var added = false;
@@ -123,7 +123,7 @@ void main() {
         tester,
         combined: true,
         reactions: [
-          _reaction(),
+          _reaction(count: 3),
           _reaction(emoji: _eyes),
         ],
         onToggle: toggled.add,
@@ -131,12 +131,13 @@ void main() {
         onAddReaction: () => added = true,
       );
       expect(find.text('1'), findsNothing);
+      expect(find.text('4'), findsOneWidget);
       expect(find.byKey(const ValueKey('add-reaction-pill')), findsNothing);
       expect(
         tester
             .getSize(find.byKey(const ValueKey('combined-reaction-tray')))
             .width,
-        lessThan(70),
+        lessThan(100),
       );
       await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
       await tester.pumpAndSettle();

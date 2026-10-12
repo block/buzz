@@ -133,12 +133,24 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     }
   }
 
+  // Match the smile-plus affordance used by Flutter instead of a plain plus.
+  private static let addReactionImage: UIImage = {
+    UIGraphicsImageRenderer(size: CGSize(width: 26, height: 26)).image { context in
+      let face = UIImage(systemName: "face.smiling")
+      face?.draw(in: CGRect(x: 0, y: 0, width: 22, height: 22))
+      context.cgContext.setBlendMode(.clear)
+      context.cgContext.fillEllipse(in: CGRect(x: 13, y: 13, width: 13, height: 13))
+      context.cgContext.setBlendMode(.normal)
+      UIImage(systemName: "plus.circle")?.draw(in: CGRect(x: 14, y: 14, width: 12, height: 12))
+    }.withRenderingMode(.alwaysTemplate)
+  }()
+
   private func rebuildFilters() {
     for child in filters.arrangedSubviews { child.removeFromSuperview() }
     if canAddReaction {
       let add = UIButton(type: .system)
       var config = UIButton.Configuration.gray()
-      config.image = UIImage(systemName: "face.smiling.badge.plus") ?? UIImage(systemName: "plus.circle")
+      config.image = Self.addReactionImage
       config.cornerStyle = .capsule
       config.baseForegroundColor = foregroundColor
       add.configuration = config

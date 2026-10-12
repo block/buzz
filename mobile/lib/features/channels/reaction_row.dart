@@ -148,7 +148,8 @@ class ReactionRow extends StatelessWidget {
           alignment: Alignment.centerLeft,
           child: Semantics(
             button: true,
-            label: 'View reactions',
+            label:
+                'View ${reactions.fold<int>(0, (sum, reaction) => sum + reaction.count)} reactions',
             child: GestureDetector(
               key: const ValueKey('combined-reaction-tray'),
               behavior: HitTestBehavior.opaque,
@@ -161,8 +162,12 @@ class ReactionRow extends StatelessWidget {
                   border: Border.all(color: context.colors.surface, width: 2),
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.all(Grid.quarter),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.xxs + Grid.quarter,
+                    vertical: Grid.half,
+                  ),
                   child: Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     spacing: Grid.quarter,
                     runSpacing: Grid.quarter,
                     children: [
@@ -171,6 +176,13 @@ class ReactionRow extends StatelessWidget {
                           padding: const EdgeInsets.all(Grid.quarter),
                           child: _ReactionEmoji(reaction: reaction, size: 20),
                         ),
+                      Padding(
+                        padding: const EdgeInsets.only(left: Grid.half),
+                        child: Text(
+                          '${reactions.fold<int>(0, (sum, reaction) => sum + reaction.count)}',
+                          style: context.textTheme.labelSmall,
+                        ),
+                      ),
                     ],
                   ),
                 ),

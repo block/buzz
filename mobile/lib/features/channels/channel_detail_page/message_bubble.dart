@@ -160,9 +160,7 @@ class _MessageBubble extends HookConsumerWidget {
             ),
             child: MessageFooterLayout(
               animateSize: true,
-              overlap: message.reactions.isNotEmpty
-                  ? Grid.twelve + Grid.quarter
-                  : 0,
+              overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
               child: RepaintBoundary(
                 key: messageSnapshotKey,
                 child: Row(
