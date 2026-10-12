@@ -36,6 +36,7 @@ import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
+import '../../shared/composer/composer_seed_provider.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/deeplink/deep_link.dart';

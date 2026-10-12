@@ -12,6 +12,7 @@ import os.log
   private var nativeMessagePresentationCoordinator: NativeMessagePresentationCoordinator?
   private var mediaUploadChannel: FlutterMethodChannel?
   private var pushChannel: FlutterMethodChannel?
+  private var shareInboxChannel: FlutterMethodChannel?
   private let apnsRegistrationBuffer = APNsRegistrationBuffer()
   private let pushNavigationBuffer = BuzzPushNavigationBuffer()
   private var apnsDeviceToken: Data?
@@ -33,6 +34,9 @@ import os.log
   private var communityKeyboardChannel: FlutterMethodChannel?
   private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
+  private lazy var shareInboxBridge = BuzzShareInboxBridge(
+    appGroupIdentifier: appGroupIdentifier
+  )
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -147,6 +151,15 @@ import os.log
       generator.prepare()
       generator.notificationOccurred(call.method == "error" ? .error : .success)
       result(nil)
+    }
+    shareInboxChannel = FlutterMethodChannel(
+      name: "buzz/share_inbox",
+      binaryMessenger: messenger
+    )
+    shareInboxChannel?.setMethodCallHandler { [weak self] call, result in
+      if self?.shareInboxBridge.handle(call, result: result) != true {
+        result(FlutterMethodNotImplemented)
+      }
     }
     qrScannerChannel = FlutterMethodChannel(
       name: "buzz/qr_scanner",
