@@ -164,13 +164,26 @@ Why `wrap`, not `run`:
   through untouched.
 - No supervisor process is left to orphan.
 
-Per-spawn dynamic grants go on the command line (repos target, demo config
-home from `apply_demo_config_home`); static grants live in the profile.
+Implemented in `managed_agents/sandbox.rs`. Static grants live in the
+profile. Per-spawn grants go on the command line (`spawn_grants`):
 
-The helper is the only place the decision is made, and the regression test
-binds the production seam: assert on the `Command` that `spawn_agent_child`
-builds (program is `nono`, args contain `--profile buzz-agent-local` and end
-with `-- <acp path>`), not on the helper in isolation (rule 3).
+- Read: the directories of the resolved `buzz-acp`, agent CLI, and MCP
+  binaries (dev builds run them from the repo's `target/`), user `PATH`
+  entries under `$HOME`, and the CLI's channel-templates directory.
+- Read-write: a `REPOS` symlink target outside the nest, and the demo config
+  root.
+- Never `$HOME` or an ancestor of it; only existing directories.
+
+`NONO_*` env vars are stripped from the command (inherited ones included) and
+reserved in user env (`reserved_env_keys.rs`), because nono reads them as
+flags. A sandboxed spawn also refuses when the workdir is not the nest:
+`default_agent_workdir` falls back to `$HOME`, and the profile's workdir grant
+would then share all of it.
+
+`agent_command` and `finish_sandboxed_command` build the spawn `Command`; the
+tests in `sandbox/tests.rs` exercise those production functions. A sandboxed
+command that skipped `finish_sandboxed_command` runs bare `nono`, which exits
+with usage, so the mistake fails closed rather than running unsandboxed.
 
 ### 3. Nested sandboxes inside the agent
 

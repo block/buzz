@@ -70,6 +70,12 @@ pub struct GlobalAgentConfig {
     /// Preferred ACP runtime for definitions without an explicit runtime.
     #[serde(default)]
     pub preferred_runtime: Option<String>,
+
+    /// Run agents without the nono sandbox. Off (sandboxed) by default, and a
+    /// config saved without the field also stays sandboxed. Ignored where the
+    /// sandbox is unsupported (Windows), which always runs unsandboxed.
+    #[serde(default)]
+    pub disable_agent_sandbox: bool,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.

@@ -104,6 +104,7 @@ fn policy_for(path: &str) -> MaskPolicy {
         //   session_title                       — display chrome
         //   model / provider                    — catalog ids
         //   effort_level                        — non-secret effort enum
+        //   sandboxed                           — agent sandbox on/off
         //   respond_to / respond_to_allowlist   — gate mode + pubkeys
         //   idle_timeout_seconds / max_turn_duration_seconds / parallelism
         //                                       — numeric limits
