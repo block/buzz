@@ -333,3 +333,53 @@ query, fragment or credentials. Incoming request queries are rejected.
 Host and forwarding headers do not participate in delivery authentication.
 Event signatures, body hashes, timestamps, grant checks and replay protection
 remain enforced. No mobile App Attest audiences or relay activation settings change.
+
+## Web Push profile (`buzz-web`)
+
+Browsers/PWAs enroll a Web Push subscription directly with the gateway, authenticated by NIP-98 from the
+member's own signer (no App Attest, no private keys). The installation reuses the same installation,
+delegation, grant, replay, quota, revocation and reaper machinery as APNs; the relay's NIP-PL matcher
+decides who is woken and enforces channel access exactly as for iOS.
+
+Public routes (CORS-limited to `BUZZ_PUSH_WEB_ALLOWED_ORIGIN`):
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /v1/web/vapid-public-key` | none | VAPID application server key |
+| `POST /v1/web/installations` | NIP-98 (member) | Enroll `{v, subscription:{endpoint,keys}, expires_at}` |
+| `POST /v1/web/delegations` | NIP-98 (same member) | Delegate to a relay executor key, returns `endpoint_grant` |
+| `POST /v1/web/installations/revoke` | NIP-98 (same member) | Revoke |
+
+Subscription endpoints must be HTTPS on Apple, Google, Mozilla or Microsoft push hosts (SSRF guard).
+Subscriptions are sealed with `BUZZ_PUSH_TOKEN_KEYS` like APNs tokens. Deliveries use the existing
+`/v1/deliveries/apns` relay path; for `buzz-web` grants the relay adds a closed content-free `hint`
+(`class`, `event_id`, `channel_id`) that becomes the notification line and deep link. APNs deliveries never
+receive a hint. A 404/410 from the push service returns 410 to the relay (lease endpoint disabled) and
+revokes the installation.
+
+| Variable | Purpose |
+|---|---|
+| `BUZZ_PUSH_WEB_VAPID_PRIVATE_KEY_PATH` | Mounted secret: PEM or base64url P-256 scalar |
+| `BUZZ_PUSH_WEB_VAPID_SUBJECT` | `mailto:` or `https:` contact |
+| `BUZZ_PUSH_WEB_PUBLIC_URL` | Exact external base URL clients sign into NIP-98 `u` |
+| `BUZZ_PUSH_WEB_ALLOWED_ORIGIN` | Browser origin for CORS |
+| `BUZZ_PUSH_IOS_PROFILE=disabled` | Optional web-only mode (no APNs certificate; App Attest root still mounted) |
+
+Requires migration `0006_web_push_profile.sql` (gateway) and relay migration `0057_push_approval_kinds.sql`.
+
+## Co-located deployment on the relay host (Buzz web, proposed)
+
+Run the gateway beside the relay in the existing prod compose project; no new hosts, no RDS.
+
+**Current host (inspected read-only 2026-10-12):** `buzz.huladesk.com` / `buzzadmin.huladesk.com` -> `52.6.245.86` (private `ip-172-26-4-199`, the Lightsail address range; 2 vCPU, 7.6 GiB RAM with about 6 GiB available, 102 GB free of 154 GB). Access: `ssh -i ~/Documents/hulabuzz.pem ubuntu@52.6.245.86`. Compose project `buzz-prod` in `/home/ubuntu/buzz/deploy/compose` (`compose.yml` + `compose.caddy.yml`, network `buzz-net`). Services: relay, pair, postgres (17-alpine, db `buzz`, about 475 MB), redis, minio, caddy, livekit, coturn. Secrets: `/home/ubuntu/buzz/deploy/compose/.env` (mode 600). DNS: Route 53 zone `huladesk.com` (AWS profile `huladesk`).
+
+1. **Back up first:** take timestamped copies of `.env`, `compose.yml`, `compose.caddy.yml`, `Caddyfile`, and a `pg_dumpall --globals-only` plus `pg_dump buzz`, matching the existing `*.bak.<ts>` convention.
+2. **Image:** build `Dockerfile.push-gateway` on the host from a separate code copy, like the relay build (`~/buzz-build-<date>`), and tag it `hulabuzz/push-gateway:<date>`. Set `BUZZ_PUSH_GATEWAY_IMAGE` in `.env`.
+3. **Compose:** add the `push-gateway` service on `buzz-net` with `depends_on: postgres (healthy)` and `restart: unless-stopped`. Publish no ports; 8080 is the API and 8081 the private health/metrics port.
+4. **Database:** in `buzz-prod-postgres-1`, create database `buzz_push_gateway`, an owner role `buzz_push_gateway_owner` (migrations) and a `buzz_push_gateway_runtime` role. Revoke `CONNECT` on `buzz` from both. Run the gateway once with `--migrate-only`.
+5. **DNS (Route 53, profile `huladesk`):** add an `A` record `push.huladesk.com -> 52.6.245.86`, the same pattern as `buzzadmin`/`livekit`.
+6. **Caddy:** append `push.huladesk.com { encode zstd gzip  reverse_proxy push-gateway:8080 }` to `Caddyfile`. Caddy obtains the certificate automatically. Then `docker compose ... restart caddy`.
+7. **Secrets in `.env`:** `BUZZ_PUSH_WEB_VAPID_PRIVATE_KEY` (or a mounted file next to `.env`), `BUZZ_PUSH_WEB_SUBJECT`, `BUZZ_PUSH_WEB_PUBLIC_URL=https://push.huladesk.com`, `BUZZ_PUSH_GRANT_KEYS`, `BUZZ_PUSH_TOKEN_KEYS`, the gateway DB URLs, `BUZZ_PUSH_IOS_PROFILE=disabled`. Add `https://push.huladesk.com` to the relay's CORS origins only if needed (the gateway handles its own CORS).
+8. **Relay:** `BUZZ_PUSH_ENABLED=true`, `BUZZ_PUSH_GATEWAY_DELIVERY_URL=http://push-gateway:8080/v1/deliveries/apns` (internal network), executor key id. Rebuild the relay image with this PR (migration 0057, auto-migrate is on) and `up -d relay`. Keep `pair` pinned.
+9. **Rollback:** restore `.env`/`compose.yml`/`Caddyfile` from the backups, `up -d`, and stop `push-gateway`. The gateway DB can stay; it is isolated.
+10. **Cost:** about $0 extra (same instance). Expect roughly 30-60 MB RAM and a few MB of disk.

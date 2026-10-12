@@ -56,6 +56,9 @@ pub struct AppState {
     pub endpoint_quota_max_deliveries: i64,
     pub now: fn() -> i64,
     pub accepting: Arc<AtomicBool>,
+    /// Optional browser Web Push profile; `None` keeps every `/v1/web/*`
+    /// route at 404 and makes `buzz-web` grants a configuration fault.
+    pub web: Option<Arc<crate::web_http::WebRuntime>>,
 }
 fn error(status: StatusCode, code: &'static str) -> Response {
     (status, Json(ErrorBody { error: code })).into_response()
@@ -743,6 +746,9 @@ async fn deliver(
             .await;
         return error(StatusCode::NOT_FOUND, "invalid_grant");
     }
+    if permit.authority.profile == AppProfile::BuzzWeb {
+        return deliver_web(&s, permit, r, grant.generation).await;
+    }
     if permit.authority.profile != AppProfile::BuzzIosDogfood {
         crate::metrics::record_delivery_error("profile_disabled");
         let _ = s
@@ -795,6 +801,75 @@ async fn deliver(
         }
     };
     delivery_outcome_response(outcome, grant.generation)
+}
+
+/// Web Push leg of `deliver`: open the sealed subscription, build the
+/// content-free payload from the relay hint, encrypt and send with VAPID.
+async fn deliver_web(
+    s: &AppState,
+    permit: crate::authority::DeliveryPermit,
+    r: DeliveryRequest,
+    generation: i64,
+) -> Response {
+    let Some(web) = s.web.clone() else {
+        crate::metrics::record_delivery_error("profile_disabled");
+        let _ = s
+            .authority
+            .finish_delivery(permit, DeliveryDisposition::Retryable)
+            .await;
+        return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
+    };
+    let sub: crate::webpush::WebPushSubscription = match s
+        .token_keyring
+        .open(&permit.authority.token_ciphertext)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+    {
+        Some(sub) => sub,
+        None => {
+            crate::metrics::record_delivery_error("token_custody");
+            let _ = s
+                .authority
+                .finish_delivery(permit, DeliveryDisposition::Retryable)
+                .await;
+            return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+        }
+    };
+    let hint = r.hint.filter(|h| h.is_valid());
+    let payload = crate::webpush::build_payload(hint.as_ref());
+    let urgency = match hint.as_ref().map(|h| h.class.as_str()) {
+        Some("dm" | "mention" | "needs_action") => "high",
+        _ => "normal",
+    };
+    let ttl = (r.expires_at - (s.now)()).max(0);
+    let installation_id = permit.authority.installation_id;
+    let epoch = permit.authority.endpoint_epoch;
+    let authority_store = Arc::clone(&s.authority);
+    let delivery = tokio::spawn(async move {
+        let outcome = web.transport.send(&sub, &payload, ttl, urgency).await;
+        let disposition = match outcome {
+            DeliveryOutcome::Retry { .. } | DeliveryOutcome::ConfigurationFault => {
+                DeliveryDisposition::Retryable
+            }
+            _ => DeliveryDisposition::Terminal,
+        };
+        authority_store.finish_delivery(permit, disposition).await?;
+        if matches!(outcome, DeliveryOutcome::InvalidEndpoint { .. }) {
+            // Dead browser subscription: retire the installation so every
+            // delegation stops resolving; the relay disables its lease on 410.
+            let _ = authority_store
+                .revoke_installation(installation_id, epoch, epoch + 1)
+                .await;
+        }
+        Ok::<_, AuthorityError>(outcome)
+    });
+    match delivery.await {
+        Ok(Ok(outcome)) => delivery_outcome_response(outcome, generation),
+        _ => {
+            crate::metrics::record_delivery_error("finish_failed");
+            error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
+        }
+    }
 }
 
 fn delivery_outcome_response(outcome: DeliveryOutcome, generation: i64) -> Response {
@@ -860,6 +935,22 @@ pub fn router_with_metrics(
         .route("/v1/installations/endpoint", post(rotate_endpoint))
         .route("/v1/installations/revoke", post(revoke_installation))
         .route(DELIVERY_PATH, post(deliver))
+        .route(
+            "/v1/web/vapid-public-key",
+            get(crate::web_http::vapid_public_key).options(crate::web_http::web_options),
+        )
+        .route(
+            "/v1/web/installations",
+            post(crate::web_http::web_enroll).options(crate::web_http::web_options),
+        )
+        .route(
+            "/v1/web/delegations",
+            post(crate::web_http::web_delegate).options(crate::web_http::web_options),
+        )
+        .route(
+            "/v1/web/installations/revoke",
+            post(crate::web_http::web_revoke).options(crate::web_http::web_options),
+        )
         .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
     let public = Router::new()
         .merge(enrollment)
@@ -943,6 +1034,7 @@ mod request_limit_tests {
             endpoint_quota_max_deliveries: 10,
             now: fixed_now,
             accepting: Arc::new(AtomicBool::new(true)),
+            web: None,
         }
     }
 

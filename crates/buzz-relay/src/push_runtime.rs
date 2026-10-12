@@ -35,6 +35,46 @@ struct DeliveryRequest<'a> {
     endpoint_grant: &'a str,
     request_id: uuid::Uuid,
     expires_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<WebPushHint>,
+}
+
+/// Content-free deep-link hint, attached only for `buzz-web` leases so APNs
+/// deliveries stay blind. Never carries message content or author.
+#[derive(Serialize, Debug, PartialEq)]
+struct WebPushHint {
+    class: String,
+    event_id: String,
+    channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_root_id: Option<String>,
+}
+
+const WEB_APP_PROFILE: &str = "buzz-web";
+
+fn web_hint(wake: &buzz_db::push::ClaimedWake, thread_root: Option<&[u8]>) -> Option<WebPushHint> {
+    (wake.app_profile.as_deref() == Some(WEB_APP_PROFILE)).then(|| WebPushHint {
+        class: wake.class.clone(),
+        event_id: hex::encode(&wake.event_id),
+        channel_id: wake.channel_id.map(|c| c.to_string()),
+        thread_root_id: thread_root.map(hex::encode),
+    })
+}
+
+/// Thread root for a web wake's event so the tap opens the thread. Best-effort:
+/// a lookup failure only drops the deep link, never the notification.
+async fn web_thread_root(state: &AppState, wake: &buzz_db::push::ClaimedWake) -> Option<Vec<u8>> {
+    if wake.app_profile.as_deref() != Some(WEB_APP_PROFILE) {
+        return None;
+    }
+    state
+        .db
+        .push_thread_roots(wake.community, std::slice::from_ref(&wake.event_id))
+        .await
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|(_, root)| root)
 }
 
 #[derive(Deserialize)]
@@ -94,6 +134,12 @@ pub async fn run_matcher(state: Arc<AppState>) {
 struct MatchContext {
     leases: Vec<buzz_db::push::MatchLease>,
     memberships: std::collections::HashSet<(uuid::Uuid, Vec<u8>)>,
+    /// Batch channels that are DM channels (for `scope: "dm"`).
+    dm_channels: std::collections::HashSet<uuid::Uuid>,
+    /// Reply event id -> thread root id (for `scope: "thread"`).
+    thread_roots: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    /// (thread root id, lease author) participation pairs.
+    thread_participants: std::collections::HashSet<(Vec<u8>, Vec<u8>)>,
 }
 
 async fn load_match_context(
@@ -117,9 +163,57 @@ async fn load_match_context(
         .await?
         .into_iter()
         .collect();
+    // Participation context is only loaded when some lease asks for it, so
+    // APNs-only communities pay nothing extra.
+    let wants_scope = |scope: &str| {
+        leases.iter().any(|lease| {
+            lease.subscriptions.as_array().is_some_and(|subs| {
+                subs.iter()
+                    .any(|s| s.get("scope").and_then(|v| v.as_str()) == Some(scope))
+            })
+        })
+    };
+    let dm_channels = if wants_scope("dm") {
+        state
+            .db
+            .push_dm_channels(batch.community, &channels)
+            .await?
+            .into_iter()
+            .collect()
+    } else {
+        Default::default()
+    };
+    let (thread_roots, thread_participants) = if wants_scope("thread") {
+        let ids: Vec<Vec<u8>> = batch
+            .jobs
+            .iter()
+            .map(|j| j.event.event.id.as_bytes().to_vec())
+            .collect();
+        let roots: std::collections::HashMap<Vec<u8>, Vec<u8>> = state
+            .db
+            .push_thread_roots(batch.community, &ids)
+            .await?
+            .into_iter()
+            .collect();
+        let mut root_ids: Vec<Vec<u8>> = roots.values().cloned().collect();
+        root_ids.sort_unstable();
+        root_ids.dedup();
+        let participants = state
+            .db
+            .push_thread_participants(batch.community, &root_ids, &authors)
+            .await?
+            .into_iter()
+            .collect();
+        (roots, participants)
+    } else {
+        Default::default()
+    };
     Ok(MatchContext {
         leases,
         memberships,
+        dm_channels,
+        thread_roots,
+        thread_participants,
     })
 }
 
@@ -271,6 +365,11 @@ fn match_job(
             {
                 continue;
             }
+            if let Some(scope) = sub.scope.as_deref() {
+                if !scope_matches(scope, job, &lease.author, context) {
+                    continue;
+                }
+            }
             let ignored = sub.ignore.iter().any(|raw| {
                 serde_json::from_value::<Filter>(serde_json::Value::Object(raw.clone()))
                     .is_ok_and(|f| filters_match(&[f], &job.event))
@@ -310,6 +409,33 @@ fn match_job(
         });
     }
     Ok(wakes)
+}
+
+/// Relay-evaluated participation scope. Never matches the author's own events.
+fn scope_matches(
+    scope: &str,
+    job: &buzz_db::push::BatchedMatch,
+    lease_author: &[u8],
+    context: &MatchContext,
+) -> bool {
+    if job.event.event.pubkey.to_bytes().as_slice() == lease_author {
+        return false;
+    }
+    match scope {
+        "dm" => job
+            .event
+            .channel_id
+            .is_some_and(|c| context.dm_channels.contains(&c)),
+        "thread" => context
+            .thread_roots
+            .get(job.event.event.id.as_bytes().as_slice())
+            .is_some_and(|root| {
+                context
+                    .thread_participants
+                    .contains(&(root.clone(), lease_author.to_vec()))
+            }),
+        _ => false,
+    }
 }
 
 /// Match-time counterpart of REQ's filter-level `#p` authorization gate.
@@ -487,7 +613,13 @@ async fn deliver_one(
         record_delivery("configuration_error");
         return;
     };
-    let body = match delivery_body(&outcome.endpoint_grant, outcome.id, outcome.expires_at) {
+    let thread_root = web_thread_root(state, &outcome).await;
+    let body = match delivery_body(
+        &outcome.endpoint_grant,
+        outcome.id,
+        outcome.expires_at,
+        web_hint(&outcome, thread_root.as_deref()),
+    ) {
         Ok(body) => body,
         Err(error) => {
             warn!(wake=%outcome.id, %error, "push delivery body encoding failed");
@@ -611,12 +743,14 @@ fn delivery_body(
     endpoint_grant: &str,
     request_id: uuid::Uuid,
     expires_at: i64,
+    hint: Option<WebPushHint>,
 ) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&DeliveryRequest {
         v: 1,
         endpoint_grant,
         request_id,
         expires_at,
+        hint,
     })?)
 }
 
@@ -740,6 +874,124 @@ mod tests {
         Json(serde_json::json!({"status":"accepted"}))
     }
 
+    fn wake(profile: Option<&str>) -> buzz_db::push::ClaimedWake {
+        buzz_db::push::ClaimedWake {
+            community: buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+            id: uuid::Uuid::new_v4(),
+            claim_id: uuid::Uuid::new_v4(),
+            event_id: vec![0xab; 32],
+            channel_id: Some(uuid::Uuid::nil()),
+            author: vec![1; 32],
+            installation_id: "i".into(),
+            lease_generation: 1,
+            endpoint_grant: "g".into(),
+            class: "mention".into(),
+            app_profile: profile.map(str::to_owned),
+            expires_at: 0,
+            queued_at: Utc::now(),
+            attempt: 1,
+        }
+    }
+
+    fn scoped_context(
+        member: &nostr::Keys,
+        subs: serde_json::Value,
+        channel: uuid::Uuid,
+    ) -> MatchContext {
+        MatchContext {
+            leases: vec![buzz_db::push::MatchLease {
+                author: member.public_key().to_bytes().to_vec(),
+                installation_id: "web".into(),
+                generation: 1,
+                subscriptions: subs,
+                expires_at: Utc::now().timestamp() + 3600,
+            }],
+            memberships: [(channel, member.public_key().to_bytes().to_vec())]
+                .into_iter()
+                .collect(),
+            dm_channels: Default::default(),
+            thread_roots: Default::default(),
+            thread_participants: Default::default(),
+        }
+    }
+
+    fn channel_message(author: &nostr::Keys, channel: uuid::Uuid) -> buzz_db::push::BatchedMatch {
+        let event = EventBuilder::new(Kind::Custom(9), "hi")
+            .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
+            .sign_with_keys(author)
+            .unwrap();
+        buzz_db::push::BatchedMatch {
+            event: buzz_core::StoredEvent::new(event, Some(channel)),
+            attempt: 1,
+        }
+    }
+
+    #[test]
+    fn thread_scope_matches_participants_only() {
+        let (member, other) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let channel = uuid::Uuid::new_v4();
+        let subs = serde_json::json!([{"filter":{"kinds":[9]},"class":"thread_reply","ignore":[],"scope":"thread"}]);
+        let mut ctx = scoped_context(&member, subs, channel);
+        let reply = channel_message(&other, channel);
+        // Not a thread reply -> no wake.
+        assert!(match_job(&reply, &ctx).unwrap().is_empty());
+        let root = vec![9u8; 32];
+        ctx.thread_roots
+            .insert(reply.event.event.id.as_bytes().to_vec(), root.clone());
+        // Reply in a thread the member never touched -> no wake.
+        assert!(match_job(&reply, &ctx).unwrap().is_empty());
+        ctx.thread_participants
+            .insert((root, member.public_key().to_bytes().to_vec()));
+        let wakes = match_job(&reply, &ctx).unwrap();
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].class, "thread_reply");
+        // The member's own reply never wakes them.
+        let own = channel_message(&member, channel);
+        ctx.thread_roots
+            .insert(own.event.event.id.as_bytes().to_vec(), vec![9u8; 32]);
+        assert!(match_job(&own, &ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dm_scope_matches_any_dm_channel_the_member_is_in() {
+        let (member, other) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let channel = uuid::Uuid::new_v4();
+        let subs =
+            serde_json::json!([{"filter":{"kinds":[9]},"class":"dm","ignore":[],"scope":"dm"}]);
+        let mut ctx = scoped_context(&member, subs, channel);
+        let msg = channel_message(&other, channel);
+        assert!(match_job(&msg, &ctx).unwrap().is_empty());
+        ctx.dm_channels.insert(channel);
+        assert_eq!(match_job(&msg, &ctx).unwrap()[0].class, "dm");
+        // Not a member of that DM -> membership gate still blocks it.
+        ctx.memberships.clear();
+        assert!(match_job(&msg, &ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hint_only_for_web_profile_and_content_free() {
+        assert_eq!(
+            web_hint(&wake(Some("buzz-ios-dogfood")), Some(&[7; 32])),
+            None
+        );
+        assert_eq!(web_hint(&wake(None), None), None);
+        let hint = web_hint(&wake(Some("buzz-web")), Some(&[0xcd; 32])).unwrap();
+        assert_eq!(
+            hint.thread_root_id.as_deref(),
+            Some("cd".repeat(32).as_str())
+        );
+        assert_eq!(hint.class, "mention");
+        assert_eq!(hint.event_id, "ab".repeat(32));
+        let body: serde_json::Value =
+            serde_json::from_slice(&delivery_body("g", uuid::Uuid::nil(), 1, Some(hint)).unwrap())
+                .unwrap();
+        assert_eq!(body["hint"].as_object().unwrap().len(), 4);
+        let apns: serde_json::Value =
+            serde_json::from_slice(&delivery_body("g", uuid::Uuid::nil(), 1, None).unwrap())
+                .unwrap();
+        assert!(apns.get("hint").is_none());
+    }
+
     #[tokio::test]
     async fn gateway_retries_send_the_same_request_id_over_http() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -761,8 +1013,13 @@ mod tests {
         let keys = nostr::Keys::generate();
         let request_id = uuid::Uuid::new_v4();
         for _ in 0..2 {
-            let body =
-                delivery_body("opaque-grant", request_id, Utc::now().timestamp() + 60).unwrap();
+            let body = delivery_body(
+                "opaque-grant",
+                request_id,
+                Utc::now().timestamp() + 60,
+                None,
+            )
+            .unwrap();
             let auth = nip98_header(&keys, url.as_str(), &body).unwrap();
             let response = send_gateway_request(&http, &url, body, auth).await.unwrap();
             assert!(response.status().is_success());

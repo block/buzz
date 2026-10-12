@@ -20,11 +20,15 @@ pub const WIRE_VERSION: u8 = 1;
 #[serde(rename_all = "kebab-case")]
 pub enum AppProfile {
     BuzzIosDogfood,
+    /// Browser/PWA installations delivered over Web Push (VAPID). Enrolled by
+    /// a NIP-98-authenticated member pubkey instead of App Attest.
+    BuzzWeb,
 }
 impl AppProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BuzzIosDogfood => "buzz-ios-dogfood",
+            Self::BuzzWeb => "buzz-web",
         }
     }
 }
@@ -40,6 +44,74 @@ pub struct DeliveryRequest {
     pub endpoint_grant: String,
     pub request_id: uuid::Uuid,
     pub expires_at: i64,
+    /// Content-free routing hint, sent by the relay only for `buzz-web`
+    /// leases. Ignored (never forwarded) for APNs deliveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<WebPushHint>,
+}
+
+/// Closed, content-free routing hint for Web Push deep links.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebPushHint {
+    /// Lease subscription class: `dm`, `mention`, `thread_reply`, `needs_action` or `default`.
+    pub class: String,
+    /// Lowercase hex event id.
+    pub event_id: String,
+    /// Channel UUID, when the event belongs to a channel.
+    pub channel_id: Option<String>,
+    /// Thread root event id (lowercase hex) when the event is a thread reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_root_id: Option<String>,
+}
+
+fn is_hex_id(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+impl WebPushHint {
+    pub fn is_valid(&self) -> bool {
+        matches!(
+            self.class.as_str(),
+            "default" | "dm" | "mention" | "thread_reply" | "needs_action"
+        ) && is_hex_id(&self.event_id)
+            && self.thread_root_id.as_deref().is_none_or(is_hex_id)
+            && self
+                .channel_id
+                .as_ref()
+                .is_none_or(|c| c.len() == 36 && uuid::Uuid::parse_str(c).is_ok())
+    }
+}
+
+/// `POST /v1/web/installations` (NIP-98 authenticated by the member pubkey).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebInstallationRequest {
+    pub v: u8,
+    pub subscription: crate::webpush::WebPushSubscription,
+    pub expires_at: i64,
+}
+
+/// `POST /v1/web/delegations` (NIP-98, same member pubkey as the installation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebDelegationRequest {
+    pub v: u8,
+    pub installation_handle: uuid::Uuid,
+    pub generation: i64,
+    pub relay_pubkey: String,
+    pub not_before: i64,
+    pub expires_at: i64,
+}
+
+/// `POST /v1/web/installations/revoke` (NIP-98, same member pubkey).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRevokeRequest {
+    pub v: u8,
+    pub installation_handle: uuid::Uuid,
 }
 
 /// Opaque delivery capability plaintext. It contains no APNs token: the random

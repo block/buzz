@@ -1419,10 +1419,12 @@ dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "hex",
+ "hkdf 0.13.0",
  "metrics",
  "metrics-exporter-prometheus",
  "minicbor",
  "nostr 0.44.7",
+ "p256",
  "proptest",
  "rand 0.10.1",
  "reqwest 0.13.4",
@@ -3021,6 +3023,7 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "hkdf 0.12.4",
  "pem-rfc7468 0.7.0",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
@@ -3980,6 +3983,15 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -9191,7 +9203,7 @@ dependencies = [
  "cbc 0.2.1",
  "futures-util",
  "getrandom 0.4.3",
- "hkdf",
+ "hkdf 0.13.0",
  "hybrid-array",
  "num",
  "once_cell",
@@ -10103,7 +10115,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
- "hkdf",
+ "hkdf 0.13.0",
  "hmac 0.13.0",
  "itoa",
  "log",

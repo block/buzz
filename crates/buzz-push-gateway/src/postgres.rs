@@ -73,6 +73,7 @@ fn ts(v: DateTime<Utc>) -> i64 {
 fn profile(v: &str) -> Result<AppProfile, AuthorityError> {
     match v {
         "buzz-ios-dogfood" => Ok(AppProfile::BuzzIosDogfood),
+        "buzz-web" => Ok(AppProfile::BuzzWeb),
         _ => Err(AuthorityError::Unavailable),
     }
 }

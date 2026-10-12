@@ -10,7 +10,11 @@ pub mod model;
 pub mod postgres;
 pub(crate) mod strict_json;
 pub mod token;
+pub mod web_http;
+pub mod webpush;
 pub use http::{router, router_with_metrics, AppState};
 
 #[cfg(test)]
 mod http_delivery_tests;
+#[cfg(test)]
+mod web_http_tests;

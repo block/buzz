@@ -37,7 +37,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_handle = buzz_push_gateway::metrics::install()?;
     let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
     let configured = &c.profile;
-    let profile = {
+    let profile = if c.ios_disabled {
+        tracing::warn!("iOS/APNs profile disabled: running web-only");
+        buzz_push_gateway::http::ProfileRuntime {
+            app_attest: Arc::new(AppAttestVerifier::new(
+                configured.app_attest_app_id.clone(),
+                app_attest_root,
+            )?),
+            transport: Arc::new(DisabledApns),
+        }
+    } else {
         let apple = AppAttestVerifier::with_environment(
             configured.app_attest_app_id.clone(),
             app_attest_root,
@@ -52,6 +61,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         buzz_push_gateway::http::ProfileRuntime {
             app_attest: Arc::new(apple),
             transport,
+        }
+    };
+    let now_fn: fn() -> i64 = || chrono::Utc::now().timestamp();
+    let web = match &c.web {
+        None => None,
+        Some(w) => {
+            let vapid = buzz_push_gateway::webpush::Vapid::from_secret(
+                &fs::read_to_string(&w.vapid_private_key_path)?,
+                w.vapid_subject.clone(),
+            )
+            .map_err(std::io::Error::other)?;
+            let public = vapid.public_key_b64url().to_owned();
+            let transport = Arc::new(buzz_push_gateway::webpush::HttpWebPushTransport::new(
+                vapid, now_fn,
+            )?);
+            tracing::info!(vapid_public_key = %public, "Web Push profile configured");
+            Some(Arc::new(
+                buzz_push_gateway::web_http::WebRuntime::new_with_public(
+                    public,
+                    transport,
+                    w.public_url.clone(),
+                    w.allowed_origin.clone(),
+                ),
+            ))
         }
     };
     let grant_keyring = GrantKeyring::new(
@@ -103,6 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             endpoint_quota_max_deliveries: c.endpoint_quota_max_deliveries,
             now: || chrono::Utc::now().timestamp(),
             accepting: accepting.clone(),
+            web,
         },
         Some(metrics_handle),
     );
@@ -135,6 +169,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     reaper.abort();
     Ok(())
 }
+/// APNs stand-in for web-only deployments: every iOS delivery is a configuration fault.
+struct DisabledApns;
+#[async_trait::async_trait]
+impl buzz_push_gateway::apns::PushTransport for DisabledApns {
+    async fn send(
+        &self,
+        _: buzz_push_gateway::apns::DeliveryAttempt,
+        _: &str,
+    ) -> buzz_push_gateway::apns::DeliveryOutcome {
+        buzz_push_gateway::apns::DeliveryOutcome::ConfigurationFault
+    }
+}
+
 async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {

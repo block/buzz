@@ -15,7 +15,24 @@ use sha2::Digest as _;
 /// Message kinds that can produce a mobile Activity-inbox notification.
 /// Generic Nostr notes and non-message workflow/agent events are deliberately
 /// excluded from the dogfood MVP.
-pub(crate) const PUSH_KINDS: &[u64] = &[9, 40_002, 45_001, 45_003];
+pub(crate) const PUSH_KINDS: &[u64] = &[9, 40_002, 45_001, 45_003, 46_010, 46_011, 46_012];
+
+/// Lease classes. `default` is the only APNs class; the web profile uses the
+/// named classes so the gateway can pick a content-free notification line.
+pub(crate) const PUSH_CLASSES: &[&str] =
+    &["default", "dm", "mention", "thread_reply", "needs_action"];
+
+/// Server-owned app profiles a lease may name.
+pub(crate) const PUSH_APP_PROFILES: &[AppProfile<'static>] = &[
+    AppProfile {
+        id: "buzz-ios-dogfood",
+        transport: "apns",
+    },
+    AppProfile {
+        id: "buzz-web",
+        transport: "webpush",
+    },
+];
 
 /// NIP-PL addressable push-lease event kind.
 pub const KIND_PUSH_LEASE: u32 = 30_350;
@@ -50,7 +67,16 @@ pub struct Subscription {
     #[serde(default)]
     pub ignore: Vec<Map<String, Value>>,
     pub suppress: Option<Suppress>,
+    /// Relay-evaluated participation scope (web profile): `dm` matches any
+    /// message in a DM channel the author belongs to; `thread` matches replies
+    /// in threads the author started, replied in, or was mentioned in. The
+    /// relay supplies the narrowing, so the filter needs only `kinds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
+
+/// Participation scopes a lease subscription may request.
+pub(crate) const PUSH_SCOPES: &[&str] = &["dm", "thread"];
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -246,7 +272,17 @@ fn validate_subscription(sub: &Subscription, limits: &LeaseLimits<'_>) -> Result
     if !limits.supported_classes.contains(&sub.class.as_str()) {
         return Err("class not supported".into());
     }
-    validate_filter(&sub.filter, limits, true)?;
+    if let Some(scope) = &sub.scope {
+        if !PUSH_SCOPES.contains(&scope.as_str()) {
+            return Err("scope not supported".into());
+        }
+        // Scoped filters are narrowed by the relay (membership/participation)
+        // and may only name kinds, so they cannot widen what the author reads.
+        if sub.filter.keys().any(|k| k != "kinds") {
+            return Err("scoped filter may only contain kinds".into());
+        }
+    }
+    validate_filter(&sub.filter, limits, sub.scope.is_none())?;
     if sub.ignore.len() > limits.max_ignore {
         return Err("ignore quota exceeded".into());
     }
@@ -491,11 +527,8 @@ pub async fn accept(
     let limits = LeaseLimits {
         expected_origin: &origin,
         author_hex: &author_hex,
-        app_profiles: &[AppProfile {
-            id: "buzz-ios-dogfood",
-            transport: "apns",
-        }],
-        supported_classes: &["default"],
+        app_profiles: PUSH_APP_PROFILES,
+        supported_classes: PUSH_CLASSES,
         push_kinds: PUSH_KINDS,
         max_subscriptions: 16,
         max_kinds: 16,
@@ -680,6 +713,27 @@ mod tests {
     }
 
     #[test]
+    fn scoped_subscriptions_are_kinds_only_and_known() {
+        let ok = parse_plaintext(r##"{"v":1,"origin":"o","generation":1,"active":true,"app_profile":"p","transport":"apns","endpoint":"token","subscriptions":[{"filter":{"kinds":[9]},"class":"default","scope":"thread"}]}"##, 4096).unwrap();
+        assert!(validate_plaintext(&ok, &limits()).is_ok());
+        let unknown = parse_plaintext(r##"{"v":1,"origin":"o","generation":1,"active":true,"app_profile":"p","transport":"apns","endpoint":"token","subscriptions":[{"filter":{"kinds":[9]},"class":"default","scope":"everything"}]}"##, 4096).unwrap();
+        assert_eq!(
+            validate_plaintext(&unknown, &limits()).unwrap_err(),
+            "scope not supported"
+        );
+        let widened = parse_plaintext(r##"{"v":1,"origin":"o","generation":1,"active":true,"app_profile":"p","transport":"apns","endpoint":"token","subscriptions":[{"filter":{"kinds":[9],"authors":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},"class":"default","scope":"dm"}]}"##, 4096).unwrap();
+        assert_eq!(
+            validate_plaintext(&widened, &limits()).unwrap_err(),
+            "scoped filter may only contain kinds"
+        );
+        let unscoped = parse_plaintext(r##"{"v":1,"origin":"o","generation":1,"active":true,"app_profile":"p","transport":"apns","endpoint":"token","subscriptions":[{"filter":{"kinds":[9]},"class":"default"}]}"##, 4096).unwrap();
+        assert_eq!(
+            validate_plaintext(&unscoped, &limits()).unwrap_err(),
+            "lease filter not narrowed"
+        );
+    }
+
+    #[test]
     fn migration_trigger_allowlist_matches_advertised_push_kinds() {
         let kinds = PUSH_KINDS
             .iter()
@@ -687,7 +741,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         let predicate = format!("NEW.kind IN ({kinds})");
-        let migration = include_str!("../../../../migrations/0040_push_message_kinds.sql");
+        let migration = include_str!("../../../../migrations/0057_push_approval_kinds.sql");
         assert!(
             migration.contains(&predicate),
             "migration trigger must use PUSH_KINDS exactly: {predicate}"

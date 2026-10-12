@@ -51,6 +51,81 @@ pub struct Config {
     /// Independent token-custody keyring. These keys MUST NOT be reused for
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
+    /// `BUZZ_PUSH_IOS_PROFILE=disabled`: run without APNs credentials (web-only
+    /// deployment). App Attest enrollment then never verifies and APNs grants
+    /// are a configuration fault.
+    pub ios_disabled: bool,
+    /// Optional browser Web Push profile.
+    pub web: Option<WebConfig>,
+}
+
+/// Web Push (VAPID) profile configuration. All four variables are required
+/// together; none of them is accepted from a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebConfig {
+    /// Mounted secret: PEM or base64url P-256 private scalar.
+    pub vapid_private_key_path: PathBuf,
+    /// `mailto:` or `https:` contact sent to push services.
+    pub vapid_subject: String,
+    /// Exact external base URL clients sign into NIP-98 `u`.
+    pub public_url: String,
+    /// Browser origin allowed by CORS.
+    pub allowed_origin: String,
+}
+
+fn parse_web(e: &HashMap<String, String>) -> Result<Option<WebConfig>, ConfigError> {
+    const KEYS: [&str; 4] = [
+        "BUZZ_PUSH_WEB_VAPID_PRIVATE_KEY_PATH",
+        "BUZZ_PUSH_WEB_VAPID_SUBJECT",
+        "BUZZ_PUSH_WEB_PUBLIC_URL",
+        "BUZZ_PUSH_WEB_ALLOWED_ORIGIN",
+    ];
+    let vals: Vec<Option<&str>> = KEYS
+        .iter()
+        .map(|k| e.get(*k).map(String::as_str).filter(|v| !v.is_empty()))
+        .collect();
+    if vals.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    for (k, v) in KEYS.iter().zip(&vals) {
+        if v.is_none() {
+            return Err(ConfigError::Missing(k));
+        }
+    }
+    let [key, subject, public_url, origin] =
+        [vals[0], vals[1], vals[2], vals[3]].map(|v| v.unwrap_or_default());
+    if !(subject.starts_with("mailto:") || subject.starts_with("https://")) {
+        return Err(ConfigError::Invalid("BUZZ_PUSH_WEB_VAPID_SUBJECT"));
+    }
+    let https_origin = |v: &str| {
+        url::Url::parse(v)
+            .is_ok_and(|u| u.scheme() == "https" && u.path() == "/" && u.query().is_none())
+    };
+    if !https_origin(public_url) {
+        return Err(ConfigError::Invalid("BUZZ_PUSH_WEB_PUBLIC_URL"));
+    }
+    if !https_origin(origin) || origin.ends_with('/') {
+        return Err(ConfigError::Invalid("BUZZ_PUSH_WEB_ALLOWED_ORIGIN"));
+    }
+    Ok(Some(WebConfig {
+        vapid_private_key_path: key.into(),
+        vapid_subject: subject.to_owned(),
+        public_url: public_url.trim_end_matches('/').to_owned(),
+        allowed_origin: origin.to_owned(),
+    }))
+}
+
+impl AppProfileConfig {
+    /// Inert placeholder for web-only deployments.
+    fn disabled() -> Self {
+        Self {
+            app_attest_app_id: "DISABLED.ios.profile".to_owned(),
+            app_attest_environment: AppAttestEnvironment::Production,
+            apns_cert_path: PathBuf::new(),
+            apns_topic: "disabled".to_owned(),
+            apns_environment: ApnsEnvironment::Production,
+        }
+    }
 }
 
 // Registered NIP-PL v1 App Attest audiences are protocol constants, not routing URLs.
@@ -195,7 +270,20 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
-        let profile = parse_profile(e)?;
+        let ios_disabled = match e.get("BUZZ_PUSH_IOS_PROFILE").map(String::as_str) {
+            None | Some("") | Some("enabled") => false,
+            Some("disabled") => true,
+            Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_IOS_PROFILE")),
+        };
+        let web = parse_web(e)?;
+        if ios_disabled && web.is_none() {
+            return Err(ConfigError::Invalid("BUZZ_PUSH_IOS_PROFILE"));
+        }
+        let profile = if ios_disabled {
+            AppProfileConfig::disabled()
+        } else {
+            parse_profile(e)?
+        };
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
             .map(String::as_str)
@@ -220,6 +308,8 @@ impl Config {
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
             token_keys,
+            ios_disabled,
+            web,
         })
     }
 }
@@ -227,6 +317,53 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn web_profile_is_all_or_nothing_and_enables_web_only_mode() {
+        let mut env = base();
+        assert_eq!(Config::from_map(&env).unwrap().web, None);
+        env.insert(
+            "BUZZ_PUSH_WEB_VAPID_SUBJECT".into(),
+            "mailto:ops@huladesk.com".into(),
+        );
+        assert!(matches!(
+            Config::from_map(&env),
+            Err(ConfigError::Missing(_))
+        ));
+        env.insert(
+            "BUZZ_PUSH_WEB_VAPID_PRIVATE_KEY_PATH".into(),
+            "/run/secrets/vapid".into(),
+        );
+        env.insert(
+            "BUZZ_PUSH_WEB_PUBLIC_URL".into(),
+            "https://push.example.com".into(),
+        );
+        env.insert(
+            "BUZZ_PUSH_WEB_ALLOWED_ORIGIN".into(),
+            "https://app.example.com".into(),
+        );
+        let c = Config::from_map(&env).unwrap();
+        assert_eq!(c.web.unwrap().public_url, "https://push.example.com");
+        env.insert(
+            "BUZZ_PUSH_WEB_ALLOWED_ORIGIN".into(),
+            "http://app.example.com".into(),
+        );
+        assert!(Config::from_map(&env).is_err());
+        env.insert(
+            "BUZZ_PUSH_WEB_ALLOWED_ORIGIN".into(),
+            "https://app.example.com".into(),
+        );
+        env.insert("BUZZ_PUSH_IOS_PROFILE".into(), "disabled".into());
+        for k in [
+            "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+            "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
+            "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
+            "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT",
+        ] {
+            env.remove(k);
+        }
+        assert!(Config::from_map(&env).unwrap().ios_disabled);
+    }
+
     #[test]
     fn attestation_environment_is_explicit_and_build_gated() {
         let mut env = base();

@@ -136,33 +136,50 @@ async function fetchChannels(
     memberEvents = await queryAll({ kinds: [39002], "#p": [my] }); // rare: page through the full membership set
   const latestVis = round1
     .filter(isDmVisibility)
-    .reduce<NostrEvent | null>((a, e) => (!a || e.created_at > a.created_at ? e : a), null);
+    .reduce<NostrEvent | null>(
+      (a, e) => (!a || e.created_at > a.created_at ? e : a),
+      null,
+    );
   const hiddenDms = new Set(
-    latestVis ? latestVis.tags.filter((t) => t[0] === "h" && t[1]).map((t) => t[1]) : [],
+    latestVis
+      ? latestVis.tags.filter((t) => t[0] === "h" && t[1]).map((t) => t[1])
+      : [],
   );
   const membership = collectMembers(memberEvents);
-  const ids = [...new Set(memberEvents.map(dTag).filter((x): x is string => !!x))].sort();
-  const openIds = openMeta.map(dTag).filter((x): x is string => !!x && !ids.includes(x));
+  const ids = [
+    ...new Set(memberEvents.map(dTag).filter((x): x is string => !!x)),
+  ].sort();
+  const openIds = openMeta
+    .map(dTag)
+    .filter((x): x is string => !!x && !ids.includes(x));
   const allIds = [...ids, ...openIds];
   const missing = allIds.filter((id) => !membership.has(id));
 
   const round2: NostrEvent[] = [];
   if (ids.length || allIds.length) {
-    const recency = (id: string) => ({ kinds: RECENCY_KINDS, "#h": [id], limit: 1 });
+    const recency = (id: string) => ({
+      kinds: RECENCY_KINDS,
+      "#h": [id],
+      limit: 1,
+    });
     // First request carries metadata + missing members + as many recency filters as fit one batch.
     const head: Filter[] = [];
     if (ids.length) head.push({ kinds: [39000], "#d": ids, limit: ids.length });
-    if (missing.length) head.push({ kinds: [39002], "#d": missing, limit: missing.length });
+    if (missing.length)
+      head.push({ kinds: [39002], "#d": missing, limit: missing.length });
     const room = Math.max(0, LAST_MESSAGE_BATCH - head.length);
     const first = [...head, ...allIds.slice(0, room).map(recency)];
     round2.push(...(await queryRelay(first)));
     for (let i = room; i < allIds.length; i += LAST_MESSAGE_BATCH)
       round2.push(
-        ...(await queryRelay(allIds.slice(i, i + LAST_MESSAGE_BATCH).map(recency)).catch(() => [])),
+        ...(await queryRelay(
+          allIds.slice(i, i + LAST_MESSAGE_BATCH).map(recency),
+        ).catch(() => [])),
       );
   }
   const meta = round2.filter((e) => e.kind === 39000);
-  for (const [k, v] of collectMembers(round2.filter((e) => e.kind === 39002))) membership.set(k, v);
+  for (const [k, v] of collectMembers(round2.filter((e) => e.kind === 39002)))
+    membership.set(k, v);
   const messages = round2.filter((e) => e.kind !== 39000 && e.kind !== 39002);
 
   const memberIds = new Set(meta.map(dTag));
@@ -475,23 +492,40 @@ async function addReaction(a: Args) {
   if (url != null) {
     // NIP-30 custom emoji: `:shortcode:` content + ["emoji", shortcode, url] (same validation as buzz-sdk)
     const code = emoji.replace(/^:+|:+$/g, "");
-    if (!code) throw new Error("invalid custom emoji reaction: emoji shortcode must not be empty");
+    if (!code)
+      throw new Error(
+        "invalid custom emoji reaction: emoji shortcode must not be empty",
+      );
     if (code.length > 64 || !SHORTCODE.test(code))
-      throw new Error("invalid custom emoji reaction: emoji shortcode may only contain ASCII letters, digits, hyphens, and underscores (max 64)");
+      throw new Error(
+        "invalid custom emoji reaction: emoji shortcode may only contain ASCII letters, digits, hyphens, and underscores (max 64)",
+      );
     if (!url || url.length > 2048 || !/^https?:\/\//.test(url))
-      throw new Error("invalid custom emoji reaction: emoji image URL must be http(s) and at most 2048 bytes");
+      throw new Error(
+        "invalid custom emoji reaction: emoji image URL must be http(s) and at most 2048 bytes",
+      );
     const sc = code.toLowerCase();
-    await publishNow(7, [["e", target], ["emoji", sc, url]], `:${sc}:`);
+    await publishNow(
+      7,
+      [
+        ["e", target],
+        ["emoji", sc, url],
+      ],
+      `:${sc}:`,
+    );
     return;
   }
-  if ([...emoji].length > 64) throw new Error("emoji exceeds maximum length of 64 characters");
+  if ([...emoji].length > 64)
+    throw new Error("emoji exceeds maximum length of 64 characters");
   await publishNow(7, [["e", target]], emoji);
 }
 
 async function removeReaction(a: Args) {
   const target = eventIdArg(a?.eventId);
   const emoji = String(a?.emoji ?? "").trim();
-  const mine = await queryRelay([{ kinds: [7], "#e": [target], authors: [me()] }]);
+  const mine = await queryRelay([
+    { kinds: [7], "#e": [target], authors: [me()] },
+  ]);
   const ev = mine.find((e) => e.content.trim() === emoji);
   if (!ev) throw new Error("could not find your reaction event for this emoji");
   await publishNow(5, [["e", ev.id]]);
@@ -499,8 +533,12 @@ async function removeReaction(a: Args) {
 
 async function deleteMessage(a: Args) {
   const channelId = String(a?.channelId ?? "");
-  if (!UUID.test(channelId)) throw new Error(`invalid channel UUID: ${channelId}`);
-  await publishNow(5, [["h", channelId], ["e", eventIdArg(a?.eventId)]]);
+  if (!UUID.test(channelId))
+    throw new Error(`invalid channel UUID: ${channelId}`);
+  await publishNow(5, [
+    ["h", channelId],
+    ["e", eventIdArg(a?.eventId)],
+  ]);
 }
 
 // open_dm: mirror of src-tauri open_dm. Kind 41010 with one ["p", pubkey] per participant; the relay finds the
@@ -519,18 +557,27 @@ async function openDm(a: Args) {
     await new Promise((r) => setTimeout(r, 1100));
     res = await publishNow(41010, tags);
   }
-  const raw = res.message.startsWith("response:") ? res.message.slice(9) : res.message;
+  const raw = res.message.startsWith("response:")
+    ? res.message.slice(9)
+    : res.message;
   let channelId: string;
   try {
     channelId = JSON.parse(raw).channel_id;
   } catch (e) {
-    throw new Error(`response parse failed: ${e instanceof Error ? e.message : e}`);
+    throw new Error(
+      `response parse failed: ${e instanceof Error ? e.message : e}`,
+    );
   }
-  const evs = await queryRelay([{ kinds: [39000], "#d": [channelId], limit: 1 }]);
+  const evs = await queryRelay([
+    { kinds: [39000], "#d": [channelId], limit: 1 },
+  ]);
   const info = evs[0] ? channelInfoFromEvent(evs[0], true) : null;
-  if (!info) throw new Error("DM channel created but metadata not yet available");
+  if (!info)
+    throw new Error("DM channel created but metadata not yet available");
   return info;
 }
+
+/** Channels the signed-in member belongs to (used by Web Push to scope DM lease filters). */
 
 export const chatHandlers: Record<
   string,
@@ -661,7 +708,11 @@ export const chatHandlers: Record<
       const prev = latest.get(pk);
       if (!prev || prev[0] < ev.created_at) latest.set(pk, [ev.created_at, s]);
     }
-    return Object.fromEntries([...latest].filter(([, [ts, s]]) => ts >= cutoff && s !== "offline").map(([k, [, s]]) => [k, s]));
+    return Object.fromEntries(
+      [...latest]
+        .filter(([, [ts, s]]) => ts >= cutoff && s !== "offline")
+        .map(([k, [, s]]) => [k, s]),
+    );
   },
   update_profile: updateProfile,
   ensure_starter_channels: async () => ({

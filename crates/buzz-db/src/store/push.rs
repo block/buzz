@@ -175,6 +175,9 @@ pub struct ClaimedWake {
     pub endpoint_grant: String,
     /// Wake class sent to the gateway.
     pub class: String,
+    /// Lease app profile (e.g. `buzz-ios-dogfood`, `buzz-web`); selects whether
+    /// a content-free routing hint may accompany the delivery.
+    pub app_profile: Option<String>,
     /// Delivery deadline, in Unix seconds.
     pub expires_at: i64,
     /// Time this durable wake entered the relay outbox.
@@ -1145,7 +1148,7 @@ pub async fn claim_due_wakes(
           AND l.endpoint_hash = o.endpoint_hash
         RETURNING o.community_id, o.id, o.claim_id, o.event_id, c.channel_id,
                   o.author, o.installation_id, o.lease_generation,
-                  l.endpoint_grant, o.class, o.expires_at, o.created_at AS queued_at,
+                  l.endpoint_grant, l.app_profile, o.class, o.expires_at, o.created_at AS queued_at,
                   o.attempts
         "#,
     )
@@ -1177,7 +1180,7 @@ pub async fn revalidate_wake_for_send(
         r#"
         SELECT o.community_id, o.id, o.claim_id, o.event_id, e.channel_id,
                o.author, o.installation_id, o.lease_generation,
-               l.endpoint_grant, o.class, o.expires_at, o.created_at AS queued_at,
+               l.endpoint_grant, l.app_profile, o.class, o.expires_at, o.created_at AS queued_at,
                o.attempts
         FROM push_wake_outbox o
         JOIN push_leases l
@@ -1355,6 +1358,7 @@ fn row_to_claimed_wake(row: sqlx::postgres::PgRow) -> Result<ClaimedWake> {
         lease_generation: row.try_get("lease_generation")?,
         endpoint_grant: row.try_get("endpoint_grant")?,
         class: row.try_get("class")?,
+        app_profile: row.try_get("app_profile")?,
         expires_at: row.try_get("expires_at")?,
         queued_at: row.try_get("queued_at")?,
         attempt: row.try_get("attempts")?,
@@ -1529,6 +1533,107 @@ impl Db {
             max_active_leases,
         )
         .await
+    }
+}
+
+/// Relay-side context for participation-scoped (web) push subscriptions.
+impl Db {
+    /// Thread root for each event that is a thread reply: `(event_id, root_event_id)`.
+    #[datastore_span(name = "push_thread_roots", system = "postgresql")]
+    pub async fn push_thread_roots(
+        &self,
+        community: CommunityId,
+        event_ids: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let rows = sqlx::query(
+            "SELECT event_id, root_event_id FROM thread_metadata \
+             WHERE community_id = $1 AND event_id = ANY($2) AND root_event_id IS NOT NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(event_ids)
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter()
+            .map(|r| Ok((r.try_get("event_id")?, r.try_get("root_event_id")?)))
+            .collect()
+    }
+
+    /// Participants among `pubkeys` for each thread root: the root author, anyone
+    /// who replied in the thread, and anyone @-mentioned in the root or a reply.
+    #[datastore_span(name = "push_thread_participants", system = "postgresql")]
+    pub async fn push_thread_participants(
+        &self,
+        community: CommunityId,
+        root_ids: &[Vec<u8>],
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if root_ids.is_empty() || pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pubkeys_hex: Vec<String> = pubkeys.iter().map(hex::encode).collect();
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let rows = sqlx::query(
+            "WITH thread_events AS ( \
+                 SELECT root_event_id AS root, event_id FROM thread_metadata \
+                 WHERE community_id = $1 AND root_event_id = ANY($2) \
+                 UNION ALL \
+                 SELECT r, r FROM unnest($2::bytea[]) AS r \
+             ) \
+             SELECT DISTINCT te.root, e.pubkey FROM thread_events te \
+               JOIN events e ON e.community_id = $1 AND e.id = te.event_id \
+              WHERE e.pubkey = ANY($3) AND e.deleted_at IS NULL \
+             UNION \
+             SELECT DISTINCT te.root, decode(m.pubkey_hex, 'hex') FROM thread_events te \
+               JOIN event_mentions m ON m.community_id = $1 AND m.event_id = te.event_id \
+              WHERE m.pubkey_hex = ANY($4)",
+        )
+        .bind(community.as_uuid())
+        .bind(root_ids)
+        .bind(pubkeys)
+        .bind(&pubkeys_hex)
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter()
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect()
+    }
+
+    /// Channel ids among `channel_ids` that are direct-message channels.
+    #[datastore_span(name = "push_dm_channels", system = "postgresql")]
+    pub async fn push_dm_channels(
+        &self,
+        community: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        if channel_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let rows = sqlx::query(
+            "SELECT id FROM channels WHERE community_id = $1 AND id = ANY($2) \
+             AND channel_type = 'dm' AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_ids)
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter().map(|r| Ok(r.try_get("id")?)).collect()
     }
 }
 

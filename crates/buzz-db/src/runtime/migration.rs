@@ -718,7 +718,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 56);
+        assert_eq!(migrations.len(), 57);
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -727,7 +727,8 @@ mod postgres_tests {
         assert_eq!(migrations[53].version, 54);
         assert_eq!(migrations[54].version, 55);
         assert_eq!(migrations[55].version, 56);
-        assert_eq!(latest_embedded_version(), migrations[55].version);
+        assert_eq!(migrations[56].version, 57);
+        assert_eq!(latest_embedded_version(), migrations[56].version);
         assert!(migrations[48]
             .sql
             .as_str()

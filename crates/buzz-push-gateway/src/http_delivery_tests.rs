@@ -114,6 +114,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         endpoint_quota_max_deliveries: 10,
         now,
         accepting: Arc::new(AtomicBool::new(true)),
+        web: None,
     });
     let body = serde_json::to_vec(&serde_json::json!({
         "v": 1, "endpoint_grant": grant, "request_id": Uuid::new_v4(), "expires_at": now() + 60,

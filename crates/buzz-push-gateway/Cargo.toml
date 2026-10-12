@@ -29,6 +29,8 @@ byteorder = "1.5"
 minicbor = "0.25"
 chrono = { workspace = true }
 hex = { workspace = true }
+hkdf = "0.13"
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pem"] }
 getrandom = "0.4"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
