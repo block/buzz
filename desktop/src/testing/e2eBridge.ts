@@ -1343,6 +1343,8 @@ declare global {
       createdAt?: number;
       pubkey?: string;
       threadHeadId?: string;
+      /** Optional activity label carried by the typing event's `content`. */
+      label?: string;
     }) => RelayEvent;
     __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
       command: string,
@@ -5328,6 +5330,7 @@ function emitMockTypingIndicator(
   pubkey: string,
   threadHeadId?: string,
   createdAt?: number,
+  label?: string,
 ) {
   const event: RelayEvent = {
     id: crypto.randomUUID().replace(/-/g, ""),
@@ -5338,7 +5341,7 @@ function emitMockTypingIndicator(
       ["h", channelId],
       ...(threadHeadId ? [["e", threadHeadId, "", "reply"]] : []),
     ],
-    content: "",
+    content: label ?? "",
     sig: "mocksig".repeat(20).slice(0, 128),
   };
 
@@ -11698,6 +11701,7 @@ export function maybeInstallE2eTauriMocks() {
     createdAt,
     pubkey,
     threadHeadId,
+    label,
   }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
@@ -11711,6 +11715,7 @@ export function maybeInstallE2eTauriMocks() {
       pubkey ?? CHARLIE_PUBKEY,
       threadHeadId,
       createdAt,
+      label,
     );
   };
   window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({

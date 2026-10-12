@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -15,7 +16,7 @@ type TypingIndicatorRowProps = {
   className?: string;
   currentPubkey?: string;
   profiles?: UserProfileLookup;
-  typingPubkeys: string[];
+  typingEntries: readonly TypingIndicatorEntry[];
   variant?: "default" | "activity";
 };
 
@@ -35,9 +36,16 @@ function resolveFallbackName(channel: Channel | null, pubkey: string) {
   return channel.participants[participantIndex] ?? null;
 }
 
-function formatTypingLabel(names: string[]) {
+/**
+ * The typing row's text. A single typer's activity label (carried by the
+ * typing event's `content`) follows the name; with several typers the row
+ * stays generic — per-typer labels would not fit.
+ */
+function formatTypingLabel(names: string[], activityLabel: string | null) {
   if (names.length === 1) {
-    return `${names[0]} is typing...`;
+    return activityLabel
+      ? `${names[0]} is typing — ${activityLabel}`
+      : `${names[0]} is typing...`;
   }
 
   if (names.length === 2) {
@@ -56,23 +64,25 @@ export function TypingIndicatorRow({
   className,
   currentPubkey,
   profiles,
-  typingPubkeys,
+  typingEntries,
   variant = "default",
 }: TypingIndicatorRowProps) {
   const isActivityVariant = variant === "activity";
   const labels = React.useMemo(
     () =>
-      typingPubkeys.map((pubkey) =>
+      typingEntries.map((entry) =>
         resolveUserLabel({
-          pubkey,
+          pubkey: entry.pubkey,
           currentPubkey,
-          fallbackName: resolveFallbackName(channel, pubkey),
+          fallbackName: resolveFallbackName(channel, entry.pubkey),
           profiles,
           preferResolvedSelfLabel: true,
         }),
       ),
-    [channel, currentPubkey, profiles, typingPubkeys],
+    [channel, currentPubkey, profiles, typingEntries],
   );
+  const activityLabel =
+    typingEntries.length === 1 ? (typingEntries[0]?.label ?? null) : null;
 
   return (
     <div
@@ -94,12 +104,12 @@ export function TypingIndicatorRow({
           )}
         >
           <div className="flex shrink-0 items-center">
-            {typingPubkeys.map((pubkey, index) => {
-              const profile = profiles?.[pubkey.toLowerCase()];
-              const label = labels[index] ?? truncateNpub(pubkey);
+            {typingEntries.map((entry, index) => {
+              const profile = profiles?.[entry.pubkey.toLowerCase()];
+              const label = labels[index] ?? truncateNpub(entry.pubkey);
               return (
                 <div
-                  key={pubkey}
+                  key={entry.pubkey}
                   className={cn(
                     "relative shrink-0 ring-1 ring-background",
                     profile?.isAgent ? "rounded-squircle" : "rounded-full",
@@ -134,7 +144,7 @@ export function TypingIndicatorRow({
             )}
             data-testid="message-typing-indicator-label"
           >
-            <Shimmer>{formatTypingLabel(labels)}</Shimmer>
+            <Shimmer>{formatTypingLabel(labels, activityLabel)}</Shimmer>
           </p>
         </div>
       )}

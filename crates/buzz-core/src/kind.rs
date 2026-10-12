@@ -465,7 +465,9 @@ pub const EPHEMERAL_KIND_MAX: u32 = 29999;
 pub const KIND_PRESENCE_UPDATE: u32 = 20001;
 /// NIP-AB: Device pairing event. Ephemeral — relay may discard after delivery.
 pub const KIND_PAIRING: u32 = 24134;
-/// Ephemeral: typing indicator for a channel.
+/// Ephemeral: typing indicator for a channel. Non-empty `content` is an
+/// optional short activity label (publishers SHOULD stay under 80 chars);
+/// clients render it for a single typer and ignore it otherwise.
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
