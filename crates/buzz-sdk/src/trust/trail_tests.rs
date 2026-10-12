@@ -1189,6 +1189,82 @@ fn invalid_update_links_stay_unresolved_and_never_bind() {
 }
 
 #[test]
+fn update_of_another_pr_or_with_two_e_never_binds_here() {
+    let mut c = code(Keys::generate(), Keys::generate());
+    // A valid update, but of a different PR by the same author.
+    let other = pr(&c.owner, &c.author, T0 + 1);
+    let of_other = update(
+        &repo(&c.owner, "r"),
+        &other,
+        &c.author,
+        &c.author,
+        9,
+        T0 + 25,
+    );
+    let two_e = {
+        let meta = GitPrUpdateMeta {
+            pr_event: c.r1.id.to_hex(),
+            pr_author: c.author.public_key().to_hex(),
+            commit: commit(10),
+            clone_urls: vec!["https://git.example/r.git".into()],
+            ..GitPrUpdateMeta::default()
+        };
+        let b = build_git_pr_update(&repo(&c.owner, "r"), "", &meta)
+            .expect("update")
+            .tag(Tag::parse(["E", &other.id.to_hex()]).expect("E"));
+        sign(b, &c.author, T0 + 26)
+    };
+    let on_other = status(
+        GitStatus::AppliedOrResolved,
+        &c.r1,
+        Some(&of_other),
+        None,
+        &c.owner,
+        T0 + 32,
+    );
+    let on_two_e = status(
+        GitStatus::AppliedOrResolved,
+        &c.r1,
+        Some(&two_e),
+        None,
+        &c.owner,
+        T0 + 33,
+    );
+    for e in [&other, &of_other, &two_e, &on_other, &on_two_e] {
+        c.relay.add(e);
+    }
+    let trail = code_read(&c, Entry::Request(c.r1.id));
+    let task = trail
+        .tasks
+        .iter()
+        .find(|t| t.contributions.iter().any(|x| x.id == c.r1.id.to_hex()))
+        .expect("R1's task");
+    // Neither status binds to any revision of R1.
+    assert!(
+        task.contributions.iter().all(|x| x.outcomes.is_empty()),
+        "{task:#?}"
+    );
+    for s in [&on_other, &on_two_e] {
+        let o = task
+            .unbound
+            .iter()
+            .find(|o| o.id == s.id.to_hex())
+            .unwrap_or_else(|| panic!("{} not shown: {task:#?}", s.id));
+        assert!(
+            o.note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("PR-level merge claim; judged revision unknown")),
+            "{o:#?}"
+        );
+    }
+    // The update of another PR is never a revision of R1.
+    assert!(task
+        .contributions
+        .iter()
+        .all(|x| x.id != of_other.id.to_hex()));
+}
+
+#[test]
 fn saved_trail_rechecks_its_evidence_without_the_origin() {
     let c = chain();
     let mut relay = Relay::default();
