@@ -6,6 +6,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/shared/ui/popover";
+import { RelayImg } from "@/shared/ui/RelayImg";
 
 export function InlineEmojiPopover({
   alt,
@@ -62,7 +63,7 @@ export function InlineEmojiPopover({
           onFocus={handleFocus}
           onBlur={scheduleClose}
         >
-          <img
+          <RelayImg
             alt={alt}
             title={label}
             src={resolvedSrc}
@@ -85,7 +86,7 @@ export function InlineEmojiPopover({
       >
         <div className="flex flex-col items-center text-center">
           <div className="mb-2 flex h-14 w-14 items-center justify-center">
-            <img
+            <RelayImg
               alt={alt}
               src={resolvedSrc}
               className="inline-block h-12 w-12 object-contain"

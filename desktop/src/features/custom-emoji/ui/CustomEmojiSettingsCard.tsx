@@ -18,6 +18,7 @@ import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
+import { RelayImg } from "@/shared/ui/RelayImg";
 
 /**
  * Custom emoji management (NIP-30, kind:30030). Each member owns their own set:
@@ -158,7 +159,7 @@ export function CustomEmojiSettingsCard() {
               <div className="flex min-w-0 flex-[1_1_16rem] items-center gap-3">
                 <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-md border bg-background">
                   {pendingUpload ? (
-                    <img
+                    <RelayImg
                       alt="Selected custom emoji preview"
                       src={rewriteRelayUrl(pendingUpload.url)}
                       className="h-14 w-14 object-contain"
@@ -288,7 +289,7 @@ export function CustomEmojiSettingsCard() {
                   key={e.shortcode}
                   className="flex items-center gap-3 px-4 py-3"
                 >
-                  <img
+                  <RelayImg
                     alt={`:${e.shortcode}:`}
                     src={rewriteRelayUrl(e.url)}
                     className="h-6 w-6 shrink-0 object-contain"
@@ -323,7 +324,7 @@ export function CustomEmojiSettingsCard() {
                   key={e.shortcode}
                   className="flex items-center gap-3 px-4 py-3"
                 >
-                  <img
+                  <RelayImg
                     alt={`:${e.shortcode}:`}
                     src={rewriteRelayUrl(e.url)}
                     className="h-6 w-6 shrink-0 object-contain"

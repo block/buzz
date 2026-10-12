@@ -2,6 +2,7 @@ import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { cn } from "@/shared/lib/cn";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { RelayImg } from "@/shared/ui/RelayImg";
 
 /**
  * Render a user-status emoji from its stored string. A status emoji is a bare
@@ -49,7 +50,7 @@ export function StatusEmoji({
     );
     if (found) {
       return (
-        <img
+        <RelayImg
           alt={decorative ? "" : value}
           aria-hidden={decorative || undefined}
           title={decorative || !showTitle ? undefined : displayName}
