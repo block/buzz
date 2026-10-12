@@ -411,6 +411,22 @@ export function TerminalBootstrap({
           }
           // Explicit herdr pick with an attach tab already open: add a new herdr workspace and focus that tab.
           const result = await openInHerdr({ createWorkspace: Boolean(existing && options?.forceHerdr) });
+          if (result.ok && existing && options?.forceHerdr) {
+            // + → herdr with a herdr tab already open: a NEW tab with its own attach client (unique tab key, so the
+            // attach-by-session-name dedupe below can't fold it into the first tab). It shows the workspace just created.
+            const mode = panel.mode === "closed" ? effectiveOpenMode() : panel.mode;
+            openTerminalPanel(mode, panel.tabScope);
+            createInAppSessionRef.current({
+              ...options,
+              pendingLaunchCommand: null,
+              herdrAttach: {
+                bin: result.herdrBin,
+                argv: result.attachArgv,
+                sessionKey: `${herdrAttachKey(result.sessionName)}#${result.workspaceId ?? crypto.randomUUID()}`,
+              },
+            });
+            return;
+          }
           if (result.ok) {
             // Re-check reuse: a parallel open may have created the attach tab.
             const again = findHerdrAttachSession(
