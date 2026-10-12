@@ -110,3 +110,21 @@ export function WebOpenClawStatusNote() {
     </div>
   );
 }
+
+export type DesktopTermSettings = { cwd: string | null; shell: string | null; scrollback: number | null; sessionHost: string | null; sessionName: string | null };
+/** Web: the desktop's Buzz Term session settings over Direct (read-only); null = not connected / unknown. */
+export function useDesktopTermSettings(): DesktopTermSettings | null {
+  const { live } = useDesktopData();
+  const [t, setT] = React.useState<DesktopTermSettings | null>(null);
+  React.useEffect(() => {
+    if (!live) return setT(null);
+    let dead = false;
+    proxyCmd<DesktopTermSettings>("get_term_settings")
+      .then((r) => !dead && setT(r))
+      .catch(() => !dead && setT(null));
+    return () => {
+      dead = true;
+    };
+  }, [live]);
+  return t;
+}

@@ -142,7 +142,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
 ];
 
 /** Sections that only exist on the desktop app: hidden from web Settings, and their URLs fall back to the default section. */
-export const DESKTOP_ONLY_SETTINGS_SECTIONS: readonly string[] = ["compute", "mobile", "updates", "hosted-communities", "community-members", "relay-admin"];
+export const DESKTOP_ONLY_SETTINGS_SECTIONS: readonly string[] = ["compute", "mobile", "updates", "hosted-communities", "community-members", "relay-admin", "local-archive"];
 
 export function isSettingsSection(value: unknown): value is SettingsSection {
   return (
@@ -919,7 +919,7 @@ export function renderSettingsSection(
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
     case "local-archive":
-      return <LocalArchiveSettingsCard />;
+      return isTauri() ? <LocalArchiveSettingsCard /> : null;
     case "mobile":
       return isTauri() ? <MobilePairingCard currentPubkey={props.currentPubkey} /> : null;
     case "updates":

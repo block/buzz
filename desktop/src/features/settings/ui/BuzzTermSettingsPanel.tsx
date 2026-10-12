@@ -1,4 +1,6 @@
 import * as React from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { useDesktopTermSettings } from "@/features/bridge/ui/DesktopData";
 import { homeDir } from "@tauri-apps/api/path";
 
 import { expandTilde } from "@/features/communities/communityStorage";
@@ -50,6 +52,7 @@ const SESSION_HOST_OPTIONS = [
  * radio when herdr is selected.
  */
 export function BuzzTermSettingsPanel() {
+  const web = !isTauri();
   const prefs = useTermPreferences();
   const [cwdDraft, setCwdDraft] = React.useState(prefs.cwd);
   const [shellDraft, setShellDraft] = React.useState(prefs.shell);
@@ -127,6 +130,7 @@ export function BuzzTermSettingsPanel() {
       />
       <SettingsOptionGroupList>
         <RemoteTerminalCard />
+        {web ? <WebTermSessionCard /> : (
         <SettingsOptionGroup
           data-testid="buzz-term-session-card"
           title="Sessions"
@@ -262,6 +266,7 @@ export function BuzzTermSettingsPanel() {
             </div>
           </SettingsOptionRow>
         </SettingsOptionGroup>
+        )}
 
         <SettingsOptionGroup
           data-testid="buzz-term-appearance-card"
@@ -349,6 +354,7 @@ export function BuzzTermSettingsPanel() {
           </SettingsOptionRow>
         </SettingsOptionGroup>
 
+        {web ? <WebTermHostCard /> : (
         <SettingsOptionGroup
           data-testid="buzz-term-host-card"
           title="Session host"
@@ -480,7 +486,53 @@ export function BuzzTermSettingsPanel() {
             </>
           ) : null}
         </SettingsOptionGroup>
+        )}
       </SettingsOptionGroupList>
     </section>
+  );
+}
+
+const WEB_TERM_NOTE = "These are your desktop's settings. Change them on your desktop in Settings → Buzz Term.";
+function InfoRows(props: { rows: [string, string, string][] }) {
+  return (
+    <div className="divide-y divide-border/55 px-4 py-2 text-sm">
+      {props.rows.map(([label, value, id]) => (
+        <div key={id} className="flex items-center justify-between gap-4 py-2">
+          <span className="text-muted-foreground">{label}</span>
+          <span className="truncate font-medium" data-testid={id}>
+            {value}
+          </span>
+        </div>
+      ))}
+      <p className="py-2 text-xs text-muted-foreground">{WEB_TERM_NOTE}</p>
+    </div>
+  );
+}
+/** Web: the desktop's session settings, read-only. */
+function WebTermSessionCard() {
+  const t = useDesktopTermSettings();
+  const v = (x: string | number | null | undefined, dflt: string) => (t === null ? "Unknown" : x === null || x === undefined || x === "" ? dflt : String(x));
+  return (
+    <SettingsOptionGroup data-testid="buzz-term-session-card" title="Sessions">
+      <InfoRows
+        rows={[
+          ["New sessions start in", v(t?.cwd, "Home folder"), "web-term-cwd"],
+          ["Shell", v(t?.shell, "Default shell"), "web-term-shell"],
+          ["Scrollback lines", v(t?.scrollback, String(DEFAULT_TERM_SCROLLBACK)), "web-term-scrollback"],
+        ]}
+      />
+    </SettingsOptionGroup>
+  );
+}
+/** Web: the desktop's session host, read-only. */
+function WebTermHostCard() {
+  const t = useDesktopTermSettings();
+  const host = t === null ? "Unknown" : t.sessionHost === "herdr" ? "herdr" : "Buzz Term tabs";
+  const rows: [string, string, string][] = [["Session host", host, "web-term-host"]];
+  if (t?.sessionHost === "herdr") rows.push(["herdr session", t.sessionName || "Not set", "web-term-session-name"]);
+  return (
+    <SettingsOptionGroup data-testid="buzz-term-host-card" title="Session host">
+      <InfoRows rows={rows} />
+    </SettingsOptionGroup>
   );
 }

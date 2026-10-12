@@ -85,6 +85,7 @@ export const CMD_READS = [
   "get_openclaw_workspace_mcp_status",
   "discover_agent_models",
   "get_agent_models",
+  "get_term_settings",
 ] as const;
 export const CMD_WRITES = [
   "start_managed_agent",
@@ -203,6 +204,12 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
           },
         }),
       );
+    }
+    case "get_term_settings": {
+      // Buzz Term session preferences live in the desktop frontend's store (no secrets): cwd, shell, scrollback, host.
+      const { getTermPreferences } = await import("@/features/terminal/termPreferences");
+      const p = getTermPreferences();
+      return { cwd: p.cwd || null, shell: p.shell || null, scrollback: p.scrollback ?? null, sessionHost: p.sessionHost ?? null, sessionName: p.sessionName || null };
     }
     case "get_agent_models":
       return modelsOut(await inv(name, { pubkey: pubkey(a.pubkey) }));
