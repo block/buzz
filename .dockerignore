@@ -6,6 +6,9 @@ desktop/src-tauri/target/
 # Native non-relay UI builds (not part of the public image)
 desktop/
 mobile/
+# ...except the one desktop crate the relay workspace depends on (crates/buzz-remote-access -> buzz-terminal).
+!desktop/src-tauri/crates/buzz-terminal/
+desktop/src-tauri/crates/buzz-terminal/target/
 
 # Node artifacts (built inside the image; host outputs would invalidate cache)
 node_modules/
