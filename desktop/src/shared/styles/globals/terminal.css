@@ -370,8 +370,8 @@
     color: inherit;
     flex: 1 0 auto;
     font: 600 14px "JetBrains Mono", monospace;
-    min-height: 40px;
-    min-width: 40px;
+    min-height: 44px;
+    min-width: 44px;
     padding: 0 10px;
     touch-action: manipulation;
     user-select: none;
@@ -474,4 +474,30 @@
 /* the window controls sat in their own tinted box at the right of the tab strip: blend them into the strip */
 [data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-readout {
   background: transparent;
+}
+
+/* Key-bar group (TouchKeyGroup): the row floats directly above its button. */
+.buzz-terminal-touch-group {
+  display: flex;
+  flex: 1 0 auto;
+  position: relative;
+}
+.buzz-terminal-touch-group > .buzz-terminal-touch-key {
+  flex: 1 0 auto;
+}
+.buzz-terminal-touch-group-row {
+  background: hsl(var(--background, 0 0% 100%));
+  border: 1px solid hsl(var(--border, 0 0% 80%));
+  border-radius: 12px;
+  box-shadow: 0 4px 16px #0003;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  position: fixed;
+  z-index: 2147483640;
+}
+.buzz-terminal-touch-group-row .buzz-terminal-touch-key {
+  min-height: 44px;
+  min-width: 56px;
+  white-space: nowrap;
 }

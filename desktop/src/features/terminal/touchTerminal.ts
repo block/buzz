@@ -116,6 +116,15 @@ export class TouchGestures {
     return [];
   }
 
+  /** Select mode (key-bar Select toggle): the current one-finger touch selects from where it went down instead of scrolling. */
+  beginSelect(): void {
+    if (this.pts.size === 1) this.mode = "select";
+  }
+  /** Ignore the rest of the current touch (e.g. after a long-press right-click). */
+  kill(): void {
+    if (this.pts.size > 0) this.mode = "dead";
+  }
+
   cancel(): TouchAction[] {
     const was = this.mode;
     this.pts.clear();
@@ -135,14 +144,15 @@ export const TOUCH_KEYS = {
   ctrlC: "\u0003",
 } as const;
 
-export type StickyMods = { ctrl: boolean; alt: boolean };
+/** `meta` (Cmd) is sent like Alt/Option (ESC prefix), the usual "Meta sends Escape" terminal convention. */
+export type StickyMods = { ctrl: boolean; alt: boolean; meta?: boolean };
 
 /**
  * Apply armed Ctrl/Alt to what the keyboard just produced. Ctrl maps a single letter (or one of @ [ \ ] ^ _ / space) to its
  * control code; Alt prefixes ESC. `used` says whether the armed modifiers were spent (an unmappable key leaves Ctrl armed).
  */
 export function applyStickyModifiers(text: string, mods: StickyMods): { text: string; used: boolean } {
-  if (!text || (!mods.ctrl && !mods.alt)) return { text, used: false };
+  if (!text || (!mods.ctrl && !mods.alt && !mods.meta)) return { text, used: false };
   let out = text;
   let used = false;
   if (mods.ctrl) {
@@ -163,7 +173,7 @@ export function applyStickyModifiers(text: string, mods: StickyMods): { text: st
       }
     }
   }
-  if (mods.alt) {
+  if (mods.alt || mods.meta) {
     out = `\u001b${out}`;
     used = true;
   }

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 
 import { cn } from "@/shared/lib/cn";
 import { TOUCH_KEYS } from "./touchTerminal";
@@ -6,8 +7,13 @@ import { TOUCH_KEYS } from "./touchTerminal";
 type Props = {
   ctrl: boolean;
   alt: boolean;
+  meta: boolean;
   onToggleCtrl: () => void;
   onToggleAlt: () => void;
+  onToggleMeta: () => void;
+  /** Select mode: one-finger drags select cells instead of scrolling. */
+  selectMode: boolean;
+  onToggleSelect: () => void;
   /** Send raw terminal input (Esc, Tab, arrows, Ctrl-C). */
   onKey: (sequence: string) => void;
   onPaste: () => void;
@@ -19,7 +25,85 @@ type Props = {
  * Keys a phone keyboard doesn't have. Buttons act on pointer-down and never take focus, so the hidden input (and with it the
  * on-screen keyboard) stays up while you tap them; arrows repeat while held.
  */
-export function TerminalTouchBar({ ctrl, alt, onToggleCtrl, onToggleAlt, onKey, onPaste, keyboardOpen, onToggleKeyboard }: Props) {
+export type TouchKeyGroupItem = { id: string; label: string; ariaLabel?: string; on?: boolean; action: () => void };
+
+/**
+ * Reusable key-bar group: one button that opens a floating row of options directly above it. Tapping an option runs it and
+ * closes the row; tapping outside closes it too. Buttons act on pointer-down and never take focus (keyboard stays up).
+ */
+export function TouchKeyGroup({ label, ariaLabel, items, testId }: { label: string; ariaLabel: string; items: TouchKeyGroupItem[]; testId: string }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+  const rowRef = React.useRef<HTMLDivElement>(null);
+  const [pos, setPos] = React.useState<{ left: number; bottom: number } | null>(null);
+  React.useLayoutEffect(() => {
+    if (!open || !ref.current) return;
+    // The key bar scrolls horizontally (it clips anything absolutely positioned), so the row is portaled and fixed above the button.
+    const r = ref.current.getBoundingClientRect();
+    const rowW = rowRef.current?.offsetWidth ?? 0;
+    setPos({ left: Math.max(4, Math.min(r.left, window.innerWidth - rowW - 4)), bottom: window.innerHeight - r.top + 6 });
+  }, [open]);
+  React.useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!ref.current?.contains(t) && !rowRef.current?.contains(t)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", away, true);
+    return () => document.removeEventListener("pointerdown", away, true);
+  }, [open]);
+  const anyOn = items.some((i) => i.on);
+  return (
+    <div ref={ref} className="buzz-terminal-touch-group" data-testid={testId}>
+      <button
+        type="button"
+        className={cn("buzz-terminal-touch-key", (open || anyOn) && "buzz-terminal-touch-key-on")}
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        data-testid={`${testId}-toggle`}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          setOpen((o) => !o);
+        }}
+        onMouseDown={(e) => e.preventDefault()}
+      >
+        {label}
+      </button>
+      {open ? createPortal(
+        <div
+          ref={rowRef}
+          className="buzz-terminal-touch-group-row"
+          role="menu"
+          data-testid={`${testId}-row`}
+          style={{ left: pos?.left ?? 4, bottom: pos?.bottom ?? 60, visibility: pos ? "visible" : "hidden" }}
+        >
+          {items.map((it) => (
+            <button
+              key={it.id}
+              type="button"
+              role="menuitem"
+              className={cn("buzz-terminal-touch-key", it.on && "buzz-terminal-touch-key-on")}
+              aria-label={it.ariaLabel ?? it.label}
+              aria-pressed={it.on}
+              data-testid={`${testId}-${it.id}`}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                it.action();
+                setOpen(false);
+              }}
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      ) : null}
+    </div>
+  );
+}
+
+export function TerminalTouchBar({ ctrl, alt, meta, onToggleCtrl, onToggleAlt, onToggleMeta, selectMode, onToggleSelect, onKey, onPaste, keyboardOpen, onToggleKeyboard }: Props) {
   const repeat = React.useRef<{ delay: number; every: number }>({ delay: 0, every: 0 });
   const stop = React.useCallback(() => {
     window.clearTimeout(repeat.current.delay);
@@ -62,13 +146,29 @@ export function TerminalTouchBar({ ctrl, alt, onToggleCtrl, onToggleAlt, onKey, 
   return (
     <div className="buzz-terminal-touchbar" data-testid="terminal-touchbar" role="toolbar" aria-label="Terminal keys">
       {key("Esc", TOUCH_KEYS.esc, "tk-esc")}
-      {key("Tab", TOUCH_KEYS.tab, "tk-tab")}
-      {mod("Ctrl", ctrl, onToggleCtrl, "tk-ctrl")}
-      {mod("Alt", alt, onToggleAlt, "tk-alt")}
-      {key("←", TOUCH_KEYS.left, "tk-left", true)}
-      {key("↓", TOUCH_KEYS.down, "tk-down", true)}
-      {key("↑", TOUCH_KEYS.up, "tk-up", true)}
-      {key("→", TOUCH_KEYS.right, "tk-right", true)}
+      <TouchKeyGroup
+        label="⌃⌥"
+        ariaLabel="Modifiers"
+        testId="tk-mods"
+        items={[
+          { id: "tab", label: "Tab", action: () => onKey(TOUCH_KEYS.tab) },
+          { id: "ctrl", label: "Ctrl", ariaLabel: "Control (next key)", on: ctrl, action: onToggleCtrl },
+          { id: "alt", label: "⌥ Alt", ariaLabel: "Option (next key)", on: alt, action: onToggleAlt },
+          { id: "cmd", label: "⌘ Cmd", ariaLabel: "Command (next key)", on: meta, action: onToggleMeta },
+        ]}
+      />
+      {mod("Select", selectMode, onToggleSelect, "tk-select")}
+      <TouchKeyGroup
+        label="↑↓"
+        ariaLabel="Arrow keys"
+        testId="tk-arrows"
+        items={[
+          { id: "left", label: "←", ariaLabel: "Left", action: () => onKey(TOUCH_KEYS.left) },
+          { id: "down", label: "↓", ariaLabel: "Down", action: () => onKey(TOUCH_KEYS.down) },
+          { id: "up", label: "↑", ariaLabel: "Up", action: () => onKey(TOUCH_KEYS.up) },
+          { id: "right", label: "→", ariaLabel: "Right", action: () => onKey(TOUCH_KEYS.right) },
+        ]}
+      />
       {key("^C", TOUCH_KEYS.ctrlC, "tk-ctrlc")}
       <button type="button" className="buzz-terminal-touch-key" data-testid="tk-paste" onPointerDown={press(onPaste)} {...common}>
         Paste

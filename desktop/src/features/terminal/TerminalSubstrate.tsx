@@ -230,10 +230,13 @@ export function TerminalSubstrate({
     return Number.isFinite(stored) ? stored : 320;
   });
   // ── touch ──
-  const [mods, setMods] = React.useState<StickyMods>({ ctrl: false, alt: false });
+  const [mods, setMods] = React.useState<StickyMods>({ ctrl: false, alt: false, meta: false });
+  const [selectMode, setSelectMode] = React.useState(false);
+  const selectModeRef = React.useRef(selectMode);
+  selectModeRef.current = selectMode;
   const modsRef = React.useRef(mods);
   modsRef.current = mods;
-  const gesturesRef = React.useRef(new TouchGestures());
+  const gesturesRef = React.useRef(new TouchGestures({ longPressMs: 500 }));
   const longPressTimerRef = React.useRef(0);
   const touchScrollRef = React.useRef({ remainderPx: 0 });
   const touchPointRef = React.useRef({ x: 0, y: 0 });
@@ -270,10 +273,10 @@ export function TerminalSubstrate({
   const sendInput = React.useEffectEvent((text: string) => {
     if (!text) return;
     let out = text;
-    if (touchUi && (modsRef.current.ctrl || modsRef.current.alt)) {
+    if (touchUi && (modsRef.current.ctrl || modsRef.current.alt || modsRef.current.meta)) {
       const applied = applyStickyModifiers(text, modsRef.current);
       out = applied.text;
-      if (applied.used) setMods({ ctrl: false, alt: false });
+      if (applied.used) setMods({ ctrl: false, alt: false, meta: false });
     }
     setWelcomeVisible(false);
     setCursorPainted(true);
@@ -371,6 +374,14 @@ export function TerminalSubstrate({
         }
         case "longpress": {
           const cell = cellAt(action.x, action.y);
+          // Mouse-tracking apps (Herder, vim, tmux…): a long press is a right-click at that cell; no local selection.
+          if (mouseReportingRef.current && onMouseRef.current && !selectModeRef.current) {
+            gesturesRef.current.kill();
+            onMouseRef.current({ button: "right", action: "press", column: cell.col + 1, row: cell.row + 1 });
+            onMouseRef.current({ button: "right", action: "release", column: cell.col + 1, row: cell.row + 1 });
+            navigator.vibrate?.(12);
+            break;
+          }
           const word = gridRef.current?.wordAt(cell.row, cell.col) ?? null;
           setPasteBox(false);
           setTouchSel({
@@ -417,6 +428,14 @@ export function TerminalSubstrate({
     touchScrollRef.current = { remainderPx: 0 };
     const gestures = gesturesRef.current;
     applyTouchActions(gestures.down(event.pointerId, event.clientX, event.clientY, performance.now()));
+    if (selectModeRef.current && gestures.state === "pending") {
+      // Select mode: the drag selects rendered cells (works in the alternate screen too); no scroll, no long-press timer.
+      gestures.beginSelect();
+      const cell = cellAt(event.clientX, event.clientY);
+      setTouchSel({ anchor: cell, head: cell, done: false });
+      window.clearTimeout(longPressTimerRef.current);
+      return;
+    }
     window.clearTimeout(longPressTimerRef.current);
     if (gestures.state === "pending") {
       longPressTimerRef.current = window.setTimeout(
@@ -472,6 +491,7 @@ export function TerminalSubstrate({
     const text = grid.textBetweenCells(sel.anchor.row, sel.anchor.col, sel.head.row, sel.head.col);
     if (text) await copyToClipboard(text);
     setTouchSel(null);
+    setSelectMode(false); // Copy returns to scroll mode
     textareaRef.current?.focus({ preventScroll: true });
   };
   // Touch: the on-screen keyboard opens only from the keyboard button (toggle). Elsewhere the hidden input stays inputmode="none",
@@ -1705,8 +1725,15 @@ export function TerminalSubstrate({
         <TerminalTouchBar
           ctrl={mods.ctrl}
           alt={mods.alt}
+          meta={!!mods.meta}
           onToggleCtrl={() => setMods((m) => ({ ...m, ctrl: !m.ctrl }))}
           onToggleAlt={() => setMods((m) => ({ ...m, alt: !m.alt }))}
+          onToggleMeta={() => setMods((m) => ({ ...m, meta: !m.meta }))}
+          selectMode={selectMode}
+          onToggleSelect={() => {
+            setSelectMode((on) => !on);
+            setTouchSel(null);
+          }}
           onKey={(seq) => sendInput(seq)}
           onPaste={() => void pasteFromClipboard()}
           keyboardOpen={kb.open}
