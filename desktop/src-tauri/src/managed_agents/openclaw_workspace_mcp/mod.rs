@@ -214,6 +214,23 @@ pub fn fetch_project_instructions_at(
     grant: &OpenClawWorkspaceGrant,
     path: Option<&str>,
 ) -> Result<Option<String>, String> {
+    // reqwest::blocking owns an internal tokio runtime. Building or dropping it on a
+    // tokio worker panics ("Cannot drop a runtime in a context where blocking is not
+    // allowed"), and spawn calls this while holding `managed_agent_processes`, so the
+    // panic poisoned that lock for the rest of the session. Always run it on a plain
+    // OS thread so it is safe from sync and async callers alike.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| fetch_project_instructions_blocking(grant, path))
+            .join()
+            .unwrap_or_else(|_| Err("openclaw project-instructions fetch panicked".into()))
+    })
+}
+
+fn fetch_project_instructions_blocking(
+    grant: &OpenClawWorkspaceGrant,
+    path: Option<&str>,
+) -> Result<Option<String>, String> {
     let url = project_instructions_url(&grant.url, path);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
