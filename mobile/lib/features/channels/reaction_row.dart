@@ -180,7 +180,7 @@ class ReactionRow extends StatelessWidget {
                         padding: const EdgeInsets.only(left: Grid.half),
                         child: Text(
                           '${reactions.fold<int>(0, (sum, reaction) => sum + reaction.count)}',
-                          style: context.textTheme.labelSmall,
+                          style: context.textTheme.labelMedium,
                         ),
                       ),
                     ],
@@ -951,6 +951,7 @@ Future<bool> _showNativeReactionDetails(
         'requestId': requestId,
         'initialEmoji': initialEmoji,
         'canAddReaction': onAddReaction != null,
+        'addReactionIconCodePoint': BuzzIcons.smilePlus.codePoint,
         'sheetColor': sheetColors.surface.toARGB32(),
         'foregroundColor': sheetColors.primary.toARGB32(),
         'dark': Theme.of(context).brightness == Brightness.dark,

@@ -1,11 +1,13 @@
 import UIKit
 import ImageIO
+import CoreText
 
 /// Native resizable sheet: selected emoji first, with All and per-emoji filters.
 final class NativeReactionDetailsViewController: UIViewController, UITableViewDataSource {
   var onClose: (() -> Void)?
   var onAddReaction: (() -> Void)?
   private let canAddReaction: Bool
+  private let addReactionIconCodePoint: Int
   private let sheetColor: UIColor
   private let foregroundColor: UIColor
   private let reactions: [[String: Any]]
@@ -34,6 +36,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     sheetColor = color("sheetColor", fallback: .systemGroupedBackground)
     foregroundColor = color("foregroundColor", fallback: .label)
     canAddReaction = data["canAddReaction"] as? Bool == true
+    addReactionIconCodePoint = data["addReactionIconCodePoint"] as? Int ?? 0
     reactions = data["reactions"] as? [[String: Any]] ?? []
     profiles = data["profiles"] as? [String: [String: Any]] ?? [:]
     let initial = data["initialEmoji"] as? String
@@ -133,24 +136,33 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     }
   }
 
-  // Match the smile-plus affordance used by Flutter instead of a plain plus.
-  private static let addReactionImage: UIImage = {
-    UIGraphicsImageRenderer(size: CGSize(width: 26, height: 26)).image { context in
-      let face = UIImage(systemName: "face.smiling")
-      face?.draw(in: CGRect(x: 0, y: 0, width: 22, height: 22))
-      context.cgContext.setBlendMode(.clear)
-      context.cgContext.fillEllipse(in: CGRect(x: 13, y: 13, width: 13, height: 13))
-      context.cgContext.setBlendMode(.normal)
-      UIImage(systemName: "plus.circle")?.draw(in: CGRect(x: 14, y: 14, width: 12, height: 12))
-    }.withRenderingMode(.alwaysTemplate)
+  // Use the exact bundled Tabler font that backs BuzzIcons in Flutter.
+  private static let tablerFont: UIFont? = {
+    guard let frameworks = Bundle.main.privateFrameworksURL,
+      let provider = CGDataProvider(url: frameworks.appendingPathComponent(
+        "App.framework/flutter_assets/assets/fonts/TablerIcons.ttf") as CFURL),
+      let font = CGFont(provider), let name = font.postScriptName else { return nil }
+    CTFontManagerRegisterGraphicsFont(font, nil)
+    return UIFont(name: name as String, size: 24)
   }()
+
+  private var addReactionImage: UIImage? {
+    guard let font = Self.tablerFont,
+      let scalar = UnicodeScalar(addReactionIconCodePoint) else { return nil }
+    let glyph = NSAttributedString(string: String(scalar), attributes: [.font: font])
+    let size = glyph.size()
+    return UIGraphicsImageRenderer(size: CGSize(width: 28, height: 28)).image { _ in
+      glyph.draw(at: CGPoint(x: (28 - size.width) / 2, y: (28 - size.height) / 2))
+    }.withRenderingMode(.alwaysTemplate)
+  }
 
   private func rebuildFilters() {
     for child in filters.arrangedSubviews { child.removeFromSuperview() }
     if canAddReaction {
       let add = UIButton(type: .system)
       var config = UIButton.Configuration.gray()
-      config.image = Self.addReactionImage
+      config.image = addReactionImage
+      if config.image == nil { config.title = "Add reaction" }
       config.cornerStyle = .capsule
       config.baseForegroundColor = foregroundColor
       add.configuration = config

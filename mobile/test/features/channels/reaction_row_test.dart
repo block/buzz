@@ -1,5 +1,6 @@
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'dart:async';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
@@ -184,6 +185,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
     await tester.pump();
     expect(payload!['canAddReaction'], isTrue);
+    expect(payload!['addReactionIconCodePoint'], BuzzIcons.smilePlus.codePoint);
     await NativeMessagePresentation.present('updateProfiles', {
       'requestId': payload!['requestId'],
       'profiles': <String, Object?>{},
