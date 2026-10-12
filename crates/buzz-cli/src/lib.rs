@@ -279,7 +279,8 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
-    /// Sign and verify NIP-FP work fingerprints (pre-registration)
+    /// Read local work trails (request → contribution → outcome); write typed
+    /// work messages and outcomes; sign and verify NIP-FP fingerprints
     #[command(subcommand)]
     Trust(TrustCmd),
 }
@@ -1770,6 +1771,12 @@ pub enum PrCmd {
         /// Merge commit id (status=merged only)
         #[arg(long)]
         merge_commit: Option<String>,
+        /// The exact revision this status judges: the PR event itself, or a
+        /// kind:1619 update of it by the PR's signer in the same repository.
+        /// Both are fetched and checked before signing. Without it, readers
+        /// show a PR-level claim whose judged revision is unknown.
+        #[arg(long)]
+        revision: Option<String>,
     },
 }
 
@@ -2051,6 +2058,116 @@ pub enum TrustCmd {
         /// `nip-fp/viewer-known` policy. Repeatable.
         #[arg(long)]
         viewer_known: Vec<String>,
+    },
+    /// Read one work trail from the current relay under policy
+    /// `buzz.work/v1`: request → contribution(s) → outcome(s), each outcome
+    /// beside the exact contribution it judges. No score. Coverage, caps and
+    /// unavailable evidence are reported, never read as "clean".
+    #[command(
+        group = clap::ArgGroup::new("entry").required(true),
+        after_help = "Examples:\n  buzz trust trail --request <event-id> --channel <uuid> --text\n  buzz trust trail --actor <npub> --channel <uuid> --repo 30617:<owner-hex>:<d> --since 1791000000 --cutoff 1791600000"
+    )]
+    Trail {
+        /// Start from a typed request, a PR (kind:1618), or a patch
+        #[arg(long, group = "entry")]
+        request: Option<String>,
+        /// Start from one contribution (typed commitment/update/submission,
+        /// PR, PR update, or patch)
+        #[arg(long, group = "entry")]
+        contribution: Option<String>,
+        /// Find work requested or contributed by this key (hex or npub)
+        /// within the declared --channel/--repo scope
+        #[arg(long, group = "entry")]
+        actor: Option<String>,
+        /// Channel UUID the viewer declares it may read. Repeatable.
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Repository coordinate `30617:<owner-hex>:<d>`. Repeatable.
+        #[arg(long)]
+        repo: Vec<String>,
+        /// Unix-seconds lower bound for discovery reads
+        #[arg(long)]
+        since: Option<u64>,
+        /// Unix-seconds `until` bound for every discovery read (default: now)
+        #[arg(long)]
+        cutoff: Option<u64>,
+        /// Print a readable view instead of JSON
+        #[arg(long)]
+        text: bool,
+    },
+    /// Post a typed work request (`buzz.work/request/v1`) as a top-level
+    /// channel message. Its signer is the requester. Typed requests cannot
+    /// be thread replies in this version.
+    #[command(
+        after_help = "Example:\n  buzz trust request --channel <uuid> --title 'Draft the Q3 summary' --task-type writing --criterion 'covers all three regions'"
+    )]
+    Request {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// What is requested
+        #[arg(long)]
+        title: String,
+        /// Kind of task, e.g. writing, review, analysis
+        #[arg(long)]
+        task_type: String,
+        /// Acceptance criterion. Repeatable; at least one.
+        #[arg(long = "criterion", required = true)]
+        criteria: Vec<String>,
+    },
+    /// Reply to a typed request with a commitment, update, or submission
+    /// (`buzz.work/<role>/v1`). Channel, thread and requester come from the
+    /// fetched, signature-checked request.
+    #[command(
+        after_help = "Examples:\n  buzz trust contribute --request <id> --role commitment --summary 'taking this'\n  buzz trust contribute --request <id> --role update --state blocked --summary 'waiting on data'\n  buzz trust contribute --request <id> --role submission --summary 'v2' --artifact 'inline: ...' --artifact-revision sha256:<hex> --previous <submission-id>"
+    )]
+    Contribute {
+        /// The typed request answered
+        #[arg(long)]
+        request: String,
+        /// commitment, update, or submission
+        #[arg(long, value_parser = ["commitment", "update", "submission"])]
+        role: String,
+        /// What the contributor says
+        #[arg(long)]
+        summary: String,
+        /// working or blocked (update only)
+        #[arg(long, value_parser = ["working", "blocked"])]
+        state: Option<String>,
+        /// Artifact: inline text or an immutable revision locator (submission only)
+        #[arg(long)]
+        artifact: Option<String>,
+        /// Revision of the artifact, e.g. a digest or commit (submission only)
+        #[arg(long)]
+        artifact_revision: Option<String>,
+        /// The previous submission this one revises (submission only)
+        #[arg(long)]
+        previous: Option<String>,
+    },
+    /// Judge one exact typed submission with a `buzz.wot` outcome
+    /// (kind:1985). Its `e`, `p` and `h` come from the fetched submission.
+    /// Only the request's signer is read as authorized; anyone else's
+    /// outcome is an attributed opinion. The relay accepts outcomes on
+    /// open-channel work only.
+    #[command(
+        after_help = "Example:\n  buzz trust outcome --submission <id> --claim accepted --reason 'meets the criteria' --criterion 'covers all three regions'"
+    )]
+    Outcome {
+        /// The exact submission judged
+        #[arg(long)]
+        submission: String,
+        /// accepted, corrected, rejected, disputed, or reused
+        #[arg(long, value_parser = ["accepted", "corrected", "rejected", "disputed", "reused"])]
+        claim: String,
+        /// Why
+        #[arg(long)]
+        reason: String,
+        /// Criterion checked. Repeatable; at least one.
+        #[arg(long = "criterion", required = true)]
+        criteria: Vec<String>,
+        /// Evidence reference cited. Repeatable.
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
     },
 }
 
@@ -2605,7 +2722,17 @@ mod tests {
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
-        assert_eq!(names(&cmd, "trust"), vec!["fingerprint", "verify"]);
+        assert_eq!(
+            names(&cmd, "trust"),
+            vec![
+                "contribute",
+                "fingerprint",
+                "outcome",
+                "request",
+                "trail",
+                "verify"
+            ]
+        );
         assert_eq!(
             names(&cmd, "moderation"),
             vec![
@@ -2640,7 +2767,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 6),
             ("social", 7),
-            ("trust", 2),
+            ("trust", 6),
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),

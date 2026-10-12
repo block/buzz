@@ -666,34 +666,17 @@ impl<'a> Reduce<'a> {
     /// Validate a `1619` against its original PR (engineering plan §3, code
     /// revision binding). The error says why it stays unresolved.
     fn update_link(&self, update: &Event, root: EventId) -> Result<(), String> {
-        for name in ["E", "P", "a", "c"] {
-            if count(update, name) != 1 {
-                return Err(format!("needs exactly one {name} tag; unresolved update"));
-            }
-        }
         let Some(original) = self.valid(&root).filter(|e| e.kind.as_u16() == 1618) else {
             return Err(format!(
                 "original PR {root} unavailable or not a verified 1618; unresolved update"
             ));
         };
-        if evidence::tag_value(update, "P") != Some(original.pubkey.to_hex().as_str()) {
-            return Err("P does not name the original PR's signer; unresolved update".into());
-        }
-        if count(original, "a") != 1
-            || evidence::tag_value(update, "a") != evidence::tag_value(original, "a")
-        {
-            return Err(
-                "names a different repository than the original PR; unresolved update".into(),
-            );
-        }
+        pr_revision(original, update)?;
         let origin = |e: &Event| self.trail.fetch.store.get(&e.id).map(|s| s.origin.as_str());
         if origin(update) != origin(original) {
             return Err(
                 "fetched from a different origin than the original PR; unresolved update".into(),
             );
-        }
-        if update.pubkey != original.pubkey {
-            return Err("signed by a key other than the original PR's signer; unresolved update (delegation is not supported)".into());
         }
         Ok(())
     }
@@ -1015,6 +998,59 @@ fn code(
         unresolved,
         outcomes: Vec::new(),
     }
+}
+
+/// Check that `revision` is a revision of the PR `original` that a status
+/// may judge exactly: `original` itself (a `1618` with one `c` and one `a`),
+/// or a `1619` whose single `E`, `P`, `a`, and `c` name `original`, its
+/// signer, and its repository, signed by that same key (plan §3, code
+/// revision binding). Both events must already be signature-verified and
+/// fetched from one origin; the reader checks origin separately.
+///
+/// Writers call this before signing a revision-level status; the trail
+/// reader applies the same rule again. Delegated update signers are not
+/// supported.
+///
+/// # Errors
+///
+/// Returns why `revision` cannot be bound to `original`.
+pub fn pr_revision(original: &Event, revision: &Event) -> Result<(), String> {
+    if original.kind.as_u16() != 1618 {
+        return Err(format!("{} is not a 1618 pull request", original.id));
+    }
+    if count(original, "c") != 1 || count(original, "a") != 1 {
+        return Err(format!(
+            "original PR {} needs exactly one c tip commit and one a repository",
+            original.id
+        ));
+    }
+    if revision.id == original.id {
+        return Ok(());
+    }
+    if revision.kind.as_u16() != 1619 {
+        return Err(format!(
+            "{} is neither the original PR nor a 1619 update",
+            revision.id
+        ));
+    }
+    for name in ["E", "P", "a", "c"] {
+        if count(revision, name) != 1 {
+            return Err(format!("needs exactly one {name} tag; unresolved update"));
+        }
+    }
+    if single_id(revision, "E") != Some(original.id) {
+        return Err("E does not name the original PR; unresolved update".into());
+    }
+    if evidence::tag_value(revision, "P") != Some(original.pubkey.to_hex().as_str()) {
+        return Err("P does not name the original PR's signer; unresolved update".into());
+    }
+    if evidence::tag_value(revision, "a") != evidence::tag_value(original, "a") {
+        return Err("names a different repository than the original PR; unresolved update".into());
+    }
+    if revision.pubkey != original.pubkey {
+        return Err("signed by a key other than the original PR's signer; unresolved update (delegation is not supported)".into());
+    }
+    Ok(())
 }
 
 fn is_contribution(event: &Event) -> bool {

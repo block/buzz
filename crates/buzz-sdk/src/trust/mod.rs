@@ -18,6 +18,7 @@ mod assess;
 mod evidence;
 mod fetch;
 mod judge;
+mod render;
 mod report;
 mod trail;
 mod verifier;
@@ -36,7 +37,7 @@ use crate::SdkError;
 
 pub use fetch::{MAX_PAGES, QUERY_LIMIT};
 pub use report::*;
-pub use trail::{Entry, Scope, Trail, TRAIL_POLICY};
+pub use trail::{pr_revision, Entry, Scope, Trail, TRAIL_POLICY};
 pub use verifier::Verifier;
 pub use work::{
     build_work_label, build_work_part, build_work_request, PartSpec, WorkRole, OUTCOME_CLAIMS,

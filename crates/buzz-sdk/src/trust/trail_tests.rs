@@ -369,6 +369,55 @@ fn exact_revision_outcomes_keep_correction_history() {
     assert_eq!(task.conversation[0].id, c.praise.id.to_hex());
     assert!(task.unbound.is_empty());
     assert_honest(trail);
+
+    // The readable view names every source and keeps every qualifier.
+    let text = trail.readable();
+    for e in [
+        &c.request,
+        &c.commitment,
+        &c.update,
+        &c.c1,
+        &c.c2,
+        &c.corrected,
+        &c.accepted,
+        &c.opinion,
+        &c.praise,
+    ] {
+        assert!(text.contains(&e.id.to_hex()), "{} missing:\n{text}", e.id);
+    }
+    for needle in [
+        "task: Draft the Q3 summary (writing)",
+        "criterion: covers the three regions",
+        "state: blocked",
+        &format!("follows: {}", c.c1.id),
+        "an attributed opinion, not task state",
+        &format!("outcome corrected {}", c.corrected.id),
+        "relationship unknown",
+        "conversation (not work, not acceptance)",
+        "content is not fetched",
+        "coverage:",
+    ] {
+        assert!(text.contains(needle), "{needle:?} missing:\n{text}");
+    }
+    assert_readable_honest(&text);
+}
+
+fn assert_readable_honest(text: &str) {
+    let lower = text.to_lowercase();
+    for banned in [
+        "independent",
+        "verified work",
+        "no dispute",
+        "clean",
+        "score",
+        "rung",
+        "complete",
+    ] {
+        assert!(
+            !lower.contains(banned),
+            "readable view says {banned}:\n{text}"
+        );
+    }
 }
 
 #[test]
@@ -927,6 +976,18 @@ fn root_only_merge_stays_revision_unknown_and_ref_check_is_separate() {
         Some(RefStatus::Corroborated)
     );
     assert_honest(&trail);
+    let text = trail.readable();
+    for needle in [
+        "request: request not linked",
+        "outcomes that name no exact revision:",
+        "PR-level merge claim; judged revision unknown",
+        "merge commit corroborated by ref state",
+        "not review",
+        &merge.id.to_hex(),
+    ] {
+        assert!(text.contains(needle), "{needle:?} missing:\n{text}");
+    }
+    assert_readable_honest(&text);
 }
 
 #[test]
