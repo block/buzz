@@ -639,6 +639,13 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
+/// NIP-32: Label. Buzz accepts the first slice only: one `e` target event in
+/// an open channel, one `p` naming the target's signer, and one `h` equal to
+/// the target's channel. The relay derives the channel from the stored target;
+/// the `h` tag is checked against it, never trusted on its own. Used for
+/// `buzz.wot` work outcomes. See `docs/nips/NIP-FP.md`.
+pub const KIND_LABEL: u32 = 1985;
+
 /// NIP-FP: Work fingerprint — a subject's signed, replaceable index of
 /// *selected* work events (parameterized replaceable, d = fingerprint id).
 ///
@@ -784,6 +791,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
     KIND_PROJECT,
+    KIND_LABEL,
     KIND_WORK_FINGERPRINT,
 ];
 
