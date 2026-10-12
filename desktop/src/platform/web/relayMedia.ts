@@ -5,6 +5,7 @@
 // through the same-origin /__relay proxy with the header and shows them as blob: URLs. One signed token is reused for every
 // media request while it is valid (Blossom tokens are expiry-bound, not single-use), so a slow remote signer is asked once
 // per ~40 s instead of once per image.
+import { relayFetchUrl } from "./relayProxy";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { relayHttpBase } from "./relayConfig";
@@ -31,11 +32,9 @@ function serverAuthority(base: string): string {
   return u.host;
 }
 
-/** Same-origin proxy URL for a relay path (the relay does not send CORS headers for our origin). */
+/** Fetch URL for a relay path: dev /__relay proxy, production direct (or CDN prefix). See relayProxy.ts. */
 export function proxiedRelayUrl(base: string, path: string): string {
-  return new URL(base).origin === location.origin
-    ? `${base}${path}`
-    : `/__relay/${encodeURIComponent(base)}${path}`;
+  return relayFetchUrl(base, path);
 }
 
 async function signBlossom(
