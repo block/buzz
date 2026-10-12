@@ -93,7 +93,7 @@ void main() {
       final scheme = AppTheme.light().colorScheme;
       // Derived from the text color, not the scheme's border tokens — those sit
       // within a few levels of the card fill and vanish.
-      expect(divider.color, scheme.onSurface.withValues(alpha: 0.12));
+      expect(divider.color, scheme.onSurface.withValues(alpha: 0.07));
 
       // The indent is painted inside the divider's box, so the line starts at
       // the box's left edge plus the indent — level with the row titles.
