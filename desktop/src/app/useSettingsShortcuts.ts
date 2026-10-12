@@ -1,3 +1,4 @@
+import { isShortcutUnavailableOnWeb } from "@/shared/lib/keyboard-shortcuts";
 import * as React from "react";
 
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
@@ -23,7 +24,7 @@ export function useSettingsShortcuts({
         !event.shiftKey &&
         (event.key === "," || event.code === "Comma");
 
-      if (!isSettingsShortcut) {
+      if (!isSettingsShortcut || isShortcutUnavailableOnWeb("open-settings")) {
         return;
       }
 

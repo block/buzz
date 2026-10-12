@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
 
 export const HUDDLE_SHORTCUT_EVENT = "buzz:huddle-shortcut";
@@ -296,6 +297,21 @@ export function getPlatformKeys(shortcut: KeyboardShortcut): string {
  * or null when the id is unknown. Use this for inline hints (menus, tooltips)
  * so they stay in sync with the canonical shortcut registry.
  */
+/** Shortcuts the browser (or macOS) keeps for itself on the web build: shown as "N/A" there and not handled. */
+export const WEB_UNAVAILABLE_SHORTCUTS: ReadonlySet<string> = new Set([
+  "new-channel", // ⇧⌘N: new incognito/private window
+  "open-settings", // ⌘,: browser settings
+  "go-home", // ⇧⌘A: Chrome tab search
+  "always-address-agent", // ⇧⌘M: Chrome profile switcher
+]);
+/** True when running in the web build (no Tauri runtime). */
+export function isWebShortcutBuild(): boolean {
+  return typeof window !== "undefined" && !isTauri();
+}
+export function isShortcutUnavailableOnWeb(id: string): boolean {
+  return isWebShortcutBuild() && WEB_UNAVAILABLE_SHORTCUTS.has(id);
+}
+
 export function getPlatformKeysById(id: string): string | null {
   const shortcut = KEYBOARD_SHORTCUTS.find((s) => s.id === id);
   return shortcut ? getPlatformKeys(shortcut) : null;

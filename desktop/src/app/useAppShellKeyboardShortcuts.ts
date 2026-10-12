@@ -1,4 +1,5 @@
 import * as React from "react";
+import { isShortcutUnavailableOnWeb } from "@/shared/lib/keyboard-shortcuts";
 
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import {
@@ -83,7 +84,7 @@ export function useAppShellKeyboardShortcuts({
         return;
       }
 
-      if (key === "n" && event.shiftKey) {
+      if (key === "n" && event.shiftKey && !isShortcutUnavailableOnWeb("new-channel")) {
         event.preventDefault();
         onCreateChannel();
         return;
@@ -95,7 +96,7 @@ export function useAppShellKeyboardShortcuts({
         return;
       }
 
-      if (key === "a" && event.shiftKey) {
+      if (key === "a" && event.shiftKey && !isShortcutUnavailableOnWeb("go-home")) {
         event.preventDefault();
         void onGoHome();
         return;

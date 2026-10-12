@@ -1,3 +1,4 @@
+import { isWebShortcutBuild } from "@/shared/lib/keyboard-shortcuts";
 export type TerminalOwner = "buzz" | "terminal";
 
 export type HandoffState = {
@@ -160,6 +161,8 @@ export function matchTabChord(
     if (event.code === "ArrowRight") return "next";
     return null;
   }
+  // Web: ⌘T / ⌘W belong to the browser (new/close tab); use the panel's + and × instead.
+  if (isWebShortcutBuild()) return null;
   if (event.code === "KeyT") return "new";
   if (event.code === "KeyW") return "close";
   return null;
