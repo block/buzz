@@ -64,8 +64,11 @@ export function installExternalLinkGuard(doc: Document = document): void {
   const onClick = (event: Event) => {
     const a = (event.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
     if (!a || !hardenExternalAnchor(a, origin)) return;
-    // iOS installed PWA: _blank opens an in-app browser sheet; hand the link to Safari instead.
-    if (event.type === "click" && isIosStandalone(win)) {
+    // Web owns every plain external-link click: skip the desktop-only link side panel / pinned-site handlers
+    // (stopImmediatePropagation at document capture runs before React's root listeners) and open outside the app.
+    // iOS installed PWA hands the link URL itself (never location) to Safari; elsewhere a new tab.
+    const m = event as MouseEvent;
+    if (event.type === "click" && m.button === 0 && !m.metaKey && !m.ctrlKey && !m.shiftKey && !m.altKey) {
       event.preventDefault();
       event.stopImmediatePropagation();
       openExternalUrl(new URL(a.getAttribute("href") ?? "", origin).href, win);

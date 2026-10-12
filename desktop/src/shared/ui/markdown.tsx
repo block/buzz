@@ -1,4 +1,5 @@
 import * as React from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { createPortal } from "react-dom";
 import type { Components } from "react-markdown";
 import { ChevronLeft, ChevronRight, Download } from "lucide-react";
@@ -1715,7 +1716,7 @@ function MarkdownInner({
     const map = new Map<string, () => void>();
     for (const preview of resolvedLinkPreviews) {
       map.set(preview.href, () => {
-        openLinkSidePanel(preview.href);
+        if (!openLinkSidePanel(preview.href)) void openUrl(preview.href);
       });
     }
     return map;

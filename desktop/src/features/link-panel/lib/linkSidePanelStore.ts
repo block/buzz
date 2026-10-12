@@ -106,6 +106,8 @@ export function openLinkSidePanel(
   options?: OpenLinkSidePanelOptions,
 ): boolean {
   const trimmed = url.trim();
+  // Desktop-only: the web build has no embedded webview, so callers fall back to opening externally.
+  if (typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)) return false;
   if (!isLinkSidePanelUrl(trimmed)) return false;
   parkPlaygroundHost();
 

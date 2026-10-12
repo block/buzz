@@ -109,3 +109,16 @@ test("viewport mode updates independently of expand", async () => {
   openLinkSidePanel("https://fresh.example/");
   assert.equal(getLinkSidePanel()?.viewportMode, "desktop");
 });
+
+test("web build (no Tauri) never opens the side panel so callers open externally", async () => {
+  const { openLinkSidePanel, getLinkSidePanel, resetLinkSidePanelStore } = await import("./linkSidePanelStore.ts");
+  resetLinkSidePanelStore();
+  const saved = globalThis.window;
+  globalThis.window = {};
+  try {
+    assert.equal(openLinkSidePanel("https://example.com"), false);
+    assert.equal(getLinkSidePanel(), null);
+  } finally {
+    if (saved === undefined) delete globalThis.window; else globalThis.window = saved;
+  }
+});

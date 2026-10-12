@@ -1,3 +1,4 @@
+import { bottomClearancePx, getSignerToastPrefs, signerToastDelayMs, subscribeSignerToastPrefs } from "./signerToastPrefs";
 import { ESCALATE_WAIT_MS, nip07EscalateWaitMs, signerHealth } from "./signerHealth";
 // Tiny vanilla-DOM "Waiting for your signer…" indicator, independent of the React app tree.
 type St = { pending: number; authUrl: string | null; queued: number; labels: string[] };
@@ -18,22 +19,70 @@ function render() {
     return;
   }
   if (dismissed) return;
-  if (el || showTimer) return update();
-  // Only show if the signer takes noticeably long (>1.5s), to avoid flicker; then stay up until nothing is pending.
+  const prefs = getSignerToastPrefs();
+  const delay = signerToastDelayMs(prefs.mode, !!st.authUrl);
+  if (delay === null) {
+    // Off: hide (an auth URL that blocks the action still shows; see signerToastDelayMs).
+    clearTimeout(showTimer);
+    showTimer = undefined;
+    el?.remove();
+    el = null;
+    return;
+  }
+  if (el) return update();
+  if (showTimer) {
+    // Waiting on a "problems" delay and an auth URL just arrived: show now.
+    if (delay > 0) return;
+    clearTimeout(showTimer);
+  }
   showTimer = setTimeout(() => {
     showTimer = undefined;
     if (st.pending === 0 && st.queued === 0) return;
     el = document.createElement("div");
     el.setAttribute("data-testid", "signer-waiting");
     el.setAttribute("role", "status");
-    // Phone: top, below the safe area, smaller, so it never covers the composer/terminal key bar.
-    const phone = window.matchMedia?.("(max-width: 599px)").matches;
-    el.style.cssText = phone
-      ? "position:fixed;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top) + 6px);max-width:calc(100vw - 16px);z-index:2147483647;background:#111d;color:#f5f5f5;border:1px solid #444;border-radius:10px;padding:5px 10px;font:12px/1.3 Inter,system-ui,sans-serif;box-shadow:0 2px 10px #0006;display:flex;gap:8px;align-items:center"
-      : "position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom) + 16px);z-index:2147483647;background:#111;color:#f5f5f5;border:1px solid #444;border-radius:12px;padding:10px 14px;font:14px/1.4 Inter,system-ui,sans-serif;box-shadow:0 4px 20px #0008;display:flex;gap:10px;align-items:center";
     document.body.appendChild(el);
+    place();
     update();
-  }, 1500);
+  }, delay);
+}
+const DOCKED = '[data-testid="phone-tabbar"], [data-testid="message-composer"], .buzz-terminal-touch-key';
+function cssPx(name: string): number {
+  const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
+  return Number.isFinite(v) ? v : 0;
+}
+/** Position from prefs: top under the safe area, or bottom above the tab bar / composer / terminal keys. */
+function place() {
+  if (!el) return;
+  const phone = window.matchMedia?.("(max-width: 599px)").matches;
+  const { position } = getSignerToastPrefs();
+  el.setAttribute("data-position", position);
+  const base = phone
+    ? "position:fixed;left:50%;transform:translateX(-50%);max-width:calc(100vw - 16px);z-index:2147483647;background:#111d;color:#f5f5f5;border:1px solid #444;border-radius:10px;padding:5px 10px;font:12px/1.3 Inter,system-ui,sans-serif;box-shadow:0 2px 10px #0006;display:flex;gap:8px;align-items:center"
+    : "position:fixed;left:50%;transform:translateX(-50%);max-width:calc(100vw - 32px);z-index:2147483647;background:#111;color:#f5f5f5;border:1px solid #444;border-radius:12px;padding:10px 14px;font:14px/1.4 Inter,system-ui,sans-serif;box-shadow:0 4px 20px #0008;display:flex;gap:10px;align-items:center";
+  if (position === "top") {
+    el.style.cssText = `${base};top:calc(max(var(--phone-safe-top, 0px), env(safe-area-inset-top)) + ${phone ? 6 : 12}px)`;
+    return;
+  }
+  const vh = window.visualViewport?.height ?? window.innerHeight;
+  const tops = [...document.querySelectorAll(DOCKED)]
+    .map((n) => n.getBoundingClientRect())
+    .filter((r) => r.width > 0 && r.height > 0)
+    .map((r) => r.top);
+  const safeBottom = Math.max(cssPx("--phone-safe-bottom"), 0);
+  const px = tops.length ? bottomClearancePx(vh, tops, safeBottom) : null;
+  el.style.cssText = `${base};bottom:${px === null ? `calc(env(safe-area-inset-bottom) + 16px)` : `${Math.round(window.innerHeight - vh + px)}px`}`;
+}
+if (typeof window !== "undefined") {
+  const re = () => place();
+  window.addEventListener("resize", re);
+  window.visualViewport?.addEventListener("resize", re);
+  window.addEventListener("hashchange", () => setTimeout(re, 300));
+  subscribeSignerToastPrefs(() => {
+    if (el && getSignerToastPrefs().mode === "off" && !st.authUrl) { el.remove(); el = null; }
+    place();
+    render();
+  });
 }
 function update() {
   if (!el) return;
