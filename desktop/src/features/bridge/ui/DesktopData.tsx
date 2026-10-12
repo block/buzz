@@ -82,7 +82,7 @@ export function useDesktopOpenClawStatus(): { tone: ChipTone; label: string } {
         .then((r) => {
           if (dead) return;
           const expired = !!r.expiresAt && Date.parse(r.expiresAt) < Date.now();
-          setSt(r.connected && !expired ? { tone: "green", label: "Set up" } : expired ? { tone: "amber", label: "Expired" } : { tone: "amber", label: "Not set up" });
+          setSt(r.connected && !expired ? { tone: "green", label: "Connected" } : expired ? { tone: "amber", label: "Expired" } : { tone: "amber", label: "Not set up" });
         })
         .catch(() => !dead && setSt({ tone: "red", label: "Error" }));
     void run();
