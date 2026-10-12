@@ -65,6 +65,8 @@ ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 COPY --from=planner /build/recipe.json recipe.json
 # Cook the full workspace recipe — relay deps include workspace siblings, so
 # scoping to -p buzz-relay misses transitive deps and re-builds them later.
+# buzz-remote-access depends on this crate by path from outside the workspace, so cargo-chef does not skeleton it.
+COPY desktop/src-tauri/crates/buzz-terminal desktop/src-tauri/crates/buzz-terminal
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 # Compile immutable artifact identity into the relay. Defaults preserve local
