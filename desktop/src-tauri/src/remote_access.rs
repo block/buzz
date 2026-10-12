@@ -195,7 +195,8 @@ fn rand_u64() -> u64 {
 }
 
 fn allowed_origins(dns: Option<&str>) -> Vec<String> {
-    let mut v = vec!["https://buzz.huladesk.com".to_string()];
+    // the public Hula web app (hulabuzz) + the original web origin
+    let mut v = vec!["https://hulabuzz.huladesk.com".to_string(), "https://buzz.huladesk.com".to_string()];
     if let Some(d) = dns {
         // the Mac's own dev/preview serve entries (443 and 8443) on this tailnet name
         v.push(format!("https://{d}"));
@@ -403,6 +404,15 @@ pub fn shutdown_blocking(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_hula_web_origin_is_allowed() {
+        let v = super::allowed_origins(None);
+        assert!(v.iter().any(|o| o == "https://hulabuzz.huladesk.com"));
+        assert!(!v.iter().any(|o| o == "https://evil.huladesk.com" || o == "http://hulabuzz.huladesk.com"));
+        let t = super::allowed_origins(Some("mac.tailnet.ts.net"));
+        assert!(t.iter().any(|o| o == "https://hulabuzz.huladesk.com") && t.iter().any(|o| o == "https://mac.tailnet.ts.net"));
+    }
+
     use super::*;
 
     #[test]
