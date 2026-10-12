@@ -25,7 +25,9 @@ class _MessageBubbleShape extends ShapeBorder {
           rect,
           topLeft: start ? round : joined,
           topRight: round,
-          bottomLeft: joined,
+          bottomLeft: end
+              ? const Radius.circular((Radii.sm + Radii.container) / 2)
+              : joined,
           bottomRight: round,
         ),
       );

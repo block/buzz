@@ -83,6 +83,13 @@ class _SystemMessageRow extends HookConsumerWidget {
           text: describeChannelTextFieldChange('purpose', systemEvent.purpose),
         ),
       ],
+      SystemEventType.memberLeft => [const TextSpan(text: 'left the channel')],
+      SystemEventType.channelArchived => [
+        const TextSpan(text: 'archived this channel'),
+      ],
+      SystemEventType.channelUnarchived => [
+        const TextSpan(text: 'unarchived this channel'),
+      ],
       SystemEventType.channelCreated => [
         const TextSpan(text: 'created this channel'),
       ],
@@ -95,10 +102,6 @@ class _SystemMessageRow extends HookConsumerWidget {
     final messageStyleActor = messageStyleAction == null
         ? null
         : systemEvent.actorPubkey?.trim();
-    final usesMessageStyleLayout =
-        groupedMembership != null ||
-        (messageStyleActor != null && messageStyleActor.isNotEmpty);
-
     final reactions = groupedMessages == null
         ? message.reactions
         : _aggregateSystemMessageReactions(sourceMessages);
@@ -161,10 +164,7 @@ class _SystemMessageRow extends HookConsumerWidget {
         borderRadius: BorderRadius.circular(Radii.md),
         highlightColor: context.colors.primary.withValues(alpha: 0.1),
         child: Padding(
-          padding: EdgeInsets.only(
-            top: usesMessageStyleLayout ? Grid.xs : Grid.xxs,
-            bottom: usesMessageStyleLayout ? 0 : Grid.xxs,
-          ),
+          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -188,22 +188,18 @@ class _SystemMessageRow extends HookConsumerWidget {
                         resolveLabel: resolveLabel,
                         userCache: userCache,
                         actionSpans: messageStyleAction,
+                        icon: _systemEventIcon(systemEvent.type),
                       )
                     : Row(
                         children: [
-                          _systemEventAvatar(
-                            context,
-                            systemEvent,
-                            userCache,
-                            channelId,
+                          _SystemActivityIcon(
+                            icon: _systemEventIcon(systemEvent.type),
                           ),
                           const SizedBox(width: Grid.xxs),
                           Expanded(
                             child: Text(
                               systemEvent.describe(resolveLabel),
-                              style: systemMessageBodyTextStyle.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                              ),
+                              style: _systemActionTextStyle(context),
                             ),
                           ),
                           _messageTimestamp(
@@ -227,13 +223,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                 ),
               if (reactions.isNotEmpty)
                 Padding(
-                  padding: EdgeInsets.only(
-                    left:
-                        (usesMessageStyleLayout ? messageAvatarSize : 36) +
-                        (usesMessageStyleLayout
-                            ? messageAvatarContentGap
-                            : Grid.xxs),
-                  ),
+                  padding: const EdgeInsets.only(left: Grid.sm + Grid.xxs),
                   child: ReactionRow(
                     messageId: message.id,
                     channelId: channelId,
@@ -374,16 +364,9 @@ class _MembershipSystemMessageContent extends StatelessWidget {
         .toList();
     final actionStyle = _systemActionTextStyle(context);
     final actionSpans = <InlineSpan>[
-      TextSpan(
-        text: event.isSelfJoin
-            ? 'joined the channel'
-            // No "was": the name renders on the line above via
-            // MessageAuthorMeta, so this reads as a status line rather than a
-            // sentence continuing across the metadata row. Matches desktop's
-            // SystemMessageRow. `SystemEvent.describe` keeps "was added by"
-            // because it builds subject and predicate into one string.
-            : 'added by ${resolveLabel(event.actorPubkey)}',
-      ),
+      TextSpan(text: event.isSelfJoin ? 'joined the channel' : 'was added by '),
+      if (!event.isSelfJoin)
+        _systemNameSpan(context, event.actorPubkey!, channelId, resolveLabel),
       if (additionalTargets.isNotEmpty)
         TextSpan(text: event.isSelfJoin ? ' along with ' : ', along with '),
       ..._memberNameSpans(
@@ -402,12 +385,13 @@ class _MembershipSystemMessageContent extends StatelessWidget {
       resolveLabel: resolveLabel,
       userCache: userCache,
       actionSpans: actionSpans,
+      icon: BuzzIcons.userPlus,
     );
   }
 }
 
 TextStyle? _systemActionTextStyle(BuildContext context) {
-  return systemMessageBodyTextStyle.copyWith(
+  return context.textTheme.bodySmall?.copyWith(
     color: context.colors.onSurfaceVariant,
   );
 }
@@ -419,6 +403,7 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
   final String Function(String? pubkey) resolveLabel;
   final Map<String, UserProfile> userCache;
   final List<InlineSpan> actionSpans;
+  final IconData icon;
 
   const _MessageStyleSystemMessageContent({
     required this.displayPubkey,
@@ -427,6 +412,7 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     required this.resolveLabel,
     required this.userCache,
     required this.actionSpans,
+    required this.icon,
   });
 
   @override
@@ -434,54 +420,28 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => showUserProfileSheet(
-            context,
-            displayPubkey,
-            names: channelIdentityNamesProvider(channelId),
-          ),
-          child: _UserAvatar(
-            profile: userCache[displayPubkey.toLowerCase()],
-            pubkey: displayPubkey,
-            isAgent:
-                userCache[displayPubkey.toLowerCase()]?.ownerPubkey != null,
-            size: messageAvatarSize,
-          ),
-        ),
-        const SizedBox(width: messageAvatarContentGap),
+        _SystemActivityIcon(icon: icon),
+        const SizedBox(width: Grid.xxs),
         Expanded(
-          child: Padding(
-            padding: const EdgeInsets.only(top: Grid.half),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          child: Text.rich(
+            TextSpan(
+              style: _systemActionTextStyle(context),
               children: [
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Grid.quarter),
-                  child: MessageAuthorMeta(
-                    displayName: resolveLabel(displayPubkey),
-                    username: messageUsernameLabel(
-                      userCache[displayPubkey.toLowerCase()],
-                    ),
-                    timestamp: formatMessageTime(createdAt),
-                    nameColor: context.colors.onSurface,
-                    metadataColor: context.colors.onSurfaceVariant,
-                    nameStyle: systemMessageHeadingTextStyle,
-                    displayNameKey: ValueKey(
-                      'system-message-author-$displayPubkey',
-                    ),
-                    usernameKey: ValueKey(
-                      'system-message-username-$displayPubkey',
-                    ),
-                    timestampKey: ValueKey(
-                      'system-message-timestamp-$displayPubkey',
-                    ),
-                  ),
+                _systemNameSpan(
+                  context,
+                  displayPubkey,
+                  channelId,
+                  resolveLabel,
                 ),
-                Text.rich(
-                  TextSpan(
-                    style: _systemActionTextStyle(context),
-                    children: actionSpans,
+                const TextSpan(text: ' '),
+                ...actionSpans,
+                const TextSpan(text: '  '),
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.middle,
+                  child: _messageTimestamp(
+                    context,
+                    createdAt,
+                    key: ValueKey('system-message-timestamp-$displayPubkey'),
                   ),
                 ),
               ],
@@ -492,6 +452,71 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     );
   }
 }
+
+WidgetSpan _systemNameSpan(
+  BuildContext context,
+  String pubkey,
+  String channelId,
+  String Function(String?) resolveLabel,
+) {
+  return WidgetSpan(
+    alignment: PlaceholderAlignment.baseline,
+    baseline: TextBaseline.alphabetic,
+    child: Semantics(
+      button: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => showUserProfileSheet(
+          context,
+          pubkey,
+          names: channelIdentityNamesProvider(channelId),
+        ),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: max(
+              0,
+              MediaQuery.sizeOf(context).width - Grid.gutter * 2 - Grid.lg,
+            ),
+          ),
+          child: Text(
+            resolveLabel(pubkey),
+            key: ValueKey('system-message-author-$pubkey'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: _systemActionTextStyle(
+              context,
+            )?.copyWith(fontWeight: FontWeight.w500),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class _SystemActivityIcon extends StatelessWidget {
+  final IconData icon;
+  const _SystemActivityIcon({required this.icon});
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: Grid.sm,
+    height: Grid.sm,
+    child: Icon(icon, size: Grid.xs, color: context.colors.onSurfaceVariant),
+  );
+}
+
+IconData _systemEventIcon(SystemEventType type) => switch (type) {
+  SystemEventType.memberJoined => BuzzIcons.userPlus,
+  SystemEventType.memberLeft => BuzzIcons.arrowLeft,
+  SystemEventType.memberRemoved => BuzzIcons.userMinus,
+  SystemEventType.topicChanged ||
+  SystemEventType.purposeChanged => BuzzIcons.pencil,
+  SystemEventType.channelCreated => BuzzIcons.users,
+  SystemEventType.channelArchived => BuzzIcons.archive,
+  SystemEventType.channelUnarchived => BuzzIcons.archiveRestore,
+  SystemEventType.huddleStarted => BuzzIcons.headphones,
+  SystemEventType.huddleEnded => BuzzIcons.phoneOff,
+};
 
 List<InlineSpan> _memberNameSpans(
   BuildContext context, {
@@ -538,82 +563,6 @@ List<InlineSpan> _memberNameSpans(
   }
 
   return spans;
-}
-
-Widget _systemEventAvatar(
-  BuildContext context,
-  SystemEvent event,
-  Map<String, UserProfile> userCache,
-  String channelId,
-) {
-  final hasTarget =
-      event.targetPubkey != null && event.targetPubkey != event.actorPubkey;
-
-  if (event.actorPubkey != null && hasTarget) {
-    // Two-avatar stack: actor + target (e.g. "Alice added Bob").
-    return SizedBox(
-      width: 32,
-      height: 20,
-      child: Stack(
-        children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => showUserProfileSheet(
-              context,
-              event.actorPubkey!,
-              names: channelIdentityNamesProvider(channelId),
-            ),
-            child: SmallAvatar(
-              pubkey: event.actorPubkey!,
-              userCache: userCache,
-            ),
-          ),
-          Positioned(
-            left: 12,
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => showUserProfileSheet(
-                context,
-                event.targetPubkey!,
-                names: channelIdentityNamesProvider(channelId),
-              ),
-              child: SmallAvatar(
-                pubkey: event.targetPubkey!,
-                userCache: userCache,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  if (event.actorPubkey != null) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => showUserProfileSheet(
-        context,
-        event.actorPubkey!,
-        names: channelIdentityNamesProvider(channelId),
-      ),
-      child: SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
-    );
-  }
-
-  // Fallback: generic icon when no actor is available.
-  return Container(
-    width: 20,
-    height: 20,
-    decoration: BoxDecoration(
-      color: context.colors.surfaceContainerHighest,
-      shape: BoxShape.circle,
-    ),
-    child: Icon(
-      BuzzIcons.arrowLeftRight,
-      size: 12,
-      color: context.colors.onSurfaceVariant,
-    ),
-  );
 }
 
 class _ThreadSummaryRow extends ConsumerWidget {

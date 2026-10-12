@@ -5778,17 +5778,11 @@ void main() {
       expect(find.text('Alice'), findsOneWidget);
       final createdAction = findRichText('created this channel');
       expect(createdAction, findsOneWidget);
-      expect(
-        tester.getSize(find.byType(CircleAvatar)),
-        const Size.square(messageAvatarSize),
-      );
+      expect(find.byType(CircleAvatar), findsNothing);
       final nameRect = tester.getRect(find.text('Alice'));
       final nameText = tester.widget<Text>(find.text('Alice'));
-      expect(nameText.style?.fontSize, systemMessageHeadingTextStyle.fontSize);
-      expect(
-        nameText.style?.fontWeight,
-        systemMessageHeadingTextStyle.fontWeight,
-      );
+      expect(nameText.style?.fontSize, 14);
+      expect(nameText.style?.fontWeight, FontWeight.w500);
       expect(
         find.byKey(const ValueKey('system-message-username-alice')),
         findsNothing,
@@ -5800,13 +5794,11 @@ void main() {
       final createdText = tester.widget<RichText>(createdAction);
       expect(
         effectiveFontSizeForText(createdText.text, 'created this channel'),
-        systemMessageBodyTextStyle.fontSize,
+        14,
       );
     });
 
-    testWidgets('renders a huddle event like a regular message row', (
-      tester,
-    ) async {
+    testWidgets('renders a compact huddle activity row', (tester) async {
       await tester.pumpWidget(
         _buildTestable(
           messages: [_huddleMsg(id: 'huddle-1', kind: EventKind.huddleStarted)],
@@ -5819,10 +5811,7 @@ void main() {
 
       expect(find.text('Alice'), findsOneWidget);
       expect(findRichText('started a huddle'), findsOneWidget);
-      expect(
-        tester.getSize(find.byType(CircleAvatar)),
-        const Size.square(messageAvatarSize),
-      );
+      expect(find.byType(CircleAvatar), findsNothing);
       expect(
         find.byKey(const ValueKey('system-message-timestamp-alice')),
         findsOneWidget,
@@ -8682,30 +8671,17 @@ void main() {
                 .descendant(of: regularRow, matching: find.byType(CircleAvatar))
                 .first,
           );
-          final huddleAvatar = tester.getRect(
-            find
-                .descendant(of: huddleRow, matching: find.byType(CircleAvatar))
-                .first,
-          );
-          final regularAuthor = tester.getRect(
-            find.byKey(const ValueKey('message-author-regular-message')),
+          expect(
+            find.descendant(of: huddleRow, matching: find.byType(CircleAvatar)),
+            findsNothing,
           );
           final huddleAuthor = tester.getRect(
             find.byKey(const ValueKey('system-message-author-bob')),
           );
-          final regularBody = tester.getRect(findRichText('Regular message'));
           final huddleBody = tester.getRect(findRichText(huddleEvent.action));
-
-          expect(huddleAuthor.top - huddleAvatar.top, Grid.half);
-          expect(huddleAuthor.left, regularAuthor.left - Grid.xs);
-          expect(
-            regularAvatar.bottom,
-            closeTo(regularBody.bottom + Grid.xxs + Grid.quarter, 0.01),
-          );
-          expect(
-            huddleBody.top - huddleAuthor.bottom,
-            closeTo(regularBody.top - regularAuthor.bottom - Grid.xxs, 0.01),
-          );
+          expect(huddleAuthor.left, huddleBody.left);
+          expect(huddleBody.top, greaterThan(regularAvatar.bottom));
+          expect(huddleAuthor.top, greaterThanOrEqualTo(huddleBody.top));
         },
       );
     }
@@ -8758,30 +8734,27 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        Rect avatarRect(String rowKey) => tester.getRect(
-          find
-              .descendant(
-                of: find.byKey(ValueKey(rowKey)),
-                matching: find.byType(CircleAvatar),
-              )
-              .first,
-        );
-
-        final avatars = [
-          avatarRect('message-row-message-alice'),
-          avatarRect('message-row-message-bob'),
-          avatarRect('system-message-row-membership-carol'),
-          avatarRect('system-message-row-huddle-dave'),
-          avatarRect('message-row-message-erin'),
-        ];
-        // System actors remain at the top; conversation avatars sit at the
-        // bubble bottom. Their artwork no longer defines the inter-row gap.
-        for (var index = 1; index < avatars.length; index++) {
+        final rows = [
+          'message-row-message-alice',
+          'message-row-message-bob',
+          'system-message-row-membership-carol',
+          'system-message-row-huddle-dave',
+          'message-row-message-erin',
+        ].map((key) => tester.getRect(find.byKey(ValueKey(key)))).toList();
+        for (var index = 1; index < rows.length; index++) {
+          expect(rows[index].top, greaterThanOrEqualTo(rows[index - 1].bottom));
+        }
+        for (final key in [
+          'system-message-row-membership-carol',
+          'system-message-row-huddle-dave',
+        ]) {
           expect(
-            avatars[index].top - avatars[index - 1].bottom,
-            greaterThanOrEqualTo(Grid.xs),
+            find.descendant(
+              of: find.byKey(ValueKey(key)),
+              matching: find.byType(CircleAvatar),
+            ),
+            findsNothing,
           );
-          expect(avatars[index].left, avatars.first.left);
         }
       },
     );
@@ -8806,13 +8779,10 @@ void main() {
 
       expect(find.text('Bob'), findsOneWidget);
       expect(findRichText('joined the channel'), findsOneWidget);
-      expect(
-        tester.getSize(find.byType(CircleAvatar)),
-        const Size.square(messageAvatarSize),
-      );
+      expect(find.byType(CircleAvatar), findsNothing);
     });
 
-    testWidgets('opens a profile sheet from a membership system avatar', (
+    testWidgets('opens a profile sheet from a membership activity name', (
       tester,
     ) async {
       const alicePubkey =
@@ -8874,7 +8844,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(CircleAvatar));
+      await tester.tap(
+        find.byKey(const ValueKey('system-message-author-$bobPubkey')),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
@@ -8919,7 +8891,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(CircleAvatar));
+      await tester.tap(
+        find.byKey(const ValueKey('system-message-author-$invalidPubkey')),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
@@ -9009,7 +8983,9 @@ void main() {
           );
           await tester.pumpAndSettle();
 
-          await tester.tap(find.byType(CircleAvatar));
+          await tester.tap(
+            find.byKey(const ValueKey('system-message-author-$bobPubkey')),
+          );
           await tester.pumpAndSettle();
 
           expect(find.byType(UserProfileSheet), findsOneWidget);
@@ -9038,7 +9014,7 @@ void main() {
       },
     );
 
-    testWidgets('opens a profile sheet from a huddle system avatar', (
+    testWidgets('opens a profile sheet from a huddle activity name', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -9057,7 +9033,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(CircleAvatar));
+      await tester.tap(
+        find.byKey(const ValueKey('system-message-author-alice')),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
@@ -9100,7 +9078,9 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.byType(CircleAvatar));
+        await tester.tap(
+          find.byKey(const ValueKey('system-message-author-alice')),
+        );
         await tester.pumpAndSettle();
 
         expect(find.byType(UserProfileSheet), findsOneWidget);
@@ -9165,9 +9145,7 @@ void main() {
       },
     );
 
-    testWidgets('opens a profile sheet from a generic system avatar', (
-      tester,
-    ) async {
+    testWidgets('opens a profile sheet from an activity name', (tester) async {
       await tester.pumpWidget(
         _buildTestable(
           messages: [
@@ -9188,7 +9166,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(CircleAvatar).first);
+      await tester.tap(
+        find.byKey(const ValueKey('system-message-author-alice')),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
@@ -9217,13 +9197,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Bob'), findsOneWidget);
-      final addedAction = findRichText('added by Alice');
+      final addedAction = findRichText('was added by ');
       expect(addedAction, findsOneWidget);
       expect(find.text('Alice added Bob to the channel'), findsNothing);
-      expect(
-        tester.getSize(find.byType(CircleAvatar)),
-        const Size.square(messageAvatarSize),
-      );
+      expect(find.byType(CircleAvatar), findsNothing);
       final nameRect = tester.getRect(find.text('Bob'));
       expect(
         find.byKey(const ValueKey('system-message-username-bob')),
@@ -9234,10 +9211,7 @@ void main() {
       );
       expect(timestampRect.left, greaterThan(nameRect.right));
       final addedText = tester.widget<RichText>(addedAction);
-      expect(
-        effectiveFontSizeForText(addedText.text, 'added by Alice'),
-        systemMessageBodyTextStyle.fontSize,
-      );
+      expect(effectiveFontSizeForText(addedText.text, 'was added by '), 14);
     });
 
     testWidgets('groups member additions with tappable overflow names', (
@@ -9304,7 +9278,7 @@ void main() {
 
       expect(find.text('Bob'), findsOneWidget);
       expect(
-        findRichText('added by Alice, along with Carol, Dave, Erin, and '),
+        findRichText(', along with Carol, Dave, Erin, and '),
         findsOneWidget,
       );
       expect(find.byKey(const Key('membership-overflow')), findsOneWidget);
@@ -9345,12 +9319,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final avatarRect = tester.getRect(find.byType(CircleAvatar));
-      final reactionRect = tester.getRect(find.byType(ReactionRow));
-      expect(
-        reactionRect.left,
-        avatarRect.left + messageAvatarSize + messageAvatarContentGap,
+      final nameRect = tester.getRect(
+        find.byKey(const ValueKey('system-message-author-bob')),
       );
+      final reactionRect = tester.getRect(find.byType(ReactionRow));
+      expect(reactionRect.left, nameRect.left);
     });
 
     testWidgets('a reacted message offers the + picker in the timeline', (
@@ -9425,7 +9398,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob left the channel'), findsOneWidget);
+      expect(find.text('Bob'), findsOneWidget);
+      expect(findRichText('left the channel'), findsOneWidget);
     });
 
     testWidgets(
@@ -9456,7 +9430,7 @@ void main() {
         await tester.pumpAndSettle();
 
         final timestampFinder = find.byKey(
-          const ValueKey('system-message-timestamp-sys-accessible'),
+          const ValueKey('system-message-timestamp-alice'),
         );
         final timestamp = tester.widget<Text>(timestampFinder);
         expect(timestamp.maxLines, 1);

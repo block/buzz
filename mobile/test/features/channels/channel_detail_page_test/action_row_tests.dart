@@ -33,7 +33,9 @@ void actionRowTests() {
   group('Channel action rows', () {
     for (var index = 0; index < cases.length; index++) {
       final scenario = cases[index];
-      testWidgets('uses message layout for action $index', (tester) async {
+      testWidgets('uses compact activity layout for action $index', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           _buildTestable(
             messages: [
@@ -60,8 +62,7 @@ void actionRowTests() {
           of: row,
           matching: find.byType(CircleAvatar),
         );
-        expect(avatars, findsOneWidget);
-        expect(tester.getSize(avatars), const Size.square(messageAvatarSize));
+        expect(avatars, findsNothing);
         final author = find.byKey(
           const ValueKey('system-message-author-alice'),
         );
@@ -88,18 +89,18 @@ void actionRowTests() {
         );
         final actionBody = tester.getRect(body);
         final actionAuthor = tester.getRect(author);
-        expect(actionBody.left, regularBody.left - Grid.xs);
-        expect(actionAuthor.left, regularAuthor.left - Grid.xs);
+        expect(actionBody.left, lessThan(regularBody.left));
+        expect(actionAuthor.left, actionBody.left);
         expect(regularAuthor.left, regularBody.left);
-        expect(
-          actionBody.top - actionAuthor.bottom,
-          closeTo(regularBody.top - regularAuthor.bottom - Grid.xxs, 0.01),
-        );
+        expect(actionAuthor.top, greaterThanOrEqualTo(actionBody.top));
         final timestamp = find.byKey(
           const ValueKey('system-message-timestamp-alice'),
         );
         expect(tester.widget<Text>(timestamp).data, formatMessageTime(1010));
-        expect(tester.getRect(timestamp).top, lessThan(actionBody.top));
+        expect(
+          tester.getRect(timestamp).top,
+          greaterThanOrEqualTo(actionBody.top),
+        );
         final reactions = find.descendant(
           of: row,
           matching: find.byType(ReactionRow),
@@ -120,7 +121,14 @@ void actionRowTests() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Someone ${scenario.action}'), findsOneWidget);
-        expect(find.byIcon(BuzzIcons.arrowLeftRight), findsOneWidget);
+        expect(
+          find.byIcon(
+            scenario.payload['type'] == 'member_removed'
+                ? BuzzIcons.userMinus
+                : BuzzIcons.pencil,
+          ),
+          findsOneWidget,
+        );
         expect(
           find.byKey(const ValueKey('system-message-timestamp-fallback')),
           findsOneWidget,
@@ -147,7 +155,9 @@ void actionRowTests() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(CircleAvatar));
+      await tester.tap(
+        find.byKey(const ValueKey('system-message-author-alice')),
+      );
       await tester.pumpAndSettle();
       expect(
         tester.widget<UserProfileSheet>(find.byType(UserProfileSheet)).pubkey,
