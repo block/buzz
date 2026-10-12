@@ -460,3 +460,18 @@
   [data-phone] .buzz-terminal-substrate[data-keyboard-open="true"] .buzz-terminal-touchbar {
     padding-bottom: 4px;
   }
+
+/* Phone maximized: no inner card. The viewport's px-5/pt-2 inset goes (only safe-area insets remain) and the terminal's own
+   background fills the substrate, so the leftover sub-row band above the key bar matches the terminal instead of a frame. */
+[data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] {
+  background: var(--buzz-terminal-background, hsl(var(--background))) !important;
+}
+[data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-viewport {
+  background: var(--buzz-terminal-background, transparent);
+  margin: 0 !important;
+  padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px) !important;
+}
+/* the window controls sat in their own tinted box at the right of the tab strip: blend them into the strip */
+[data-phone] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-readout {
+  background: transparent;
+}
