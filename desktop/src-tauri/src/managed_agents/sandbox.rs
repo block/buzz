@@ -59,6 +59,8 @@ pub(crate) struct SandboxGrants {
     pub read: Vec<PathBuf>,
     /// Read-write directories.
     pub allow: Vec<PathBuf>,
+    /// Read-only files.
+    pub read_files: Vec<PathBuf>,
 }
 
 /// Resolve the sandbox for a spawn: `Ok(None)` when the user turned it off or
@@ -202,6 +204,10 @@ fn wrap_args(sandbox: &AgentSandbox, grants: &SandboxGrants, acp_command: &Path)
         args.push("--allow".into());
         args.push(dir.into());
     }
+    for file in &grants.read_files {
+        args.push("--read-file".into());
+        args.push(file.into());
+    }
     args.push("--".into());
     args.push(acp_command.into());
     args
@@ -241,6 +247,9 @@ pub(crate) struct GrantInputs<'a> {
     pub demo_config_home: Option<&'a Path>,
     /// Buzz-owned data directories agents read ([`buzz_data_reads`]).
     pub data_reads: &'a [PathBuf],
+    /// The agent's log, inherited as stdout and stderr. Node `fstat`s its
+    /// stdio at startup and aborts when the sandbox denies that.
+    pub log_file: Option<&'a Path>,
 }
 
 /// Compute the per-launch grants. Only existing directories are granted, and
@@ -291,6 +300,11 @@ pub(crate) fn spawn_grants(inputs: &GrantInputs<'_>) -> SandboxGrants {
             }
         }
     }
+    grants.read_files.extend(
+        inputs
+            .log_file
+            .and_then(|file| std::fs::canonicalize(file).ok()),
+    );
     grants
 }
 

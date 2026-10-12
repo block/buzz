@@ -49,6 +49,7 @@ fn sandboxed_command_wraps_the_harness_with_the_local_profile() {
     let grants = SandboxGrants {
         read: vec![PathBuf::from("/Users/u/.bun/bin")],
         allow: vec![PathBuf::from("/Volumes/code")],
+        read_files: vec![PathBuf::from("/Users/u/Library/agents/logs/a.log")],
     };
 
     let mut command = agent_command(Some(&sandbox), acp);
@@ -71,6 +72,8 @@ fn sandboxed_command_wraps_the_harness_with_the_local_profile() {
             "/Users/u/.bun/bin",
             "--allow",
             "/Volumes/code",
+            "--read-file",
+            "/Users/u/Library/agents/logs/a.log",
             "--",
             "/Applications/Buzz.app/Contents/MacOS/buzz-acp",
         ]
@@ -139,6 +142,7 @@ fn grants_for(fixture: &GrantFixture, binaries: &[&Path], path_env: &str) -> San
         nest: Some(&fixture.nest),
         demo_config_home: None,
         data_reads: &[],
+        log_file: None,
     })
 }
 
@@ -205,6 +209,7 @@ fn grants_allow_the_demo_config_home() {
         nest: Some(&f.nest),
         demo_config_home: Some(&demo),
         data_reads: &[],
+        log_file: None,
     });
 
     assert_eq!(grants.allow, [demo]);
@@ -265,6 +270,7 @@ fn grants_read_only_buzz_data_dirs() {
         nest: Some(&f.nest),
         demo_config_home: None,
         data_reads: &[templates.clone(), node_tools.clone(), missing],
+        log_file: None,
     });
 
     assert_eq!(grants.read, [templates, node_tools]);
@@ -284,4 +290,28 @@ fn buzz_data_reads_cover_managed_node_tools() {
         let dir = dir.expect("data dir");
         assert!(reads.contains(&dir), "{} missing", dir.display());
     }
+}
+
+/// Node aborts at startup when it cannot `fstat` its inherited stderr, the
+/// agent log in the desktop's app-data directory.
+#[test]
+fn grants_read_only_the_agent_log() {
+    let f = grant_fixture();
+    let logs = f.root.join("app-data/agents/logs");
+    fs::create_dir_all(&logs).unwrap();
+    let log = logs.join("agent.log");
+    fs::write(&log, "").unwrap();
+
+    let grants = spawn_grants(&GrantInputs {
+        binaries: &[],
+        path_env: None,
+        home: Some(&f.home),
+        nest: Some(&f.nest),
+        demo_config_home: None,
+        data_reads: &[],
+        log_file: Some(&log),
+    });
+
+    assert_eq!(grants.read_files, [log]);
+    assert!(grants.read.is_empty() && grants.allow.is_empty());
 }

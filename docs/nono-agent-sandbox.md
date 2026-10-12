@@ -153,8 +153,10 @@ nono wrap --silent --allow-cwd --profile buzz-agent-local \
   -- <resolved_acp_command>
 ```
 
-The agent log needs no grant, because stdout and stderr are inherited file
-descriptors, not paths.
+The agent log is inherited as stdout and stderr, so writes need no grant. It is
+still granted read-only (`--read-file`): Node `fstat`s its stdio at startup,
+Seatbelt checks that against the file's path, and Node aborts without a message
+when it is denied.
 
 Why `wrap`, not `run`:
 

@@ -879,6 +879,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
             nest: super::nest_dir().as_deref(),
             demo_config_home: demo_config_home.as_deref(),
             data_reads: &data_reads,
+            log_file: Some(&log_path),
         });
         super::sandbox::finish_sandboxed_command(
             &mut command,
