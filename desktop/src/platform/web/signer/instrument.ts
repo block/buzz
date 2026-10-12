@@ -526,11 +526,11 @@ function startNip07Recovery(inner: Signer) {
 export function instrumentSigner<S extends Signer>(inner: S): S {
   nip07Mode = inner.kind === "nip07";
   signerHealth.setSignerKind(inner.kind === "nip07" ? "nip07" : "nip46");
-  if (nip07Mode) {
-    // A "no-session" state left over from before sign-in must not fast-fail every call of the freshly connected extension.
-    signerHealth.reset();
-    startNip07Recovery(inner);
-  }
+  // A "no-session" state left over from before sign-in (resumeSession sets it when nothing is saved) must not fast-fail
+  // relay AUTH and every background call of the freshly connected signer. NIP-46 too: a nostrconnect login (e.g. Primal on
+  // iOS) can complete without any request round trip that would have cleared it, leaving relay auth dropped forever.
+  signerHealth.reset();
+  if (nip07Mode) startNip07Recovery(inner);
   const signNormal = (ev: UnsignedEvent, prio: SignPriority): Promise<SignedEvent> => {
     // Signer known dead: don't queue doomed relay-auth/background signs behind it (user-initiated sends still try, as a probe).
     if (prio !== 0 && signerHealth.blocksBackground()) return dropped(ev.kind, "signer isn't responding");
