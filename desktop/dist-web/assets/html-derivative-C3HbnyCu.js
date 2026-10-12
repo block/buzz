@@ -1,1 +1,0 @@
-import{t as e}from"./html-derivative-Dhubv07u.js";export{e as default};

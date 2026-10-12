@@ -1,1 +1,0 @@
-var e=new EventTarget;async function t(t,n){let r=e=>n({event:t,id:0,payload:e.detail});return e.addEventListener(t,r),()=>e.removeEventListener(t,r)}async function n(t,n){e.dispatchEvent(new CustomEvent(t,{detail:n}))}export{t as n,n as t};

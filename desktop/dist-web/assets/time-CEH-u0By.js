@@ -1,1 +1,0 @@
-var e=60,t=3600,n=86400;function r(r){let i=Math.floor(Date.now()/1e3),a=Math.max(0,i-r);return a<e?`just now`:a<t?`${Math.floor(a/e)}m ago`:a<n?`${Math.floor(a/t)}h ago`:`${Math.floor(a/n)}d ago`}export{r as t};

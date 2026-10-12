@@ -1,1 +1,0 @@
-import{t as e}from"./tex-CWHOmQVq.js";export{e as default};
