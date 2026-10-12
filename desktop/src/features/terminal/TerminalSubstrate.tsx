@@ -100,6 +100,7 @@ type TerminalSubstrateProps = {
 
 /** Zero-width placeholder kept in the hidden input on touch so iOS has something to delete (and keeps repeating backspace). */
 const TOUCH_SENTINEL = "\u200b";
+const TOUCH_SEED = TOUCH_SENTINEL.repeat(64);
 
 function isToggleChord(event: KeyboardEvent): boolean {
   return (
@@ -846,21 +847,24 @@ export function TerminalSubstrate({
     if (touchUi) setTouchSel(null);
   }, [touchUi, activeSessionId]);
 
-  // Touch: iOS auto-repeats a held backspace only as beforeinput deleteContentBackward events (no keydown repeat), and only
-  // while there is something to delete. Keep a sentinel in the hidden input and turn every delete event into a PTY delete.
+  // Touch: iOS auto-repeats a held backspace only as beforeinput delete events (no keydown repeat) and only while the input has
+  // something to delete; after a while it accelerates to word deletes. Each event goes to the PTY at once: one DEL per char
+  // repeat, one ^W per word repeat (same as native). No per-event DOM work: the cancelled event leaves the 64-char sentinel
+  // buffer untouched, so it's only reseeded on focus or after real typing.
   React.useEffect(() => {
     const area = textareaRef.current;
     if (!touchUi || !area) return;
     const seed = () => {
-      if (area.value !== TOUCH_SENTINEL) area.value = TOUCH_SENTINEL;
-      area.setSelectionRange(1, 1);
+      if (area.value !== TOUCH_SEED) {
+        area.value = TOUCH_SEED;
+        area.setSelectionRange(TOUCH_SEED.length, TOUCH_SEED.length);
+      }
     };
     const onBeforeInput = (event: InputEvent) => {
       const seq = event.inputType === "deleteContentBackward" ? "\x7f" : event.inputType === "deleteWordBackward" ? "\x17" : null;
       if (!seq) return;
-      event.preventDefault(); // the sentinel stays, so iOS keeps repeating
+      event.preventDefault();
       sendInput(seq);
-      seed();
     };
     area.addEventListener("beforeinput", onBeforeInput);
     area.addEventListener("focus", seed);
@@ -1613,7 +1617,7 @@ export function TerminalSubstrate({
             // touch: the sentinel isn't user text; if it vanished without a cancelable beforeinput, that was a delete
             const committed = touchUi ? raw.replaceAll(TOUCH_SENTINEL, "") : raw;
             if (touchUi && !raw.includes(TOUCH_SENTINEL) && !committed) sendInput("\x7f");
-            event.currentTarget.value = touchUi ? TOUCH_SENTINEL : "";
+            event.currentTarget.value = touchUi ? TOUCH_SEED : "";
             if (!committed) return;
             // Capture/textarea keydown already forwarded this printable.
             if (printableKeyHandledRef.current === committed) {
