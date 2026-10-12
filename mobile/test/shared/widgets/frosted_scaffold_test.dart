@@ -12,6 +12,43 @@ Border? _appBarBorder(WidgetTester tester) {
 }
 
 void main() {
+  testWidgets('foreground paints above header and leaves body interactive', (
+    tester,
+  ) async {
+    var taps = 0;
+    const marker = Text('Foreground date');
+    const bar = FrostedAppBar(title: Text('Header'));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: FrostedScaffold(
+          appBar: bar,
+          body: Center(
+            child: TextButton(
+              onPressed: () => taps++,
+              child: const Text('Body action'),
+            ),
+          ),
+          foreground: const Stack(
+            children: [Positioned(top: 80, left: 0, child: marker)],
+          ),
+        ),
+      ),
+    );
+    final stack = tester.widget<Stack>(
+      find.ancestor(of: find.byWidget(bar), matching: find.byType(Stack)).first,
+    );
+    expect(stack.children.indexOf(bar), lessThan(stack.children.length - 1));
+    expect(
+      find.descendant(
+        of: find.byWidget(stack.children.last),
+        matching: find.byWidget(marker),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Body action'));
+    expect(taps, 1);
+  });
+
   testWidgets('utility pages expose the inverted surface hierarchy', (
     tester,
   ) async {

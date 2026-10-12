@@ -14,24 +14,11 @@ class _QuickReactionRow extends ConsumerWidget {
   /// bottom sheet, so it must not read through the sheet's disposed ref.
   final WidgetRef pageRef;
 
-  /// Drives the staged glyph reveal when this row is shown in the popover.
-  /// The bottom sheet leaves this null and retains its existing static row.
-  final Animation<double>? presentationAnimation;
-
-  final Object? popResult;
-
-  /// Selects exactly one popover result and side effect. Bottom sheets leave
-  /// this null and retain their existing local dismissal behavior.
-  final void Function(Object? result, VoidCallback effect)? onSelected;
-
   const _QuickReactionRow({
     required this.message,
     required this.sheetContext,
     required this.pageContext,
     required this.pageRef,
-    this.presentationAnimation,
-    this.popResult,
-    this.onSelected,
   });
 
   @override
@@ -74,22 +61,13 @@ class _QuickReactionRow extends ConsumerWidget {
                 .toDouble();
         final circles = <Widget>[
           for (var index = 0; index < emoji.length; index++)
-            _ReactionItemReveal(
+            KeyedSubtree(
               key: ValueKey('quick-reaction-${emoji[index]}'),
-              animation: presentationAnimation,
-              index: index,
               child: _QuickReactionCircle(
                 size: circleSize,
                 onTap: () {
-                  void effect() => react(emoji[index]);
-
-                  final select = onSelected;
-                  if (select != null) {
-                    select(popResult, effect);
-                  } else {
-                    Navigator.of(sheetContext).pop(popResult);
-                    effect();
-                  }
+                  Navigator.of(sheetContext).pop();
+                  react(emoji[index]);
                 },
                 child: _QuickReactionGlyph(
                   value: emoji[index],
@@ -97,23 +75,13 @@ class _QuickReactionRow extends ConsumerWidget {
                 ),
               ),
             ),
-          _ReactionItemReveal(
+          KeyedSubtree(
             key: const ValueKey('quick-reaction-more'),
-            animation: presentationAnimation,
-            index: emoji.length,
             child: _QuickReactionCircle(
               size: circleSize,
               onTap: () {
-                void effect() =>
-                    showEmojiPicker(context: pageContext, onSelect: react);
-
-                final select = onSelected;
-                if (select != null) {
-                  select(popResult, effect);
-                } else {
-                  Navigator.of(sheetContext).pop(popResult);
-                  effect();
-                }
+                Navigator.of(sheetContext).pop();
+                showEmojiPicker(context: pageContext, onSelect: react);
               },
               child: Icon(
                 BuzzIcons.plus,

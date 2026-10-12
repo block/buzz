@@ -1,6 +1,7 @@
 part of '../channel_detail_page.dart';
 
 class _MessageList extends HookConsumerWidget {
+  final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
@@ -21,6 +22,7 @@ class _MessageList extends HookConsumerWidget {
 
   const _MessageList({
     required this.entries,
+    required this.stickyDateHeaderState,
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
@@ -48,9 +50,6 @@ class _MessageList extends HookConsumerWidget {
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
-    final stickyDateHeaderState = useValueNotifier(
-      StickyDateHeaderState.hidden,
-    );
     final stickyDayTimestamp = useValueNotifier<int?>(null);
     final timelineViewportHeight = useRef(MediaQuery.sizeOf(context).height);
     final isLoadingOlder = useState(false);
@@ -234,7 +233,9 @@ class _MessageList extends HookConsumerWidget {
         StickyDateHeaderState state, {
         int? activeDayTimestamp,
       }) {
-        stickyDateHeaderState.value = state;
+        stickyDateHeaderState.value = showUnreadNavigation
+            ? StickyDateHeaderState.hidden
+            : state;
         stickyDayTimestamp.value = activeDayTimestamp;
       }
 
@@ -536,11 +537,12 @@ class _MessageList extends HookConsumerWidget {
         itemPositionsListener,
         appBarTitleContentHeight,
         composerBottomInset,
+        showUnreadNavigation,
+        stickyDateHeaderState,
       ],
     );
 
     useEffect(() {
-      stickyDateHeaderState.value = StickyDateHeaderState.hidden;
       stickyDayTimestamp.value = null;
       return null;
     }, [channelId]);
@@ -880,21 +882,6 @@ class _MessageList extends HookConsumerWidget {
             ),
           ),
         ),
-        if (!showUnreadNavigation)
-          Positioned(
-            left: 0,
-            right: 0,
-            top:
-                frostedAppBarHeight(
-                  context,
-                  titleContentHeight: appBarTitleContentHeight,
-                ) +
-                Grid.twelve,
-            child: StickyDateHeader(
-              key: const ValueKey('channel-sticky-date-header'),
-              state: stickyDateHeaderState,
-            ),
-          ),
         if (showUnreadNavigation)
           Positioned(
             left: 0,

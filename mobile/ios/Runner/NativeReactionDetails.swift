@@ -144,8 +144,8 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     var config = UIButton.Configuration.tinted()
     config.cornerStyle = .capsule
     config.title = reaction == nil ? title : "       \(title)"
-    config.baseBackgroundColor = selectedEmoji == emoji ? .systemBlue : .tertiarySystemFill
-    config.baseForegroundColor = selectedEmoji == emoji ? .systemBlue : .label
+    config.baseBackgroundColor = selectedEmoji == emoji ? foregroundColor : .tertiarySystemFill
+    config.baseForegroundColor = selectedEmoji == emoji ? foregroundColor : .label
     let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
       guard let self else { return }
       guard self.selectedEmoji != emoji else { return }

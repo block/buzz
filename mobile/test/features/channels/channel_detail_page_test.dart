@@ -45,7 +45,6 @@ import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
-import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
@@ -3296,9 +3295,7 @@ void main() {
       );
     });
 
-    testWidgets('long press opens the anchored reaction popover', (
-      tester,
-    ) async {
+    testWidgets('long press opens the reaction sheet', (tester) async {
       final hapticCalls = <MethodCall>[];
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         SystemChannels.platform,
@@ -3349,376 +3346,13 @@ void main() {
         ),
         findsNWidgets(6),
       );
-      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.byType(BottomSheet), findsOneWidget);
       expect(find.text('Copy text'), findsNothing);
       expect(findRichText('joined the channel'), findsOneWidget);
       expect(hapticCalls, hasLength(1));
       expect(hapticCalls.single.arguments, 'HapticFeedbackType.mediumImpact');
 
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isFalse);
-    });
-
-    testWidgets('reaction popover leaves existing reactions in the blur', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [
-            _systemMsg(
-              id: 'reacted-system-message',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'alice',
-              },
-            ),
-            _reaction(
-              id: 'existing-reaction',
-              targetId: 'reacted-system-message',
-            ),
-          ],
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final messageCenter = tester.getCenter(
-        findRichText('joined the channel'),
-      );
-      final reactionRect = tester.getRect(find.byType(ReactionRow));
-      final reactionCenter = reactionRect.center;
-      final reactionPillTop = Offset(
-        reactionRect.center.dx,
-        reactionRect.top + Grid.half + Grid.quarter,
-      );
-      await tester.longPress(
-        find.byKey(const ValueKey('system-message-row-reacted-system-message')),
-      );
-      await tester.pumpAndSettle();
-
-      final backgroundFinder = find.byKey(
-        const ValueKey('reaction-popover-background'),
-      );
-      final background = tester.widget<ClipPath>(backgroundFinder);
-      final backgroundOrigin = tester.getTopLeft(backgroundFinder);
-      final blurPath = background.clipper!.getClip(
-        tester.getSize(backgroundFinder),
-      );
-
-      expect(blurPath.contains(messageCenter - backgroundOrigin), isFalse);
-      expect(blurPath.contains(reactionPillTop - backgroundOrigin), isTrue);
-      expect(blurPath.contains(reactionCenter - backgroundOrigin), isTrue);
-
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isFalse);
-    });
-
-    for (final thread in [false, true]) {
-      for (final reactionOnly in [false, true]) {
-        testWidgets(
-          'native header restores after backdrop thread=$thread reactionOnly=$reactionOnly',
-          (tester) async {
-            debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-            addTearDown(() {
-              debugDefaultTargetPlatformOverride = null;
-              messageActionBackdropActive.value = false;
-            });
-            // Exercise the composable fallback when native menus are unavailable.
-            const presentation = MethodChannel(
-              'buzz/native_message_presentation',
-            );
-            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-              presentation,
-              (_) async => {'supported': false},
-            );
-            addTearDown(
-              () => tester.binding.defaultBinaryMessenger
-                  .setMockMethodCallHandler(presentation, null),
-            );
-            final event = reactionOnly
-                ? _systemMsg(
-                    id: 'native-backdrop',
-                    payload: {
-                      'type': 'member_joined',
-                      'actor': 'alice',
-                      'target': 'alice',
-                    },
-                  )
-                : _textMsg(
-                    id: 'native-backdrop',
-                    pubkey: 'alice',
-                    content: 'Native backdrop target',
-                  );
-            final timeline = formatTimeline([event]);
-            await tester.pumpWidget(
-              _buildTestable(
-                messages: [event],
-                users: const {
-                  'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-                },
-                home: thread
-                    ? ThreadDetailPage(
-                        threadHead: timeline.single,
-                        allMessages: timeline,
-                        channelId: _testChannel.id,
-                        currentPubkey: null,
-                        isMember: true,
-                        isArchived: false,
-                      )
-                    : null,
-              ),
-            );
-            await tester.pumpAndSettle();
-            final header = find.byWidgetPredicate(
-              (widget) =>
-                  widget is UiKitView &&
-                  widget.viewType == 'buzz/ios_navigation_bar',
-            );
-            expect(header, findsOneWidget);
-            final key = thread
-                ? 'thread-message-row-native-backdrop'
-                : reactionOnly
-                ? 'system-message-row-native-backdrop'
-                : 'message-row-native-backdrop';
-            await tester.longPress(find.byKey(ValueKey(key)));
-            await tester.pumpAndSettle();
-            expect(messageActionBackdropActive.value, isTrue);
-            expect(header, findsNothing);
-            expect(
-              find.descendant(
-                of: find.byType(FrostedAppBar),
-                matching: find.byType(UiKitView),
-              ),
-              findsNothing,
-              reason: 'Every header control must participate in Flutter blur',
-            );
-            final overlay = find.byKey(
-              ValueKey(
-                reactionOnly
-                    ? 'reaction-popover-tray'
-                    : 'message-action-surface',
-              ),
-            );
-            expect(overlay, findsOneWidget);
-            Navigator.of(tester.element(overlay)).pop();
-            await tester.pump();
-            expect(
-              header,
-              findsNothing,
-              reason:
-                  'Keep native view suppressed through the dismissal transition',
-            );
-            await tester.pumpAndSettle();
-            expect(messageActionBackdropActive.value, isFalse);
-            expect(header, findsOneWidget);
-            await tester.pumpWidget(const SizedBox());
-            debugDefaultTargetPlatformOverride = null;
-          },
-        );
-      }
-    }
-
-    testWidgets('reaction-only and full actions share the stronger backdrop', (
-      tester,
-    ) async {
-      addTearDown(() => messageActionBackdropActive.value = false);
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [
-            _systemMsg(
-              id: 'reaction-only-blur',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'alice',
-              },
-            ),
-            _textMsg(
-              id: 'full-action-blur',
-              pubkey: 'alice',
-              content: 'Full action target',
-              createdAt: 1100,
-            ),
-          ],
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.longPress(
-        find.byKey(const ValueKey('system-message-row-reaction-only-blur')),
-      );
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isTrue);
-      final reactionBackdrop = tester.widget<BackdropFilter>(
-        find.byKey(const ValueKey('reaction-popover-backdrop-filter')),
-      );
-      final reactionTint = tester.widget<ColoredBox>(
-        find.byKey(const ValueKey('reaction-popover-background-tint')),
-      );
-
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isFalse);
-
-      await tester.longPress(
-        find.byKey(const ValueKey('message-row-full-action-blur')),
-      );
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isTrue);
-      final fullBackdrop = tester.widget<BackdropFilter>(
-        find.byKey(const ValueKey('message-actions-backdrop-filter')),
-      );
-      final fullTint = tester.widget<ColoredBox>(
-        find.byKey(const ValueKey('message-actions-background')),
-      );
-
-      expect(fullBackdrop.filter, same(reactionBackdrop.filter));
-      expect(fullTint.color, reactionTint.color);
-
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('message-action-surface'))),
-      ).pop();
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isFalse);
-    });
-
-    testWidgets('reaction-only popovers serialize concurrent requests', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: const [],
-          home: Scaffold(
-            body: Consumer(
-              builder: (context, ref, _) => TextButton(
-                key: const ValueKey('concurrent-reaction-launcher'),
-                onPressed: () {
-                  final message = formatTimeline([
-                    _systemMsg(
-                      id: 'concurrent-reaction',
-                      payload: {
-                        'type': 'member_joined',
-                        'actor': 'alice',
-                        'target': 'alice',
-                      },
-                    ),
-                  ]).single;
-                  const anchorRect = Rect.fromLTWH(32, 260, 300, 72);
-                  showMessageActions(
-                    context: context,
-                    ref: ref,
-                    message: message,
-                    channelId: _channelId,
-                    canManageMessage: false,
-                    anchorRect: anchorRect,
-                  );
-                  showMessageActions(
-                    context: context,
-                    ref: ref,
-                    message: message,
-                    channelId: _channelId,
-                    canManageMessage: false,
-                    anchorRect: anchorRect,
-                  );
-                },
-                child: const Text('Open concurrent reactions'),
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(
-        find.byKey(const ValueKey('concurrent-reaction-launcher')),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(const ValueKey('reaction-popover-tray')),
-        findsOneWidget,
-      );
-      expect(messageActionBackdropActive.value, isTrue);
-
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isFalse);
-
-      await tester.tap(
-        find.byKey(const ValueKey('concurrent-reaction-launcher')),
-      );
-      await tester.pumpAndSettle();
-      expect(
-        find.byKey(const ValueKey('reaction-popover-tray')),
-        findsOneWidget,
-        reason: 'The presentation latch must release after dismissal.',
-      );
-
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
-      await tester.pumpAndSettle();
-      expect(messageActionBackdropActive.value, isFalse);
-    });
-
-    testWidgets('reaction popover grows right from a fixed left edge', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [
-            _systemMsg(
-              id: 'left-growth-target',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'alice',
-              },
-            ),
-          ],
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.longPress(
-        find.byKey(const ValueKey('system-message-row-left-growth-target')),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-      final earlyRect = tester.getRect(
-        find.byKey(const ValueKey('reaction-popover-tray')),
-      );
-      await tester.pump(const Duration(milliseconds: 80));
-      final laterRect = tester.getRect(
-        find.byKey(const ValueKey('reaction-popover-tray')),
-      );
-
-      expect(laterRect.left, moreOrLessEquals(earlyRect.left));
-      expect(laterRect.width, greaterThan(earlyRect.width));
-      await tester.pumpAndSettle();
-
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
       await tester.pumpAndSettle();
       expect(messageActionBackdropActive.value, isFalse);
     });
@@ -3759,14 +3393,9 @@ void main() {
       await gesture.up();
       await tester.pumpAndSettle();
 
-      expect(
-        find.byKey(const ValueKey('reaction-popover-tray')),
-        findsOneWidget,
-      );
+      expect(find.byType(BottomSheet), findsOneWidget);
 
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
       await tester.pumpAndSettle();
       expect(messageActionBackdropActive.value, isFalse);
     });
@@ -3809,24 +3438,15 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.byKey(const ValueKey('message-action-reaction-tray')),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('quick-reaction-more')), findsOneWidget);
       expect(
         find.byKey(const ValueKey('message-action-preview')),
-        findsOneWidget,
+        findsNothing,
       );
-      expect(
-        find.byKey(const ValueKey('message-action-surface')),
-        findsOneWidget,
-      );
-      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.byType(BottomSheet), findsOneWidget);
       expect(find.text('Copy text'), findsOneWidget);
 
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('message-action-surface'))),
-      ).pop();
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
       await tester.pumpAndSettle();
       expect(messageActionBackdropActive.value, isFalse);
     });
@@ -5377,6 +4997,30 @@ void main() {
         final stickyHeader = find.byKey(
           const ValueKey('channel-sticky-date-header'),
         );
+        final scaffold = tester.widget<FrostedScaffold>(
+          find
+              .ancestor(
+                of: stickyHeader,
+                matching: find.byType(FrostedScaffold),
+              )
+              .first,
+        );
+        expect(scaffold.foreground, isNotNull);
+        expect(
+          find.descendant(
+            of: find.byWidget(scaffold.foreground!),
+            matching: stickyHeader,
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.byWidget(scaffold.body),
+            matching: stickyHeader,
+          ),
+          findsNothing,
+        );
+
         final stickySurface = find.byKey(
           const ValueKey('channel-sticky-date-header-surface'),
         );
@@ -12281,6 +11925,27 @@ void main() {
       final stickyHeader = find.byKey(
         const ValueKey('thread-sticky-date-header'),
       );
+      final scaffold = tester.widget<FrostedScaffold>(
+        find
+            .ancestor(of: stickyHeader, matching: find.byType(FrostedScaffold))
+            .first,
+      );
+      expect(scaffold.foreground, isNotNull);
+      expect(
+        find.descendant(
+          of: find.byWidget(scaffold.foreground!),
+          matching: stickyHeader,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byWidget(scaffold.body),
+          matching: stickyHeader,
+        ),
+        findsNothing,
+      );
+
       expect(
         find.descendant(
           of: stickyHeader,
