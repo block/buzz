@@ -383,7 +383,9 @@ fn command_search_dirs() -> Vec<PathBuf> {
     })
 }
 
-fn is_executable_file(path: &Path) -> bool {
+/// A regular file the current user can execute. Dev builds place empty,
+/// non-executable sidecar stubs next to the app, which this rejects.
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
     };
