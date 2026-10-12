@@ -4,6 +4,7 @@ import * as React from "react";
 import { describeRemote } from "../remoteCopy";
 import { RemoteConnection, RemoteError, type RemoteSession, type SignJson, type TerminalHandle } from "../remoteClient";
 import { KEYS, TermBuffer } from "../termBuffer";
+import { attachHandoffToTerminal, takePendingTermHandoff, peekPendingTermHandoff, type PendingTermHandoff } from "../webTermHandoff";
 import type { BridgeState } from "../webClient";
 
 export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) {
@@ -26,6 +27,14 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
   const [line, setLine] = React.useState("");
   const screenRef = React.useRef<HTMLPreElement>(null);
 
+  // A "Pass thread context to Buzz Term" handoff from the web: open the terminal by itself and start the session in it.
+  const autoRef = React.useRef<((h: PendingTermHandoff) => void) | null>(null);
+  const autoReady = !!info && info.status === "on" && info.terminals && !open;
+  React.useEffect(() => {
+    if (!autoReady || !peekPendingTermHandoff()) return;
+    const h = takePendingTermHandoff();
+    if (h) autoRef.current?.(h);
+  }, [autoReady]);
   React.useEffect(
     () => () => {
       termRef.current?.close();
@@ -70,7 +79,7 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
       const c = await ensure();
       setSessions(await c.listSessions());
     });
-  const openTerm = () =>
+  const openTerm = (handoff?: PendingTermHandoff) =>
     guard("terminal", async () => {
       const c = await ensure();
       bufRef.current = new TermBuffer();
@@ -97,7 +106,9 @@ export function RemotePanel(props: { bridge: BridgeState; signJson: SignJson }) 
       // the desktop's Settings → Buzz Term → Scrollback decides how much history this terminal keeps
       if (t.scrollback) bufRef.current.maxLines = t.scrollback;
       setOpen(true);
+      if (handoff) attachHandoffToTerminal(t, handoff);
     });
+  autoRef.current = (h) => void openTerm(h);
   const send = (s: string) => termRef.current?.write(s);
   const btn = { fontSize: 12, padding: "4px 8px", marginRight: 4 } as const;
 

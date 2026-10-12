@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { SquareTerminal } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -13,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
+import { WebTermHandoffPanel } from "@/features/bridge/ui/WebTermHandoffPanel";
 import { buildTermSessionHandoffInstruction } from "../lib/handoffInstruction.ts";
 import { listTermSessionHarnesses } from "../lib/harnesses.ts";
 import {
@@ -37,7 +39,45 @@ type TermSessionHandoffPopoverProps = {
   ) => Promise<void>;
 };
 
-export function TermSessionHandoffPopover({
+/** Desktop: the original card (local agents, local harnesses). Web: agents and harnesses of the member's own desktop via the relay bridge. */
+export function TermSessionHandoffPopover(props: TermSessionHandoffPopoverProps) {
+  return isTauri() ? <DesktopTermSessionHandoffPopover {...props} /> : <WebTermSessionHandoffPopover {...props} />;
+}
+
+function WebTermSessionHandoffPopover({ channelId, threadId }: TermSessionHandoffPopoverProps) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <Popover onOpenChange={setOpen} open={open}>
+      <Tooltip disableHoverableContent>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <Button
+              aria-label="Pass thread context to Buzz Term"
+              className="shrink-0"
+              data-testid="thread-term-session-button"
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <SquareTerminal />
+            </Button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Buzz Term</TooltipContent>
+      </Tooltip>
+      <PopoverContent
+        align="end"
+        className="w-80 max-w-[90vw] space-y-3"
+        data-testid="thread-term-session-panel"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
+        <WebTermHandoffPanel channelId={channelId} onDone={() => setOpen(false)} threadId={threadId} />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function DesktopTermSessionHandoffPopover({
   channelId,
   threadId,
   channelMemberPubkeys,
