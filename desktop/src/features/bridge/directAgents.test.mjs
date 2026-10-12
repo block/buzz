@@ -88,3 +88,45 @@ test("a signer decline is reported as declined", async () => {
   const d = new DirectAgents({ desktopId: "dsk", url: "ws://127.0.0.1:1/x" }, async () => { throw new Error("User rejected"); }, s.make);
   await assert.rejects(d.list(), (e) => e.code === "declined");
 });
+
+test("autoConnect signs once, reuses a live connection, and tries only once per page visit", async () => {
+  const s = server();
+  let signs = 0;
+  const d = new DirectAgents({ desktopId: "dsk", url: "ws://127.0.0.1:1/x" }, async () => (signs++, "{}"), s.make);
+  await d.autoConnect();
+  await d.autoConnect();
+  assert.equal(d.live, true);
+  assert.equal(signs, 1);
+});
+
+test("autoConnect after a decline does not retry on its own; a new visit (resetAuto) or an explicit connect does", async () => {
+  const s = server();
+  let signs = 0;
+  let decline = true;
+  const d = new DirectAgents({ desktopId: "dsk", url: "ws://127.0.0.1:1/x" }, async () => { signs++; if (decline) throw new Error("User rejected"); return "{}"; }, s.make);
+  await d.autoConnect(); // resolves, never throws
+  assert.equal(d.state, "failed");
+  assert.equal(d.live, false);
+  await d.autoConnect();
+  await d.autoConnect();
+  assert.equal(signs, 1, "no retry loop");
+  decline = false;
+  d.resetAuto(); // the page was closed and reopened
+  await d.autoConnect();
+  assert.equal(d.live, true);
+  assert.equal(signs, 2);
+});
+
+test("after the signature expires nothing reconnects until the next page visit", async () => {
+  const s = server({ ttl: 60 });
+  let t = Date.now();
+  let signs = 0;
+  const d = new DirectAgents({ desktopId: "dsk", url: "ws://127.0.0.1:1/x" }, async () => (signs++, "{}"), s.make, () => t);
+  await d.autoConnect();
+  t = d.expiresAt + 1000;
+  await d.autoConnect();
+  assert.equal(signs, 1, "expiry alone never pops the signer");
+  d.resetAuto();
+  await d.autoConnect();
+  assert.equal(signs, 2);
+});

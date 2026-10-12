@@ -95,6 +95,22 @@ export class DirectAgents {
     return this.connecting;
   }
 
+  private autoTried = false;
+  /** Automatic connect for when the Agents page opens: at most one attempt per page visit (no retry loop after a decline or failure). */
+  async autoConnect(): Promise<void> {
+    if (this.live || this.connecting || this.autoTried) return;
+    this.autoTried = true;
+    try {
+      await this.connect();
+    } catch {
+      /* the badge shows the reason and a Retry control; the relay keeps working */
+    }
+  }
+  /** Called when the Agents page closes, so the next visit may connect automatically again. */
+  resetAuto() {
+    this.autoTried = false;
+  }
+
   close() {
     this.conn?.close();
     this.conn = null;

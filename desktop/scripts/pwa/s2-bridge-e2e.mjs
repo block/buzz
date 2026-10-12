@@ -677,9 +677,8 @@ check("9c2. Terminal nav entry appears with a reachable terminal host selected",
 // 10. agent management over the direct connection (real listener + in-memory agent store; relay stays the fallback)
 await page.evaluate(() => { location.hash = "#/agents"; });
 await page.locator('[data-testid="agents-path"]').waitFor({ timeout: 20000 }).catch(() => {});
-check("10a. before connecting the path label says 'Via relay' and 'Connect directly' is offered", await page.waitForFunction(() => document.querySelector('[data-testid="agents-path"]')?.getAttribute("data-path") === "relay" && !!document.querySelector('[data-testid="direct-connect"]'), null, { timeout: 30000 }).then(() => true, () => false));
-await page.locator('[data-testid="direct-connect"]').click().catch(() => {});
-check("10b. after one signer approval the label says 'Direct' with the signature expiry", await page.waitForFunction(() => document.querySelector('[data-testid="agents-path"]')?.getAttribute("data-path") === "direct" && /signed until/.test(document.querySelector('[data-testid="agents-path-line"]')?.textContent || ""), null, { timeout: 60000 }).then(() => true, () => false));
+check("10a. with management on and the host reachable the Agents page connects by itself: no click, one signer approval, label 'Direct' with the signature expiry", await page.waitForFunction(() => document.querySelector('[data-testid="agents-path"]')?.getAttribute("data-path") === "direct" && /signed until/.test(document.querySelector('[data-testid="agents-path-line"]')?.textContent || ""), null, { timeout: 60000 }).then(() => true, () => false));
+check("10b. no 'Connect directly' button once connected", !(await page.locator('[data-testid="direct-connect"]').count()));
 check("10c. direct list shows ALL agents including stopped ones (relay list shows running only)", await page.waitForFunction(() => document.querySelectorAll('[data-testid="direct-agent-row"]').length >= 3 && !!document.querySelector('[data-testid="direct-agent-row"][data-status="stopped"]'), null, { timeout: 20000 }).then(() => true, () => false));
 await page.locator('[data-testid="direct-new"]').click().catch(() => {});
 await page.locator('[data-testid="direct-create-name"]').fill("E2E Agent").catch(() => {});

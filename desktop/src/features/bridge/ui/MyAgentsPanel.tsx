@@ -37,6 +37,13 @@ export function MyAgentsPanel() {
   );
   const dstate = useDirectState(direct);
   const [connecting, setConnecting] = React.useState(false);
+  // Connect on its own when the page is open, the desktop offers remote management and is reachable on the tailnet: one signature per
+  // connection, one attempt per visit (a declined/failed attempt leaves the relay and a Retry button; no background prompts later).
+  const autoOk = !!direct && b.available && b.heartbeat?.remote?.agents === true && transport === "direct" && b.presence !== "offline";
+  React.useEffect(() => {
+    if (autoOk && direct) void direct.autoConnect();
+  }, [autoOk, direct]);
+  React.useEffect(() => () => direct?.resetAuto(), [direct]);
   if (!b.available) return null;
   const directLive = dstate.live && !!direct;
   const connectDirect = () => {

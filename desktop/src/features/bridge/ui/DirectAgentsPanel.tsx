@@ -29,7 +29,8 @@ function clock(ms: number) {
 
 /** The connection line: which path is in use and, for a direct one, how long the signature lasts. */
 export function PathBadge(props: { direct: DirectAgents | null; canDirect: boolean; managementOn: boolean; onConnect: () => void; busy: boolean; unreachable: boolean }) {
-  const { live, expiresAt, error } = useDirectState(props.direct);
+  const { live, expiresAt, error, state } = useDirectState(props.direct);
+  const busy = props.busy || state === "connecting";
   return (
     <div data-testid="agents-path-line" style={{ fontSize: 12, margin: "0 0 10px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
       <span data-testid="agents-path" data-path={live ? "direct" : "relay"} style={{ border: "1px solid rgba(128,128,128,.5)", borderRadius: 4, padding: "0 6px" }}>
@@ -37,8 +38,8 @@ export function PathBadge(props: { direct: DirectAgents | null; canDirect: boole
       </span>
       {live && expiresAt > 0 && <span style={{ opacity: 0.7 }}>signed until {clock(expiresAt)}</span>}
       {!live && props.canDirect && props.managementOn && (
-        <button type="button" data-testid="direct-connect" style={btn} disabled={props.busy} onClick={props.onConnect}>
-          {props.busy ? "Waiting for your signer…" : "Connect directly"}
+        <button type="button" data-testid="direct-connect" style={btn} disabled={busy} onClick={props.onConnect}>
+          {busy ? "Waiting for your signer…" : state === "failed" ? "Retry" : "Connect directly"}
         </button>
       )}
       {!live && props.unreachable && props.managementOn && (
@@ -46,7 +47,7 @@ export function PathBadge(props: { direct: DirectAgents | null; canDirect: boole
           Direct isn't reachable (connect this device to your tailnet for create, rename and edit).
         </span>
       )}
-      {error && !live && !props.busy && (
+      {error && !live && !busy && (
         <span data-testid="direct-error" style={{ color: "#c0392b" }}>
           {directErrorCopy(error)}
         </span>
@@ -83,8 +84,9 @@ export function DirectAgentsSection(props: { direct: DirectAgents; /** Changes w
     void refresh();
     void direct.runtimes().then(setRuntimes).catch(() => {});
     void direct.personas().then(setPersonas).catch(() => {});
+    // Never reconnect (and so never prompt the signer) from the background poll: only refresh while the signature is live.
     const t = window.setInterval(() => {
-      if (!document.hidden) void refresh();
+      if (!document.hidden && direct.live) void refresh();
     }, DIRECT_POLL_MS);
     const onVisible = () => {
       if (!document.hidden) void refresh();
