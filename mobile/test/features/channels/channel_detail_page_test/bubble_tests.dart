@@ -1,6 +1,75 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  testWidgets('newest short message keeps the same group gap', (tester) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          for (var index = 0; index < 3; index++)
+            _textMsg(
+              id: 'gap-$index',
+              pubkey: 'alice',
+              content: 'Short',
+              createdAt: 1000 + index,
+            ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    Rect bubble(int index) => tester.getRect(
+      find.descendant(
+        of: find.byKey(ValueKey('message-row-gap-$index')),
+        matching: find.byKey(const ValueKey('message-text-bubble-0')),
+      ),
+    );
+    final firstGap = bubble(1).top - bubble(0).bottom;
+    final newestGap = bubble(2).top - bubble(1).bottom;
+    expect(newestGap, closeTo(firstGap, 0.01));
+  });
+
+  testWidgets('newest short thread reply keeps the same group gap', (
+    tester,
+  ) async {
+    final events = [
+      _textMsg(id: 'root', pubkey: 'bob', content: 'Root', createdAt: 900),
+      for (var index = 0; index < 3; index++)
+        _textMsg(
+          id: 'gap-$index',
+          pubkey: 'alice',
+          content: 'Short',
+          createdAt: 1000 + index,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+    ];
+    final messages = formatTimeline(events);
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: events,
+        home: ThreadDetailPage(
+          threadHead: messages.firstWhere((m) => m.id == 'root'),
+          allMessages: messages,
+          channelId: _channelId,
+          currentPubkey: 'me',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    Rect bubble(int index) => tester.getRect(
+      find.descendant(
+        of: find.byKey(ValueKey('thread-message-row-gap-$index')),
+        matching: find.byKey(const ValueKey('message-text-bubble-0')),
+      ),
+    );
+    expect(
+      bubble(2).top - bubble(1).bottom,
+      closeTo(bubble(1).top - bubble(0).bottom, 0.01),
+    );
+  });
+
   testWidgets('channel groups keep one avatar on the last message', (
     tester,
   ) async {
