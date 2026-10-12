@@ -1,9 +1,10 @@
 // Mounted once in the desktop AppShell (no-op in the browser). Feeds the bridge publisher from existing agent state.
 import { isTauri } from "@tauri-apps/api/core";
+import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { useActiveAgentTurnsByChannel } from "@/features/agents/activeAgentTurnsStore";
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import { managedAgentsQueryKey, useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
   getAgentTranscript,
   subscribeAgentObserverStore,
@@ -46,6 +47,11 @@ export function useBridgePublisher(
 ): void {
   const enabled = isTauri() && !!pubkey && !!relayUrl;
   const agentsQuery = useManagedAgentsQuery({ enabled });
+  const queryClient = useQueryClient();
+  const queryClientRef = React.useRef(queryClient);
+  queryClientRef.current = queryClient;
+  // A command from the web changed agent state: refresh this desktop's own lists (and so the next snapshot) right away.
+  const invalidateAgents = () => void queryClientRef.current.invalidateQueries({ queryKey: managedAgentsQueryKey });
   const channelTurns = useActiveAgentTurnsByChannel();
   const publisherRef = React.useRef<BridgePublisher | null>(null);
   const nameRef = React.useRef(channelName);
@@ -151,10 +157,18 @@ export function useBridgePublisher(
       ),
       executors: {
         start: async (a) => {
-          await startManagedAgent(a, { expectedSignerPubkey: pubkey });
+          try {
+            await startManagedAgent(a, { expectedSignerPubkey: pubkey });
+          } finally {
+            invalidateAgents();
+          }
         },
         stop: async (a) => {
-          await stopManagedAgent(a);
+          try {
+            await stopManagedAgent(a);
+          } finally {
+            invalidateAgents();
+          }
         },
         message: async (a, channelId, text) => {
           await sendChannelMessage(

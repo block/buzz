@@ -104,7 +104,7 @@ export function MyAgentsPanel() {
         busy={connecting}
         unreachable={transport === "relay" && !!host?.hasDirect}
       />
-      {directLive && direct && <DirectAgentsSection direct={direct} />}
+      {directLive && direct && <DirectAgentsSection direct={direct} snapshotTs={b.snapshotTs} />}
       {!managementOn && (
         <div
           data-testid="agents-management-info"

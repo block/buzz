@@ -80,8 +80,15 @@ export function transportFor(feature: Feature, host: RemoteHost | undefined, rea
 
 // ── per-device web preferences ───────────────────────────────────────────────────────────
 const KEY = "buzz-web-remote-prefs";
-export type WebRemotePrefs = { agentsOn: boolean; terminalOn: boolean; agentsHost: string | null; terminalHost: string | null };
-const DEFAULT: WebRemotePrefs = { agentsOn: false, terminalOn: false, agentsHost: null, terminalHost: null };
+export type WebRemotePrefs = {
+  agentsOn: boolean;
+  terminalOn: boolean;
+  agentsHost: string | null;
+  terminalHost: string | null;
+  /** The user switched the terminal off on purpose: never turn it back on automatically. */
+  terminalOptOut: boolean;
+};
+const DEFAULT: WebRemotePrefs = { agentsOn: false, terminalOn: false, agentsHost: null, terminalHost: null, terminalOptOut: false };
 const subs = new Set<() => void>();
 let cached: WebRemotePrefs | null = null;
 export function getWebRemotePrefs(): WebRemotePrefs {
@@ -104,3 +111,17 @@ export function subscribeWebRemotePrefs(f: () => void) {
   subs.add(f);
   return () => void subs.delete(f);
 }
+
+/** The one specific thing that is missing, from what the desktop advertises and what this browser can reach. */
+export function whyTermUnavailable(host: RemoteHost | undefined, hasRemoteInfo: boolean, reach: Reach): string | null {
+  if (!hasRemoteInfo) return "Your desktop hasn't reported remote access yet. Make sure the desktop app is open, signed in and up to date.";
+  if (!host) return null;
+  if (!host.supports.terminal)
+    return host.hasDirect
+      ? "Allow remote terminal is off on your desktop (Settings → Buzz Term)."
+      : "Your desktop's remote access isn't running (Tailscale may be off, or Allow remote access is off).";
+  if (host.stale) return "Your desktop hasn't been seen in over a day.";
+  if (reach === "unreachable") return "This browser can't reach your desktop over your tailnet. Connect this device to Tailscale.";
+  return null;
+}
+

@@ -231,7 +231,19 @@ export class BridgeWebClient {
       if (prev && prev.status !== "accepted" && body.status === "accepted") return;
       const results = new Map(this.state.results);
       results.set(cmdId, { ...body, ts: env.ts });
-      this.set({ results });
+      const patch: Partial<BridgeState> = { results };
+      // Optimistic list update: once the desktop says a start/stop worked, show it now (the next real snapshot replaces this).
+      const expect = this.expected.get(cmdId);
+      if (expect && body.status === "ok") {
+        this.expected.delete(cmdId);
+        const snap = this.state.snapshot;
+        if (snap)
+          patch.snapshot = {
+            ...snap,
+            agents: snap.agents.map((a) => (a.pubkey.toLowerCase() === expect.pubkey ? { ...a, status: expect.status } : a)),
+          };
+      }
+      this.set(patch);
       return;
     }
     if (d === D_AGENTS && env.type === "agents.snapshot") {
@@ -252,6 +264,13 @@ export class BridgeWebClient {
         presence: presenceOf(lastHeardTs),
       });
     }
+  }
+
+  private expected = new Map<string, { pubkey: string; status: "running" | "stopped" }>();
+  /** Remember what a start/stop command should leave behind, to show it as soon as the desktop confirms. */
+  expectStatus(cmdId: string, pubkey: string, status: "running" | "stopped") {
+    this.expected.set(cmdId, { pubkey: pubkey.toLowerCase(), status });
+    if (this.expected.size > 50) this.expected.delete(this.expected.keys().next().value as string);
   }
 
   private shotParts = new Map<string, { n: number; parts: Map<number, string>; b: ShotChunkBody; ts: number }>();

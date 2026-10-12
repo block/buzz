@@ -122,6 +122,10 @@ export class BridgeCommander {
     });
     this.sent = next;
     this.emit();
+    if (type === "agent.start" || type === "agent.stop") {
+      const pk = (body as { agentPubkey?: string }).agentPubkey;
+      if (pk) this.client.expectStatus(env.id, pk, type === "agent.start" ? "running" : "stopped");
+    }
     await this.io.publish(signed);
     return env.id;
   }

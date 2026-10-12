@@ -1,12 +1,14 @@
 // Mounted once in AppShell: keeps the remote-access status fresh and shows a local notification when a remote terminal opens.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import { createManagedAgent, listManagedAgents, updateManagedAgent } from "@/shared/api/tauri";
 import { sendChannelMessage } from "@/shared/api/tauriMessages";
 import { startManagedAgent, stopManagedAgent } from "@/shared/api/tauriManagedAgents";
+import { managedAgentsQueryKey } from "@/features/agents/hooks";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { handleMgmt, mgmtErrorString, type MgmtDeps } from "./directMgmt";
 import { isAgentManagementAllowed, refreshRemoteAccess, subscribeRemoteAccess } from "./remoteAccessStore";
@@ -27,7 +29,13 @@ export function realMgmtDeps(pubkey: string | undefined): MgmtDeps {
   };
 }
 
+/** Ops that change agent state: the desktop's own agent lists (and the bridge snapshot) must refresh after them. */
+const MUTATING_OPS = new Set(["agent.start", "agent.stop", "agent.create", "agent.rename", "agent.update"]);
+
 export function useRemoteAccessEvents(pubkey?: string): void {
+  const queryClient = useQueryClient();
+  const queryClientRef = React.useRef(queryClient);
+  queryClientRef.current = queryClient;
   const pubkeyRef = React.useRef(pubkey);
   pubkeyRef.current = pubkey;
   React.useEffect(() => {
@@ -43,6 +51,8 @@ export function useRemoteAccessEvents(pubkey?: string): void {
         await invoke("remote_mgmt_reply", { reqId, ok: true, result });
       } catch (err) {
         await invoke("remote_mgmt_reply", { reqId, ok: false, error: mgmtErrorString(err) }).catch(() => {});
+      } finally {
+        if (MUTATING_OPS.has(op)) void queryClientRef.current.invalidateQueries({ queryKey: managedAgentsQueryKey });
       }
     }).then((u) => (cancelled ? u() : unlistens.push(u)));
     void listen("remote-access-changed", () => void refreshRemoteAccess()).then((u) => (cancelled ? u() : unlistens.push(u)));

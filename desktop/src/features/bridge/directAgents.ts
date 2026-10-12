@@ -20,6 +20,8 @@ export type DirectPersona = { id: string; name: string };
 export type AgentEdit = { name?: string; provider?: string | null; model?: string | null; runtimeId?: string };
 export type NewAgent = { name: string; provider?: string; model?: string; personaId?: string; runtimeId?: string; start?: boolean };
 
+export type AgentMutation = { op: "start" | "stop" | "create" | "rename" | "update"; pubkey?: string; name?: string };
+
 export type DirectState = "idle" | "connecting" | "connected" | "failed";
 
 /** Errors that mean "the direct path isn't usable right now": fall back to the relay where one exists. */
@@ -116,12 +118,24 @@ export class DirectAgents {
   async list(): Promise<DirectAgent[]> {
     return (await this.call<{ agents: DirectAgent[] }>("agents.list")).agents ?? [];
   }
-  start = (pubkey: string) => this.call("agent.start", { pubkey });
-  stop = (pubkey: string) => this.call("agent.stop", { pubkey });
+  private mutationListeners = new Set<(m: AgentMutation) => void>();
+  /** Fires after every acknowledged change to agent state made through this connection (any component), so lists can update at once. */
+  onMutation(fn: (m: AgentMutation) => void) {
+    this.mutationListeners.add(fn);
+    return () => void this.mutationListeners.delete(fn);
+  }
+  private async mutate<T>(m: AgentMutation, p: Promise<T>): Promise<T> {
+    const r = await p;
+    for (const l of this.mutationListeners) l(m);
+    return r;
+  }
+  start = (pubkey: string) => this.mutate({ op: "start", pubkey }, this.call("agent.start", { pubkey }));
+  stop = (pubkey: string) => this.mutate({ op: "stop", pubkey }, this.call("agent.stop", { pubkey }));
   message = (pubkey: string, channelId: string, text: string) => this.call("agent.message", { pubkey, channelId, text });
-  create = (a: NewAgent) => this.call<{ agent: DirectAgent; spawnError?: string }>("agent.create", { ...a });
-  rename = (pubkey: string, name: string) => this.call<{ agent: DirectAgent }>("agent.rename", { pubkey, name });
-  update = (pubkey: string, edit: AgentEdit) => this.call<{ agent: DirectAgent; restartNeeded?: boolean }>("agent.update", { pubkey, ...edit });
+  create = (a: NewAgent) => this.mutate({ op: "create" }, this.call<{ agent: DirectAgent; spawnError?: string }>("agent.create", { ...a }));
+  rename = (pubkey: string, name: string) => this.mutate({ op: "rename", pubkey, name }, this.call<{ agent: DirectAgent }>("agent.rename", { pubkey, name }));
+  update = (pubkey: string, edit: AgentEdit) =>
+    this.mutate({ op: "update", pubkey }, this.call<{ agent: DirectAgent; restartNeeded?: boolean }>("agent.update", { pubkey, ...edit }));
   async runtimes(): Promise<DirectRuntime[]> {
     return (await this.call<{ runtimes: DirectRuntime[] }>("providers.list")).runtimes ?? [];
   }

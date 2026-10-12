@@ -67,6 +67,13 @@ export function useRemoteHostsFor(b: ReturnType<typeof useBridgeAgents>) {
       if (!h || reachOf(h) === "unreachable") setWebRemotePrefs({ terminalOn: false });
     }
     if (prefs.agentsOn && !selected("agents")) setWebRemotePrefs({ agentsOn: false });
+    // Buzz term is on by default: once the desktop advertises terminals and its tailnet address answers, turn it on here
+    // (and pick that desktop) unless the user switched it off themselves. Without this the page stayed on its
+    // "isn't available" instructions even though the desktop was ready.
+    if (!prefs.terminalOn && !prefs.terminalOptOut) {
+      const ready = hosts.find((h) => h.supports.terminal && !h.stale && reachOf(h) === "reachable");
+      if (ready) setWebRemotePrefs({ terminalOn: true, terminalHost: ready.id });
+    }
   }); // eslint-disable-line react-hooks/exhaustive-deps
   return { b, hosts, prefs, reachOf, selected };
 }
@@ -172,7 +179,11 @@ export function WebRemoteTerminal() {
           disabled={!canTurnOn}
           id="web-remote-terminal-switch"
           onCheckedChange={(on) =>
-            setWebRemotePrefs({ terminalOn: on, ...(on && !prefs.terminalHost ? { terminalHost: reachable[0]?.id ?? null } : {}) })
+            setWebRemotePrefs({
+              terminalOn: on,
+              terminalOptOut: !on,
+              ...(on && !prefs.terminalHost ? { terminalHost: reachable[0]?.id ?? null } : {}),
+            })
           }
         />
       </SettingsOptionRow>

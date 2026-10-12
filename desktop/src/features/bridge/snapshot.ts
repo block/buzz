@@ -94,6 +94,7 @@ export function snapshotSignature(b: AgentsSnapshotBody): string {
       a.status,
       a.pid ?? null,
       a.model ?? null,
+      a.runtime ?? null,
       a.lastError ?? null,
       a.activeTurns.map((t) => t.channelId),
       a.currentTask ?? null,

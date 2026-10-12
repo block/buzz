@@ -46,6 +46,14 @@ import {
 import { snapshotSignature } from "./snapshot";
 import { packChunks, TranscriptTracker } from "./transcript";
 
+/** Coalesce window for an agent lifecycle change (start/stop/create/rename/runtime status) before it is published. */
+export const URGENT_SNAPSHOT_DELAY_MS = 250;
+
+/** The part of a snapshot that is agent lifecycle state (not the "working in #channel" activity). */
+export function agentStateSignature(b: AgentsSnapshotBody): string {
+  return JSON.stringify(b.agents.map((a) => [a.pubkey, a.name, a.status, a.pid ?? null, a.runtime ?? null, a.model ?? null]));
+}
+
 export const DEFAULT_CAPS = ["agents.snapshot", "transcript.chunk"];
 
 export type PublisherIO = {
@@ -81,6 +89,8 @@ export class BridgePublisher {
   private keyPromise: Promise<void> | null = null;
   private pending: AgentsSnapshotBody | null = null;
   private lastSig: string | null = null;
+  private lastStateSig: string | null = null;
+  private timerUrgent = false;
   private lastPublishAt = 0;
   private lastForcedAt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -170,16 +180,29 @@ export class BridgePublisher {
       return;
     }
     this.pending = body;
+    // Start/stop/create/rename/runtime-status changes go out almost immediately (a short coalesce), not on the slow timer;
+    // churn like "working in #channel" keeps the normal debounce and rate limit.
+    const stateSig = agentStateSignature(body);
+    const urgent = this.lastStateSig !== null && stateSig !== this.lastStateSig;
+    this.lastStateSig = stateSig;
+    if (urgent) {
+      if (this.timer && !this.timerUrgent) {
+        (this.io.clearTimeout ?? clearTimeout)(this.timer);
+        this.timer = null;
+      }
+      this.schedule(URGENT_SNAPSHOT_DELAY_MS);
+      return;
+    }
     this.schedule();
   }
 
-  private schedule() {
+  private schedule(fixedWait?: number) {
     if (this.timer) return;
+    this.timerUrgent = fixedWait !== undefined;
     const sinceLast = this.nowMs() - this.lastPublishAt;
-    const wait = Math.max(
-      SNAPSHOT_DEBOUNCE_MS,
-      SNAPSHOT_MIN_INTERVAL_MS - sinceLast,
-    );
+    const wait =
+      fixedWait ??
+      Math.max(SNAPSHOT_DEBOUNCE_MS, SNAPSHOT_MIN_INTERVAL_MS - sinceLast);
     this.timer = (this.io.setTimeout ?? setTimeout)(() => {
       this.timer = null;
       void this.flush();

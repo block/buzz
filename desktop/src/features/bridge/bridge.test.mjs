@@ -262,3 +262,28 @@ test("desktop restart (new key, seq restarts) is accepted; cached key avoids a s
   assert.equal(reloadCalls, 0);
   assert.equal(c3.state.presence, "online");
 });
+
+test("agent lifecycle change is published within the urgent window, not the slow debounce", async () => {
+  const h = harness();
+  const delays = [];
+  const io = h.pub.io;
+  io.setTimeout = (fn, ms) => {
+    delays.push(ms);
+    h.timers.push(fn);
+    return h.timers.length;
+  };
+  h.pub.update({ agents: [agent()], generatedAt: 1 });
+  await h.runTimers();
+  delays.length = 0;
+  // activity-only churn keeps the normal debounce
+  h.pub.update({ agents: [agent({ currentTask: "Working in #a" })], generatedAt: 2 });
+  assert.ok(delays[0] >= 2000, `activity change waits (${delays[0]})`);
+  await h.runTimers();
+  delays.length = 0;
+  // start/stop is urgent even right after a publish
+  h.pub.update({ agents: [agent({ status: "stopped" })], generatedAt: 3 });
+  assert.equal(delays[0], 250);
+  const n = h.pub.stats.snapshots;
+  await h.runTimers();
+  assert.equal(h.pub.stats.snapshots, n + 1);
+});

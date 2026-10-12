@@ -55,8 +55,11 @@ export function PathBadge(props: { direct: DirectAgents | null; canDirect: boole
   );
 }
 
-export function DirectAgentsSection(props: { direct: DirectAgents }) {
-  const { direct } = props;
+/** Direct list refresh cadence while the page is visible (the desktop's listener has no push channel yet). */
+export const DIRECT_POLL_MS = 3_000;
+
+export function DirectAgentsSection(props: { direct: DirectAgents; /** Changes whenever the relay snapshot does (a state change on the desktop). */ snapshotTs?: number | null }) {
+  const { direct, snapshotTs } = props;
   const { live } = useDirectState(direct);
   const [agents, setAgents] = React.useState<DirectAgent[] | null>(null);
   const [runtimes, setRuntimes] = React.useState<DirectRuntime[]>([]);
@@ -80,9 +83,31 @@ export function DirectAgentsSection(props: { direct: DirectAgents }) {
     void refresh();
     void direct.runtimes().then(setRuntimes).catch(() => {});
     void direct.personas().then(setPersonas).catch(() => {});
-    const t = window.setInterval(() => void refresh(), 15_000);
-    return () => window.clearInterval(t);
+    const t = window.setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, DIRECT_POLL_MS);
+    const onVisible = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    // Any change made through this connection (this component or the controls) updates the list at once: optimistic first, then confirmed.
+    const off = direct.onMutation((m) => {
+      if (m.op === "start" || m.op === "stop")
+        setAgents((cur) => cur?.map((a) => (a.pubkey === m.pubkey ? { ...a, status: m.op === "start" ? "running" : "stopped" } : a)) ?? cur);
+      if (m.op === "rename")
+        setAgents((cur) => cur?.map((a) => (a.pubkey === m.pubkey && m.name ? { ...a, name: m.name } : a)) ?? cur);
+      void refresh();
+    });
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+      off();
+    };
   }, [live, direct, refresh]);
+  // The relay snapshot moved (e.g. the desktop started or stopped an agent): re-read the full list now.
+  React.useEffect(() => {
+    if (live && snapshotTs != null) void refresh();
+  }, [snapshotTs, live, refresh]);
 
   const run = async (what: string, fn: () => Promise<unknown>, done?: string) => {
     setBusy(what);

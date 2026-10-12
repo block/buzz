@@ -51,6 +51,9 @@ const EMPTY_LIST = [
   "list_relay_agents",
   "discover_acp_providers",
   "fetch_persona_catalog",
+  // Teams are local desktop state (no relay-hosted catalog is read from the browser yet): an empty catalog, not an error.
+  "fetch_team_catalog",
+  "discover_backend_providers",
   "reconcile_managed_agent_runtimes",
 ];
 const FALSE_CMDS = [
