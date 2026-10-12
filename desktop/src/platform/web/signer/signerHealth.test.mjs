@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ESCALATE_WAIT_MS, UNRESPONSIVE_AFTER, isRevokedAnswer, signerHealth } from "./signerHealth.ts";
+import { BANNER_SILENCE_MS, ESCALATE_WAIT_MS, UNRESPONSIVE_AFTER, isRevokedAnswer, signerHealth } from "./signerHealth.ts";
 
 test("timeouts: slow, then unresponsive after N in a row; one success resets", () => {
   signerHealth.reset();
@@ -29,7 +29,15 @@ test("answers: revoked/unauthorized => unresponsive(revoked); a user 'no' counts
 test("escalation, probe failure, reconnecting and no-session", () => {
   signerHealth.reset();
   assert.ok(ESCALATE_WAIT_MS >= 10_000);
-  signerHealth.escalate();
+  signerHealth.escalate(); // signer answered moments ago: a long wait alone isn't "unresponsive"
+  assert.equal(signerHealth.get().state, "ok");
+  const realNow = Date.now;
+  Date.now = () => realNow() + BANNER_SILENCE_MS + 1;
+  try {
+    signerHealth.escalate();
+  } finally {
+    Date.now = realNow;
+  }
   assert.deepEqual([signerHealth.get().state, signerHealth.get().reason], ["unresponsive", "long-wait"]);
   signerHealth.reset();
   signerHealth.reconnecting(true);
@@ -49,4 +57,22 @@ test("escalation, probe failure, reconnecting and no-session", () => {
   signerHealth.success(); // no change, no event
   off();
   assert.equal(n, 1);
+});
+
+test("background timeouts never escalate; hidden page pauses counting and resume starts clean", () => {
+  signerHealth.reset();
+  for (let i = 0; i < 10; i++) signerHealth.timeout({ background: true });
+  assert.equal(signerHealth.get().state, "slow");
+  signerHealth.reset();
+  signerHealth.setVisible(false);
+  for (let i = 0; i < 10; i++) signerHealth.timeout();
+  assert.equal(signerHealth.get().state, "ok");
+  signerHealth.timeout();
+  signerHealth.setVisible(true);
+  assert.equal(signerHealth.get().state, "ok");
+  signerHealth.error("unauthorized: session revoked");
+  signerHealth.setVisible(false);
+  signerHealth.setVisible(true);
+  assert.equal(signerHealth.get().reason, "revoked");
+  signerHealth.reset();
 });

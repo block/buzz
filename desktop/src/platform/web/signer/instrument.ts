@@ -50,7 +50,7 @@ const SLOW_P50_MS = 3_000;
 const SIGNED_KEEP_MS = 10 * 60_000;
 const CACHE_PREFIX = "buzz-sig-c:"; // sessionStorage
 const LS_PREFIX = "buzz-sig-l:"; // localStorage (survives app relaunch)
-const CACHE_MAX = 300;
+const CACHE_MAX = 1000; // decrypt results (snapshots re-deliver the same ciphertexts): never ask the signer twice
 const LS_MAX_ENTRIES = 400;
 const LS_MAX_CHARS = 1_500_000;
 const RETRYABLE_MESSAGE_KINDS = new Set([9, 45001, 45003]);
@@ -413,7 +413,7 @@ function schedule<T>(
         if (nip07Mode) {
           // NIP-07 never goes through nip46.ts, so feed health here: any answer (even a user "no") = alive; only silence counts.
           if (ok || !/in time/.test(String((e as Error)?.message ?? e))) signerHealth.success();
-          else signerHealth.timeout();
+          else signerHealth.timeout({ background: rec.prio !== 0 });
         }
         if (!ok) rec.error = e instanceof Error ? e.message : String(e);
         console.info(
@@ -756,7 +756,14 @@ export function instrumentSigner<S extends Signer>(inner: S): S {
       }
       const rec = newRec(method, urgent ? 1 : 2);
       // Decrypts (settings, reminders, mutes…) are not needed to draw the first screen: hold them until it is up (12s cap).
-      const p = schedule(rec, !urgent, call, CRYPTO_TIMEOUT_MS, method === "nip44_decrypt" && !urgent).then(
+      const isTimeout = (e: unknown) => /in time|didn't respond|timeout/i.test(String((e as Error)?.message ?? e));
+      // One silent retry on a transient timeout (iOS: signer app backgrounded, relay socket frozen) before anyone sees an error.
+      const p = schedule(rec, !urgent, call, CRYPTO_TIMEOUT_MS, method === "nip44_decrypt" && !urgent)
+        .catch((e) => {
+          if (!isTimeout(e) || signerHealth.blocksBackground()) throw e;
+          return schedule(newRec(method, urgent ? 1 : 2), false, call, CRYPTO_TIMEOUT_MS, false);
+        })
+        .then(
         (out) => {
           cryptoTimeouts = 0;
           cachePut(key, out);

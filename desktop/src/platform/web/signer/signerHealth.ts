@@ -11,7 +11,7 @@ export type SignerHealthReason = "timeout" | "revoked" | "probe-failed" | "long-
 export const UNRESPONSIVE_AFTER = 3;
 /** The mid-session banner for timeout/long-wait only shows after this long with no answer at all (iOS NIP-46 round trips via the
  *  relay are slow, more so while the signer app is backgrounded). Revoked answers and failed probes still show at once. */
-export const BANNER_SILENCE_MS = 12_000;
+export const BANNER_SILENCE_MS = 20_000;
 /** Which signer is active. Remote (NIP-46) signers answer in seconds; a NIP-07 extension may wait on a popup the user must click. */
 export type ActiveSignerKind = "nip07" | "nip46" | null;
 /** NIP-07: only call the extension unresponsive after this long with nothing answered (popup approvals are slow). */
@@ -40,6 +40,9 @@ let snap: Snapshot = { state: "ok", reason: "none", consecutiveTimeouts: 0 };
 let activeKind: ActiveSignerKind = null;
 let lastAlive = Date.now();
 let before: SignerHealthState = "ok"; // state to return to when reconnecting ends without news
+// Page hidden (iOS: switched to the signer app, Safari suspended the tab): timeouts then say nothing about the signer, so
+// health counting pauses, and on resume it starts clean (a revoked/no-session verdict is kept).
+let paused = false;
 const listeners = new Set<() => void>();
 const emit = () => {
   for (const l of listeners) l();
@@ -70,7 +73,13 @@ export const signerHealth = {
     lastAlive = Date.now();
     set({ state: "ok", reason: "none", consecutiveTimeouts: 0 });
   },
-  timeout() {
+  /** A request timed out. `background` (decrypts, relay auth, presence…) never escalates on its own: only "slow". */
+  timeout(opts?: { background?: boolean }) {
+    if (paused) return;
+    if (opts?.background) {
+      if (snap.state === "ok") set({ state: "slow", reason: "timeout" });
+      return;
+    }
     const n = snap.consecutiveTimeouts + 1;
     set(n >= UNRESPONSIVE_AFTER ? { state: "unresponsive", reason: "timeout", consecutiveTimeouts: n } : { state: "slow", reason: "timeout", consecutiveTimeouts: n });
   },
@@ -80,9 +89,11 @@ export const signerHealth = {
     else this.success();
   },
   escalate(reason: SignerHealthReason = "long-wait") {
+    if (paused || Date.now() - lastAlive < BANNER_SILENCE_MS) return;
     if (snap.state === "ok" || snap.state === "slow") set({ state: "unresponsive", reason });
   },
   probeFailed(reason: SignerHealthReason = "probe-failed") {
+    if (paused && reason !== "revoked") return;
     set({ state: "unresponsive", reason });
   },
   noSession() {
@@ -98,9 +109,27 @@ export const signerHealth = {
   blocksBackground(): boolean {
     return snap.state === "unresponsive" || snap.state === "no-session";
   },
+  /** Page visibility: pause while hidden; on becoming visible, forget timeouts counted around the suspension. */
+  setVisible(visible: boolean) {
+    if (!visible) {
+      paused = true;
+      return;
+    }
+    if (!paused) return;
+    paused = false;
+    lastAlive = Date.now();
+    if (snap.reason !== "revoked" && snap.state !== "no-session") set({ state: "ok", reason: "none", consecutiveTimeouts: 0 });
+  },
+  isPaused: () => paused,
   reset() {
     before = "ok";
     snap = { state: "ok", reason: "none", consecutiveTimeouts: 0 };
     emit();
   },
 };
+
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  const sync = () => signerHealth.setVisible(document.visibilityState !== "hidden");
+  document.addEventListener("visibilitychange", sync);
+  sync();
+}

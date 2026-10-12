@@ -395,7 +395,8 @@ export class Nip46Client {
   }
   private fail(p: Pending, code: "timeout") {
     this.pending.delete(p.id);
-    signerHealth.timeout();
+    // encrypt/decrypt are background work (settings, key wraps, snapshots); only signatures/handshakes count toward "unresponsive"
+    signerHealth.timeout({ background: /crypt/.test(p.method) });
     this.updateStatus();
     p.reject(
       new Nip46Error(
