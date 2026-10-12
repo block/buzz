@@ -6,12 +6,13 @@ test("routes map to tabs (deep links)", () => {
   assert.equal(phoneTabForPath("/", null), "inbox");
   assert.equal(phoneTabForPath("/channels/abc", null), "channels");
   assert.equal(phoneTabForPath("/channels/abc/posts/def", null), "channels");
-  assert.equal(phoneTabForPath("/agents", null), "agents");
+  assert.equal(phoneTabForPath("/agents", null), "me");
   assert.equal(phoneTabForPath("/buzz-term", null), "term");
   assert.equal(phoneTabForPath("/bots/x", null), "me");
   assert.equal(phoneTabForPath("/settings", null), "me");
   assert.equal(phoneTabForPath("/agents", "channels"), "channels");
   assert.equal(phoneTabForPath("/", "me"), "me");
+  assert.equal(phoneTabForPath("/channels/abc", "search"), "search");
 });
 
 test("conversation views hide the tab bar; top-level screens show it", () => {

@@ -45,6 +45,8 @@ type TopbarSearchProps = {
   suggestionChannels?: Channel[];
   scopeFocusRequest?: number;
   variant?: "bar" | "icon";
+  /** Phone Search tab: non-modal, full-screen, opens (input focused) on mount. */
+  phoneScreen?: boolean;
 };
 const MAX_SEARCH_SUGGESTIONS = 4;
 const SEARCH_RESULT_LIMIT = 40;
@@ -389,6 +391,7 @@ export function TopbarSearch({
   scopeFocusRequest = 0,
   suggestionChannels,
   variant = "bar",
+  phoneScreen = false,
 }: TopbarSearchProps) {
   const [isOpen, setIsOpen] = React.useState(false);
   const [scopeChannelId, setScopeChannelId] = React.useState<string | null>(
@@ -596,6 +599,12 @@ export function TopbarSearch({
 
     openSearchDialog(null);
   }, [focusRequest, openSearchDialog]);
+
+  React.useEffect(() => {
+    if (phoneScreen) openSearchDialog(null);
+    // Mount-only: the phone Search screen opens straight into the input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phoneScreen]);
 
   const lastScopeFocusRequestRef = React.useRef(scopeFocusRequest);
   React.useEffect(() => {
@@ -925,7 +934,7 @@ export function TopbarSearch({
   );
   return (
     <div className={cn("relative", className)}>
-      <Dialog open={isOpen} onOpenChange={handleSearchOpenChange}>
+      <Dialog modal={!phoneScreen} open={isOpen} onOpenChange={handleSearchOpenChange}>
         <button
           aria-label="Search everything"
           className={
@@ -966,7 +975,11 @@ export function TopbarSearch({
         </button>
         <DialogContent
           aria-busy={isSearchLoading && visibleSearchableResults.length === 0}
-          className="mt-[18vh] max-w-2xl self-start gap-0 overflow-hidden rounded-2xl p-0 shadow-2xl"
+          className={cn(
+            "mt-[18vh] max-w-2xl self-start gap-0 overflow-hidden rounded-2xl p-0 shadow-2xl",
+            phoneScreen && "phone-search-dialog",
+          )}
+          onInteractOutside={phoneScreen ? (event) => event.preventDefault() : undefined}
           data-testid="search-results"
           onOpenAutoFocus={(event) => {
             event.preventDefault();

@@ -1,11 +1,57 @@
 /* Phone layout ([data-phone], < 600px) — bottom tab bar shell. iPad/desktop never match these selectors.
    [data-phone-tabbar] is set on <html> while the tab bar is showing. Unlayered so it beats Tailwind utilities. */
 [data-phone] {
-  --phone-tabbar-h: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+  /* Safe areas go through variables so tests can simulate a notch (headless WebKit reports 0). */
+  --phone-safe-top: env(safe-area-inset-top, 0px);
+  --phone-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --phone-tabbar-bar-h: 3.5rem;
+  --phone-tabbar-gap: 8px;
+  /* Space the floating tab bar occupies, from the bottom of the screen to its top edge plus a small gap. */
+  --phone-tabbar-h: calc(var(--phone-tabbar-bar-h) + var(--phone-safe-bottom) + var(--phone-tabbar-gap) * 2);
 }
+/* The shell follows the visual viewport (--phone-vh, set from JS; 100dvh fallback) so it shrinks with the keyboard,
+   and starts below the status bar / Dynamic Island. */
+[data-phone],
+[data-phone] body {
+  height: var(--phone-vh, 100dvh);
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+[data-phone] body > #root,
+[data-phone] body > #root > * {
+  height: var(--phone-vh, 100dvh) !important;
+  min-height: 0 !important;
+  max-height: var(--phone-vh, 100dvh);
+}
+[data-phone] body > #root {
+  padding-top: var(--phone-safe-top);
+  box-sizing: border-box;
+}
+[data-phone] body > #root > * {
+  height: 100% !important;
+  max-height: 100%;
+}
+/* Floating capsule tab bar (Primal-style): inset from the edges, above the home indicator, translucent + blurred. */
 [data-phone] .phone-tabbar {
-  height: var(--phone-tabbar-h);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  position: fixed;
+  left: 14px;
+  right: 14px;
+  bottom: calc(var(--phone-safe-bottom) + var(--phone-tabbar-gap));
+  height: var(--phone-tabbar-bar-h);
+  padding: 4px;
+  gap: 2px;
+  border-radius: 9999px;
+  background: rgba(24, 24, 27, 0.72);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28), 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+[data-phone] .phone-tabbar .phone-tab {
+  transition: background-color 150ms ease, color 150ms ease;
+}
+[data-phone] .phone-tabbar .phone-tab[aria-current="page"] {
+  background: rgba(255, 255, 255, 0.16);
 }
 /* Content stops above the tab bar. */
 [data-phone][data-phone-tabbar] [data-buzz-content-surface] {
@@ -15,7 +61,7 @@
 [data-phone] .phone-fullscreen {
   position: fixed;
   inset: 0 0 var(--phone-tabbar-h) 0;
-  padding-top: env(safe-area-inset-top, 0px);
+  padding-top: var(--phone-safe-top);
   z-index: 110;
   background: hsl(var(--sidebar-background, var(--background)));
   display: flex;
@@ -43,4 +89,185 @@
 /* The Channels tab is the list only: Inbox/Agents/Buzz term live in the tab bar, Projects/Bots/Browsers under Me. */
 [data-phone] .phone-fullscreen .sidebar-primary-menu {
   display: none;
+}
+
+/* ---- iOS polish ---- */
+/* Content runs edge to edge (no inset card) on phone. */
+[data-phone] [data-buzz-content-surface] {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  margin-top: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+[data-phone] [data-buzz-content-surface]:not([data-phone-tabbar] *) {
+  margin-bottom: 0 !important;
+}
+[data-phone] main[data-buzz-main], [data-phone] [data-testid="settings-view"],
+[data-phone] main:has(> [data-buzz-content-surface]) {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+/* The top chrome is just the back button on phone, at the left edge; the channel header stays pinned below it. */
+[data-phone] [data-testid="app-top-chrome"] {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+  overflow: hidden;
+}
+[data-phone] [data-testid="app-top-chrome"] [data-testid="phone-back"] {
+  position: absolute;
+  left: 6px;
+}
+/* The channel header is already pinned over the timeline; keep it inside the screen width. */
+[data-phone] [data-testid="chat-header"] {
+  max-width: 100%;
+  overflow: hidden;
+}
+/* Right-panel / thread-panel edge toggles make no sense on phone. */
+[data-phone] [data-testid="right-panel-toggle"],
+[data-phone] [data-testid="thread-panel-edge-toggle"],
+[data-phone] [data-testid="side-panel-collapse"],
+[data-phone] [data-testid="thread-view-mode-toggle"] {
+  display: none !important;
+}
+/* Header overflow menu: the desktop action row laid out as a wrapping grid. */
+.phone-header-overflow-actions > div {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+/* Composer: pinned to the bottom, clear of the home indicator while the keyboard is closed. */
+[data-phone] [data-testid="message-composer"] {
+  padding-bottom: max(4px, var(--phone-safe-bottom));
+}
+[data-phone][data-phone-keyboard] [data-testid="message-composer"] {
+  padding-bottom: 4px;
+}
+/* Message actions: no hover bar on phone; a tap or long-press opens one row's actions. */
+[data-phone] [data-message-action-rail] {
+  display: none;
+}
+[data-phone] [data-phone-actions-open] [data-message-action-rail] {
+  display: block;
+  top: -6px !important;
+}
+[data-phone] [data-phone-actions-open] {
+  background: hsl(var(--muted) / 0.6);
+}
+[data-phone] [data-testid="message-row"] {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+[data-phone] [data-testid="message-row"] [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* Link previews, quotes, media and code never widen the row. */
+[data-phone] [data-testid="message-row"],
+[data-phone] [data-testid="message-row"] * {
+  min-width: 0;
+}
+[data-phone] [data-testid="message-row"] :is(img, video, iframe, pre, table, blockquote, figure, [data-testid*="link-preview"], [data-testid*="quote"], [class*="link-preview"]) {
+  max-width: 100% !important;
+}
+[data-phone] [data-testid="message-row"] pre {
+  overflow-x: auto;
+}
+/* Settings on phone: full-screen list, then a full-screen section with a back button. */
+[data-phone] .phone-settings {
+  position: fixed;
+  inset: 0 0 var(--phone-tabbar-h) 0;
+  padding-top: var(--phone-safe-top);
+  z-index: 110;
+  display: flex;
+  flex-direction: column;
+  background: hsl(var(--background));
+}
+[data-phone] .phone-settings-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 48px;
+  padding: 0 8px 0 4px;
+  border-bottom: 1px solid hsl(var(--border));
+  flex-shrink: 0;
+}
+[data-phone] .phone-settings-back {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 9999px;
+}
+[data-phone] .phone-settings-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+/* Section pages edge to edge: grouped lists drop the inset card chrome. */
+[data-phone] .phone-settings [data-testid^="settings-panel-"] :is(div, ul, section).rounded-xl.border,
+[data-phone] .phone-settings [data-testid^="settings-panel-"] :is(div, ul, section).rounded-2xl.border {
+  border-left: 0 !important;
+  border-right: 0 !important;
+  border-radius: 0 !important;
+  margin-left: -1rem !important;
+  margin-right: -1rem !important;
+  width: auto !important;
+  max-width: none !important;
+  box-shadow: none !important;
+}
+/* Profile: smaller avatar block, no tall empty band above the fields. */
+[data-phone] .phone-settings [data-testid="settings-panel-profile"] .gap-12 {
+  gap: 0.75rem !important;
+}
+[data-phone] .phone-settings [data-testid="settings-panel-profile"] .h-48 {
+  height: 7.5rem !important;
+}
+[data-phone] .phone-settings [data-testid="settings-panel-profile"] .w-48 {
+  width: 7.5rem !important;
+}
+[data-phone] .phone-settings [data-testid="settings-panel-profile"] .-mb-14 {
+  margin-bottom: -2rem !important;
+}
+[data-phone]:not([data-phone-tabbar]) .phone-settings {
+  bottom: 0;
+  padding-bottom: var(--phone-safe-bottom);
+}
+/* Search lives only in the Search tab on phone. */
+[data-phone] [data-testid="sidebar-pinned-header"],
+[data-phone] .phone-fullscreen [data-testid="open-search"]:not(.phone-search-screen *) {
+  display: none !important;
+}
+[data-phone] .phone-search-screen {
+  background: hsl(var(--background));
+}
+[data-phone] .phone-search-dialog {
+  position: fixed !important;
+  top: calc(var(--phone-safe-top) + 48px) !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: var(--phone-tabbar-h) !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  transform: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  border-left: 0 !important;
+  border-right: 0 !important;
+  display: flex !important;
+  flex-direction: column;
+  pointer-events: auto;
+  z-index: 115;
+}
+[data-phone] .phone-search-dialog [data-testid="search-results-list"] {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none !important;
+  overflow-y: auto;
+}
+[data-phone] div:has(> .phone-search-dialog) {
+  z-index: 115 !important;
 }

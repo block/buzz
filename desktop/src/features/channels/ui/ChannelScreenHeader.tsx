@@ -1,4 +1,6 @@
-import { LogIn, SquareTerminal } from "lucide-react";
+import { EllipsisVertical, LogIn, SquareTerminal } from "lucide-react";
+import { usePhoneLayout } from "@/shared/lib/phoneLayout";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import type * as React from "react";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
@@ -149,6 +151,23 @@ export function ChannelScreenHeader({
         {channelActions}
       </div>
     ) : null;
+  const isPhone = usePhoneLayout();
+  // Phone: the header row is too narrow for every action, so they collapse into one ⋮ overflow.
+  const headerActions =
+    isPhone && actions ? (
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button aria-label="Channel actions" data-testid="phone-header-overflow" size="icon" type="button" variant="ghost">
+            <EllipsisVertical />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-auto max-w-[calc(100vw-16px)] p-2" data-testid="phone-header-overflow-menu">
+          <div className="phone-header-overflow-actions">{actions}</div>
+        </PopoverContent>
+      </Popover>
+    ) : (
+      actions
+    );
 
   if (!showHeaderContent) {
     return null;
@@ -158,7 +177,7 @@ export function ChannelScreenHeader({
     <ChatHeader
       belowSystemChrome
       chromeWrapperRef={chromeWrapperRef}
-      actions={actions}
+      actions={headerActions}
       channelType={activeChannel?.channelType}
       description={getChannelDescription(activeChannel)}
       detail={headerDetail}

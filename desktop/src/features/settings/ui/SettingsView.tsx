@@ -1,7 +1,8 @@
 import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
+import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, LoaderCircle, RefreshCw } from "lucide-react";
+import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 
 import { isAdminOnlySettingsSection } from "@/features/community-bots/lib/settingsVisibility";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
@@ -219,6 +220,9 @@ export function SettingsView({
     });
   }, [myMembershipQuery.data, featureState]);
 
+  const isPhone = usePhoneLayout();
+  // Phone: Settings opens on the section list; a section opens full screen with a back button to the list.
+  const [phoneShowList, setPhoneShowList] = React.useState(true);
   const [isLoaded, setIsLoaded] = React.useState(false);
   const [appVersion, setAppVersion] = React.useState<string | null>(null);
 
@@ -273,6 +277,87 @@ export function SettingsView({
         .filter((group) => group.sections.length > 0),
     [visibleSectionByValue],
   );
+
+  if (isPhone) {
+    const activeEntry = visibleSectionByValue.get(section);
+    return (
+      <div className="phone-settings" data-testid="phone-settings">
+        <div className="phone-settings-header">
+          <button
+            aria-label={phoneShowList ? "Back to app" : "Back to settings"}
+            className="phone-settings-back"
+            data-testid={phoneShowList ? "settings-back-to-app" : "phone-settings-back"}
+            onClick={() => (phoneShowList ? onClose() : setPhoneShowList(true))}
+            type="button"
+          >
+            <ChevronLeft className="h-6 w-6" />
+          </button>
+          <h1 className="truncate text-base font-semibold">
+            {phoneShowList ? "Settings" : (activeEntry?.label ?? "Settings")}
+          </h1>
+        </div>
+        {phoneShowList ? (
+          <nav aria-label="Settings sections" className="phone-settings-scroll" data-testid="phone-settings-list">
+            {visibleNavGroups.map((group) => (
+              <div className="phone-settings-group" key={group.label}>
+                <p className="px-4 pb-1 pt-4 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {group.label}
+                </p>
+                <ul className="divide-y divide-border border-y border-border bg-background">
+                  {group.sections.map((entry) => {
+                    const Icon = entry.icon;
+                    return (
+                      <li key={entry.value}>
+                        <button
+                          className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm active:bg-muted"
+                          data-testid={`settings-nav-${entry.value}`}
+                          onClick={() => {
+                            onSectionChange(entry.value);
+                            setPhoneShowList(false);
+                          }}
+                          type="button"
+                        >
+                          <Icon className="h-5 w-5 text-muted-foreground" />
+                          <span className="flex-1">{entry.label}</span>
+                          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ))}
+            {appVersion ? (
+              <p className="px-4 py-4 text-xs text-muted-foreground" data-testid="settings-version">
+                v{appVersion}
+              </p>
+            ) : null}
+          </nav>
+        ) : (
+          <section className="phone-settings-scroll px-4 pb-8 pt-3" data-testid="settings-content-scroll">
+            <div className="flex w-full flex-col gap-4" data-testid={`settings-panel-${section}`}>
+              <SettingsSectionErrorBoundary section={section}>
+                {renderSettingsSection(section, {
+                  currentPubkey,
+                  fallbackDisplayName,
+                  isUpdatingDesktopNotifications,
+                  notificationErrorMessage,
+                  notificationPermission,
+                  notificationSettings,
+                  onSetDesktopNotificationsEnabled,
+                  onSetHomeBadgeEnabled,
+                  onSetSlotAlertsEnabled,
+                  onSetNotifyWhileViewing,
+                  onSetAllSlotAlertsEnabled,
+                  onSetSoundForSlot,
+                })}
+              </SettingsSectionErrorBoundary>
+            </div>
+          </section>
+        )}
+      </div>
+    );
+  }
 
   return (
     <>

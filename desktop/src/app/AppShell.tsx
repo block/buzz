@@ -123,6 +123,7 @@ import { SidebarProvider } from "@/shared/ui/sidebar";
 import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 import { PhoneMeScreen } from "@/app/phone/PhoneMeScreen";
 import { PhoneTabBar } from "@/app/phone/PhoneTabBar";
+import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import {
   type PhoneTab,
   phoneHidesTabBar,
@@ -223,8 +224,9 @@ export function AppShell() {
   const isPhoneThread = location.pathname.includes("/posts/");
   const handlePhoneBack = React.useCallback(() => {
     if (isPhoneThread) goBack();
+    else if (phoneTab === "me") setPhoneOverlay("me"); // Agents, Bots, Projects… return to the Me list
     else setPhoneOverlay("channels");
-  }, [goBack, isPhoneThread]);
+  }, [goBack, isPhoneThread, phoneTab]);
   React.useEffect(() => {
     setPhoneOverlay(null); // any navigation leaves the Channels/Me list screens
   }, [location.pathname]);
@@ -905,7 +907,10 @@ export function AppShell() {
                     {!settingsOpen && !hideAppChrome ? (
                       <AppTopChrome
                         onPhoneBack={
-                          isPhone && !showPhoneTabBar && !settingsOpen
+                          isPhone &&
+                          !settingsOpen &&
+                          (!showPhoneTabBar ||
+                            (phoneTab === "me" && phoneOverlay === null))
                             ? handlePhoneBack
                             : undefined
                         }
@@ -1088,6 +1093,7 @@ export function AppShell() {
                                 identityQuery.data?.displayName ||
                                 "Me"
                               }
+                              onAgents={() => void goAgents()}
                               onBots={() => void goBots()}
                               onBrowsers={() => void goBrowsers()}
                               onProjects={() => void goProjects()}
@@ -1095,6 +1101,29 @@ export function AppShell() {
                               onWorkflows={() => void goWorkflows()}
                               pubkey={identityQuery.data?.pubkey}
                             />
+                          </div>
+                        ) : null}
+                        {isPhone && phoneOverlay === "search" && !hideAppChrome ? (
+                          <div className="phone-fullscreen phone-search-screen" data-testid="phone-search-screen">
+                            <div className="phone-settings-header">
+                              <h1 className="px-3 text-base font-semibold">Search</h1>
+                            </div>
+                            <div className="px-3 pt-2">
+                              <TopbarSearch
+                                channels={channels}
+                                currentPubkey={identityQuery.data?.pubkey}
+                                onOpenChannel={(channelId) => {
+                                  setPhoneOverlay(null);
+                                  void goChannel(channelId);
+                                }}
+                                onOpenResult={(hit, query) => {
+                                  setPhoneOverlay(null);
+                                  handleOpenSearchResult(hit, query);
+                                }}
+                                phoneScreen
+                                suggestionChannels={channels}
+                              />
+                            </div>
                           </div>
                         ) : null}
                         {showPhoneTabBar && !hideAppChrome ? (
@@ -1105,13 +1134,12 @@ export function AppShell() {
                               channels: unreadChannelNotificationCount,
                             }}
                             onSelect={(tab: PhoneTab) => {
-                              if (tab === "channels" || tab === "me") {
+                              if (tab === "channels" || tab === "me" || tab === "search") {
                                 setPhoneOverlay(tab);
                                 return;
                               }
                               setPhoneOverlay(null);
                               if (tab === "inbox") void goHome();
-                              else if (tab === "agents") void goAgents();
                               else void navigate({ to: "/buzz-term" });
                             }}
                           />

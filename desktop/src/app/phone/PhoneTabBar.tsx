@@ -1,5 +1,5 @@
 // Phone-only bottom tab bar (rendered only when usePhoneLayout() is true). iPad/desktop never mount it.
-import { Bot, CircleUser, Inbox, MessagesSquare, SquareTerminal } from "lucide-react";
+import { CircleUser, Inbox, MessagesSquare, Search, SquareTerminal } from "lucide-react";
 import type * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -8,7 +8,7 @@ import type { PhoneTab } from "./phoneTabs";
 const TABS: { id: PhoneTab; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
   { id: "inbox", label: "Inbox", Icon: Inbox },
   { id: "channels", label: "Channels", Icon: MessagesSquare },
-  { id: "agents", label: "Agents", Icon: Bot },
+  { id: "search", label: "Search", Icon: Search },
   { id: "term", label: "Buzz Term", Icon: SquareTerminal },
   { id: "me", label: "Me", Icon: CircleUser },
 ];
@@ -37,7 +37,7 @@ export function PhoneTabBar({
   return (
     <nav
       aria-label="Primary"
-      className="phone-tabbar fixed inset-x-0 bottom-0 z-[120] flex border-t border-sidebar-border bg-sidebar/95 text-sidebar-foreground backdrop-blur"
+      className="phone-tabbar z-[120] flex text-white"
       data-testid="phone-tabbar"
     >
       {TABS.map(({ id, label, Icon }) => {
@@ -46,8 +46,8 @@ export function PhoneTabBar({
           <button
             aria-current={isActive ? "page" : undefined}
             className={cn(
-              "flex min-w-0 flex-1 flex-col items-center gap-0.5 pb-1 pt-1.5 text-[10px] font-medium",
-              isActive ? "text-primary" : "text-muted-foreground",
+              "phone-tab flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-full text-[10px] font-medium",
+              isActive ? "text-white" : "text-white/60",
             )}
             data-testid={`phone-tab-${id}`}
             key={id}
@@ -55,7 +55,7 @@ export function PhoneTabBar({
             type="button"
           >
             <span className="relative">
-              <Icon className="h-6 w-6" />
+              <Icon className="h-[22px] w-[22px]" />
               <Badge count={badges[id] ?? 0} />
             </span>
             <span className="truncate">{label}</span>

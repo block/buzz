@@ -1,6 +1,6 @@
 // Phone "Me" tab: user card plus entry points for pages without their own tab. Settings opens the existing (web
 // read-only for desktop-owned items) Settings screen.
-import { Blocks, Bot, ChevronRight, FolderKanban, Globe, Settings, Workflow } from "lucide-react";
+import { Blocks, Bot, BotMessageSquare, ChevronRight, FolderKanban, Globe, Settings, Workflow } from "lucide-react";
 import type * as React from "react";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -12,6 +12,7 @@ export function PhoneMeScreen({
   avatarUrl,
   pubkey,
   onSettings,
+  onAgents,
   onBots,
   onBrowsers,
   onProjects,
@@ -21,6 +22,7 @@ export function PhoneMeScreen({
   avatarUrl?: string | null;
   pubkey?: string;
   onSettings: () => void;
+  onAgents: () => void;
   onBots: () => void;
   onBrowsers: () => void;
   onProjects: () => void;
@@ -28,6 +30,7 @@ export function PhoneMeScreen({
 }) {
   const rows: Row[] = [
     { id: "settings", label: "Settings", Icon: Settings, onSelect: onSettings },
+    { id: "agents", label: "Agents", Icon: BotMessageSquare, onSelect: onAgents },
     { id: "projects", label: "Projects", Icon: FolderKanban, onSelect: onProjects },
     { id: "bots", label: "Bots", Icon: Bot, onSelect: onBots },
     { id: "browsers", label: "Browsers", Icon: Globe, onSelect: onBrowsers },

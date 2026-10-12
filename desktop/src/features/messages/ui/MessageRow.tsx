@@ -411,6 +411,7 @@ export const MessageRow = React.memo(
 
     const actionBarNode = (
       <div
+        data-message-action-rail=""
         className={cn(
           "absolute right-2 top-1 z-10 sm:pointer-events-none",
           actionBarPlacement === "floating"
