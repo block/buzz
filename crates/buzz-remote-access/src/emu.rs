@@ -41,7 +41,10 @@ pub struct EmuSession {
     id: String,
     terminal: Arc<SharedTerminal>,
     publisher: Mutex<FramePublisher>,
-    out: mpsc::Sender<Message>,
+    /// The attached connection's outbox; None while the session is detached (kept alive for a later term.attach).
+    out: Mutex<Option<mpsc::Sender<Message>>>,
+    /// Last title the program set (for term.list after a reconnect).
+    title: Mutex<Option<String>>,
     /// Whether a websocket subscriber is currently attached (frames are only sent while true).
     attached: AtomicBool,
     input: mpsc::Sender<TermInput>,
@@ -76,7 +79,8 @@ impl EmuSession {
             id: id.to_string(),
             terminal: terminal.clone(),
             publisher,
-            out,
+            out: Mutex::new(Some(out)),
+            title: Mutex::new(None),
             attached: AtomicBool::new(false),
             input: handle.input.clone(),
             dims: Mutex::new((cols, rows)),
@@ -95,6 +99,13 @@ impl EmuSession {
                 };
                 if let Some(m) = msg {
                     if let Some(s) = a_session.upgrade() {
+                        if let Ok(mut t) = s.title.lock() {
+                            match &m {
+                                TerminalMessage::Title(x) => *t = Some(x.chars().take(200).collect()),
+                                TerminalMessage::ResetTitle => *t = None,
+                                _ => {}
+                            }
+                        }
                         if s.attached.load(Ordering::Acquire) {
                             let _ = s.send_msg(&m);
                         }
@@ -173,7 +184,26 @@ impl EmuSession {
 
     fn send_msg(&self, m: &TerminalMessage) -> bool {
         let text = json!({"t":"term.msg","id":self.id,"msg":serde_json::to_value(m).unwrap_or(Value::Null)}).to_string();
-        send_blocking_or_try(&self.out, Message::text(text))
+        let Some(out) = self.out.lock().ok().and_then(|o| o.clone()) else { return false };
+        send_blocking_or_try(&out, Message::text(text))
+    }
+
+    /// Point the session at a new connection's outbox (None = detach and drop the old outbox, frames stop).
+    pub fn rebind(&self, out: Option<mpsc::Sender<Message>>) {
+        if out.is_none() {
+            self.attached.store(false, Ordering::Release);
+        }
+        if let Ok(mut o) = self.out.lock() {
+            *o = out;
+        }
+    }
+
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().ok().and_then(|t| t.clone())
+    }
+
+    pub fn dims(&self) -> (u16, u16) {
+        self.dims.lock().map(|d| *d).unwrap_or((80, 24))
     }
 
     fn publish(&self, publication: Publication) {
@@ -341,6 +371,9 @@ impl EmuSession {
     /// Stop publishing (the PTY itself is closed by the server via `TermInput::Close`).
     pub fn shutdown(&self) {
         self.attached.store(false, Ordering::Release);
+        if let Ok(mut o) = self.out.lock() {
+            *o = None;
+        }
         if let Ok(mut p) = self.publisher.lock() {
             p.close();
         }

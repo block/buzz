@@ -13,7 +13,7 @@
 //!   client -> {"t":"mgmt","id","op","params"}                   -> {"t":"mgmt.result","id","ok":bool,"result"|"error"}
 //!     (agent management; refused with "agents_disabled" unless the desktop's "Allow remote agent management" is on)
 //!   server -> {"t":"error","code":"session_expired"} then close  when the signed connection's lifetime ends
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +35,11 @@ use crate::challenge::{now_secs, random_hex, ChallengeBook, Purpose};
 
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_TERM_INPUT: usize = 16 * 1024;
+/// Raw output kept per plain (non-emulated) remote terminal for replay on term.attach.
+pub const RING_BYTES: usize = 256 * 1024;
+/// How long a remote terminal outlives its websocket (page refresh, dropped link) before it is closed.
+pub const DETACH_GRACE: Duration = Duration::from_secs(600);
+const REPLAY_CHUNK: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TerminalLaunch {
@@ -110,6 +115,8 @@ pub struct ServerConfig {
     pub session_ttl: Duration,
     /// How long one terminal signature lets further launches skip the signer on that connection; clamped like `session_ttl`.
     pub term_session_ttl: Duration,
+    /// How long a detached terminal is kept for term.attach ([`DETACH_GRACE`]; shorter in tests).
+    pub detach_grace: Duration,
 }
 
 impl ServerConfig {
@@ -127,6 +134,7 @@ impl ServerConfig {
             mgmt: None,
             session_ttl: Duration::from_secs(3600),
             term_session_ttl: Duration::from_secs(3600),
+            detach_grace: DETACH_GRACE,
         }
     }
 }
@@ -141,6 +149,105 @@ struct Shared {
     conns: AtomicUsize,
     terms: AtomicUsize,
     kill: broadcast::Sender<()>,
+    /// Every live remote terminal by launch id, attached or detached. Never held across an await.
+    live: Mutex<HashMap<String, LiveTerm>>,
+}
+
+/// Output target + replay ring, shared with the forwarding task (one lock so attach can't miss or reorder output).
+struct Tap {
+    ring: VecDeque<u8>,
+    out: Option<mpsc::Sender<Message>>,
+}
+impl Tap {
+    fn push(&mut self, b: &[u8]) {
+        self.ring.extend(b);
+        let over = self.ring.len().saturating_sub(RING_BYTES);
+        if over > 0 {
+            self.ring.drain(..over);
+        }
+    }
+}
+
+struct LiveTerm {
+    /// Hex pubkey of the member that opened it; only that member may list or attach.
+    owner: String,
+    input: mpsc::Sender<TermInput>,
+    emu: Option<Arc<EmuSession>>,
+    tap: Arc<Mutex<Tap>>,
+    /// Connection currently driving it; None while detached.
+    conn: Option<String>,
+    detached_at: Option<tokio::time::Instant>,
+    cols: u16,
+    rows: u16,
+    host: Option<String>,
+    session: Option<String>,
+    scrollback: Option<u32>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn send_close(input: &mpsc::Sender<TermInput>) {
+    if input.try_send(TermInput::Close).is_err() {
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            let i = input.clone();
+            h.spawn(async move {
+                let _ = i.send(TermInput::Close).await;
+            });
+        }
+    }
+}
+
+impl Shared {
+    /// Close one terminal (tab closed, reaped, killed). Reports term.closed to its connection, if any.
+    fn close_live(&self, id: &str) -> bool {
+        let Some(e) = lock(&self.live).remove(id) else { return false };
+        if let Some(m) = &e.emu {
+            m.shutdown();
+        }
+        send_close(&e.input);
+        if let Some(out) = lock(&e.tap).out.take() {
+            let _ = out.try_send(Message::text(json!({"t":"term.closed","id":id}).to_string()));
+        }
+        true
+    }
+    fn close_all_live(&self) {
+        let ids: Vec<String> = lock(&self.live).keys().cloned().collect();
+        for id in ids {
+            self.close_live(&id);
+        }
+    }
+    /// The connection went away: keep its terminals running, detached, for `detach_grace`.
+    fn detach_conn(&self, conn_id: &str) {
+        let now = tokio::time::Instant::now();
+        let mut live = lock(&self.live);
+        for e in live.values_mut().filter(|e| e.conn.as_deref() == Some(conn_id)) {
+            e.conn = None;
+            e.detached_at = Some(now);
+            lock(&e.tap).out = None;
+            if let Some(m) = &e.emu {
+                m.rebind(None);
+            }
+        }
+    }
+    fn reap(&self) {
+        let grace = self.cfg.detach_grace;
+        let ids: Vec<String> = lock(&self.live)
+            .iter()
+            .filter(|(_, e)| e.detached_at.is_some_and(|t| t.elapsed() >= grace))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in ids {
+            self.close_live(&id);
+        }
+    }
+    /// Input channel / emulator of a terminal, only for the connection that currently drives it.
+    fn mine(&self, id: &str, conn_id: &str) -> Option<(mpsc::Sender<TermInput>, Option<Arc<EmuSession>>)> {
+        let live = lock(&self.live);
+        let e = live.get(id).filter(|e| e.conn.as_deref() == Some(conn_id))?;
+        Some((e.input.clone(), e.emu.clone()))
+    }
 }
 
 pub struct RemoteServer {
@@ -169,7 +276,27 @@ impl RemoteServer {
             conns: AtomicUsize::new(0),
             terms: AtomicUsize::new(0),
             kill,
+            live: Mutex::new(HashMap::new()),
         });
+        {
+            // reaper: detached terminals are closed once their grace period runs out
+            let sh = Arc::downgrade(&shared);
+            let mut stop_rx = stop.subscribe();
+            let tick = (shared.cfg.detach_grace / 4).clamp(Duration::from_millis(50), Duration::from_secs(15));
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = stop_rx.recv() => break,
+                        _ = tokio::time::sleep(tick) => {}
+                    }
+                    let Some(sh) = sh.upgrade() else { break };
+                    sh.reap();
+                }
+                if let Some(sh) = sh.upgrade() {
+                    sh.close_all_live();
+                }
+            });
+        }
         let sh = shared.clone();
         let mut stop_rx = stop.subscribe();
         tokio::spawn(async move {
@@ -201,6 +328,7 @@ impl RemoteServer {
     pub fn set_terminals_enabled(&self, on: bool) {
         self.shared.terminals_enabled.store(on, Ordering::SeqCst);
         if !on {
+            self.shared.close_all_live();
             let _ = self.shared.kill.send(());
         }
     }
@@ -230,9 +358,15 @@ impl RemoteServer {
     }
     /// "Kill list": closes every remote terminal now.
     pub fn kill_all_terminals(&self) {
+        self.shared.close_all_live();
         let _ = self.shared.kill.send(());
     }
+    /// Remote terminals currently kept alive with no connection (waiting for term.attach).
+    pub fn detached_terminals(&self) -> usize {
+        lock(&self.shared.live).values().filter(|e| e.conn.is_none()).count()
+    }
     pub fn shutdown(&self) {
+        self.shared.close_all_live();
         let _ = self.stop.send(());
     }
 }
@@ -330,8 +464,6 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
     let mut term_signed_until: Option<u64> = None;
 
     // 2. authenticated loop
-    let mut terms: HashMap<String, mpsc::Sender<TermInput>> = HashMap::new();
-    let mut emus: HashMap<String, Arc<EmuSession>> = HashMap::new();
     let mut kill = sh.kill.subscribe();
     let b64 = base64::engine::general_purpose::STANDARD;
     loop {
@@ -343,7 +475,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                 break;
             }
             _ = kill.recv() => {
-                for (id, t) in terms.drain() { if let Some(e) = emus.remove(&id) { e.shutdown(); } let _ = t.send(TermInput::Close).await; let _ = out_tx.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await; }
+                // the server already closed every terminal (close_all_live) and reported term.closed
                 continue;
             }
         };
@@ -430,14 +562,45 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
             }
             "term.open" => {
                 let lid = v["launchId"].as_str().unwrap_or("").to_string();
-                let reply = open_terminal(&sh, &conn_id, &v, &lid, &mut terms, &mut emus, &out_tx, &mut term_signed_until).await;
+                let reply = open_terminal(&sh, &conn_id, &v, &lid, &out_tx, &mut term_signed_until).await;
                 if let Err(code) = reply {
                     let _ = out_tx.send(Message::text(json!({"t":"error","code":code,"id":lid}).to_string())).await;
                 }
             }
+            "term.list" => {
+                if !sh.terminals_enabled.load(Ordering::SeqCst) {
+                    let _ = out_tx.send(err("terminals_disabled")).await;
+                    continue;
+                }
+                let me = sh.cfg.member.to_hex();
+                let list: Vec<Value> = lock(&sh.live)
+                    .iter()
+                    .filter(|(_, e)| e.owner == me)
+                    .map(|(id, e)| {
+                        let (cols, rows) = e.emu.as_ref().map(|m| m.dims()).unwrap_or((e.cols, e.rows));
+                        json!({
+                            "id": id,
+                            "emu": e.emu.is_some(),
+                            "title": e.emu.as_ref().and_then(|m| m.title()),
+                            "attached": e.conn.is_some(),
+                            "mine": e.conn.as_deref() == Some(conn_id.as_str()),
+                            "cols": cols, "rows": rows,
+                            "host": e.host, "session": e.session,
+                            "detachedS": e.detached_at.map(|t| t.elapsed().as_secs()),
+                        })
+                    })
+                    .collect();
+                let _ = out_tx.send(Message::text(json!({"t":"term.list","sessions":list}).to_string())).await;
+            }
+            "term.attach" => {
+                let id = v["id"].as_str().unwrap_or("").to_string();
+                if let Err(code) = attach_terminal(&sh, &conn_id, &v, &id, &out_tx, &mut term_signed_until) {
+                    let _ = out_tx.send(Message::text(json!({"t":"error","code":code,"id":id}).to_string())).await;
+                }
+            }
             "term.in" => {
                 if let (Some(id), Some(d)) = (v["id"].as_str(), v["data"].as_str()) {
-                    if let (Some(t), Ok(bytes)) = (terms.get(id), b64.decode(d)) {
+                    if let (Some((t, _)), Ok(bytes)) = (sh.mine(id, &conn_id), b64.decode(d)) {
                         if bytes.len() <= MAX_TERM_INPUT {
                             let _ = t.send(TermInput::Data(bytes)).await;
                         }
@@ -445,14 +608,14 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                 }
             }
             "term.resize" => {
-                if let Some(t) = v["id"].as_str().and_then(|id| terms.get(id)) {
+                if let Some((t, _)) = v["id"].as_str().and_then(|id| sh.mine(id, &conn_id)) {
                     let (c, r) = (v["cols"].as_u64().unwrap_or(80), v["rows"].as_u64().unwrap_or(24));
                     let _ = t.send(TermInput::Resize(c.clamp(10, 500) as u16, r.clamp(2, 200) as u16)).await;
                 }
             }
             op if op.starts_with("emu.") => {
                 let Some(id) = v["id"].as_str().map(str::to_string) else { continue };
-                let Some(e) = emus.get(&id).cloned() else {
+                let Some(e) = sh.mine(&id, &conn_id).and_then(|(_, e)| e) else {
                     let _ = out_tx.send(emu_reply(&id, &v, Err("terminal session not found".into()))).await;
                     continue;
                 };
@@ -474,12 +637,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                     "emu.attach" => e.attach().map(|(sub, vp)| json!({"subscriptionId":sub.to_string(),"viewport":vp})),
                     "emu.detach" => e.detach(v["sub"].as_str().unwrap_or("")).map(|_| Value::Null),
                     "emu.close" => {
-                        if let Some(e) = emus.remove(&id) {
-                            e.shutdown();
-                        }
-                        if let Some(t) = terms.remove(&id) {
-                            let _ = t.send(TermInput::Close).await;
-                        }
+                        sh.close_live(&id);
                         Ok(Value::Null)
                     }
                     _ => Err("unknown op".into()),
@@ -490,26 +648,52 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
             }
             "term.close" => {
                 if let Some(id) = v["id"].as_str() {
-                    if let Some(e) = emus.remove(id) {
-                        e.shutdown();
-                    }
-                    if let Some(t) = terms.remove(id) {
-                        let _ = t.send(TermInput::Close).await;
+                    if sh.mine(id, &conn_id).is_some() {
+                        sh.close_live(id);
                     }
                 }
             }
             _ => {}
         }
     }
-    for (id, t) in terms.drain() {
-        if let Some(e) = emus.remove(&id) {
-            e.shutdown();
-        }
-        let _ = t.send(TermInput::Close).await;
-    }
+    // page refresh / dropped link: terminals stay alive (detached) for term.attach until the grace period ends
+    sh.detach_conn(&conn_id);
     sh.book.lock().unwrap_or_else(|p| p.into_inner()).drop_connection(&conn_id);
     let _ = out_tx.send(Message::Close(None)).await;
     let _ = writer.await;
+}
+
+/// Terminal launches and attaches need a signature for `terminal:<id>`, or this connection's signed terminal window.
+fn term_auth(sh: &Shared, conn_id: &str, v: &Value, id: &str, term_signed_until: &mut Option<u64>) -> Result<u64, &'static str> {
+    let want = Purpose::parse(&format!("terminal:{id}")).ok_or("bad_launch_id")?;
+    let event = v["event"].as_str().unwrap_or("");
+    let now = now_secs();
+    if event.is_empty() {
+        if !term_window_open(*term_signed_until, now) {
+            return Err("term_signature_required");
+        }
+    } else {
+        let got = lock(&sh.book).verify(event, conn_id, now).map_err(|e| e.code())?;
+        if got != want {
+            return Err("wrong_purpose");
+        }
+        *term_signed_until = Some(now + sh.term_ttl_s.load(Ordering::SeqCst));
+    }
+    Ok(term_signed_until.unwrap_or(0))
+}
+
+/// Called once the PTY's output has ended: account, forget, report.
+fn on_term_ended(sh: &Shared, id: &str) {
+    sh.terms.fetch_sub(1, Ordering::SeqCst);
+    let gone = lock(&sh.live).remove(id);
+    if let Some(e) = gone {
+        if let Some(m) = &e.emu {
+            m.shutdown();
+        }
+        if let Some(out) = lock(&e.tap).out.take() {
+            let _ = out.try_send(Message::text(json!({"t":"term.closed","id":id}).to_string()));
+        }
+    }
 }
 
 async fn open_terminal(
@@ -517,8 +701,6 @@ async fn open_terminal(
     conn_id: &str,
     v: &Value,
     lid: &str,
-    terms: &mut HashMap<String, mpsc::Sender<TermInput>>,
-    emus: &mut HashMap<String, Arc<EmuSession>>,
     out_tx: &mpsc::Sender<Message>,
     term_signed_until: &mut Option<u64>,
 ) -> Result<(), &'static str> {
@@ -526,32 +708,11 @@ async fn open_terminal(
         return Err("terminals_disabled");
     }
     let backend = sh.cfg.backend.clone().ok_or("no_backend")?;
-    let want = Purpose::parse(&format!("terminal:{lid}")).ok_or("bad_launch_id")?;
-    let event = v["event"].as_str().unwrap_or("");
-    let now = now_secs();
-    if event.is_empty() {
-        // no signature: only allowed inside this connection's signed terminal window
-        if !term_window_open(*term_signed_until, now) {
-            return Err("term_signature_required");
-        }
-    } else {
-        // a signature for THIS launch; a connection signature is not enough. It (re)starts the signed terminal window.
-        let got = sh
-            .book
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .verify(event, conn_id, now)
-            .map_err(|e| e.code())?;
-        if got != want {
-            return Err("wrong_purpose");
-        }
-        *term_signed_until = Some(now + sh.term_ttl_s.load(Ordering::SeqCst));
-    }
-    let signed_until = term_signed_until.unwrap_or(0);
-    if terms.contains_key(lid) {
+    let signed_until = term_auth(sh, conn_id, v, lid, term_signed_until)?;
+    if lock(&sh.live).contains_key(lid) {
         return Err("already_open");
     }
-    // atomically reserve a slot
+    // atomically reserve a slot (detached terminals count: they are still running)
     if sh.terms.fetch_add(1, Ordering::SeqCst) >= sh.cfg.max_terminals {
         sh.terms.fetch_sub(1, Ordering::SeqCst);
         return Err("too_many_terminals");
@@ -565,13 +726,8 @@ async fn open_terminal(
     }
     let launch_cols = v["cols"].as_u64().unwrap_or(80).clamp(10, 500) as u16;
     let launch_rows = v["rows"].as_u64().unwrap_or(24).clamp(2, 200) as u16;
-    let launch = TerminalLaunch {
-        launch_id: lid.to_string(),
-        cols: v["cols"].as_u64().unwrap_or(80).clamp(10, 500) as u16,
-        rows: v["rows"].as_u64().unwrap_or(24).clamp(2, 200) as u16,
-        session,
-        host: v["host"].as_str().filter(|h| matches!(*h, "shell" | "herdr")).map(str::to_string),
-    };
+    let host = v["host"].as_str().filter(|h| matches!(*h, "shell" | "herdr")).map(str::to_string);
+    let launch = TerminalLaunch { launch_id: lid.to_string(), cols: launch_cols, rows: launch_rows, session: session.clone(), host: host.clone() };
     let handle = match backend.open(launch) {
         Ok(h) => h,
         Err(_) => {
@@ -579,45 +735,112 @@ async fn open_terminal(
             return Err("launch_failed");
         }
     };
-    terms.insert(lid.to_string(), handle.input.clone());
+    let scrollback = handle.scrollback;
+    let tap = Arc::new(Mutex::new(Tap { ring: VecDeque::new(), out: Some(out_tx.clone()) }));
+    let entry = |emu: Option<Arc<EmuSession>>, input: mpsc::Sender<TermInput>| LiveTerm {
+        owner: sh.cfg.member.to_hex(),
+        input,
+        emu,
+        tap: tap.clone(),
+        conn: Some(conn_id.to_string()),
+        detached_at: None,
+        cols: launch_cols,
+        rows: launch_rows,
+        host: host.clone(),
+        session: session.clone(),
+        scrollback,
+    };
     if v["emu"].as_bool().unwrap_or(false) {
-        let scrollback = handle.scrollback;
-        let (c, r) = (launch_cols, launch_rows);
-        match EmuSession::start(lid, handle, c, r, out_tx.clone()) {
+        let input = handle.input.clone();
+        match EmuSession::start(lid, handle, launch_cols, launch_rows, out_tx.clone()) {
             Ok((session, sub, viewport, done)) => {
-                emus.insert(lid.to_string(), session);
+                lock(&sh.live).insert(lid.to_string(), entry(Some(session), input));
                 let _ = out_tx
                     .send(Message::text(json!({"t":"term.opened","id":lid,"emu":true,"termSignedUntil":signed_until,"scrollback":scrollback,"subscriptionId":sub.to_string(),"viewport":viewport}).to_string()))
                     .await;
-                let (sh2, out2, id) = (sh.clone(), out_tx.clone(), lid.to_string());
+                let (sh2, id) = (sh.clone(), lid.to_string());
                 tokio::spawn(async move {
                     let _ = done.await;
-                    sh2.terms.fetch_sub(1, Ordering::SeqCst);
-                    let _ = out2.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await;
+                    on_term_ended(&sh2, &id);
                 });
                 return Ok(());
             }
             Err(_) => {
-                terms.remove(lid);
                 sh.terms.fetch_sub(1, Ordering::SeqCst);
                 return Err("launch_failed");
             }
         }
     }
-    let _ = out_tx.send(Message::text(json!({"t":"term.opened","id":lid,"termSignedUntil":signed_until,"scrollback":handle.scrollback}).to_string())).await;
-    let (sh2, out2, id) = (sh.clone(), out_tx.clone(), lid.to_string());
+    lock(&sh.live).insert(lid.to_string(), entry(None, handle.input.clone()));
+    let _ = out_tx.send(Message::text(json!({"t":"term.opened","id":lid,"termSignedUntil":signed_until,"scrollback":scrollback}).to_string())).await;
+    let (sh2, id) = (sh.clone(), lid.to_string());
     let mut output = handle.output;
     tokio::spawn(async move {
         let b64 = base64::engine::general_purpose::STANDARD;
         while let Some(chunk) = output.recv().await {
-            let m = Message::text(json!({"t":"term.out","id":id,"data":b64.encode(chunk)}).to_string());
-            if out2.send(m).await.is_err() {
-                break;
+            // always into the ring; to the connection only while one is attached
+            let out = {
+                let mut t = lock(&tap);
+                t.push(&chunk);
+                t.out.clone()
+            };
+            if let Some(out) = out {
+                let m = Message::text(json!({"t":"term.out","id":id,"data":b64.encode(&chunk)}).to_string());
+                if out.send(m).await.is_err() {
+                    let mut t = lock(&tap);
+                    if t.out.as_ref().is_some_and(|o| o.same_channel(&out)) {
+                        t.out = None;
+                    }
+                }
             }
         }
-        sh2.terms.fetch_sub(1, Ordering::SeqCst);
-        let _ = out2.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await;
+        on_term_ended(&sh2, &id);
     });
+    Ok(())
+}
+
+/// Re-drive a live terminal (after a page refresh or dropped link) from this connection: emulated terminals get a fresh
+/// snapshot (the emulator holds the screen and history), plain ones get their output ring replayed first.
+fn attach_terminal(
+    sh: &Arc<Shared>,
+    conn_id: &str,
+    v: &Value,
+    id: &str,
+    out_tx: &mpsc::Sender<Message>,
+    term_signed_until: &mut Option<u64>,
+) -> Result<(), &'static str> {
+    if !sh.terminals_enabled.load(Ordering::SeqCst) {
+        return Err("terminals_disabled");
+    }
+    let signed_until = term_auth(sh, conn_id, v, id, term_signed_until)?;
+    let me = sh.cfg.member.to_hex();
+    let mut live = lock(&sh.live);
+    let e = live.get_mut(id).ok_or("not_found")?;
+    if e.owner != me {
+        return Err("not_found");
+    }
+    // take it over (an older tab/connection of the same member stops receiving it)
+    e.conn = Some(conn_id.to_string());
+    e.detached_at = None;
+    if let Some(m) = e.emu.clone() {
+        lock(&e.tap).out = Some(out_tx.clone());
+        m.rebind(Some(out_tx.clone()));
+        let scrollback = e.scrollback;
+        drop(live);
+        let (sub, viewport) = m.attach().map_err(|_| "attach_failed")?;
+        let _ = out_tx.try_send(Message::text(
+            json!({"t":"term.attached","id":id,"emu":true,"termSignedUntil":signed_until,"scrollback":scrollback,"subscriptionId":sub.to_string(),"viewport":viewport,"title":m.title()}).to_string(),
+        ));
+        return Ok(());
+    }
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut t = lock(&e.tap);
+    let _ = out_tx.try_send(Message::text(json!({"t":"term.attached","id":id,"termSignedUntil":signed_until,"scrollback":e.scrollback}).to_string()));
+    let ring: Vec<u8> = t.ring.iter().copied().collect();
+    for c in ring.chunks(REPLAY_CHUNK) {
+        let _ = out_tx.try_send(Message::text(json!({"t":"term.out","id":id,"data":b64.encode(c),"replay":true}).to_string()));
+    }
+    t.out = Some(out_tx.clone());
     Ok(())
 }
 

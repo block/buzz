@@ -538,3 +538,70 @@ async fn terminal_signature_window_allows_unsigned_launches_until_it_expires() {
     assert_eq!(auth(&mut ws2, &keys).await["termSessionTtlS"], 24 * 3600);
     srv.shutdown();
 }
+
+#[tokio::test]
+async fn terminals_survive_a_dropped_connection_then_attach_replays_and_grace_reaps() {
+    let keys = Keys::generate();
+    let opened = Arc::new(Mutex::new(vec![]));
+    let mut cfg = ServerConfig::new(keys.public_key(), "dsk1", vec![ORIGIN.into()]);
+    cfg.backend = Some(Arc::new(Echo { opened: opened.clone() }));
+    cfg.detach_grace = Duration::from_millis(600);
+    let srv = RemoteServer::start(cfg, 0).await.unwrap();
+    srv.set_terminals_enabled(true);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    async fn signed(ws: &mut Ws, keys: &Keys, lid: &str, frame: Value) -> Value {
+        send(ws, json!({"t":"term.challenge","launchId":lid})).await;
+        let c = recv(ws).await;
+        let ev = sign(keys, c["nonce"].as_str().unwrap(), c["connId"].as_str().unwrap(), "dsk1", &format!("terminal:{lid}"), None);
+        let mut f = frame;
+        f["event"] = ev.into();
+        send(ws, f).await;
+        recv(ws).await
+    }
+    let mut a = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    auth(&mut a, &keys).await;
+    for lid in ["tab-0001", "tab-0002"] {
+        let r = signed(&mut a, &keys, lid, json!({"t":"term.open","launchId":lid,"cols":80,"rows":24})).await;
+        assert_eq!(r["t"], "term.opened");
+        recv(&mut a).await; // prompt
+    }
+    send(&mut a, json!({"t":"term.in","id":"tab-0001","data":b64.encode(b"hello-1\n")})).await;
+    recv(&mut a).await;
+    drop(a); // page refresh
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(srv.detached_terminals(), 2);
+    assert_eq!(srv.open_terminals(), 2);
+
+    let mut b = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    auth(&mut b, &keys).await;
+    send(&mut b, json!({"t":"term.list"})).await;
+    let l = recv(&mut b).await;
+    assert_eq!(l["t"], "term.list");
+    let mut ids: Vec<&str> = l["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+    ids.sort();
+    assert_eq!(ids, ["tab-0001", "tab-0002"]);
+    // attach needs a terminal signature (or an open window)
+    send(&mut b, json!({"t":"term.attach","id":"tab-0001"})).await;
+    assert_eq!(recv(&mut b).await["code"], "term_signature_required");
+    // input to a terminal this connection doesn't drive is ignored
+    let r = signed(&mut b, &keys, "tab-0001", json!({"t":"term.attach","id":"tab-0001"})).await;
+    assert_eq!(r["t"], "term.attached");
+    let rep = recv(&mut b).await;
+    assert_eq!(rep["replay"], true);
+    assert_eq!(b64.decode(rep["data"].as_str().unwrap()).unwrap(), b"$ hello-1\n");
+    send(&mut b, json!({"t":"term.in","id":"tab-0001","data":b64.encode(b"x\n")})).await;
+    assert_eq!(b64.decode(recv(&mut b).await["data"].as_str().unwrap()).unwrap(), b"x\n");
+    // the second one was not attached: reaped after the grace period
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(srv.detached_terminals(), 0);
+    assert_eq!(srv.open_terminals(), 1);
+    // closing the tab kills it
+    send(&mut b, json!({"t":"term.close","id":"tab-0001"})).await;
+    assert_eq!(recv(&mut b).await["t"], "term.closed");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(srv.open_terminals(), 0);
+    // a different member can't authenticate at all, so can't list/attach (auth is member-only)
+    let mut c = connect(srv.addr, Some(ORIGIN)).await.unwrap();
+    assert_eq!(auth(&mut c, &Keys::generate()).await["code"], "wrong_member");
+    srv.shutdown();
+}
