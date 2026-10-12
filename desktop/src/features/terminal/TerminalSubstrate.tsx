@@ -98,6 +98,9 @@ type TerminalSubstrateProps = {
   touchUi?: boolean;
 };
 
+/** Zero-width placeholder kept in the hidden input on touch so iOS has something to delete (and keeps repeating backspace). */
+const TOUCH_SENTINEL = "\u200b";
+
 function isToggleChord(event: KeyboardEvent): boolean {
   return (
     event.code === "KeyJ" &&
@@ -843,6 +846,31 @@ export function TerminalSubstrate({
     if (touchUi) setTouchSel(null);
   }, [touchUi, activeSessionId]);
 
+  // Touch: iOS auto-repeats a held backspace only as beforeinput deleteContentBackward events (no keydown repeat), and only
+  // while there is something to delete. Keep a sentinel in the hidden input and turn every delete event into a PTY delete.
+  React.useEffect(() => {
+    const area = textareaRef.current;
+    if (!touchUi || !area) return;
+    const seed = () => {
+      if (area.value !== TOUCH_SENTINEL) area.value = TOUCH_SENTINEL;
+      area.setSelectionRange(1, 1);
+    };
+    const onBeforeInput = (event: InputEvent) => {
+      const seq = event.inputType === "deleteContentBackward" ? "\x7f" : event.inputType === "deleteWordBackward" ? "\x17" : null;
+      if (!seq) return;
+      event.preventDefault(); // the sentinel stays, so iOS keeps repeating
+      sendInput(seq);
+      seed();
+    };
+    area.addEventListener("beforeinput", onBeforeInput);
+    area.addEventListener("focus", seed);
+    seed();
+    return () => {
+      area.removeEventListener("beforeinput", onBeforeInput);
+      area.removeEventListener("focus", seed);
+    };
+  }, [touchUi]);
+
   // Touch (iPad/iPhone Safari, PWA): size from the real visible area instead of trusting flex/100vh, which left maximized at
   // ~3/4 height. Maximized pins to the content surface's box down to the visual viewport's bottom; docked keeps its height within
   // the real height. Recomputed on viewport/orientation/surface resize. Desktop (non-touch) is untouched.
@@ -1581,8 +1609,11 @@ export function TerminalSubstrate({
           }}
           onInput={(event) => {
             if (handoffRef.current.composing) return;
-            const committed = event.currentTarget.value;
-            event.currentTarget.value = "";
+            const raw = event.currentTarget.value;
+            // touch: the sentinel isn't user text; if it vanished without a cancelable beforeinput, that was a delete
+            const committed = touchUi ? raw.replaceAll(TOUCH_SENTINEL, "") : raw;
+            if (touchUi && !raw.includes(TOUCH_SENTINEL) && !committed) sendInput("\x7f");
+            event.currentTarget.value = touchUi ? TOUCH_SENTINEL : "";
             if (!committed) return;
             // Capture/textarea keydown already forwarded this printable.
             if (printableKeyHandledRef.current === committed) {
