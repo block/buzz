@@ -100,7 +100,7 @@ Future<void> showMessageActions({
                     pageContext: context,
                     pageRef: ref,
                   ),
-                  const SizedBox(height: Grid.xs),
+                  SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
                   if (!message.isSystem) ...[
                     // Fast actions: respond now, hand off context, defer.
                     _MessageQuickActionsRow(
@@ -112,7 +112,8 @@ Future<void> showMessageActions({
                       isArchived: isArchived,
                       pageContext: context,
                     ),
-                    const SizedBox(height: Grid.xs),
+                    // Section cards supply the other half of the 16pt gap.
+                    const SizedBox(height: Grid.xxs),
                     // Triage: come back to this message later.
                     SheetActionSection(
                       children: [
