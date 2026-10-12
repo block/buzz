@@ -31,6 +31,8 @@ export async function openConversationInNewTab(input: {
   );
   const href = router.history.createHref(loc.href);
   const url = new URL(href, window.location.href);
+  // Keep page-level params (e.g. `?relay=`) in the real query, before the `#` route, never appended after it.
+  for (const [k, v] of new URLSearchParams(window.location.search)) if (k !== WEB_POPOUT_QUERY_PARAM && !url.searchParams.has(k)) url.searchParams.set(k, v);
   url.searchParams.set(WEB_POPOUT_QUERY_PARAM, label);
   const w = window.open(url.toString(), "_blank", "noopener,noreferrer");
   if (!w && w !== null) throw new Error("Pop-up blocked");

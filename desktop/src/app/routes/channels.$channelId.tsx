@@ -33,18 +33,27 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Event-id params tolerate a query glued onto the value (e.g. `?thread=<id>?relay=wss://…` when `?relay=` was appended after the
+ * hash instead of before it): keep only what precedes the first `?`, `&` or `#`, otherwise the relay rejects "Invalid event ID".
+ */
+function eventIdParam(value: unknown): string | undefined {
+  const s = nonEmptyString(value);
+  return s ? nonEmptyString(s.split(/[?&#]/, 1)[0]?.trim()) : undefined;
+}
+
 function validateChannelSearch(
   search: Record<string, unknown>,
 ): ChannelRouteSearch {
   return {
     agentSession: nonEmptyString(search.agentSession),
     autoSend: nonEmptyString(search.autoSend),
-    messageId: nonEmptyString(search.messageId),
+    messageId: eventIdParam(search.messageId),
     profile: nonEmptyString(search.profile),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,
-    thread: nonEmptyString(search.thread),
-    threadRootId: nonEmptyString(search.threadRootId),
+    thread: eventIdParam(search.thread),
+    threadRootId: eventIdParam(search.threadRootId),
   };
 }
 
