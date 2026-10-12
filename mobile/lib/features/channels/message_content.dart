@@ -1,3 +1,4 @@
+import 'message_footer_layout.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -103,6 +104,15 @@ class MessageContent extends HookConsumerWidget {
   /// Marks the first message in a sender run for rounded top corners.
   final bool bubbleStart;
 
+  /// Time displayed inside the bubble, or as a footer for attachment-only content.
+  final String? timestamp;
+
+  /// Identifies the rendered timestamp for accessibility and tests.
+  final Key? timestampKey;
+
+  /// Reserves room above overlapping reactions.
+  final bool hasReactions;
+
   /// Display names for mentioned pubkeys, extracted from event p-tags.
   /// Keys are lowercase pubkeys, values are display names.
   final Map<String, String> mentionNames;
@@ -166,6 +176,9 @@ class MessageContent extends HookConsumerWidget {
     this.ownMessage = false,
     this.bubbleEnd = true,
     this.bubbleStart = true,
+    this.timestamp,
+    this.timestampKey,
+    this.hasReactions = false,
     this.mentionNames = const {},
     this.mentionLabels = const {},
     this.agentMentionPubkeys = const {},
@@ -370,6 +383,28 @@ class MessageContent extends HookConsumerWidget {
         inlineComponents: inlineComponents,
       ),
     );
+    Widget timedContent(Widget child) {
+      if (timestamp == null) return child;
+      return MessageFooterLayout(
+        inlineLineHeight:
+            MediaQuery.textScalerOf(context).scale(style?.fontSize ?? 15) *
+            (style?.height ?? 1.2),
+        footer: Padding(
+          padding: const EdgeInsets.only(left: Grid.half),
+          child: Text(
+            timestamp!,
+            key: timestampKey,
+            style: messageTimestampTextStyle.copyWith(
+              fontSize: 11,
+              height: 17 / 11,
+              color: context.colors.onSurfaceVariant,
+            ),
+          ),
+        ),
+        child: child,
+      );
+    }
+
     final segments = bubble
         ? _bubbleSegments(finalContent, imetaByUrl)
         : const <({String text, bool attachment})>[];
@@ -380,14 +415,20 @@ class MessageContent extends HookConsumerWidget {
             children: [
               for (final (index, segment) in segments.indexed)
                 if (segment.attachment)
-                  renderMarkdown(segment.text)
+                  index == segments.length - 1 && trailingGallery == null
+                      ? timedContent(renderMarkdown(segment.text))
+                      : renderMarkdown(segment.text)
                 else
                   Container(
                     key: ValueKey('message-text-bubble-$index'),
                     margin: const EdgeInsets.only(bottom: Grid.quarter),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: Grid.xs,
-                      vertical: Grid.xxs,
+                    padding: EdgeInsets.fromLTRB(
+                      Grid.xs,
+                      Grid.xxs,
+                      Grid.xs,
+                      hasReactions && index == segments.length - 1
+                          ? Grid.xs
+                          : Grid.xxs,
                     ),
                     decoration: ShapeDecoration(
                       color: Color.alphaBlend(
@@ -406,7 +447,10 @@ class MessageContent extends HookConsumerWidget {
                             index == segments.length - 1,
                       ),
                     ),
-                    child: renderMarkdown(segment.text),
+                    child:
+                        index == segments.length - 1 && trailingGallery == null
+                        ? timedContent(renderMarkdown(segment.text))
+                        : renderMarkdown(segment.text),
                   ),
             ],
           )
@@ -418,15 +462,17 @@ class MessageContent extends HookConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (trailingGallery.content.trim().isNotEmpty) markdown,
-        _MessageImageCarousel(
-          key: ValueKey(
-            trailingGallery.items.map((item) => item.url).join('\u0000'),
+        timedContent(
+          _MessageImageCarousel(
+            key: ValueKey(
+              trailingGallery.items.map((item) => item.url).join('\u0000'),
+            ),
+            items: trailingGallery.items,
+            leadingOverflow: mediaCarouselLeadingOverflow,
+            trailingOverflow: mediaCarouselTrailingOverflow,
+            onReply: onMediaReply,
+            onMore: onMediaMore,
           ),
-          items: trailingGallery.items,
-          leadingOverflow: mediaCarouselLeadingOverflow,
-          trailingOverflow: mediaCarouselTrailingOverflow,
-          onReply: onMediaReply,
-          onMore: onMediaMore,
         ),
       ],
     );

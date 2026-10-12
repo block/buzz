@@ -103,6 +103,9 @@ class ReactionRow extends StatelessWidget {
   /// Channel whose members define the reactor names' comparison context.
   final String channelId;
 
+  /// Groups reaction controls in one capsule for attachment to a bubble.
+  final bool combined;
+
   final List<TimelineReaction> reactions;
   final void Function(String emoji) onToggle;
 
@@ -121,6 +124,7 @@ class ReactionRow extends StatelessWidget {
     required this.reactions,
     required this.onToggle,
     this.showAddButton = false,
+    this.combined = false,
     this.onAddReaction,
   });
 
@@ -130,28 +134,45 @@ class ReactionRow extends StatelessWidget {
     // the point. Without it, an empty row would be dead space.
     if (reactions.isEmpty && !showAddButton) return const SizedBox.shrink();
 
-    return Padding(
-      padding: const EdgeInsets.only(top: Grid.half),
-      child: Wrap(
-        spacing: Grid.half,
-        runSpacing: Grid.half,
-        children: [
-          for (final reaction in reactions)
-            _ReactionPill(
-              messageId: messageId,
-              reaction: reaction,
-              onTap: () => onToggle(reaction.emoji),
-              onLongPress: () => showReactionDetailSheet(
-                context: context,
-                channelId: channelId,
-                reactions: reactions,
-                initialEmoji: reaction.emoji,
-              ),
+    final controls = Wrap(
+      spacing: Grid.half,
+      runSpacing: Grid.half,
+      children: [
+        for (final reaction in reactions)
+          _ReactionPill(
+            messageId: messageId,
+            reaction: reaction,
+            combined: combined,
+            onTap: () => onToggle(reaction.emoji),
+            onLongPress: () => showReactionDetailSheet(
+              context: context,
+              channelId: channelId,
+              reactions: reactions,
+              initialEmoji: reaction.emoji,
             ),
-          if (showAddButton && onAddReaction != null)
-            _AddReactionPill(onTap: onAddReaction!),
-        ],
+          ),
+        if (showAddButton && onAddReaction != null)
+          _AddReactionPill(onTap: onAddReaction!, combined: combined),
+      ],
+    );
+    return Padding(
+      padding: EdgeInsets.only(
+        top: combined ? 0 : Grid.half,
+        bottom: combined ? Grid.xxs : 0,
       ),
+      child: combined
+          ? DecoratedBox(
+              decoration: BoxDecoration(
+                color: context.colors.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(Radii.container),
+                border: Border.all(color: context.colors.surface, width: 2),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(Grid.quarter),
+                child: controls,
+              ),
+            )
+          : controls,
     );
   }
 }
@@ -160,11 +181,13 @@ class ReactionRow extends StatelessWidget {
 class _PillSurface extends StatelessWidget {
   final bool highlighted;
   final double minWidth;
+  final bool combined;
   final Widget child;
 
   const _PillSurface({
     required this.highlighted,
     required this.minWidth,
+    this.combined = false,
     required this.child,
   });
 
@@ -181,13 +204,15 @@ class _PillSurface extends StatelessWidget {
       decoration: BoxDecoration(
         color: highlighted
             ? colors.primary.withValues(alpha: 0.10)
-            : colors.surfaceContainerHighest,
+            : (combined ? Colors.transparent : colors.surfaceContainerHighest),
         borderRadius: BorderRadius.circular(_pillHeight / 2),
-        border: Border.all(
-          color: highlighted
-              ? colors.primary.withValues(alpha: 0.40)
-              : colors.outlineVariant,
-        ),
+        border: combined
+            ? null
+            : Border.all(
+                color: highlighted
+                    ? colors.primary.withValues(alpha: 0.40)
+                    : colors.outlineVariant,
+              ),
       ),
       child: child,
     );
@@ -199,10 +224,12 @@ class _ReactionPill extends HookConsumerWidget {
   final TimelineReaction reaction;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+  final bool combined;
 
   const _ReactionPill({
     required this.messageId,
     required this.reaction,
+    this.combined = false,
     required this.onTap,
     required this.onLongPress,
   });
@@ -266,6 +293,7 @@ class _ReactionPill extends HookConsumerWidget {
           },
           child: _PillSurface(
             highlighted: reacted,
+            combined: combined,
             minWidth: _pillMinWidth,
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -297,7 +325,9 @@ class _ReactionPill extends HookConsumerWidget {
 class _AddReactionPill extends StatelessWidget {
   final VoidCallback onTap;
 
-  const _AddReactionPill({required this.onTap});
+  final bool combined;
+
+  const _AddReactionPill({required this.onTap, this.combined = false});
 
   @override
   Widget build(BuildContext context) {
@@ -310,6 +340,7 @@ class _AddReactionPill extends StatelessWidget {
         child: _PillSurface(
           highlighted: false,
           minWidth: _addPillWidth,
+          combined: combined,
           child: Center(
             widthFactor: 1,
             child: Icon(

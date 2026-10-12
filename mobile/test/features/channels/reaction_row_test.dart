@@ -65,6 +65,7 @@ Future<ProviderContainer> _pumpRow(
   required List<TimelineReaction> reactions,
   void Function(String emoji)? onToggle,
   bool showAddButton = false,
+  bool combined = false,
   VoidCallback? onAddReaction,
   String messageId = _messageId,
   VoidCallback? onMessageLongPress,
@@ -83,6 +84,7 @@ Future<ProviderContainer> _pumpRow(
         onLongPress: (_) => onMessageLongPress?.call(),
         child: ReactionRow(
           messageId: messageId,
+          combined: combined,
           channelId: 'channel',
           reactions: reactions,
           onToggle: onToggle ?? (_) {},
@@ -111,6 +113,30 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 }
 
 void main() {
+  testWidgets('combined capsule preserves individual toggles and add control', (
+    tester,
+  ) async {
+    final toggled = <String>[];
+    var added = false;
+    await _pumpRow(
+      tester,
+      combined: true,
+      reactions: [
+        _reaction(),
+        _reaction(emoji: _eyes),
+      ],
+      onToggle: toggled.add,
+      showAddButton: true,
+      onAddReaction: () => added = true,
+    );
+    await tester.tap(find.byKey(const ValueKey('reaction-pill-$_fire')));
+    await tester.tap(find.byKey(const ValueKey('reaction-pill-$_eyes')));
+    await tester.tap(find.byKey(const ValueKey('add-reaction-pill')));
+    await tester.pumpAndSettle();
+    expect(toggled, [_fire, _eyes]);
+    expect(added, isTrue);
+  });
+
   testWidgets(
     'native reactor labels retain channel qualifications and live updates',
     (tester) async {

@@ -12666,7 +12666,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(33, 'Tall latest reply').join('\n')
+                  ? List.filled(31, 'Tall latest reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -12849,7 +12849,7 @@ void main() {
           findsNothing,
         );
 
-        for (var i = 0; i < 12; i++) {
+        for (var i = 0; i < 20; i++) {
           await tester.drag(list, const Offset(0, -100));
           await tester.pumpAndSettle();
         }
@@ -13032,7 +13032,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(15, 'Tall latest reply').join('\n')
+                  ? List.filled(14, 'Tall latest reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [

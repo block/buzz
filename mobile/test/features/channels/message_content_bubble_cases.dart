@@ -8,6 +8,39 @@ void bubbleContentTests() {
           'message-text-bubble-',
         ),
   );
+  testWidgets('timestamps share a short line and move below wrapped text', (
+    tester,
+  ) async {
+    for (final text in [
+      'Hi',
+      'A longer message that must wrap across several lines in this narrow bubble.',
+    ]) {
+      await tester.pumpWidget(
+        _testable(
+          SizedBox(
+            width: 230,
+            child: MessageContent(
+              content: text,
+              bubble: true,
+              timestamp: '4:26 PM',
+              timestampKey: const ValueKey('bubble-time'),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final body = tester.getRect(_findRich(text).first);
+      final time = tester.getRect(find.byKey(const ValueKey('bubble-time')));
+      if (text == 'Hi') {
+        expect(time.left, greaterThan(body.right));
+        expect(time.top, lessThan(body.bottom));
+      } else {
+        expect(time.top, greaterThanOrEqualTo(body.bottom));
+      }
+      expect(tester.takeException(), isNull);
+    }
+  });
+
   testWidgets('only a group-ending bubble paints thought dots', (tester) async {
     for (final tail in [false, true]) {
       await tester.pumpWidget(

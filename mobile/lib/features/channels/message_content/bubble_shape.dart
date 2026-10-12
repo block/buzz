@@ -24,9 +24,9 @@ class _MessageBubbleShape extends ShapeBorder {
         RRect.fromRectAndCorners(
           rect,
           topLeft: start ? round : joined,
-          topRight: start ? round : joined,
+          topRight: round,
           bottomLeft: end ? round : joined,
-          bottomRight: end ? round : joined,
+          bottomRight: round,
         ),
       );
     if (!end) return body;
