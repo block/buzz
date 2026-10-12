@@ -27,6 +27,7 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::emu::{clamp_dims, EmuSession};
 use crate::challenge::{now_secs, random_hex, ChallengeBook, Purpose};
 
 const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -313,6 +314,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
 
     // 2. authenticated loop
     let mut terms: HashMap<String, mpsc::Sender<TermInput>> = HashMap::new();
+    let mut emus: HashMap<String, Arc<EmuSession>> = HashMap::new();
     let mut kill = sh.kill.subscribe();
     let b64 = base64::engine::general_purpose::STANDARD;
     loop {
@@ -324,7 +326,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                 break;
             }
             _ = kill.recv() => {
-                for (id, t) in terms.drain() { let _ = t.send(TermInput::Close).await; let _ = out_tx.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await; }
+                for (id, t) in terms.drain() { if let Some(e) = emus.remove(&id) { e.shutdown(); } let _ = t.send(TermInput::Close).await; let _ = out_tx.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await; }
                 continue;
             }
         };
@@ -411,7 +413,7 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
             }
             "term.open" => {
                 let lid = v["launchId"].as_str().unwrap_or("").to_string();
-                let reply = open_terminal(&sh, &conn_id, &v, &lid, &mut terms, &out_tx).await;
+                let reply = open_terminal(&sh, &conn_id, &v, &lid, &mut terms, &mut emus, &out_tx).await;
                 if let Err(code) = reply {
                     let _ = out_tx.send(Message::text(json!({"t":"error","code":code,"id":lid}).to_string())).await;
                 }
@@ -431,8 +433,49 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
                     let _ = t.send(TermInput::Resize(c.clamp(10, 500) as u16, r.clamp(2, 200) as u16)).await;
                 }
             }
+            op if op.starts_with("emu.") => {
+                let Some(id) = v["id"].as_str().map(str::to_string) else { continue };
+                let Some(e) = emus.get(&id).cloned() else {
+                    let _ = out_tx.send(emu_reply(&id, &v, Err("terminal session not found".into()))).await;
+                    continue;
+                };
+                let rid_wanted = v.get("rid").is_some();
+                let res: Result<Value, String> = match op {
+                    "emu.input" => e.handle_input(v["data"].as_str().unwrap_or("")).await.map(|_| Value::Null),
+                    "emu.resize" => {
+                        let (c, r) = clamp_dims(v["cols"].as_u64().unwrap_or(80), v["rows"].as_u64().unwrap_or(24));
+                        e.resize(c, r).await.map(|vp| serde_json::to_value(vp).unwrap_or(Value::Null))
+                    }
+                    "emu.viewport_ready" => match serde_json::from_value(v["viewport"].clone()) {
+                        Ok(vp) => e.viewport_ready(v["sub"].as_str().unwrap_or(""), vp).map(|_| Value::Null),
+                        Err(_) => Err("bad viewport".into()),
+                    },
+                    "emu.ack" => e.ack(v["sub"].as_str().unwrap_or(""), v["seq"].as_u64().unwrap_or(0)).map(|_| Value::Null),
+                    "emu.scroll" => e.scroll(v["lines"].as_i64().unwrap_or(0).clamp(-10_000, 10_000) as i32).await.map(|_| Value::Null),
+                    "emu.mouse" => e.mouse(&v["req"]).await.map(Value::Bool),
+                    "emu.focus" => e.focus(v["focused"].as_bool().unwrap_or(false)).await.map(|_| Value::Null),
+                    "emu.attach" => e.attach().map(|(sub, vp)| json!({"subscriptionId":sub.to_string(),"viewport":vp})),
+                    "emu.detach" => e.detach(v["sub"].as_str().unwrap_or("")).map(|_| Value::Null),
+                    "emu.close" => {
+                        if let Some(e) = emus.remove(&id) {
+                            e.shutdown();
+                        }
+                        if let Some(t) = terms.remove(&id) {
+                            let _ = t.send(TermInput::Close).await;
+                        }
+                        Ok(Value::Null)
+                    }
+                    _ => Err("unknown op".into()),
+                };
+                if rid_wanted || res.is_err() {
+                    let _ = out_tx.send(emu_reply(&id, &v, res)).await;
+                }
+            }
             "term.close" => {
                 if let Some(id) = v["id"].as_str() {
+                    if let Some(e) = emus.remove(id) {
+                        e.shutdown();
+                    }
                     if let Some(t) = terms.remove(id) {
                         let _ = t.send(TermInput::Close).await;
                     }
@@ -441,7 +484,10 @@ async fn handle(sock: TcpStream, sh: Arc<Shared>) {
             _ => {}
         }
     }
-    for (_, t) in terms.drain() {
+    for (id, t) in terms.drain() {
+        if let Some(e) = emus.remove(&id) {
+            e.shutdown();
+        }
         let _ = t.send(TermInput::Close).await;
     }
     sh.book.lock().unwrap().drop_connection(&conn_id);
@@ -455,6 +501,7 @@ async fn open_terminal(
     v: &Value,
     lid: &str,
     terms: &mut HashMap<String, mpsc::Sender<TermInput>>,
+    emus: &mut HashMap<String, Arc<EmuSession>>,
     out_tx: &mpsc::Sender<Message>,
 ) -> Result<(), &'static str> {
     if !sh.terminals_enabled.load(Ordering::SeqCst) {
@@ -482,6 +529,8 @@ async fn open_terminal(
             return Err("bad_session");
         }
     }
+    let launch_cols = v["cols"].as_u64().unwrap_or(80).clamp(10, 500) as u16;
+    let launch_rows = v["rows"].as_u64().unwrap_or(24).clamp(2, 200) as u16;
     let launch = TerminalLaunch {
         launch_id: lid.to_string(),
         cols: v["cols"].as_u64().unwrap_or(80).clamp(10, 500) as u16,
@@ -497,6 +546,30 @@ async fn open_terminal(
         }
     };
     terms.insert(lid.to_string(), handle.input.clone());
+    if v["emu"].as_bool().unwrap_or(false) {
+        let scrollback = handle.scrollback;
+        let (c, r) = (launch_cols, launch_rows);
+        match EmuSession::start(lid, handle, c, r, out_tx.clone()) {
+            Ok((session, sub, viewport, done)) => {
+                emus.insert(lid.to_string(), session);
+                let _ = out_tx
+                    .send(Message::text(json!({"t":"term.opened","id":lid,"emu":true,"scrollback":scrollback,"subscriptionId":sub.to_string(),"viewport":viewport}).to_string()))
+                    .await;
+                let (sh2, out2, id) = (sh.clone(), out_tx.clone(), lid.to_string());
+                tokio::spawn(async move {
+                    let _ = done.await;
+                    sh2.terms.fetch_sub(1, Ordering::SeqCst);
+                    let _ = out2.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await;
+                });
+                return Ok(());
+            }
+            Err(_) => {
+                terms.remove(lid);
+                sh.terms.fetch_sub(1, Ordering::SeqCst);
+                return Err("launch_failed");
+            }
+        }
+    }
     let _ = out_tx.send(Message::text(json!({"t":"term.opened","id":lid,"scrollback":handle.scrollback}).to_string())).await;
     let (sh2, out2, id) = (sh.clone(), out_tx.clone(), lid.to_string());
     let mut output = handle.output;
@@ -512,4 +585,13 @@ async fn open_terminal(
         let _ = out2.send(Message::text(json!({"t":"term.closed","id":id}).to_string())).await;
     });
     Ok(())
+}
+
+fn emu_reply(id: &str, v: &Value, res: Result<Value, String>) -> Message {
+    let rid = v.get("rid").cloned().unwrap_or(Value::Null);
+    Message::text(match res {
+        Ok(r) => json!({"t":"emu.reply","id":id,"rid":rid,"ok":true,"result":r}),
+        Err(e) => json!({"t":"emu.reply","id":id,"rid":rid,"ok":false,"error":e.chars().take(200).collect::<String>()}),
+    }
+    .to_string())
 }

@@ -7,6 +7,7 @@
 //! The listener never binds anything but 127.0.0.1 and never runs `tailscale funnel`.
 
 pub mod challenge;
+pub mod emu;
 pub mod pty;
 pub mod server;
 pub mod tailscale;

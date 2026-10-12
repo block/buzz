@@ -16,6 +16,7 @@ getrandom = "0.2"
 hex = "0.4"
 base64 = "0.22"
 portable-pty = "0.9"
+buzz-terminal = { path = "../../desktop/src-tauri/crates/buzz-terminal" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "io-std"] }

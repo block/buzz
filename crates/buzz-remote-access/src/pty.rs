@@ -89,6 +89,7 @@ impl PtyBackend {
             }
         }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         if let Some(dir) = resolve_cwd(self.cwd.as_deref(), std::env::var_os("HOME").map(PathBuf::from)) {
             cmd.cwd(dir);
         }

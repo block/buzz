@@ -1259,6 +1259,7 @@ name = "buzz-remote-access"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "buzz-terminal",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
