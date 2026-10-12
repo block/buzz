@@ -1,5 +1,6 @@
 // Browser port of desktop/src-tauri/src/relay.rs HTTP helpers: NIP-98 auth + POST /query, /events.
 // Every request is signed through the pluggable Signer (NIP-07 extension) — the page never holds a key.
+import { relayFetchUrl } from "./relayProxy";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { getSigner } from "./signer";
@@ -80,12 +81,9 @@ async function postOnce(path: string, body: unknown): Promise<unknown> {
   const prio: SignPriority = path === "/events" ? 0 : isPresenceRead(body) ? 3 : 1;
   const auth = await nip98Header("POST", url, bytes, prio);
   let res: Response;
-  // A cross-origin relay fails CORS on /query and /events, so go through the same-origin /__relay proxy (Vite dev proxy in
-  // dev, server.mjs in built apps). The NIP-98 `u` tag above is still signed for the real relay URL.
-  const fetchUrl =
-    new URL(url).origin !== location.origin
-      ? `/__relay/${encodeURIComponent(relayHttpBase())}${path}`
-      : url;
+    // Dev: same-origin /__relay proxy; production: the relay directly (or a CDN prefix). See relayProxy.ts. The NIP-98 `u`
+  // tag above is still signed for the real relay URL.
+  const fetchUrl = relayFetchUrl(relayHttpBase(), path);
   try {
     res = await fetch(fetchUrl, {
       method: "POST",

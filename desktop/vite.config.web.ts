@@ -8,6 +8,8 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 const shim = (f: string) => path.resolve(__dirname, "src/platform/web", f);
 const protectedOn = process.env.VITE_BUZZ_BESTIE === "1";
 
+let outDirResolved: string | undefined;
+
 export default defineConfig(({ command }) => ({
   plugins: [
     tanstackRouter({
@@ -74,8 +76,11 @@ export default defineConfig(({ command }) => ({
           next();
         });
       },
+      configResolved(c) {
+        outDirResolved = path.resolve(c.root, c.build.outDir);
+      },
       closeBundle() {
-        const out = path.resolve(__dirname, "dist-web");
+        const out = outDirResolved ?? path.resolve(__dirname, "dist-web");
         if (fs.existsSync(path.join(out, "index.web.html")))
           fs.renameSync(
             path.join(out, "index.web.html"),
