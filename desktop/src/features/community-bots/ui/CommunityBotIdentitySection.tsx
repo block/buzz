@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { Eye, EyeOff } from "lucide-react";
 import * as React from "react";
 
@@ -20,7 +21,13 @@ type CommunityBotIdentitySectionProps = {
   pubkey: string | null;
 };
 
+/** Desktop only: the web build never reveals or copies a bot's private key. */
 function CommunityBotPrivateKeyRow({ pubkey }: { pubkey: string }) {
+  if (!isTauri()) return null;
+  return <CommunityBotPrivateKeyRowDesktop pubkey={pubkey} />;
+}
+
+function CommunityBotPrivateKeyRowDesktop({ pubkey }: { pubkey: string }) {
   const [isOpen, setIsOpen] = React.useState(false);
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [unavailableReason, setUnavailableReason] = React.useState<
