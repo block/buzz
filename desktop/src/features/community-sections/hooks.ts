@@ -181,8 +181,10 @@ export function useCommunitySections() {
   const canManage = canManageCommunityMembers(membershipQuery.data);
   const catalogQuery = useCommunitySectionsCatalogQuery();
   const channelsQuery = useChannelsQuery({ enabled: Boolean(relayUrl) });
-  const { store, subscribedIds, setSubscribed } =
-    useCommunitySectionSubscriptions(pubkey, relayUrl);
+  const { store, setSubscribed } = useCommunitySectionSubscriptions(
+    pubkey,
+    relayUrl,
+  );
   const {
     enabled: communitySectionsEnabled,
     setEnabled: setCommunitySectionsEnabled,
@@ -334,8 +336,15 @@ export function useCommunitySections() {
   );
 
   const subscribedSections = React.useMemo(() => {
-    return sections.filter((section) => subscribedIds.has(section.id));
-  }, [sections, subscribedIds]);
+    return sections.filter((section) =>
+      isCommunitySectionSubscribed(store, section.id),
+    );
+  }, [sections, store]);
+
+  const effectiveSubscribedIds = React.useMemo(
+    () => new Set(subscribedSections.map((section) => section.id)),
+    [subscribedSections],
+  );
 
   const channelsById = React.useMemo(() => {
     const map = new Map<string, Channel>();
@@ -365,7 +374,7 @@ export function useCommunitySections() {
     subscribedSections,
     /** Subscribed sections to render in the left nav (empty when master toggle is off). */
     navSubscribedSections,
-    subscribedIds,
+    subscribedIds: effectiveSubscribedIds,
     streamChannels,
     channelsById,
     canManage,
@@ -379,6 +388,7 @@ export function useCommunitySections() {
     reorderSections,
     deleteSection,
     setSubscribed,
-    isSubscribed: (sectionId: string) => subscribedIds.has(sectionId),
+    isSubscribed: (sectionId: string) =>
+      isCommunitySectionSubscribed(store, sectionId),
   };
 }

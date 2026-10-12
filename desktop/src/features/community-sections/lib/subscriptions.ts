@@ -13,6 +13,14 @@ export type CommunitySectionSubsChange = {
   subscribedIds: string[];
 };
 
+/**
+ * Web builds treat every community section as subscribed unless the member
+ * explicitly turned it off (stored as `false`). Desktop keeps opt-in.
+ */
+export const DEFAULT_SECTION_SUBSCRIBED: boolean =
+  (import.meta as { env?: Record<string, unknown> }).env?.VITE_BUZZ_PLATFORM ===
+  "web";
+
 export const EMPTY_SUBSCRIPTION_STORE: CommunitySectionSubscriptionStore =
   Object.freeze({
     version: 1,
@@ -86,18 +94,23 @@ export function writeCommunitySectionSubs(
 export function isCommunitySectionSubscribed(
   store: CommunitySectionSubscriptionStore,
   sectionId: string,
+  defaultSubscribed: boolean = DEFAULT_SECTION_SUBSCRIBED,
 ): boolean {
-  return store.subscribed[sectionId] === true;
+  const flag = store.subscribed[sectionId];
+  return flag === undefined ? defaultSubscribed : flag === true;
 }
 
 export function setCommunitySectionSubscribed(
   store: CommunitySectionSubscriptionStore,
   sectionId: string,
   subscribed: boolean,
+  defaultSubscribed: boolean = DEFAULT_SECTION_SUBSCRIBED,
 ): CommunitySectionSubscriptionStore {
   const next = { ...store.subscribed };
   if (subscribed) {
     next[sectionId] = true;
+  } else if (defaultSubscribed) {
+    next[sectionId] = false;
   } else {
     delete next[sectionId];
   }

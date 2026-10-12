@@ -27,3 +27,13 @@ test("setCommunitySectionSubscribed toggles membership", () => {
   assert.equal(isCommunitySectionSubscribed(store, "eng"), false);
   assert.deepEqual(subscribedCommunitySectionIds(store), []);
 });
+
+test("web default: sections are subscribed unless explicitly turned off", () => {
+  let store = EMPTY_SUBSCRIPTION_STORE;
+  assert.equal(isCommunitySectionSubscribed(store, "eng", true), true);
+  store = setCommunitySectionSubscribed(store, "eng", false, true);
+  assert.equal(store.subscribed.eng, false);
+  assert.equal(isCommunitySectionSubscribed(store, "eng", true), false);
+  store = setCommunitySectionSubscribed(store, "eng", true, true);
+  assert.equal(isCommunitySectionSubscribed(store, "eng", true), true);
+});

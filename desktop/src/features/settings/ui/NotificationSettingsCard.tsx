@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
 import type {
@@ -27,13 +27,23 @@ import { SoundPicker } from "./SoundPicker";
 import { playNotificationSound } from "@/features/notifications/lib/sound";
 import { sendTestNotification } from "@/features/notifications/lib/testNotification";
 
+// Web Push row: web build only, and only once the push sender is live (VITE_BUZZ_WEB_PUSH_URL set at build time).
+const WebPushSettingsRow =
+  import.meta.env?.VITE_BUZZ_PLATFORM === "web" &&
+  import.meta.env?.VITE_BUZZ_WEB_PUSH_URL
+    ? lazy(() => import("@/platform/web/push/WebPushSettingsRow"))
+    : null;
+
 function TestNotificationRow({ settings }: { settings: NotificationSettings }) {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(
+    null,
+  );
   const run = async () => {
     setBusy(true);
     const r = await sendTestNotification();
-    if (r.ok && settings.slotAlertsEnabled.dm) playNotificationSound(settings.sounds.dm);
+    if (r.ok && settings.slotAlertsEnabled.dm)
+      playNotificationSound(settings.sounds.dm);
     setResult(r);
     setBusy(false);
   };
@@ -42,14 +52,26 @@ function TestNotificationRow({ settings }: { settings: NotificationSettings }) {
       <div className="min-w-0">
         <p className="text-sm font-medium">Test notification</p>
         <p
-          className={cn("text-sm font-normal", result && !result.ok ? "text-destructive" : "text-muted-foreground/70")}
+          className={cn(
+            "text-sm font-normal",
+            result && !result.ok
+              ? "text-destructive"
+              : "text-muted-foreground/70",
+          )}
           data-settings-subcopy
           data-testid="notifications-test-result"
         >
-          {result?.message ?? "Send a notification to check that alerts reach this device."}
+          {result?.message ??
+            "Send a notification to check that alerts reach this device."}
         </p>
       </div>
-      <Button data-testid="notifications-test-button" disabled={busy} onClick={() => void run()} type="button" variant="outline">
+      <Button
+        data-testid="notifications-test-button"
+        disabled={busy}
+        onClick={() => void run()}
+        type="button"
+        variant="outline"
+      >
         {busy ? "Sending…" : "Send test notification"}
       </Button>
     </SettingsOptionRow>
@@ -172,6 +194,11 @@ export function NotificationSettingsCard({
               }}
             />
           </SettingsOptionRow>
+          {WebPushSettingsRow ? (
+            <Suspense fallback={null}>
+              <WebPushSettingsRow />
+            </Suspense>
+          ) : null}
           <TestNotificationRow settings={notificationSettings} />
         </SettingsOptionGroup>
 

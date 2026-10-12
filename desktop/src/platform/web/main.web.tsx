@@ -33,6 +33,7 @@ if (!(await resumeSession())) {
   await runBootGate(signerActions);
 }
 startSignerBanner(signerActions);
+if (import.meta.env.VITE_BUZZ_WEB_PUSH_URL) void import("./push/banner").then((m) => m.startWebPush()).catch(() => undefined);
 try {
   await import("@/main");
 } catch (e) {

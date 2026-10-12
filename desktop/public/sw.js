@@ -2,7 +2,7 @@
 // Caches ONLY the static shell (hashed /assets/*, fonts/icons/css, and the navigation document).
 // Never touches: cross-origin requests, non-GET, the relay API paths (/query /events /count /media /upload /api /info /health ...),
 // or WebSocket upgrades (the SW cannot intercept those anyway).
-const VERSION = "buzz-web-v2";
+const VERSION = "buzz-web-v3";
 const SHELL = ["/", "/manifest.webmanifest", "/buzz.svg", "/boot.css", "/pwa/icon-192.png", "/pwa/icon-512.png"];
 const API = /^\/(query|events|count|media|upload|api|info|health|_liveness|_readiness|workflows|hooks|huddle|operator|invite|\.well-known)(\/|$)/;
 
@@ -24,4 +24,39 @@ self.addEventListener("fetch", (e) => {
   if (url.pathname.startsWith("/assets/") || /\.(woff2?|png|svg|css|webmanifest|ico)$/.test(url.pathname)) {
     e.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((r) => { if (r.ok) { const cp = r.clone(); caches.open(VERSION).then((c) => c.put(req, cp)); } return r; })));
   }
+});
+
+// ---- Web Push (payloads come from the Hula Buzz push sender; they never carry message secrets) ----
+self.addEventListener("push", (e) => {
+  let data = {};
+  try {
+    data = e.data ? e.data.json() : {};
+  } catch {
+    data = { title: "Hula Buzz", body: e.data ? e.data.text() : "" };
+  }
+  const title = typeof data.title === "string" && data.title ? data.title : "Hula Buzz";
+  e.waitUntil(
+    self.registration.showNotification(title, {
+      body: typeof data.body === "string" ? data.body : "",
+      tag: typeof data.tag === "string" ? data.tag : undefined,
+      icon: "/pwa/icon-192.png",
+      badge: "/pwa/icon-192.png",
+      data: { target: data.target || null },
+    }),
+  );
+});
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const target = (e.notification.data && e.notification.data.target) || null;
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+      const client = list.find((c) => new URL(c.url).origin === self.location.origin);
+      if (client) {
+        if (target) client.postMessage({ type: "buzz-push-open", target });
+        return client.focus();
+      }
+      const url = target ? `/?push=${encodeURIComponent(JSON.stringify(target))}` : "/";
+      return self.clients.openWindow(url);
+    }),
+  );
 });
