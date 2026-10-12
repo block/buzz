@@ -357,6 +357,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     let rest_client = relay.rest_client();
     let mut author_gate_ctx =
         crate::InboundAuthorGate::connect(&rest_client, &pubkey_hex, "setup startup").await;
+    author_gate_ctx.set_strict_allowlist(config.strict_allowlist);
 
     // Resolve owner for author-gate (same priority as normal mode).
     let startup_owner = crate::resolve_agent_owner(&config);
