@@ -1,3 +1,4 @@
+import { isTauri } from "@tauri-apps/api/core";
 import { Check, ChevronDown, Copy, Pencil } from "lucide-react";
 import {
   AnimatePresence,
@@ -801,7 +802,8 @@ export function ProfileSettingsCard({
                                 testId="profile-nip05"
                                 value={nip05Handle}
                               />
-                              <PrivateKeyBackupRow />
+                              {/* Web: the key is in the signer; never offer to reveal or back it up here. */}
+                              {isTauri() ? <PrivateKeyBackupRow /> : null}
                             </div>
                           </details>
                         </SettingsOptionGroup>
