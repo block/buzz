@@ -9,6 +9,10 @@ import {
   getAgentTranscript,
   subscribeAgentObserverStore,
 } from "@/features/agents/observerRelayStore";
+import { useAcpRuntimesQuery } from "@/features/agents/hooks";
+import { extractTermSessionCard } from "@/features/term-session/lib/card.ts";
+import { openTermSessionCard } from "@/features/term-session/lib/openCard.ts";
+import { listTermSessionHarnesses } from "@/features/term-session/lib/harnesses.ts";
 import { relayClient } from "@/shared/api/relayClient";
 import { nip44EncryptToSelf, signRelayEvent } from "@/shared/api/tauri";
 import { sendChannelMessage } from "@/shared/api/tauriMessages";
@@ -20,7 +24,8 @@ import type { RelayEvent } from "@/shared/api/types";
 import { isAgentManagementAllowed, remoteInfoForHeartbeat, subscribeRemoteAccess } from "./remoteAccessStore";
 import { makeBrowserDeps, playgroundBrowserHost, remoteBrowserManager, snapshotBrowserSessions } from "./browserHost";
 import { BridgeCommandHandler, makeSeenSet } from "./commandHandler";
-import { BRIDGE_KIND, BRIDGE_TAG, CMD_MAX_TTL_S, nowS } from "./protocol";
+import { BRIDGE_KIND, BRIDGE_TAG, CMD_MAX_TTL_S, nowS, type HarnessInfo } from "./protocol";
+import { isHandoffReply, runTermHandoff } from "./termHandoff";
 import { BridgePublisher } from "./publisher";
 import { buildAgentsSnapshot } from "./snapshot";
 import { entriesFromItems } from "./transcript";
@@ -44,9 +49,24 @@ export function useBridgePublisher(
   pubkey: string | undefined,
   relayUrl: string | undefined,
   channelName: (channelId: string) => string | undefined,
+  /** Channels with their member pubkeys: advertised per agent so the web can list the agents in a channel. */
+  channels?: readonly { id: string; memberPubkeys: readonly string[] }[],
 ): void {
   const enabled = isTauri() && !!pubkey && !!relayUrl;
   const agentsQuery = useManagedAgentsQuery({ enabled });
+  const runtimesQuery = useAcpRuntimesQuery({ enabled });
+  // undefined until the runtime catalog has loaded, so the web never shows "not installed" for a catalog that is merely cold.
+  const harnesses = React.useMemo<HarnessInfo[] | undefined>(
+    () =>
+      runtimesQuery.data
+        ? listTermSessionHarnesses(runtimesQuery.data).map((h) => ({ id: h.id, available: h.available }))
+        : undefined,
+    [runtimesQuery.data],
+  );
+  const harnessesRef = React.useRef(harnesses);
+  harnessesRef.current = harnesses;
+  const channelsRef = React.useRef(channels);
+  channelsRef.current = channels;
   const queryClient = useQueryClient();
   const queryClientRef = React.useRef(queryClient);
   queryClientRef.current = queryClient;
@@ -87,8 +107,10 @@ export function useBridgePublisher(
           "browser.close",
           "browser.screenshot",
           "browser.agent",
+          "term.handoff",
         ],
         remote: remoteInfoForHeartbeat,
+        harnesses: () => harnessesRef.current,
         onError: (e) => console.warn("[bridge] publish failed:", e),
       },
     );
@@ -188,6 +210,60 @@ export function useBridgePublisher(
         },
       },
       publishResult: (id, body) => p.publishResult(id, body),
+      termHandoff: (input) =>
+        runTermHandoff(
+          {
+            agentName: (pk) => agentNamesRef.current(pk) ?? "",
+            channelName: (id) => nameRef.current(id) ?? id,
+            harnessAvailable: (h) => (harnessesRef.current ?? []).some((x) => x.id === h && x.available),
+            sendInstruction: async (i, content) => {
+              await sendChannelMessage(
+                i.channelId,
+                content,
+                i.threadId,
+                undefined,
+                [i.agentPubkey],
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                pubkey,
+                i.threadId,
+              );
+            },
+            waitForCard: (i, sinceMs, timeoutMs) =>
+              new Promise((resolve) => {
+                let done = false;
+                let unsub: (() => Promise<void>) | null = null;
+                const finish = (c: ReturnType<typeof extractTermSessionCard>) => {
+                  if (done) return;
+                  done = true;
+                  clearTimeout(timer);
+                  if (unsub) void unsub();
+                  resolve(c);
+                };
+                const timer = setTimeout(() => finish(null), timeoutMs);
+                relayClient
+                  .subscribeLive(
+                    { kinds: [9], "#h": [i.channelId], authors: [i.agentPubkey], since: Math.floor(sinceMs / 1000) - 1, limit: 20 },
+                    (e: RelayEvent) => {
+                      if (!isHandoffReply(e, i, Math.floor(sinceMs / 1000))) return;
+                      const card = extractTermSessionCard(e.content);
+                      if (card) finish(card);
+                    },
+                  )
+                  .then((u) => {
+                    if (done) void u();
+                    else unsub = u;
+                  })
+                  .catch(() => finish(null));
+              }),
+            openCard: (card, ctx) => openTermSessionCard(card, ctx),
+          },
+          input,
+        ) as unknown as Promise<Record<string, unknown>>,
       agentManagementAllowed: isAgentManagementAllowed,
       browser: makeBrowserDeps(
         () => playgroundBrowserHost,
@@ -270,6 +346,13 @@ export function useBridgePublisher(
     };
   }, [enabled, pubkey, relayUrl]);
 
+  // The heartbeat is 30 s apart: tell the web right away when the set of installed harnesses changes.
+  const harnessSig = JSON.stringify(harnesses);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the signature is the dependency.
+  React.useEffect(() => {
+    void publisherRef.current?.sendHeartbeat();
+  }, [harnessSig]);
+
   const agents = agentsQuery.data;
   React.useEffect(() => {
     const p = publisherRef.current;
@@ -286,6 +369,9 @@ export function useBridgePublisher(
           personaId: a.personaId,
           lastStartedAt: a.lastStartedAt,
           lastError: a.lastError,
+          channelIds: (channels ?? [])
+            .filter((c) => c.memberPubkeys.some((m) => m.toLowerCase() === a.pubkey.toLowerCase()))
+            .map((c) => c.id),
         })),
         channelTurns,
         (id) => nameRef.current(id),
@@ -296,5 +382,5 @@ export function useBridgePublisher(
     for (const a of agents)
       if (a.status === "running")
         p.updateTranscript(a.pubkey, entriesFromItems(getAgentTranscript(a.pubkey)));
-  }, [agents, channelTurns]);
+  }, [agents, channelTurns, channels]);
 }

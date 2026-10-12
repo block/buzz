@@ -47,7 +47,8 @@ export type CommandType =
   | "browser.open"
   | "browser.close"
   | "browser.screenshot"
-  | "browser.agent";
+  | "browser.agent"
+  | "term.handoff";
 /** Commands that change state or send content: the web must get an explicit confirmation before sending. */
 export const DESTRUCTIVE_COMMANDS: readonly CommandType[] = [
   "agent.stop",
@@ -57,6 +58,7 @@ export const DESTRUCTIVE_COMMANDS: readonly CommandType[] = [
   "browser.open",
   "browser.close",
   "browser.agent",
+  "term.handoff",
 ];
 /** browser.screenshot is view-only and user-initiated per press, so it needs no confirm; the desktop still rate-limits it. */
 export const ALL_COMMANDS: readonly CommandType[] = [
@@ -111,13 +113,31 @@ export type ShotChunkBody = {
   data: string;
 };
 
+// ---- term.handoff: "Pass thread context to Buzz Term" from the web ----
+export type TermHandoffHarness = "claude" | "codex";
+export const TERM_HANDOFF_HARNESSES: readonly TermHandoffHarness[] = ["claude", "codex"];
+export type TermHandoffBody = {
+  agentPubkey: string;
+  channelId: string;
+  /** Event id of the thread head. */
+  threadId: string;
+  harness: TermHandoffHarness;
+};
+/** How long the desktop waits for the chosen agent's handoff card (must stay under CMD_MAX_TTL_S so the web does not time out first). */
+export const TERM_HANDOFF_WAIT_MS = 100_000;
+/** Interactive harnesses installed on the desktop, advertised in the heartbeat. No paths: just availability. */
+export type HarnessInfo = { id: TermHandoffHarness; available: boolean };
+/** Cap on channel ids advertised per agent (running agents only). */
+export const MAX_AGENT_CHANNEL_IDS = 60;
+
 export type CommandBody =
   | { agentPubkey: string }
   | { agentPubkey: string; channelId: string; text: string }
   | { agentPubkey: string; promptId: string }
   | { url: string }
   | { sessionId: string }
-  | { sessionId: string; mode: "off" | BrowserAgentMode; agentPubkey?: string; channelId?: string };
+  | { sessionId: string; mode: "off" | BrowserAgentMode; agentPubkey?: string; channelId?: string }
+  | TermHandoffBody;
 
 export type CommandResultBody = {
   status: "accepted" | "ok" | "error";
@@ -182,6 +202,8 @@ export type AgentSummary = {
   lastError?: string;
   activeTurns: { channelId: string; channelName?: string; since: number }[];
   currentTask?: string;
+  /** Channels this agent is a member of (running/deployed agents only, capped). Used by the web "Pass thread context to Buzz Term" picker. */
+  channelIds?: string[];
 };
 
 export type AgentsSnapshotBody = {
@@ -225,6 +247,8 @@ export type HeartbeatBody = {
   platform?: string;
   agentsRunning: number;
   uptimeSec: number;
+  /** Interactive Buzz Term harnesses (claude/codex) found on this desktop. */
+  harnesses?: HarnessInfo[];
   caps: string[];
 };
 

@@ -23,7 +23,7 @@ export type OpenTermSessionCardContext = {
 export async function openTermSessionCard(
   card: TermSessionCard,
   context: OpenTermSessionCardContext,
-): Promise<void> {
+): Promise<{ launchCommand: string; extraEnv: Record<string, string> } | null> {
   let prepared;
   try {
     prepared = await prepareTermSessionLaunch(card);
@@ -31,7 +31,7 @@ export async function openTermSessionCard(
     const message =
       error instanceof Error ? error.message : String(error ?? "Launch failed");
     toast.error(message);
-    return;
+    return null;
   }
 
   if (card.tool === "claude" && prepared.buzzDevMcpWired === false) {
@@ -48,7 +48,7 @@ export async function openTermSessionCard(
     toast.error(
       "OpenClaw workspace is enabled on this card, but the MCP grant could not be wired.",
     );
-    return;
+    return null;
   }
 
   if (card.openclawWorkspace && card.tool === "codex") {
@@ -69,4 +69,5 @@ export async function openTermSessionCard(
     launchCommand,
     extraEnv,
   });
+  return { launchCommand, extraEnv };
 }

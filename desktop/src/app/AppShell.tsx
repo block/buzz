@@ -295,6 +295,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
     (id) => channels.find((c) => c.id === id)?.name,
+    channelsQuery.data,
   );
   const dmChannelIds = React.useMemo(() => {
     const ids = new Set<string>();

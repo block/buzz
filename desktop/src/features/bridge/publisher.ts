@@ -9,6 +9,7 @@ import type {
   AgentSummary,
   AgentsSnapshotBody,
   CommandResultBody,
+  HarnessInfo,
   HeartbeatBody,
   TranscriptChunkBody,
   TranscriptEntry,
@@ -78,6 +79,8 @@ export type PublisherOptions = {
   caps?: string[];
   /** Slice B listener state, read on every heartbeat. */
   remote?: () => RemoteInfo | undefined;
+  /** Interactive harnesses installed on this desktop, read on every heartbeat. */
+  harnesses?: () => HarnessInfo[] | undefined;
   onError?: (e: unknown) => void;
 };
 
@@ -99,9 +102,9 @@ export class BridgePublisher {
   private startedAt: number;
   private destroyed = false;
   private knownAgents = new Set<string>();
-  private agentStatus = new Map<string, { status: AgentSummary["status"] }>();
+  private agentStatus = new Map<string, { status: AgentSummary["status"]; channelIds?: string[] }>();
   /** Latest known agents and status (for command validation). */
-  agents(): ReadonlyMap<string, { status: AgentSummary["status"] }> {
+  agents(): ReadonlyMap<string, { status: AgentSummary["status"]; channelIds?: string[] }> {
     return this.agentStatus;
   }
   private tx = new Map<
@@ -167,7 +170,7 @@ export class BridgePublisher {
     if (this.destroyed) return;
     this.knownAgents = new Set(body.agents.map((a) => a.pubkey.toLowerCase()));
     this.agentStatus = new Map(
-      body.agents.map((a) => [a.pubkey.toLowerCase(), { status: a.status }]),
+      body.agents.map((a) => [a.pubkey.toLowerCase(), { status: a.status, ...(a.channelIds ? { channelIds: a.channelIds } : {}) }]),
     );
     this.agentsRunning = body.agents.filter(
       (a) => a.status === "running",
@@ -245,6 +248,7 @@ export class BridgePublisher {
         agentsRunning: this.agentsRunning,
         uptimeSec: Math.floor((this.nowMs() - this.startedAt) / 1000),
         caps: this.opts.caps ?? DEFAULT_CAPS,
+        ...(this.opts.harnesses?.() ? { harnesses: this.opts.harnesses() } : {}),
         ...(this.opts.remote?.() ? { remote: this.opts.remote() } : {}),
       };
       const env = buildEnvelope({

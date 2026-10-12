@@ -4,6 +4,7 @@ import { verifyEvent } from "nostr-tools";
 import { chunkImage, validateBrowserUrl, type BrowserSessionManager } from "./browserSessions";
 import {
   ALL_COMMANDS,
+  TERM_HANDOFF_HARNESSES,
   BRIDGE_KIND,
   BRIDGE_TAG,
   CMD_MAX_TEXT,
@@ -17,9 +18,10 @@ import {
   type BridgeEventLike,
   type CommandResultBody,
   type CommandType,
+  type TermHandoffBody,
 } from "./protocol";
 
-export type KnownAgent = { status: "running" | "stopped" | "deployed" | "not_deployed" };
+export type KnownAgent = { status: "running" | "stopped" | "deployed" | "not_deployed"; channelIds?: string[] };
 
 /** Slice R: the desktop's built-in browser sessions (pinned sites), view-only from the web. */
 export type BrowserDeps = {
@@ -54,6 +56,8 @@ export type CommandDeps = {
     message(agentPubkey: string, channelId: string, text: string): Promise<string | void>;
   };
   publishResult(cmdId: string, body: CommandResultBody): Promise<void>;
+  /** term.handoff: runs the desktop's "Pass thread context to Buzz Term" flow (see termHandoff.ts). Absent = unsupported. */
+  termHandoff?(input: TermHandoffBody): Promise<Record<string, unknown>>;
   browser?: BrowserDeps;
   /** "Allow remote agent management" on this desktop. Absent = allowed (tests); when false agent.* commands are refused. */
   agentManagementAllowed?(): boolean;
@@ -240,7 +244,7 @@ export class BridgeCommandHandler {
     // 6. body validation + known agent
     const body = (env.body ?? {}) as Record<string, unknown>;
     if (type.startsWith("browser.")) return this.handleBrowser(type, cmdId, body);
-    if (type.startsWith("agent.") && d.agentManagementAllowed && !d.agentManagementAllowed()) {
+    if ((type.startsWith("agent.") || type === "term.handoff") && d.agentManagementAllowed && !d.agentManagementAllowed()) {
       d.seen.add(cmdId);
       const res: CommandResultBody = { status: "error", code: "remote_disabled", message: "Remote agent management is off on this computer. Turn on \"Allow remote agent management\" in its Settings → Agents." };
       this.results.set(cmdId, res);
@@ -284,12 +288,29 @@ export class BridgeCommandHandler {
           await d.executors.message(agentPubkey, channelId, text);
           await finish({ status: "ok" });
         }
+      } else if (type === "term.handoff") {
+        const channelId = typeof body.channelId === "string" ? body.channelId : "";
+        const threadId = typeof body.threadId === "string" ? body.threadId.toLowerCase() : "";
+        const harness = body.harness;
+        if (!channelId || channelId.length > 200 || !HEX64.test(threadId) || !(TERM_HANDOFF_HARNESSES as readonly unknown[]).includes(harness))
+          await finish({ status: "error", code: "bad_request", message: "Invalid channel, thread or harness." });
+        else if (!d.termHandoff)
+          await finish({ status: "error", code: "unsupported", message: "This desktop can't start Buzz Term handoffs." });
+        else if (agent.status !== "running")
+          await finish({ status: "error", code: "agent_not_running", message: "Start the agent first." });
+        else if (!agent.channelIds?.includes(channelId))
+          await finish({ status: "error", code: "not_member", message: "That agent isn't in this channel." });
+        else {
+          const result = await d.termHandoff({ agentPubkey, channelId, threadId, harness: harness as TermHandoffBody["harness"] });
+          await finish({ status: "ok", result });
+        }
       } else {
         // prompt.approve / prompt.deny: this desktop has no interactive permission prompts to answer.
         await finish({ status: "error", code: "unsupported", message: "This desktop does not support answering permission prompts remotely." });
       }
     } catch (e) {
-      await finish({ status: "error", code: "failed", message: String(e instanceof Error ? e.message : e).slice(0, 200) });
+      const code = type === "term.handoff" && typeof (e as { code?: unknown })?.code === "string" ? String((e as { code: string }).code) : "failed";
+      await finish({ status: "error", code, message: String(e instanceof Error ? e.message : e).slice(0, 200) });
     }
     this.stats.executed++;
     return "executed";

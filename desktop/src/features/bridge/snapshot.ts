@@ -1,6 +1,6 @@
 // Pure projection: desktop agent state -> bridge AgentSummary[]. Never include secrets, env, prompts, paths or commands.
 import type { AgentSummary, AgentsSnapshotBody } from "./protocol";
-import { MAX_SNAPSHOT_AGENTS } from "./protocol";
+import { MAX_AGENT_CHANNEL_IDS, MAX_SNAPSHOT_AGENTS } from "./protocol";
 
 export type AgentInput = {
   pubkey: string;
@@ -12,6 +12,8 @@ export type AgentInput = {
   personaId?: string | null;
   lastStartedAt?: string | null;
   lastError?: string | null;
+  /** Channels the agent is a member of. */
+  channelIds?: string[];
 };
 
 export type ChannelTurnInput = {
@@ -69,6 +71,8 @@ export function buildAgentsSnapshot(
     if (a.personaId) s.personaId = a.personaId;
     if (a.lastStartedAt) s.lastStartedAt = a.lastStartedAt;
     if (a.lastError) s.lastError = clip(a.lastError, 200);
+    if ((a.status === "running" || a.status === "deployed") && a.channelIds && a.channelIds.length > 0)
+      s.channelIds = [...new Set(a.channelIds)].sort().slice(0, MAX_AGENT_CHANNEL_IDS);
     if (activeTurns.length > 0) {
       const names = activeTurns.map((t) => t.channelName ?? "a channel");
       s.currentTask = clip(
@@ -98,6 +102,7 @@ export function snapshotSignature(b: AgentsSnapshotBody): string {
       a.lastError ?? null,
       a.activeTurns.map((t) => t.channelId),
       a.currentTask ?? null,
+      a.channelIds ?? null,
     ]),
   );
 }
