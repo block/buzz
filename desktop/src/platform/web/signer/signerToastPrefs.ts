@@ -3,7 +3,7 @@ export type SignerToastMode = "always" | "problems" | "off";
 export type SignerToastPosition = "top" | "bottom";
 export type SignerToastPrefs = { mode: SignerToastMode; position: SignerToastPosition };
 export const SIGNER_TOAST_PREFS_KEY = "buzz.web.signerToast";
-export const DEFAULT_SIGNER_TOAST_PREFS: SignerToastPrefs = { mode: "problems", position: "bottom" };
+export const DEFAULT_SIGNER_TOAST_PREFS: SignerToastPrefs = { mode: "off", position: "bottom" };
 /** "Only problems": a request counts as a problem once it has waited this long. */
 export const SIGNER_TOAST_PROBLEM_MS = 5000;
 /** "Always": short delay so fast signers don't flicker the toast. */

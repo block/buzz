@@ -47,8 +47,9 @@ const AUTH_URL_TIMEOUT_MS = 180_000; // user is approving in a browser tab / sig
 // Plain methods plus explicit per-kind sign_event grants: some signers (Primal) only pre-approve kinds that are named.
 // Kinds Buzz web signs: auth 22242, HTTP auth 27235, profile 0, notes 1, deletes 5, reactions 7, chat 9, join/leave 9021/9022,
 // community profile 9033, reports 1984, presence/typing 20001/20002, app data 30078 (settings/read state), emoji 30030,
-// reminders 30300, status 30315, community pins/bots/sections 30623-30625.
-export const SIGN_KINDS = [22242, 27235, 9, 7, 0, 1, 5, 9021, 9022, 9033, 1984, 20001, 20002, 30078, 30030, 30300, 30315, 30623, 30624, 30625];
+// reminders 30300, status 30315, community pins/bots/sections 30623-30625, Blossom media auth 24242 (relay avatars/images),
+// forum/workflow kinds 40002/40003/40008/45001/45003.
+export const SIGN_KINDS = [22242, 27235, 9, 7, 0, 1, 5, 9021, 9022, 9033, 1984, 20001, 20002, 30078, 30030, 30300, 30315, 30623, 30624, 30625, 24242, 40002, 40003, 40008, 45001, 45003];
 export const NOSTRCONNECT_PERMS = [
   "get_public_key",
   "sign_event",

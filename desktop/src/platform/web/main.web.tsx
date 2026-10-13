@@ -4,6 +4,12 @@ import { getSession, probeActiveSigner, resumeSession, signOutSigner, signerPubk
 import { runBootGate, startSignerBanner, type SignerActions } from "./signer/signerOverlay";
 import { startBootWatch } from "./signer/bootWatch";
 import { sendStatus } from "@/shared/lib/sendStatus";
+import { reloadForStaleBuild } from "@/shared/lib/lazyWithReload";
+
+// A chunk from the previous deploy is gone: reload once onto the new build instead of failing a lazy screen.
+window.addEventListener("vite:preloadError", (e) => {
+  if (reloadForStaleBuild()) e.preventDefault();
+});
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   window.addEventListener("load", () => {

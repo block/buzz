@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { Suspense, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
 import type {
@@ -24,14 +24,36 @@ import {
 } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { SoundPicker } from "./SoundPicker";
+import { lazyWithReload } from "@/shared/lib/lazyWithReload";
 import { playNotificationSound } from "@/features/notifications/lib/sound";
 import { sendTestNotification } from "@/features/notifications/lib/testNotification";
+
+/** Shown in place of the push row when its code chunk is from a replaced build and an auto-reload already ran. */
+function StalePushRow() {
+  return (
+    <SettingsOptionRow>
+      <div className="min-w-0">
+        <p className="text-sm font-medium">Phone notifications</p>
+        <p className="text-sm font-normal text-muted-foreground/70">
+          A new version is available.{" "}
+          <button className="underline" onClick={() => location.reload()} type="button">
+            Reload
+          </button>{" "}
+          to show these settings.
+        </p>
+      </div>
+    </SettingsOptionRow>
+  );
+}
 
 // Web Push row: web build only, and only once the push sender is live (VITE_BUZZ_WEB_PUSH_URL set at build time).
 const WebPushSettingsRow =
   import.meta.env?.VITE_BUZZ_PLATFORM === "web" &&
   import.meta.env?.VITE_BUZZ_WEB_PUSH_URL
-    ? lazy(() => import("@/platform/web/push/WebPushSettingsRow"))
+    ? lazyWithReload(
+        () => import("@/platform/web/push/WebPushSettingsRow"),
+        StalePushRow,
+      )
     : null;
 
 function TestNotificationRow({ settings }: { settings: NotificationSettings }) {

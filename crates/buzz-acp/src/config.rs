@@ -125,8 +125,9 @@ impl std::fmt::Display for RespondTo {
 /// - `plan` — planning-only mode (no tool execution).
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum PermissionMode {
-    /// Agent default — permission requests per tool call.
-    #[value(alias = "default")]
+    /// Agent default — permission requests per tool call. `ask` (the desktop's per-agent "Ask before using tools"
+    /// switch) maps here: the agent must raise per-tool permission requests for buzz-acp to route them to you.
+    #[value(alias = "default", alias = "ask")]
     Default,
     /// Auto mode — fully autonomous execution; model-gated (requires a model
     /// that supports `supportsAutoMode`).  Degrades gracefully to `default`
@@ -1647,6 +1648,15 @@ fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn permission_mode_ask_parses_as_default() {
+        use clap::ValueEnum;
+        assert!(matches!(
+            super::PermissionMode::from_str("ask", true),
+            Ok(super::PermissionMode::Default)
+        ));
+    }
+
     use super::*;
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};

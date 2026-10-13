@@ -6,7 +6,6 @@ import {
   WebOpenClawStatusNote,
 } from "@/features/bridge/ui/DesktopData";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
-import { AgentPermissionPromptsCard } from "./AgentPermissionPromptsCard";
 import {
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
@@ -101,7 +100,6 @@ export function AgentsSettingsPanel() {
         <RemoteAgentManagementCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
-        <AgentPermissionPromptsCard />
       </SettingsOptionGroupList>
     </section>
   );

@@ -22,10 +22,20 @@ Avatar.displayName = AvatarPrimitive.Root.displayName;
 const AvatarImage = React.forwardRef<
   React.ElementRef<typeof AvatarPrimitive.Image>,
   React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Image>
->(({ className, src, ...props }, ref) => {
+>(({ className, src, onLoadingStatusChange, ...props }, ref) => {
   // Web: relay-hosted avatars (/media/<sha>) need a signed Authorization header a plain <img> can't send, so they are
   // fetched into a blob: URL first (desktop's localhost proxy does this natively; the hook is identity there).
   const media = useRelayMediaSrc(src);
+  // While the signed fetch is in flight the image has no src yet, and Radix reports that as "error". Callers that
+  // remember failures (ProfileAvatar: DM rows, profile panel) then stuck on initials forever. Only forward an error
+  // once the media fetch itself failed or the real URL failed to load.
+  const pending = media.state === "loading" || media.state === "idle";
+  const failed = media.state === "error";
+  const statusCb = React.useRef(onLoadingStatusChange);
+  statusCb.current = onLoadingStatusChange;
+  React.useEffect(() => {
+    if (failed) statusCb.current?.("error");
+  }, [failed]);
   return (
     <AvatarPrimitive.Image
       ref={ref}
@@ -33,6 +43,10 @@ const AvatarImage = React.forwardRef<
       decoding="async"
       loading="lazy"
       {...props}
+      onLoadingStatusChange={(status) => {
+        if (status === "error" && (pending || failed)) return;
+        onLoadingStatusChange?.(status);
+      }}
       src={media.src}
     />
   );

@@ -12,6 +12,7 @@ import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { AgentIdentityFields } from "./AgentDescriptionField";
 import { OpenClawWorkspaceToggleField } from "./OpenClawWorkspaceToggleField";
+import { envAsks, PermissionAskToggleField, withPermissionAsk } from "./PermissionAskToggleField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
@@ -789,6 +790,21 @@ export function AgentDefinitionDialog({
             setUseOpenClawWorkspace(value);
           }}
           requireConnected={isCreateMode}
+        />
+
+        <PermissionAskToggleField
+          checked={envAsks(envVars)}
+          disabled={isPending}
+          id={
+            isCreateMode
+              ? "create-agent-permission-ask"
+              : "edit-definition-permission-ask"
+          }
+          note={isCreateMode ? undefined : "Applies to agents started from this definition."}
+          onCheckedChange={(value) => {
+            setHasUserChanges(true);
+            setEnvVars((prev) => withPermissionAsk(prev, value));
+          }}
         />
 
         <div className="space-y-1.5">

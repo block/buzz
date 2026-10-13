@@ -26,12 +26,12 @@ export const MAX_TERM_SCROLLBACK = 100_000;
 
 /** Term canvas font size in px. Baseline metrics are designed for 14. */
 export type TermFontSize = 12 | 14 | 16 | 18;
-export const DEFAULT_TERM_FONT_SIZE: TermFontSize = 14;
+export const DEFAULT_TERM_FONT_SIZE: TermFontSize = 12;
 export const TERM_FONT_SIZES: readonly TermFontSize[] = [12, 14, 16, 18];
 
 /** Channel header / ⌘J open mode. Left-nav stays maximized + all scope. */
 export type TermOpenMode = "docked" | "maximized";
-export const DEFAULT_TERM_OPEN_MODE: TermOpenMode = "docked";
+export const DEFAULT_TERM_OPEN_MODE: TermOpenMode = "maximized";
 
 /** Where new Term sessions / handoff Open should land. */
 export type TermSessionHost = "buzz-term" | "herdr";

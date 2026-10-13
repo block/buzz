@@ -323,7 +323,10 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
     case "start_managed_agent":
       return sanitizeAgent(await inv(name, { pubkey: pubkey(a.pubkey), expectedRelayUrl: null, expectedSignerPubkey: deps.ownerPubkey ?? null, replayFloorUnix: null }));
     case "create_persona": {
-      const r = await inv(name, { input: await personaFields(obj(a.input), deps) });
+      const fields = await personaFields(obj(a.input), deps);
+      // The only env allowed at creation over Direct: the definition's "Ask before using tools" switch.
+      if (String(obj(obj(a.input).envVars)[PERMISSION_MODE_ENV] ?? "").trim() === "ask") fields.envVars = { [PERMISSION_MODE_ENV]: "ask" };
+      const r = await inv(name, { input: fields });
       return sanitizePersona(r);
     }
     case "update_persona": {
@@ -381,6 +384,7 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
         if (!rec) bad("Unknown agent.");
         const env = { ...(obj(rec?.env_vars) as Record<string, string>) };
         if (i.permissionAsk) env[PERMISSION_MODE_ENV] = "ask";
+        else if (rec?.persona_id) env[PERMISSION_MODE_ENV] = "bypassPermissions"; // override a definition that asks
         else delete env[PERMISSION_MODE_ENV];
         out.envVars = env;
       }

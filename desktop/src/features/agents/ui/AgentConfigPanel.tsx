@@ -1,3 +1,6 @@
+import { getProxyDirect, subscribeProxy } from "@/features/bridge/remoteCmd";
+import { useAutoDirectOnOpen, useDesktopData } from "@/features/bridge/ui/DesktopData";
+import { ReconnectCard } from "@/shared/ui/reconnect-card";
 import { isTauri } from "@tauri-apps/api/core";
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
@@ -322,7 +325,15 @@ export function AgentConfigPanel({
 }: Props) {
   // Web: the desktop's config is shown read-only (fetched over Direct); editing stays on the desktop.
   const onEdit = isTauri() ? onEditProp : undefined;
-  const { data, isLoading, error } = useAgentConfigSurface(pubkey);
+  const { data, isLoading, error, refetch } = useAgentConfigSurface(pubkey);
+  // Web: this panel reads the desktop over the shared Direct connection. Connect it on open (like Settings → Agents) and reload
+  // once it's live; while it isn't, show the themed reconnect card instead of the raw "Needs a Direct connection" error.
+  useAutoDirectOnOpen();
+  const desktop = useDesktopData();
+  const proxyDirect = React.useSyncExternalStore(subscribeProxy, getProxyDirect);
+  React.useEffect(() => {
+    if (desktop.web && desktop.live && error) void refetch();
+  }, [desktop.web, desktop.live, error, refetch]);
   const flatStateTitle = sections.includes("model")
     ? "Model settings"
     : sections.includes("mcp")
@@ -347,7 +358,32 @@ export function AgentConfigPanel({
   }
 
   if (error || !data) {
-    const errorMessage = (
+    const directIssue =
+      desktop.web &&
+      (!desktop.live ||
+        (error as { code?: string } | null)?.code === "needs_direct");
+    const errorMessage = directIssue ? (
+      <div className="px-4 py-3">
+        {proxyDirect ? null : (
+          <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm text-muted-foreground" data-testid="agent-config-desktop-note">
+            Runtime settings live on your desktop. Open Hula Buzz there to see and change them here.
+          </div>
+        )}
+        <ReconnectCard
+          reconnecting={!!proxyDirect}
+          title={proxyDirect ? "Reconnecting to your desktop…" : "Runtime settings live on your desktop"}
+          description={
+            proxyDirect
+              ? "These settings load when it's back"
+              : "Open Hula Buzz on your desktop to see and change them here."
+          }
+          onReconnectNow={
+            proxyDirect ? () => void proxyDirect.connect().catch(() => undefined) : undefined
+          }
+          testId="agent-config-reconnect"
+        />
+      </div>
+    ) : (
       <p className="px-4 py-3 text-sm text-destructive">
         {error instanceof Error
           ? error.message

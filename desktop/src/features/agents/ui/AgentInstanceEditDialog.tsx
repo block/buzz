@@ -83,6 +83,8 @@ import {
 } from "./runtimeModelProviderSelection";
 import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import { OpenClawWorkspaceToggleField } from "./OpenClawWorkspaceToggleField";
+import { envAsks, PermissionAskToggleField, withPermissionAsk } from "./PermissionAskToggleField";
+import { isTauri } from "@tauri-apps/api/core";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { RunOnSummarySection } from "./RunOnSummarySection";
@@ -200,6 +202,15 @@ export function AgentInstanceEditDialog({
     setSystemPrompt,
   });
   const inheritedEnvVars = linkedPersona?.envVars ?? {};
+  // Web: env values are blanked over Direct, so the switch uses the desktop-reported `permissionAsk` and saves it as
+  // `permissionAsk` (the desktop maps it to the env var). Desktop: the switch edits the env var in the form's env state.
+  const webPermission = !isTauri();
+  const [webPermissionAsk, setWebPermissionAsk] = React.useState<boolean>(
+    agent.permissionAsk === true,
+  );
+  React.useEffect(() => {
+    if (open) setWebPermissionAsk(agent.permissionAsk === true);
+  }, [open, agent.permissionAsk]);
   const [respondTo, setRespondTo] = React.useState<RespondToMode>(
     agent.respondTo,
   );
@@ -790,6 +801,12 @@ export function AgentInstanceEditDialog({
           ? undefined
           : submitEnvVars,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
+        permissionAsk:
+          webPermission &&
+          agent.permissionAsk !== undefined &&
+          webPermissionAsk !== agent.permissionAsk
+            ? webPermissionAsk
+            : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
         // their entries), but we only send it on the wire when (a) it
@@ -1030,6 +1047,31 @@ export function AgentInstanceEditDialog({
               disabled={isSaving}
               id="edit-agent-openclaw-workspace"
               onCheckedChange={setUseOpenClawWorkspace}
+            />
+
+            <PermissionAskToggleField
+              checked={
+                webPermission
+                  ? webPermissionAsk
+                  : envAsks({ ...inheritedEnvVars, ...envVars })
+              }
+              disabled={
+                isSaving || (webPermission && agent.permissionAsk === undefined)
+              }
+              disabledReason={
+                webPermission && agent.permissionAsk === undefined
+                  ? "Connect to your desktop (Buzz desktop 0.5.26-hula.5 or newer) to change this."
+                  : undefined
+              }
+              id="edit-agent-permission-ask"
+              note={agent.status === "running" ? "Applies when the agent restarts." : undefined}
+              onCheckedChange={(value) => {
+                if (webPermission) setWebPermissionAsk(value);
+                else
+                  setEnvVars((prev) =>
+                    withPermissionAsk(prev, value, inheritedEnvVars),
+                  );
+              }}
             />
 
             <OwnerOnlyAccessField

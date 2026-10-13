@@ -79,6 +79,9 @@ async function slot<T>(f: () => Promise<T>): Promise<T> {
 }
 
 export async function proxyCmd<T = unknown>(name: string, args?: Record<string, unknown>): Promise<T> {
+  // Any screen may call before the shared Direct client is connected (e.g. an agent's profile Runtime tab): connect on demand
+  // instead of failing straight away.
+  if (!current?.live) await ensureProxyDirectLive();
   const d = current;
   if (!d || !d.live) throw new NeedsDirectError();
   try {

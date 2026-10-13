@@ -33,7 +33,8 @@ export const SIDEBAR_MENU_COUNT_LABELS: Record<SidebarMenuCountId, string> = {
 
 export const DEFAULT_SIDEBAR_MENU_COUNT_PREFERENCES: SidebarMenuCountPreferences =
   {
-    inbox: false,
+    // Web/PWA: the Inbox unread count is on for a fresh install; desktop keeps it off by default.
+    inbox: import.meta.env?.VITE_BUZZ_PLATFORM === "web",
     browsers: false,
     agents: false,
     bots: false,
