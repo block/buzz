@@ -97,13 +97,13 @@ void main() {
   ) async {
     await tester.pumpWidget(_testable());
     LocalSendProgress motion() => tester.widget(find.byType(LocalSendProgress));
-    await tester.pump(const Duration(milliseconds: 80));
+    await tester.pump(localMessageSendTransitionDuration ~/ 4);
     expect(motion().widthProgress, greaterThan(motion().progress));
     expect(motion().progress, greaterThan(0));
-    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(localMessageSendTransitionDuration * 0.375);
     expect(motion().widthProgress, 1);
     expect(motion().progress, inExclusiveRange(0, 1));
-    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(localMessageSendTransitionDuration * 0.375);
     expect(motion().progress, 1);
   });
   for (final reduced in [false, true]) {

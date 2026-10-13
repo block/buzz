@@ -7,7 +7,7 @@ import 'composer_send_origin.dart';
 import 'local_send_row.dart';
 
 /// Duration of a local message's entrance transition.
-const localMessageSendTransitionDuration = Duration(milliseconds: 320);
+const localMessageSendTransitionDuration = Duration(milliseconds: 450);
 
 /// Default travel multiplier for a message entrance.
 const localMessageSendTransitionStartOffset = 1.5;
