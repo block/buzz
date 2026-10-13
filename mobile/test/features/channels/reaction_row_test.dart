@@ -622,8 +622,9 @@ void main() {
       await tester.tap(chip);
       await tester.pump();
       expect(controller.hasParticles, entry.bursts);
-      if (entry.bursts)
+      if (entry.bursts) {
         expect(controller.debugLastBurstOrigin, tester.getCenter(chip));
+      }
     });
   }
 
