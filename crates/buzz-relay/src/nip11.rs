@@ -94,12 +94,6 @@ pub struct BuzzV1Descriptor {
     pub max_channels: usize,
     /// Maximum independent write intents per request.
     pub max_intents: usize,
-    /// Maximum explicit contexts per read request.
-    pub max_contexts: usize,
-    /// Maximum message selectors across one context request.
-    pub max_context_messages: usize,
-    /// Maximum unread-thread summaries per sidebar channel row.
-    pub max_thread_summaries: usize,
     /// Message kinds that count as unread and as latest activity. Clients
     /// classify live arrivals with this set instead of keeping a copy.
     pub eligible_kinds: [i32; 4],
@@ -342,7 +336,6 @@ fn push_descriptor(
             "pubkey": relay_keypair.public_key().to_hex(),
             "current": true
         }],
-        "app_profiles": [{"id": "buzz-ios-dogfood", "transport": "apns"}],
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
         "h_grammar": "uuid-v4-lowercase",
         "class_support": {"apns": ["default"]},
@@ -389,19 +382,13 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     );
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
         if state.config.buzz_v1_enabled {
-            use buzz_db::personal_read::{
-                ELIGIBLE_KINDS, MAX_CHANNELS, MAX_CONTEXTS, MAX_CONTEXT_MESSAGES, MAX_INTENTS,
-                MAX_THREAD_SUMMARIES,
-            };
+            use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
             info.buzz_v1 = Some(BuzzV1Descriptor {
                 version: 1,
                 base_path: crate::api::buzz_v1::BASE_PATH.to_owned(),
                 retention_seconds: state.config.buzz_v1_retention_seconds,
                 max_channels: MAX_CHANNELS,
                 max_intents: MAX_INTENTS,
-                max_contexts: MAX_CONTEXTS,
-                max_context_messages: MAX_CONTEXT_MESSAGES,
-                max_thread_summaries: MAX_THREAD_SUMMARIES,
                 eligible_kinds: ELIGIBLE_KINDS,
             });
         }
@@ -429,7 +416,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     ) {
         info.supported_extensions
             .get_or_insert_default()
-            .push("nip-pl".to_string());
+            .push("buzz-push-v1".to_string());
         info.push = Some(push);
     }
     info

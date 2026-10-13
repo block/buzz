@@ -172,6 +172,9 @@ run_unit_tests() {
   # Mirror the relay filters from `just test-unit`: the three handler modules,
   # storage-snapshot helpers, readiness and router unit suites, and the single
   # scoped admission regression in state::tests, plus the REQ lifecycle tests.
+  run_test_step "buzz-relay push runtime tests" \
+    cargo test -p buzz-relay --lib push_runtime:: -- --nocapture
+
   run_test_step "buzz-relay channel authorization tests" \
     cargo test -p buzz-relay --lib handlers::channel_authz:: -- --nocapture
 
@@ -236,7 +239,8 @@ run_unit_tests() {
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
       handlers::req::tests::claims_after_connection_cleanup_are_refused \
       handlers::req::tests::dropped_terminal_frame_cancels_connection \
-      handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection
+      handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection \
+      handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions
 
   run_test_step "buzz-relay readiness tests" \
     cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture

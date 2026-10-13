@@ -1,22 +1,23 @@
 import UIKit
 import ImageIO
 
-/// Native resizable sheet: selected emoji first, with All and per-emoji filters.
+/// Native reaction toggles above the complete list of reactors.
 final class NativeReactionDetailsViewController: UIViewController, UITableViewDataSource {
   var onClose: (() -> Void)?
+  var onToggle: ((String) -> Void)?
   private let sheetColor: UIColor
   private let foregroundColor: UIColor
-  private let reactions: [[String: Any]]
+  private let outlineColor: UIColor
+  private var reactions: [[String: Any]]
   private var profiles: [String: [String: Any]]
-  private var selectedEmoji: String?
   private let table = UITableView(frame: .zero, style: .plain)
   private let filters = UIStackView()
   private var filterHeight: NSLayoutConstraint?
   private var rows: [(String, [String: Any])] = []
+  private var burstGlyphs: [UILabel] = []
 
   private func rebuildRows() {
-    rows = reactions.filter { selectedEmoji == nil || $0["emoji"] as? String == selectedEmoji }
-      .flatMap { reaction in
+    rows = reactions.flatMap { reaction in
         (reaction["users"] as? [String] ?? []).map { ($0, reaction) }
       }
   }
@@ -31,10 +32,9 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     }
     sheetColor = color("sheetColor", fallback: .systemGroupedBackground)
     foregroundColor = color("foregroundColor", fallback: .label)
+    outlineColor = color("outlineColor", fallback: .separator)
     reactions = data["reactions"] as? [[String: Any]] ?? []
     profiles = data["profiles"] as? [String: [String: Any]] ?? [:]
-    let initial = data["initialEmoji"] as? String
-    selectedEmoji = reactions.contains { $0["emoji"] as? String == initial } ? initial : nil
     super.init(nibName: nil, bundle: nil)
     rebuildRows()
     overrideUserInterfaceStyle = data["dark"] as? Bool == true ? .dark : .light
@@ -132,8 +132,6 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
 
   private func rebuildFilters() {
     for child in filters.arrangedSubviews { child.removeFromSuperview() }
-    let count = reactions.reduce(0) { $0 + ($1["count"] as? Int ?? 0) }
-    addFilter(title: "All \(count)", emoji: nil, reaction: nil)
     for reaction in reactions {
       guard let emoji = reaction["emoji"] as? String else { continue }
       addFilter(title: "\(reaction["count"] as? Int ?? 0)", emoji: emoji, reaction: reaction)
@@ -144,20 +142,25 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     var config = UIButton.Configuration.tinted()
     config.cornerStyle = .capsule
     config.title = reaction == nil ? title : "       \(title)"
-    config.baseBackgroundColor = selectedEmoji == emoji ? .systemBlue : .tertiarySystemFill
-    config.baseForegroundColor = selectedEmoji == emoji ? .systemBlue : .label
-    let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
+    let selected = reaction?["selected"] as? Bool == true
+    config.baseBackgroundColor = selected ? foregroundColor : .tertiarySystemFill
+    config.baseForegroundColor = selected ? foregroundColor : .label
+    config.background.strokeWidth = 1
+    let stroke = selected ? foregroundColor.withAlphaComponent(0.40) : outlineColor
+    config.background.strokeColor = stroke
+    config.background.strokeColorTransformer = UIConfigurationColorTransformer { _ in stroke }
+    let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] action in
       guard let self else { return }
-      guard self.selectedEmoji != emoji else { return }
-      self.selectedEmoji = emoji
-      self.rebuildRows()
-      self.rebuildFilters()
-      self.table.reloadData()
-      self.table.setContentOffset(.zero, animated: false)
+      guard let emoji else { return }
+      if !selected, reaction?["burst"] as? Bool == true,
+        let button = action.sender as? UIButton {
+        self.burst(emoji, from: button)
+      }
+      self.onToggle?(emoji)
       UISelectionFeedbackGenerator().selectionChanged()
     })
     button.accessibilityLabel = reaction.map { "\($0["label"] as? String ?? emoji ?? "") \(title)" } ?? title
-    if selectedEmoji == emoji { button.accessibilityTraits.insert(.selected) }
+    if selected { button.accessibilityTraits.insert(.selected) }
     if let reaction {
       let glyph = NativeMessageGlyph(data: reaction, size: 22)
       glyph.isUserInteractionEnabled = false
@@ -171,6 +174,82 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
       ])
     }
     filters.addArrangedSubview(button)
+  }
+
+  /// Mirrors Flutter EmojiBurstController's five-particle, fixed-60Hz physics.
+  /// UIKit owns this sheet, so Flutter's underlying overlay cannot paint above it.
+  private func burst(_ emoji: String, from button: UIView) {
+    guard !UIAccessibility.isReduceMotionEnabled,
+      burstGlyphs.count + 5 <= 160, let window = view.window else { return }
+    let origin = button.convert(CGPoint(x: button.bounds.midX, y: button.bounds.midY), to: window)
+    for _ in 0..<5 {
+      let glyph = UILabel()
+      glyph.text = emoji
+      glyph.font = .systemFont(ofSize: 18 + ceil(CGFloat.random(in: 0..<24)))
+      glyph.sizeToFit()
+      glyph.center = origin
+      glyph.isUserInteractionEnabled = false
+      glyph.isAccessibilityElement = false
+      window.addSubview(glyph)
+      burstGlyphs.append(glyph)
+      var x = origin.x, y = origin.y
+      var xv = CGFloat.random(in: -2.2..<2.2)
+      var yv = -CGFloat.random(in: 2.1..<4.45)
+      var rotation = CGFloat.random(in: -11..<11)
+      let spin = CGFloat.random(in: -2.6..<2.6)
+      let gravity = -CGFloat.random(in: 0.018..<0.036)
+      var scale: CGFloat = 0.25
+      var positions = [NSValue(cgPoint: origin)]
+      var rotations = [rotation * .pi / 180]
+      var scales = [scale]
+      var opacities: [CGFloat] = [1]
+      for frame in 1...108 {
+        rotation += spin
+        yv = (yv + gravity) * 0.998
+        xv *= 0.965
+        x += xv
+        y += yv
+        scale += (1 - scale) * 0.28
+        positions.append(NSValue(cgPoint: CGPoint(x: x, y: y)))
+        rotations.append(rotation * .pi / 180)
+        scales.append(scale)
+        opacities.append(min(1, CGFloat(108 - frame) / (108 * 0.24)))
+      }
+      let values: [(String, [Any])] = [
+        ("position", positions), ("transform.rotation.z", rotations),
+        ("transform.scale", scales), ("opacity", opacities),
+      ]
+      let group = CAAnimationGroup()
+      group.duration = 108.0 / 60.0
+      group.animations = values.map { key, frames in
+        let animation = CAKeyframeAnimation(keyPath: key)
+        animation.values = frames
+        animation.duration = group.duration
+        animation.calculationMode = .linear
+        return animation
+      }
+      glyph.layer.opacity = 0
+      glyph.layer.add(group, forKey: "reaction-burst")
+      DispatchQueue.main.asyncAfter(deadline: .now() + group.duration) { [weak self, weak glyph] in
+        glyph?.removeFromSuperview()
+        self?.burstGlyphs.removeAll { $0 === glyph }
+      }
+    }
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    burstGlyphs.forEach { $0.removeFromSuperview() }
+    burstGlyphs.removeAll()
+  }
+
+  func updateReactions(_ reactions: [[String: Any]]) {
+    guard !reactions.isEmpty else { onClose?(); return }
+    self.reactions = reactions
+    rebuildRows()
+    guard isViewLoaded else { return }
+    rebuildFilters()
+    table.reloadData()
   }
 
   func updateProfiles(_ profiles: [String: [String: Any]]) {

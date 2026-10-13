@@ -22,79 +22,47 @@ class _NotificationsSection extends ConsumerWidget {
         !optOutPending) {
       return const SizedBox.shrink();
     }
-    final authorization = ref.watch(buzzPushAuthorizationStatusProvider);
-    final status = authorization.value;
-    final permissionUnavailable = authorization.hasError;
-    final permissionDenied = status == BuzzPushAuthorizationStatus.denied;
-    final showSettingsRecovery =
-        optOutPending ||
-        (community.pushNotificationsEnabled &&
-            (permissionDenied || permissionUnavailable));
     final canToggle = hasCapability || community.pushNotificationsEnabled;
-    final subtitle = optOutPending
-        ? 'Waiting for relay confirmation; notifications may continue'
-        : !community.pushNotificationsEnabled
-        ? 'Off for this community'
-        : !hasCapability
-        ? 'Push support unavailable; you can still turn notifications off'
-        : switch (status) {
-            BuzzPushAuthorizationStatus.notDetermined =>
-              'Waiting for iOS notification permission',
-            BuzzPushAuthorizationStatus.denied =>
-              'Enabled in Buzz, but disabled in iOS Settings',
-            BuzzPushAuthorizationStatus.authorized ||
-            BuzzPushAuthorizationStatus.provisional ||
-            BuzzPushAuthorizationStatus.ephemeral =>
-              'Receive message notifications from this community',
-            null when authorization.isLoading =>
-              'Checking iOS notification permission',
-            null => 'Enabled in Buzz; iOS permission status unavailable',
-          };
+
+    void setEnabled(bool enabled) {
+      unawaited(
+        ref
+            .read(communityListProvider.notifier)
+            .setPushNotificationsEnabled(community.id, enabled),
+      );
+    }
 
     return AppListCard(
-      label: 'Notifications',
       verticalPadding: Grid.twelve,
       children: [
-        AppListRow(
-          key: const ValueKey('push-notifications-enabled'),
-          icon: BuzzIcons.bell,
-          title: 'Push notifications',
-          subtitle: subtitle,
-          subtitleStyle: showSettingsRecovery
-              ? context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.error,
-                )
-              : null,
-          trailing: Switch.adaptive(
-            value: community.pushNotificationsEnabled,
-            onChanged: !canToggle
-                ? null
-                : (enabled) => unawaited(
-                    ref
-                        .read(communityListProvider.notifier)
-                        .setPushNotificationsEnabled(community.id, enabled),
+        MergeSemantics(
+          key: const ValueKey('push-notifications-setting'),
+          child: Stack(
+            alignment: Alignment.centerRight,
+            children: [
+              AppListRow(
+                key: const ValueKey('push-notifications-enabled'),
+                title: 'Notifications',
+                // Reserve horizontal room without letting the switch's 48dp
+                // layout height expand this single-line row.
+                trailing: const SizedBox(width: 60),
+                onTap: canToggle
+                    ? () => setEnabled(!community.pushNotificationsEnabled)
+                    : null,
+              ),
+              Positioned.fill(
+                right: Grid.xs,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: Switch.adaptive(
+                    value: community.pushNotificationsEnabled,
+                    onChanged: canToggle ? setEnabled : null,
                   ),
-          ),
-          onTap: !canToggle
-              ? null
-              : () => unawaited(
-                  ref
-                      .read(communityListProvider.notifier)
-                      .setPushNotificationsEnabled(
-                        community.id,
-                        !community.pushNotificationsEnabled,
-                      ),
                 ),
-        ),
-        if (showSettingsRecovery)
-          AppListRow(
-            key: const ValueKey('push-notifications-open-settings'),
-            icon: BuzzIcons.settings,
-            title: 'Open iOS Notification Settings',
-            onTap: () => unawaited(
-              ref.read(buzzPushNotificationSettingsOpenerProvider)(),
-            ),
+              ),
+            ],
           ),
+        ),
       ],
     );
   }

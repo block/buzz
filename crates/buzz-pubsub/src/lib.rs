@@ -398,6 +398,25 @@ impl PubSubManager {
         presence::clear_presence(&self.pool, ctx, pubkey).await
     }
 
+    /// Set one status with the 180s TTL for each of `pubkeys`, in one round trip.
+    pub async fn set_presence_many(
+        &self,
+        ctx: &TenantContext,
+        pubkeys: &[PublicKey],
+        status: &str,
+    ) -> Result<(), PubSubError> {
+        presence::set_presence_many(&self.pool, ctx, pubkeys, status).await
+    }
+
+    /// Remove presence for each of `pubkeys`.
+    pub async fn clear_presence_many(
+        &self,
+        ctx: &TenantContext,
+        pubkeys: &[PublicKey],
+    ) -> Result<(), PubSubError> {
+        presence::clear_presence_many(&self.pool, ctx, pubkeys).await
+    }
+
     /// Returns the current presence status for `pubkey`, or `None` if not set.
     pub async fn get_presence(
         &self,

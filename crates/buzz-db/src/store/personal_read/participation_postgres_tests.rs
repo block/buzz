@@ -121,32 +121,10 @@ impl World {
             .remove(0)
     }
 
-    /// The wire state of one message in the channel timeline or `root`'s thread.
-    async fn state(
-        &self,
-        channel: Uuid,
-        root: Option<&nostr::Event>,
-        message: &nostr::Event,
-    ) -> Value {
-        let page = self
-            .db
-            .personal_read_contexts(
-                self.community,
-                &self.actor.public_key(),
-                DEFAULT_RETENTION_SECONDS,
-                &[ContextQuery {
-                    target: ReadTarget {
-                        channel_id: channel,
-                        root_id: root.map(|root| root.id.to_hex()),
-                    },
-                    message_ids: vec![message.id.to_hex()],
-                }],
-            )
-            .await
-            .unwrap();
-        let mut state = wire(&page)["contexts"][0]["messages"][0].take();
-        state.as_object_mut().unwrap().remove("message_id");
-        state
+    /// The row's counts and thread rows: what the sidebar says counts.
+    async fn counts(&self, channel: Uuid) -> Value {
+        let row = self.row(channel).await;
+        json!({"unread":row.unread,"mentions":row.mentions,"threads":wire(&row.threads)})
     }
 
     fn mention(&self) -> Tag {
@@ -158,26 +136,20 @@ fn wire<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap()
 }
 
-fn exact(value: u32) -> Value {
-    json!({"status":"exact","value":value})
-}
-
-/// Unread with a reason; `Value::Null` for an ordinary top-level message.
-fn unread(reason: impl Into<Value>) -> Value {
-    json!({"status":"unread","reason":reason.into()})
-}
-
-fn status(status: &str) -> Value {
-    json!({ "status": status })
+/// Expected `counts`: whether a top-level message is unread, how many of those
+/// are directed, and the listed thread rows.
+fn counts(unread: bool, mentions: u32, threads: Vec<Value>) -> Value {
+    json!({"unread":unread,"mentions":mentions,"threads":threads})
 }
 
 fn broadcast() -> Tag {
     Tag::parse(["broadcast", "1"]).unwrap()
 }
 
-fn item(root: &nostr::Event, unread: u32, latest: &nostr::Event) -> Value {
-    json!({"root_id":root.id.to_hex(),"unread":exact(unread),
-        "latest_reply_id":latest.id.to_hex(),"latest_reply_at":latest.created_at.as_secs()})
+/// A listed, never-marked thread with `mentions` counted unread replies.
+fn item(root: &nostr::Event, mentions: u32, latest: &nostr::Event) -> Value {
+    json!({"root_id":root.id.to_hex(),"unread":true,"mentions":mentions,
+        "read_through_id":null,"latest_id":latest.id.to_hex()})
 }
 
 #[tokio::test]
@@ -197,22 +169,11 @@ async fn a_reply_counts_only_in_a_conversation_the_actor_wrote_or_replied_to() {
     let nested = w
         .reply(c, &w.peer, &root, Some(&answer), w.now + 2, vec![])
         .await;
-    assert_eq!(w.state(c, None, &root).await, status("not_counted"));
+    // Only `answer` counts. The newer reply that does not count is not the
+    // thread's latest.
     assert_eq!(
-        w.state(c, Some(&root), &answer).await,
-        unread("conversation")
-    );
-    assert_eq!(
-        w.state(c, Some(&root), &nested).await,
-        status("not_counted")
-    );
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(1));
-    assert_eq!(wire(&row.attention), exact(1));
-    // The newer reply that does not count is not the thread's preview.
-    assert_eq!(
-        wire(&row.threads),
-        json!({"items":[item(&root, 1, &answer)],"complete":true})
+        w.counts(c).await,
+        counts(false, 0, vec![item(&root, 1, &answer)])
     );
 
     // Joining the nested conversation makes its earlier reply count. The
@@ -220,14 +181,8 @@ async fn a_reply_counts_only_in_a_conversation_the_actor_wrote_or_replied_to() {
     w.reply(c, &w.actor, &root, Some(&answer), w.now + 3, vec![])
         .await;
     assert_eq!(
-        w.state(c, Some(&root), &nested).await,
-        unread("conversation")
-    );
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(2));
-    assert_eq!(
-        wire(&row.threads),
-        json!({"items":[item(&root, 2, &nested)],"complete":true})
+        w.counts(c).await,
+        counts(false, 0, vec![item(&root, 2, &nested)])
     );
 
     // A peer's thread. The actor replied to one of two parents, long ago.
@@ -240,45 +195,24 @@ async fn a_reply_counts_only_in_a_conversation_the_actor_wrote_or_replied_to() {
     let sibling = w
         .reply(c, &w.peer, &root, Some(&joined), w.now + 1, vec![])
         .await;
-    let elsewhere = w
-        .reply(c, &w.peer, &root, Some(&other), w.now + 2, vec![])
+    w.reply(c, &w.peer, &root, Some(&other), w.now + 2, vec![])
         .await;
     assert_eq!(
-        w.state(c, Some(&root), &sibling).await,
-        unread("conversation")
-    );
-    assert_eq!(
-        w.state(c, Some(&root), &elsewhere).await,
-        status("not_counted")
-    );
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(1));
-    assert_eq!(
-        wire(&row.threads),
-        json!({"items":[item(&root, 1, &sibling)],"complete":true})
+        w.counts(c).await,
+        counts(false, 0, vec![item(&root, 1, &sibling)])
     );
 
     // A conversation the actor never joined: one unread top-level message, and
     // a reply that is not unread even in its own thread.
     let c = w.channel().await;
     let root = w.post(c, &w.peer, w.now, vec![]).await;
-    let reply = w
-        .reply(c, &w.peer, &root, Some(&root), w.now + 1, vec![])
+    w.reply(c, &w.peer, &root, Some(&root), w.now + 1, vec![])
         .await;
-    assert_eq!(w.state(c, None, &root).await, unread(Value::Null));
-    assert_eq!(w.state(c, Some(&root), &reply).await, status("not_counted"));
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(1));
-    assert_eq!(wire(&row.attention), exact(0));
-    assert_eq!(wire(&row.threads), json!({"items":[],"complete":true}));
+    assert_eq!(w.counts(c).await, counts(true, 0, vec![]));
 
-    // A reply whose parent was never recorded is undecided, not absent.
-    let orphan = w.reply(c, &w.peer, &root, None, w.now + 2, vec![]).await;
-    assert_eq!(w.state(c, Some(&root), &orphan).await, status("unknown"));
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), json!({"status":"at_least","value":1}));
-    assert_eq!(wire(&row.attention), status("unknown"));
-    assert_eq!(wire(&row.threads), json!({"items":[],"complete":false}));
+    // A reply whose parent was never recorded is undecided: left out.
+    w.reply(c, &w.peer, &root, None, w.now + 2, vec![]).await;
+    assert_eq!(w.counts(c).await, counts(true, 0, vec![]));
 }
 
 #[tokio::test]
@@ -288,29 +222,12 @@ async fn a_directed_reply_counts_outside_the_actors_conversations() {
     let c = w.channel().await;
     let root = w.post(c, &w.peer, w.now, vec![]).await;
     let parent = w.reply(c, &w.peer, &root, Some(&root), w.now, vec![]).await;
-    let own = w
-        .reply(c, &w.actor, &root, Some(&root), w.now + 1, vec![])
+    w.reply(c, &w.actor, &root, Some(&root), w.now + 1, vec![])
         .await;
-    let mention = w
-        .reply(
-            c,
-            &w.peer,
-            &root,
-            Some(&parent),
-            w.now + 2,
-            vec![w.mention()],
-        )
-        .await;
-    let shout = w
-        .reply(
-            c,
-            &w.peer,
-            &root,
-            Some(&parent),
-            w.now + 3,
-            vec![broadcast()],
-        )
-        .await;
+    for (at, tags) in [(2, vec![w.mention()]), (3, vec![broadcast()])] {
+        w.reply(c, &w.peer, &root, Some(&parent), w.now + at, tags)
+            .await;
+    }
     let both = w
         .reply(
             c,
@@ -321,28 +238,16 @@ async fn a_directed_reply_counts_outside_the_actors_conversations() {
             vec![broadcast(), w.mention()],
         )
         .await;
-    assert_eq!(w.state(c, Some(&root), &own).await, status("not_counted"));
-    assert_eq!(w.state(c, Some(&root), &mention).await, unread("mention"));
-    assert_eq!(w.state(c, Some(&root), &shout).await, unread("broadcast"));
-    assert_eq!(w.state(c, Some(&root), &both).await, unread("mention"));
-    // The root, the actor's sibling `parent`, and the three directed replies.
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(5));
-    assert_eq!(wire(&row.attention), exact(4));
-    assert_eq!(
-        wire(&row.threads),
-        json!({"items":[item(&root, 4, &both)],"complete":true})
-    );
+    // The root is an undirected top-level message. The thread counts the
+    // actor's sibling `parent` and the three directed replies, not the
+    // actor's own.
+    let expected = counts(true, 0, vec![item(&root, 4, &both)]);
+    assert_eq!(w.counts(c).await, expected);
 
-    // Conversation outranks broadcast, never mention. Counts do not move.
+    // Joining the directed replies' conversation changes no count.
     w.reply(c, &w.actor, &root, Some(&parent), w.now + 5, vec![])
         .await;
-    assert_eq!(w.state(c, Some(&root), &mention).await, unread("mention"));
-    assert_eq!(
-        w.state(c, Some(&root), &shout).await,
-        unread("conversation")
-    );
-    assert_eq!(wire(&w.row(c).await.unread), exact(5));
+    assert_eq!(w.counts(c).await, expected);
 
     // In a DM every peer message is direct, tagged or not, joined or not.
     let dm = w.channel().await;
@@ -359,33 +264,34 @@ async fn a_directed_reply_counts_outside_the_actors_conversations() {
     let reply = w
         .reply(dm, &w.peer, &root, Some(&parent), w.now + 1, vec![])
         .await;
-    assert_eq!(w.state(dm, None, &root).await, unread("direct"));
-    assert_eq!(w.state(dm, Some(&root), &reply).await, unread("direct"));
-    let row = w.row(dm).await;
-    assert_eq!(wire(&row.unread), exact(3));
-    assert_eq!(wire(&row.attention), exact(3));
+    assert_eq!(
+        w.counts(dm).await,
+        counts(true, 1, vec![item(&root, 2, &reply)])
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn eligibility_then_the_read_frontier_are_reported_before_membership() {
+async fn eligibility_frontier_and_membership_each_leave_replies_out() {
     let w = World::new().await;
     let c = w.channel().await;
     let root = w.post(c, &w.peer, w.now, vec![]).await;
     let parent = w.reply(c, &w.peer, &root, Some(&root), w.now, vec![]).await;
     let reply = |author, at, tags| w.reply(c, author, &root, Some(&parent), w.now + at, tags);
     // Peer replies to a parent the actor neither wrote nor replied to.
-    let outside = reply(&w.peer, 1, vec![]).await;
-    let deleted = reply(&w.peer, 2, vec![]).await;
+    reply(&w.peer, 1, vec![]).await;
+    let deleted = reply(&w.peer, 2, vec![w.mention()]).await;
     w.delete(&deleted).await;
-    let own = w
-        .reply(c, &w.actor, &root, Some(&root), w.now + 3, vec![])
+    w.reply(c, &w.actor, &root, Some(&root), w.now + 3, vec![])
         .await;
     let anchor = reply(&w.peer, 4, vec![w.mention()]).await;
-    let later = reply(&w.peer, 5, vec![]).await;
+    // Undirected, outside the actor's conversations: never counts.
+    reply(&w.peer, 5, vec![]).await;
+    // `parent` (a reply to the root, which the actor answered) and `anchor`
+    // count: not the deleted, own or undirected replies.
     assert_eq!(
-        w.state(c, Some(&root), &outside).await,
-        status("not_counted")
+        w.counts(c).await,
+        counts(true, 0, vec![item(&root, 2, &anchor)])
     );
 
     assert_eq!(
@@ -404,15 +310,14 @@ async fn eligibility_then_the_read_frontier_are_reported_before_membership() {
         .unwrap(),
         IntentOutcome::Applied
     );
-    for (message, expected) in [
-        (&outside, "read"),
-        (&deleted, "not_counted"),
-        (&own, "not_counted"),
-        (&anchor, "read"),
-        (&later, "not_counted"),
-    ] {
-        assert_eq!(w.state(c, Some(&root), message).await, status(expected));
-    }
+    assert_eq!(w.counts(c).await, counts(true, 0, vec![]));
+    // A later directed reply is unread past the thread's anchor; the channel
+    // timeline was never marked.
+    let after = reply(&w.peer, 6, vec![w.mention()]).await;
+    let mut thread = item(&root, 1, &after);
+    thread["read_through_id"] = json!(anchor.id.to_hex());
+    assert_eq!(w.counts(c).await, counts(true, 0, vec![thread]));
+    assert_eq!(w.row(c).await.read_through_id, None);
 }
 
 #[tokio::test]
@@ -425,11 +330,11 @@ async fn a_deleted_message_is_no_witness_and_a_surviving_reply_still_is() {
 
     // The actor wrote the parent and never replied under it.
     let wrote = reply(&w.actor, &root, 0).await;
-    let to_wrote = reply(&w.peer, &wrote, 10).await;
+    reply(&w.peer, &wrote, 10).await;
     // The actor's only reply to a peer's parent.
     let once = reply(&w.peer, &root, 0).await;
     let only = reply(&w.actor, &once, 1).await;
-    let to_once = reply(&w.peer, &once, 11).await;
+    reply(&w.peer, &once, 11).await;
     // Two replies by the actor to a peer's parent.
     let twice = reply(&w.peer, &root, 0).await;
     let first = reply(&w.actor, &twice, 1).await;
@@ -440,42 +345,33 @@ async fn a_deleted_message_is_no_witness_and_a_surviving_reply_still_is() {
     let under = reply(&w.actor, &both, 1).await;
     let to_both = reply(&w.peer, &both, 13).await;
 
-    // Whether each counts: `unread` in a conversation, or else `not_counted`.
-    let counted = || async {
-        let mut counted = Vec::new();
-        for message in [&to_wrote, &to_once, &to_twice, &to_both] {
-            let state = w.state(c, Some(&root), message).await;
-            let yes = state == unread("conversation");
-            assert!(yes || state == status("not_counted"), "{state}");
-            counted.push(yes);
-        }
-        counted
+    // How many replies the thread counts, the latest of them `to_both` until
+    // it stops counting.
+    let w = &w;
+    let thread = |mentions: u32| async move {
+        let row = w.row(c).await;
+        assert!(!row.unread, "the root predates the horizon");
+        assert_eq!(row.threads.len(), 1);
+        assert_eq!(row.threads[0].mentions, mentions);
+        row.threads[0].latest_id.clone()
     };
-    let (yes, no) = (true, false);
-    // `once` and `twice` are peer replies to the root, which the actor has
-    // replied to (`wrote`, `both`), so they count as well.
-    assert_eq!(counted().await, [yes, yes, yes, yes]);
-    assert_eq!(wire(&w.row(c).await.unread), exact(6));
+    // The four peer replies to the actor's conversations count. So do `once`
+    // and `twice`: peer replies to the root, which the actor has replied to
+    // (`wrote`, `both`).
+    assert_eq!(thread(6).await, to_both.id.to_hex());
 
     // Each deletion changes only its own parent's conversation.
     w.delete(&wrote).await;
-    assert_eq!(counted().await, [no, yes, yes, yes]);
+    assert_eq!(thread(5).await, to_both.id.to_hex());
     w.delete(&only).await;
-    assert_eq!(counted().await, [no, no, yes, yes]);
+    assert_eq!(thread(4).await, to_both.id.to_hex());
     w.delete(&first).await;
-    assert_eq!(counted().await, [no, no, yes, yes]);
-    w.delete(&both).await;
-    assert_eq!(counted().await, [no, no, yes, yes]);
-    assert_eq!(wire(&w.row(c).await.unread), exact(2));
-    w.delete(&under).await;
-    assert_eq!(counted().await, [no, no, yes, no]);
+    assert_eq!(thread(4).await, to_both.id.to_hex());
     // With `wrote` and `both` gone the actor has no reply to the root either.
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(1));
-    assert_eq!(
-        wire(&row.threads),
-        json!({"items":[item(&root, 1, &to_twice)],"complete":true})
-    );
+    w.delete(&both).await;
+    assert_eq!(thread(2).await, to_both.id.to_hex());
+    w.delete(&under).await;
+    assert_eq!(thread(1).await, to_twice.id.to_hex());
 }
 
 #[tokio::test]
@@ -492,32 +388,21 @@ async fn membership_is_scoped_to_the_replys_own_channel() {
     let in_a = w
         .reply(a, &w.peer, &theirs, Some(&theirs), w.now, vec![])
         .await;
-    assert_eq!(
-        w.state(a, Some(&theirs), &in_a).await,
-        status("not_counted")
-    );
-    assert_eq!(wire(&w.row(a).await.unread), exact(0));
+    assert_eq!(w.counts(a).await, counts(false, 0, vec![]));
 
     // The actor wrote a parent in A. A peer reply in B claims it as its parent.
     let mine = w.post(a, &w.actor, old, vec![]).await;
     w.reply(b, &w.peer, &mine, Some(&mine), w.now, vec![]).await;
-    let row = w.row(b).await;
-    assert_eq!(wire(&row.unread), exact(0));
-    assert_eq!(wire(&row.threads), json!({"items":[],"complete":true}));
+    assert_eq!(w.counts(b).await, counts(false, 0, vec![]));
 
     // The same parents count once the actor is a member in the reply's channel.
     w.reply(a, &w.actor, &theirs, Some(&theirs), old, vec![])
         .await;
     let to_mine = w.reply(a, &w.peer, &mine, Some(&mine), w.now, vec![]).await;
-    assert_eq!(
-        w.state(a, Some(&theirs), &in_a).await,
-        unread("conversation")
-    );
-    assert_eq!(
-        w.state(a, Some(&mine), &to_mine).await,
-        unread("conversation")
-    );
-    assert_eq!(wire(&w.row(a).await.unread), exact(2));
+    // Equal reply times: root ID order.
+    let mut threads = [item(&theirs, 1, &in_a), item(&mine, 1, &to_mine)];
+    threads.sort_by(|x, y| x["root_id"].as_str().cmp(&y["root_id"].as_str()));
+    assert_eq!(w.counts(a).await, counts(false, 0, threads.to_vec()));
 }
 
 #[tokio::test]
@@ -536,13 +421,9 @@ async fn membership_is_exact_behind_a_busy_parent() {
             .reply(c, &w.peer, &root, Some(&root), w.now + i, vec![])
             .await;
     }
-    assert_eq!(w.state(c, Some(&root), &last).await, unread("conversation"));
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(258));
-    assert_eq!(wire(&row.attention), exact(258));
     assert_eq!(
-        wire(&row.threads),
-        json!({"items":[item(&root, 258, &last)],"complete":true})
+        w.counts(c).await,
+        counts(false, 0, vec![item(&root, 258, &last)])
     );
 }
 
@@ -552,67 +433,52 @@ async fn threads_are_capped_after_replies_that_do_not_count_are_removed() {
     let w = World::new().await;
     let c = w.channel().await;
     let old = w.now - 40 * DAY;
-    // The actor's thread has the oldest unread reply. Five unjoined threads
-    // are newer and would fill the list if the cap came first.
+    // The actor's thread has the oldest unread reply. A cap's worth of
+    // unjoined threads are newer and would fill the list if the cap came
+    // first.
     let mine = w.post(c, &w.actor, old, vec![]).await;
     let answer = w.reply(c, &w.peer, &mine, Some(&mine), w.now, vec![]).await;
-    for i in 1..=5 {
+    for i in 1..=MAX_THREAD_SUMMARIES as u64 {
         let root = w.post(c, &w.peer, old, vec![]).await;
         w.reply(c, &w.peer, &root, Some(&root), w.now + i, vec![])
             .await;
     }
-    let row = w.row(c).await;
-    assert_eq!(wire(&row.unread), exact(1));
     assert_eq!(
-        wire(&row.threads),
-        json!({"items":[item(&mine, 1, &answer)],"complete":true})
+        w.counts(c).await,
+        counts(false, 0, vec![item(&mine, 1, &answer)])
     );
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn the_parent_budget_leaves_replies_undecided_and_fabricates_no_absence() {
+async fn the_parent_budget_leaves_undecided_replies_out() {
     let w = World::new().await;
     let c = w.channel().await;
     // The actor is in the first conversation. Whether it is inside the budget
     // depends on ID order, so only the bounds are asserted.
+    let mut mine = None;
     for i in 0..1025 {
         let author = if i == 0 { &w.actor } else { &w.peer };
         let root = w.post(c, author, w.now, vec![]).await;
-        w.reply(c, &w.peer, &root, Some(&root), w.now + 1, vec![])
+        let reply = w
+            .reply(c, &w.peer, &root, Some(&root), w.now + 1, vec![])
             .await;
-        if i == 1023 {
-            // 1024 parents fit: 1023 peer roots, and the reply to the actor's.
-            // The independent SQL deadline may still withhold the answer.
-            let row = w.row(c).await;
+        if i == 0 {
+            mine = Some(item(&root, 1, &reply));
+        }
+        // 1024 parents fit: 1023 peer roots, and the reply to the actor's.
+        // The independent SQL deadline may still withhold the answer. Past
+        // 1024, one reply is undecided. An undecided reply is left out.
+        if i >= 1023 {
+            let counted = w.counts(c).await;
             assert!(
-                [exact(1024), json!({"status":"at_least","value":1023})]
-                    .contains(&wire(&row.unread)),
-                "{:?}",
-                row.unread
-            );
-            assert!(
-                [exact(1), status("unknown")].contains(&wire(&row.attention)),
-                "{:?}",
-                row.attention
+                [vec![], vec![mine.clone().unwrap()]]
+                    .map(|threads| counts(true, 0, threads))
+                    .contains(&counted),
+                "{i}: {counted}"
             );
         }
     }
-    // 1025 parents do not: one reply is undecided, so nothing is exact.
-    let row = w.row(c).await;
-    assert!(
-        [1024, 1025]
-            .map(|value| json!({"status":"at_least","value":value}))
-            .contains(&wire(&row.unread)),
-        "{:?}",
-        row.unread
-    );
-    assert!(
-        [json!({"status":"at_least","value":1}), status("unknown")].contains(&wire(&row.attention)),
-        "{:?}",
-        row.attention
-    );
-    assert!(!row.threads.complete);
 }
 
 #[tokio::test]
@@ -621,8 +487,7 @@ async fn a_lookup_timeout_decides_nothing_and_preserves_the_callers_transaction(
     let w = World::new().await;
     let c = w.channel().await;
     let root = w.post(c, &w.peer, w.now, vec![]).await;
-    let reply = w
-        .reply(c, &w.peer, &root, Some(&root), w.now + 1, vec![])
+    w.reply(c, &w.peer, &root, Some(&root), w.now + 1, vec![])
         .await;
     let mut held = w.pool.begin().await.unwrap();
     // Force the real resolver to time out, then check that its outer snapshot
@@ -668,5 +533,5 @@ async fn a_lookup_timeout_decides_nothing_and_preserves_the_callers_transaction(
     }
     reader.rollback().await.unwrap();
     held.rollback().await.unwrap();
-    assert_eq!(w.state(c, Some(&root), &reply).await, status("not_counted"));
+    assert_eq!(w.counts(c).await, counts(true, 0, vec![]));
 }

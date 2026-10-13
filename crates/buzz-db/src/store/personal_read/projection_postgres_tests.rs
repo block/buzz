@@ -1,39 +1,37 @@
-use super::{classification, postgres_tests::fixture, *};
+use super::{postgres_tests::fixture, *};
 use serde_json::json;
-
-#[test]
-fn unread_horizon_includes_its_own_cutoff() {
-    for (created_ms, counted) in [(999, false), (1000, true), (1001, true)] {
-        assert_eq!(
-            classification::eligible(9, false, false, created_ms, 1000),
-            counted
-        );
-    }
-}
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn sidebar_sql_eligibility_matches_selector_classifier() {
-    let (db, pool, community, channel, actor, event) = fixture().await;
-    let query = [ContextQuery {
-        target: ReadTarget {
-            channel_id: channel,
-            root_id: None,
-        },
-        message_ids: vec![event.id.to_hex()],
-    }];
+async fn sidebar_sql_eligibility_follows_kind_author_deletion_and_horizon() {
+    let (db, pool, community, _, actor, event) = fixture().await;
     let now = chrono::Utc::now().timestamp_millis();
     let horizon = i64::from(DEFAULT_RETENTION_SECONDS) * 1000;
-    for kind in [9, 40002, 45001, 45003, 1, 7, 39002, 40008] {
+    // Addressed to the actor, so a counted message is also exactly one mention.
+    let tags = json!([["p", actor.public_key().to_hex()]]);
+    for (kind, eligible_kind) in [
+        (9, true),
+        (40002, true),
+        (45001, true),
+        (45003, true),
+        (1, false),
+        (7, false),
+        (39002, false),
+        (40008, false),
+    ] {
         for own in [false, true] {
             for deleted in [false, true] {
                 // Now, then one minute inside and one minute outside the horizon.
-                for age in [0, horizon - 60_000, horizon + 60_000] {
+                for (age, inside) in [
+                    (0, true),
+                    (horizon - 60_000, true),
+                    (horizon + 60_000, false),
+                ] {
                     let created = now - age;
-                    sqlx::query("UPDATE events SET kind=$2,pubkey=$3,deleted_at=CASE WHEN $4 THEN now() ELSE NULL END,created_at=to_timestamp($5::double precision/1000) WHERE community_id=$1")
+                    sqlx::query("UPDATE events SET kind=$2,pubkey=$3,deleted_at=CASE WHEN $4 THEN now() ELSE NULL END,created_at=to_timestamp($5::double precision/1000),tags=$6 WHERE community_id=$1")
                         .bind(community.as_uuid()).bind(kind)
                         .bind(if own { actor.public_key().to_bytes() } else { event.pubkey.to_bytes() }.as_slice())
-                        .bind(deleted).bind(created as f64).execute(&pool).await.unwrap();
+                        .bind(deleted).bind(created as f64).bind(&tags).execute(&pool).await.unwrap();
                     let page = db
                         .personal_read_sidebar(
                             community,
@@ -44,31 +42,11 @@ async fn sidebar_sql_eligibility_matches_selector_classifier() {
                         )
                         .await
                         .unwrap();
-                    let expected = u32::from(classification::eligible(
-                        kind,
-                        own,
-                        deleted,
-                        created,
-                        page.account.cutoff_ms,
-                    ));
-                    assert!(
-                        matches!(page.channels[0].unread, ReadCount::Exact { value } if value == expected),
-                        "kind={kind} own={own} deleted={deleted} age={age}"
-                    );
-                    // The per-message selector must agree with the aggregate.
-                    let contexts = db
-                        .personal_read_contexts(
-                            community,
-                            &actor.public_key(),
-                            DEFAULT_RETENTION_SECONDS,
-                            &query,
-                        )
-                        .await
-                        .unwrap();
+                    let expected = eligible_kind && !own && !deleted && inside;
+                    let row = &page.channels[0];
                     assert_eq!(
-                        serde_json::to_value(&contexts).unwrap()["contexts"][0]["messages"][0]
-                            ["status"],
-                        ["not_counted", "unread"][expected as usize],
+                        (row.unread, row.mentions),
+                        (expected, u32::from(expected)),
                         "kind={kind} own={own} deleted={deleted} age={age}"
                     );
                 }
@@ -82,27 +60,25 @@ async fn sidebar_sql_eligibility_matches_selector_classifier() {
 async fn sidebar_compacted_tags_preserve_directed_and_corruption_rules() {
     let (db, pool, community, _, actor, _) = fixture().await;
     let actor_hex = actor.public_key().to_hex().to_uppercase();
-    for (tags, unread, attention) in [
-        (json!([]), Some(1), Some(0)),
-        (json!(["p"]), None, None),
-        (json!(["e"]), None, None),
-        (json!(["broadcast"]), None, None),
-        (
-            json!([["p", actor_hex, "relay", "petname"]]),
-            Some(1),
-            Some(1),
-        ),
-        (json!([["p", "00".repeat(32)]]), Some(1), Some(0)),
-        (json!([["broadcast", "1", "extra"]]), Some(1), Some(1)),
-        (json!([["broadcast", "0"]]), Some(1), Some(0)),
-        (json!([["p", "00".repeat(32), 42]]), None, None),
-        (json!([["broadcast", "0", 42]]), None, None),
-        (json!([["e", "00".repeat(32), "", "root", 42]]), None, None),
-        (json!([["p", actor_hex], ["p", "other", 42]]), None, None),
-        (json!([["e", "00".repeat(32), "", "reply"]]), None, None),
-        (json!([["x", 42]]), Some(1), Some(0)),
-        (json!({"p":actor_hex}), None, None),
-        (json!([["p", "x".repeat(8193)]]), None, None),
+    // Unusable tags prove nothing: that message is left out, neither unread
+    // nor a mention.
+    for (tags, unread, mentions) in [
+        (json!([]), true, 0),
+        (json!(["p"]), false, 0),
+        (json!(["e"]), false, 0),
+        (json!(["broadcast"]), false, 0),
+        (json!([["p", actor_hex, "relay", "petname"]]), true, 1),
+        (json!([["p", "00".repeat(32)]]), true, 0),
+        (json!([["broadcast", "1", "extra"]]), true, 1),
+        (json!([["broadcast", "0"]]), true, 0),
+        (json!([["p", "00".repeat(32), 42]]), false, 0),
+        (json!([["broadcast", "0", 42]]), false, 0),
+        (json!([["e", "00".repeat(32), "", "root", 42]]), false, 0),
+        (json!([["p", actor_hex], ["p", "other", 42]]), false, 0),
+        (json!([["e", "00".repeat(32), "", "reply"]]), false, 0),
+        (json!([["x", 42]]), true, 0),
+        (json!({"p":actor_hex}), false, 0),
+        (json!([["p", "x".repeat(8193)]]), false, 0),
     ] {
         sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
             .bind(community.as_uuid())
@@ -120,19 +96,12 @@ async fn sidebar_compacted_tags_preserve_directed_and_corruption_rules() {
             )
             .await
             .unwrap();
-        for (actual, expected) in [
-            (&page.channels[0].unread, unread),
-            (&page.channels[0].attention, attention),
-        ] {
-            assert!(
-                match (actual, expected) {
-                    (ReadCount::Exact { value }, Some(n)) => *value == n,
-                    (ReadCount::Unknown, None) => true,
-                    _ => false,
-                },
-                "tags={tags} actual={actual:?} expected={expected:?}"
-            );
-        }
+        let row = &page.channels[0];
+        assert_eq!(
+            (row.unread, row.mentions),
+            (unread, mentions),
+            "tags={tags}"
+        );
     }
 }
 
@@ -187,12 +156,12 @@ async fn sidebar_ancestry_fact_matches_shared_nip10_parser() {
             )
             .await
             .unwrap();
-        assert!(
-            if reply {
-                matches!(page.channels[0].unread, ReadCount::Unknown)
-            } else {
-                matches!(page.channels[0].unread, ReadCount::Exact { value: 1 })
-            },
+        // A reply marker without recorded ancestry leaves the message out.
+        assert_eq!(page.channels[0].unread, !reply, "tags={tags:?}");
+        // ...and it is never the timeline's anchor.
+        assert_eq!(
+            page.channels[0].latest_id.is_some(),
+            !reply,
             "tags={tags:?}"
         );
     }
@@ -200,7 +169,7 @@ async fn sidebar_ancestry_fact_matches_shared_nip10_parser() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn sidebar_directed_fact_matches_selector_classifier() {
+async fn sidebar_directed_fact_follows_dm_mention_and_broadcast_rules() {
     let (db, pool, community, channel, actor, _) = fixture().await;
     let actor_hex = actor.public_key().to_hex();
     let fullwidth: String = actor_hex
@@ -208,18 +177,21 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
         .map(|c| if c.is_ascii_alphabetic() { 'Ａ' } else { c })
         .collect();
     assert_ne!(fullwidth, actor_hex);
-    let cases: Vec<Vec<Vec<String>>> = serde_json::from_value(json!([
-        [],
-        [["p", actor_hex]],
-        [["p", actor_hex.to_uppercase()]],
-        [["p", fullwidth]],
-        [["p"]],
-        [["broadcast", "1"]],
-        [["broadcast", "true"]],
-        [["p", "00".repeat(32)]],
-        [["broadcast", "0"], ["p", actor_hex.to_uppercase()]]
-    ]))
-    .unwrap();
+    // Whether each tag set is directed in a stream; in a DM every one is.
+    let cases = [
+        (json!([]), false),
+        (json!([["p", actor_hex]]), true),
+        (json!([["p", actor_hex.to_uppercase()]]), true),
+        (json!([["p", fullwidth]]), false),
+        (json!([["p"]]), false),
+        (json!([["broadcast", "1"]]), true),
+        (json!([["broadcast", "true"]]), false),
+        (json!([["p", "00".repeat(32)]]), false),
+        (
+            json!([["broadcast", "0"], ["p", actor_hex.to_uppercase()]]),
+            true,
+        ),
+    ];
     for channel_type in ["stream", "dm"] {
         sqlx::query(
             "UPDATE channels SET channel_type=$3::channel_type WHERE community_id=$1 AND id=$2",
@@ -230,12 +202,11 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
         .execute(&pool)
         .await
         .unwrap();
-        for tags in &cases {
-            let expected =
-                u32::from(classification::reason(channel_type, &actor_hex, tags).is_some());
+        for (tags, in_stream) in &cases {
+            let expected = u32::from(channel_type == "dm" || *in_stream);
             sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
                 .bind(community.as_uuid())
-                .bind(json!(tags))
+                .bind(tags)
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -249,13 +220,10 @@ async fn sidebar_directed_fact_matches_selector_classifier() {
                 )
                 .await
                 .unwrap();
-            assert!(matches!(
-                page.channels[0].unread,
-                ReadCount::Exact { value: 1 }
-            ));
-            assert!(
-                matches!(page.channels[0].attention, ReadCount::Exact { value } if value == expected),
-                "channel_type={channel_type} tags={tags:?} expected={expected}"
+            assert!(page.channels[0].unread);
+            assert_eq!(
+                page.channels[0].mentions, expected,
+                "channel_type={channel_type} tags={tags}"
             );
         }
     }

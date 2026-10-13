@@ -3,6 +3,7 @@ mod cold_start;
 mod connection_observability;
 pub mod migration;
 pub(crate) mod observability;
+pub(crate) mod push_enqueue;
 pub mod replica_fence;
 
 pub use admitted_tx::AdmittedTx;
@@ -189,6 +190,8 @@ pub(crate) async fn begin_community_event_write_transaction_with_legacy_metrics(
 #[derive(Clone, Debug)]
 pub struct Db {
     pub(crate) pool: PgPool,
+    /// Optional bounded post-commit producer, shared across handle clones.
+    pub(crate) push_enqueue: Option<push_enqueue::PushEnqueue>,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
     pub(crate) max_connections: u32,
     /// Optional read-replica pool (from [`DbConfig::read_database_url`]).
@@ -576,6 +579,9 @@ pub enum DbReadinessOutcome {
 /// Configuration for the Postgres connection pool.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
+    /// Enable push producers on every writer connection. Defaults to false.
+    /// Relay startup copies `BUZZ_PUSH_ENABLED`; auxiliary writers stay off.
+    pub push_enabled: bool,
     /// Postgres connection URL (usually sourced from `DATABASE_URL`).
     pub database_url: String,
     /// Optional read-replica connection URL (usually sourced from
@@ -627,6 +633,7 @@ impl Default for DbConfig {
     /// At 20 main + 5 audit = 25/pod, four relay pods fit within the PG limit.
     fn default() -> Self {
         Self {
+            push_enabled: false,
             database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
             read_database_url: None,
             max_connections: 20,
@@ -701,7 +708,11 @@ impl Db {
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
         let usage_metrics_replica_max_age =
             read_budget_from_ms(config.usage_metrics_replica_max_age_ms);
+        let push_enqueue = config
+            .push_enabled
+            .then(|| push_enqueue::PushEnqueue::new(&pool));
         Ok(Self {
+            push_enqueue,
             pool,
             max_connections: config.max_connections,
             read_pool,
@@ -726,6 +737,7 @@ impl Db {
             classify_pool_outcome, record_milestone, DbConnectionStep, DbConnectionStepAttempt,
         };
 
+        let push_enabled = config.push_enabled;
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
         let statement_timeout_ms = config.statement_timeout_ms;
@@ -775,7 +787,9 @@ impl Db {
                         "SELECT set_config('lock_timeout', $1, false), \
                                 set_config('idle_in_transaction_session_timeout', $2, false), \
                                 set_config('statement_timeout', $3, false), \
-                                set_config('default_transaction_read_only', $4, false)",
+                                set_config('default_transaction_read_only', $4, false), \
+                                set_config('buzz.push_enabled', $5, false), \
+                                set_config('buzz.push_async_enqueue', 'on', false)",
                     )
                     .bind(lock_timeout_ms.to_string())
                     .bind(idle_txn_timeout_ms.to_string())
@@ -785,6 +799,7 @@ impl Db {
                     } else {
                         "off"
                     })
+                    .bind(if push_enabled { "on" } else { "off" })
                     .execute(&mut *conn)
                     .await
                     {
@@ -935,8 +950,12 @@ impl Db {
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
+    ///
+    /// Does not start a push producer or configure sessions. Serving writers
+    /// that need push must use [`Db::new`] with `push_enabled` instead.
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
             pool,
@@ -957,6 +976,7 @@ impl Db {
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
+            push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
@@ -1317,12 +1337,28 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<AdmittedTx> {
-        begin_community_event_write_transaction_with_legacy_metrics(
+        let mut tx = begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
             community,
             observability::WriterOperation::EventWrite,
         )
-        .await
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        Ok(tx)
+    }
+
+    /// Stop accepting best-effort push enqueue work and cancel in-flight work.
+    pub fn cancel_push_enqueue(&self) {
+        if let Some(producer) = &self.push_enqueue {
+            producer.cancel();
+        }
+    }
+
+    /// Wait for the cancelled producer to release its dedicated connection.
+    pub async fn join_push_enqueue(&self) {
+        if let Some(producer) = &self.push_enqueue {
+            producer.join().await;
+        }
     }
 
     /// Insert an event while holding and validating an admitted serving-write
@@ -1352,6 +1388,7 @@ impl Db {
         let tx = sqlx::Transaction::begin(connection, None).await?;
         let mut tx =
             AdmittedTx::admit_with_serving_lease(tx, &self.deletion_store(), lease).await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
         event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result =
             event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, None).await?;

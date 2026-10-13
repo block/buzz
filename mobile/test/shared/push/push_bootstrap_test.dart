@@ -53,6 +53,23 @@ void main() {
     expect(gate.tryBegin('attempt'), isTrue);
   });
 
+  testWidgets('a failed attempt stays blocked until the retry delay', (
+    tester,
+  ) async {
+    final gate = BuzzPushAttemptGate();
+    addTearDown(gate.dispose);
+    var retries = 0;
+    expect(gate.tryBegin('attempt'), isTrue);
+    gate.failed('attempt', retry: () => retries++);
+    expect(gate.tryBegin('attempt'), isFalse);
+    await tester.pump(const Duration(seconds: 4));
+    expect(gate.tryBegin('attempt'), isFalse);
+    expect(retries, 0);
+    await tester.pump(const Duration(seconds: 1));
+    expect(retries, 1);
+    expect(gate.tryBegin('attempt'), isTrue);
+  });
+
   test('a new attempt cancels an obsolete scheduled retry', () async {
     final gate = BuzzPushAttemptGate(retryDelay: Duration.zero);
     addTearDown(gate.dispose);

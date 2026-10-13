@@ -175,9 +175,7 @@ void actionRowTests() {
       );
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('quick-reaction-more')), findsOneWidget);
-      Navigator.of(
-        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
-      ).pop();
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
       await tester.pumpAndSettle();
     });
 

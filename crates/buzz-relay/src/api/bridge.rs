@@ -686,6 +686,7 @@ async fn handle_channel_window_filter(
     raw: &Value,
     filter: &nostr::Filter,
     accessible_channels: &[uuid::Uuid],
+    reader_pubkey_bytes: &[u8],
     events: &mut Vec<Value>,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     use buzz_core::kind::{KIND_THREAD_SUMMARY, KIND_WINDOW_BOUNDS};
@@ -790,7 +791,12 @@ async fn handle_channel_window_filter(
                 }
                 // Deletions can be stored channel-less; access-check instead
                 // of channel-constraining so they aren't silently dropped.
-                if !event_in_accessible_channel(&se, accessible_channels) {
+                if !event_in_accessible_channel(&se, accessible_channels)
+                    || !crate::handlers::req::event_visible_to_reader(
+                        &se.event,
+                        reader_pubkey_bytes,
+                    )
+                {
                     continue;
                 }
                 hop_ids.push(se.event.id.to_hex());
@@ -1118,17 +1124,33 @@ async fn submit_event_authed(
         }
     };
 
+    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
+
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
+    // Typing pulses arrive every few seconds per working agent, so their ban
+    // check uses the same short-TTL cache as their write-restriction check.
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    let nip_oa_owner = match super::relay_members::enforce_relay_membership(
-        state,
-        tenant.community(),
-        &pubkey_bytes,
-        auth_tag,
-        signed_auth_created_at,
-    )
-    .await
-    {
+    let membership = if is_typing {
+        super::relay_members::enforce_relay_membership_ephemeral(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            auth_tag,
+            signed_auth_created_at,
+        )
+        .await
+    } else {
+        super::relay_members::enforce_relay_membership(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            auth_tag,
+            signed_auth_created_at,
+        )
+        .await
+    };
+    let nip_oa_owner = match membership {
         Ok(owner) => owner.or_else(|| {
             if !state.config.require_relay_membership {
                 super::relay_members::extract_nip_oa_owner(
@@ -1151,14 +1173,27 @@ async fn submit_event_authed(
         super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
 
-    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
 
-    match crate::handlers::ingest::ingest_event(state, tenant, event, auth).await {
+    // Typing indicators are ephemeral: broadcast to the channel, never stored.
+    let result = if is_typing {
+        let event_id = event.id.to_hex();
+        crate::handlers::event::publish_http_typing(state, tenant, event, pubkey)
+            .await
+            .map(|()| crate::handlers::ingest::IngestResult {
+                event_id,
+                accepted: true,
+                message: String::new(),
+            })
+    } else {
+        crate::handlers::ingest::ingest_event(state, tenant, event, auth).await
+    };
+
+    match result {
         Ok(result) => {
             let response = Json(serde_json::json!({
                 "event_id": result.event_id,
@@ -1472,6 +1507,7 @@ async fn query_events_authed(
             raw,
             filter,
             &accessible_channels,
+            &pubkey_bytes,
             &mut events,
         )
         .await?;
@@ -2916,6 +2952,10 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 #[cfg(test)]
 #[path = "artifact_postgres_tests.rs"]
 mod artifact_postgres_tests;
+
+#[cfg(test)]
+#[path = "typing_postgres_tests.rs"]
+mod typing_postgres_tests;
 
 #[cfg(test)]
 pub(crate) mod postgres_tests {
@@ -6068,7 +6108,7 @@ pub(crate) mod postgres_tests {
     }
 
     // All accessory methods must preserve the shared admission wire contract.
-    // Keep each route independent so the unfixed adapter fails all three tests.
+    // Keep each route independent so the unfixed adapter fails both tests.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn nip_fi_buzz_v1_sidebar_wire_contract() {
@@ -6077,26 +6117,9 @@ pub(crate) mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_fi_buzz_v1_contexts_wire_contract() {
-        let targets = serde_json::json!([{"target":{"channel_id":uuid::Uuid::new_v4()}}]);
-        let encoded: String = targets
-            .to_string()
-            .bytes()
-            .map(|b| format!("%{b:02X}"))
-            .collect();
-        buzz_v1_wire_contract(
-            "GET",
-            &format!("/buzz/v1/me/read-state?targets={encoded}"),
-            b"",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn nip_fi_buzz_v1_write_wire_contract() {
         let body = serde_json::to_vec(&serde_json::json!({"intents":[{
-            "type":"mark_channel_read", "channel_id":uuid::Uuid::new_v4(),
+            "type":"mark_through", "target":{"channel_id":uuid::Uuid::new_v4()},
             "message_id":"ab".repeat(32)
         }]}))
         .expect("serialize intent");
@@ -6145,25 +6168,13 @@ pub(crate) mod postgres_tests {
         assert_eq!(headers[header::CACHE_CONTROL], "private, no-store");
         let value: serde_json::Value = serde_json::from_slice(&body).expect("control JSON");
         if method == "POST" {
+            // A blocked intent applies to no channel, so no row is refreshed.
             assert_eq!(
                 body.as_ref(),
-                br#"{"outcomes":[{"status":"blocked"}],"projection_status":"not_requested"}"#
+                br#"{"channels":[],"outcomes":[{"status":"blocked"}]}"#
             );
         } else {
-            assert!(value["account"]["cutoff_ms"].is_i64());
-            assert_eq!(
-                value["account"]["retention_seconds"],
-                state.config.buzz_v1_retention_seconds
-            );
-            if path.contains("sidebar") {
-                assert_eq!(value["channels"], serde_json::json!([]));
-                assert_eq!(value["next_cursor"], serde_json::Value::Null);
-            } else {
-                assert_eq!(
-                    value["contexts"],
-                    serde_json::json!([{"status":"unavailable"}])
-                );
-            }
+            assert_eq!(value, serde_json::json!({"channels":[],"next_cursor":null}));
         }
 
         for case in [
@@ -8317,6 +8328,53 @@ pub(crate) mod postgres_tests {
 
         drop(conn);
         fx.drop().await;
+    }
+
+    /// HTTP agents reach `materialize_nip_oa_owner` on every request. Once the
+    /// owner link is confirmed in `observer_owner_cache` the call writes
+    /// nothing: the link is set once and never cleared.
+    /// Mutation: drop the cache short-circuit → the agent row is recreated → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn known_owner_link_skips_materialize_writes() {
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("owner-link-{}.local", uuid::Uuid::new_v4());
+        state.db.ensure_configured_community(&host).await.unwrap();
+        let tenant = crate::tenant::bind_community(&state.db, &host)
+            .await
+            .unwrap();
+        let (owner, agent_key) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let materialize = || {
+            super::super::relay_members::materialize_nip_oa_owner(
+                &state, &tenant, &agent_key, &owner,
+            )
+        };
+        let agent_rows = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM users WHERE community_id = $1 AND pubkey = $2",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(agent_key.to_bytes().as_slice())
+            .fetch_one(state.db.pool())
+            .await
+            .unwrap()
+        };
+
+        assert!(materialize().await, "first call records the link");
+        assert_eq!(agent_rows().await, 1);
+
+        // Remove the row behind the cache's back: a call that still wrote
+        // would recreate it.
+        sqlx::query("DELETE FROM users WHERE community_id = $1 AND pubkey = $2")
+            .bind(tenant.community().as_uuid())
+            .bind(agent_key.to_bytes().as_slice())
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+        assert!(materialize().await, "a known link is still confirmed");
+        assert_eq!(agent_rows().await, 0, "a known link writes nothing");
     }
 
     /// An agent socket admitted with no owner, then linked to its owner by a

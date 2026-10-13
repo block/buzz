@@ -819,9 +819,9 @@ async fn push_gateway_profile_migration_converges_brownfield_authority() {
     .await
     .expect("insert delegation for legacy installation");
 
-    migration::run_migrations(&pool)
+    migration::run_migrations_through(&pool, 43)
         .await
-        .expect("apply dogfood-only migration");
+        .expect("apply historical profile migration");
 
     let legacy_installations: i64 =
         sqlx::query_scalar("SELECT count(*) FROM push_gateway_installations")

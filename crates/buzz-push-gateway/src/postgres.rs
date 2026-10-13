@@ -1,7 +1,6 @@
 //! PostgreSQL authority store. Mutations use row locks and compare-and-swap
 //! predicates so counters, epochs, and generation tombstones only move forward.
 use crate::authority::*;
-use crate::model::AppProfile;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgPool, Row};
@@ -12,6 +11,14 @@ use uuid::Uuid;
 mod bootstrap_postgres_tests;
 
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+#[cfg(test)]
+async fn migrate_gateway_through(
+    pool: &PgPool,
+    version: i64,
+) -> Result<(), sqlx::migrate::MigrateError> {
+    GATEWAY_MIGRATOR.run_to(version, pool).await
+}
 
 #[derive(Clone)]
 pub struct PostgresAuthorityStore {
@@ -69,12 +76,6 @@ fn at(ts: i64) -> Result<DateTime<Utc>, AuthorityError> {
 }
 fn ts(v: DateTime<Utc>) -> i64 {
     v.timestamp()
-}
-fn profile(v: &str) -> Result<AppProfile, AuthorityError> {
-    match v {
-        "buzz-ios-dogfood" => Ok(AppProfile::BuzzIosDogfood),
-        _ => Err(AuthorityError::Unavailable),
-    }
 }
 fn db(_: sqlx::Error) -> AuthorityError {
     AuthorityError::Unavailable
@@ -179,10 +180,9 @@ impl AuthorityStore for PostgresAuthorityStore {
         let mut tx = self.pool.begin().await.map_err(db)?;
         let now_at = at(now)?;
         let existing = sqlx::query(
-            "SELECT id,expires_at,revoked_at FROM push_gateway_installations WHERE app_attest_key_id=$1 OR (app_profile=$2 AND token_fingerprint=$3) FOR UPDATE",
+            "SELECT id,expires_at,revoked_at FROM push_gateway_installations WHERE app_attest_key_id=$1 OR token_fingerprint=$2 FOR UPDATE",
         )
         .bind(&n.app_attest_key_id)
-        .bind(n.profile.as_str())
         .bind(n.token_fingerprint.to_vec())
         .fetch_all(&mut *tx)
         .await
@@ -223,8 +223,8 @@ impl AuthorityStore for PostgresAuthorityStore {
                 .await
                 .map_err(db)?;
         }
-        let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,app_profile,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
-            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.profile.as_str()).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).execute(&mut *tx).await.map_err(db)?;
+        let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING")
+            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Conflict);
         }
@@ -240,7 +240,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
             assertion_counter: u32::try_from(r.try_get::<i64, _>("assertion_counter").map_err(db)?)
                 .map_err(|_| AuthorityError::Unavailable)?,
-            profile: profile(r.try_get("app_profile").map_err(db)?)?,
+
             token_ciphertext: r.try_get("token_ciphertext").map_err(db)?,
             token_fingerprint: bytes32(r.try_get("token_fingerprint").map_err(db)?)?,
             endpoint_epoch: r.try_get("endpoint_epoch").map_err(db)?,
@@ -268,7 +268,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
             assertion_counter: u32::try_from(r.try_get::<i64, _>("assertion_counter").map_err(db)?)
                 .map_err(|_| AuthorityError::Unavailable)?,
-            profile: profile(r.try_get("app_profile").map_err(db)?)?,
+
             token_ciphertext: r.try_get("token_ciphertext").map_err(db)?,
             token_fingerprint: bytes32(r.try_get("token_fingerprint").map_err(db)?)?,
             endpoint_epoch: r.try_get("endpoint_epoch").map_err(db)?,
@@ -282,15 +282,14 @@ impl AuthorityStore for PostgresAuthorityStore {
     async fn matching_installation(
         &self,
         key_id: &[u8],
-        app_profile: AppProfile,
+
         token_fingerprint: [u8; 32],
         endpoint_epoch: i64,
         expires_at: i64,
         now: i64,
     ) -> Result<Option<Installation>, AuthorityError> {
-        let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE app_attest_key_id=$1 AND app_profile=$2 AND token_fingerprint=$3 AND endpoint_epoch=$4 AND expires_at=$5 AND revoked_at IS NULL AND expires_at >= $6")
+        let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE app_attest_key_id=$1 AND token_fingerprint=$2 AND endpoint_epoch=$3 AND expires_at=$4 AND revoked_at IS NULL AND expires_at >= $5")
             .bind(key_id)
-            .bind(app_profile.as_str())
             .bind(token_fingerprint.to_vec())
             .bind(endpoint_epoch)
             .bind(at(expires_at)?)
@@ -308,7 +307,7 @@ impl AuthorityStore for PostgresAuthorityStore {
                     r.try_get::<i64, _>("assertion_counter").map_err(db)?,
                 )
                 .map_err(|_| AuthorityError::Unavailable)?,
-                profile: profile(r.try_get("app_profile").map_err(db)?)?,
+
                 token_ciphertext: r.try_get("token_ciphertext").map_err(db)?,
                 token_fingerprint: bytes32(r.try_get("token_fingerprint").map_err(db)?)?,
                 endpoint_epoch: r.try_get("endpoint_epoch").map_err(db)?,
@@ -432,7 +431,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         // Every authority mutation locks installation before delegation. Keep
         // this order here to avoid delivery-vs-refresh deadlocks.
         let i = sqlx::query(
-            "SELECT app_profile,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at
+            "SELECT token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at
              FROM push_gateway_installations
              WHERE id=(SELECT installation_id FROM push_gateway_delegations WHERE id=$1)
              FOR UPDATE",
@@ -470,7 +469,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             delegation_id: did,
             installation_id,
             relay_pubkey: relay.to_owned(),
-            profile: profile(i.try_get("app_profile").map_err(db)?)?,
+
             token_ciphertext: i.try_get("token_ciphertext").map_err(db)?,
             endpoint_epoch: epoch,
             generation,
@@ -647,7 +646,7 @@ mod postgres_tests {
                AND tablename='push_gateway_installations'
                AND indexname IN (
                  'push_gateway_installations_active_app_attest_key',
-                 'push_gateway_installations_active_profile_token')
+                 'push_gateway_installations_active_token')
                AND indexdef LIKE '%WHERE (revoked_at IS NULL)%'",
         )
         .fetch_one(&migration_pool)
@@ -909,8 +908,8 @@ mod postgres_tests {
     async fn install_authority(pool: &PgPool) {
         let now = Utc::now();
         sqlx::query(
-            "INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,app_profile,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at)
-             VALUES ($1,$2,$3,0,'buzz-ios-dogfood',$4,$5,1,$6)",
+            "INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at)
+             VALUES ($1,$2,$3,0,$4,$5,1,$6)",
         )
         .bind(Uuid::from_u128(1))
         .bind(vec![1u8])
@@ -946,7 +945,7 @@ mod postgres_tests {
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![2; 33],
             assertion_counter: 0,
-            profile: AppProfile::BuzzIosDogfood,
+
             token_ciphertext: vec![3],
             token_fingerprint: [4; 32],
             endpoint_epoch: 1,
@@ -1012,7 +1011,7 @@ mod postgres_tests {
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![2; 33],
             assertion_counter: 0,
-            profile: AppProfile::BuzzIosDogfood,
+
             token_ciphertext: vec![3],
             token_fingerprint: [4; 32],
             endpoint_epoch: 1,

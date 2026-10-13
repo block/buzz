@@ -585,11 +585,7 @@ pub async fn update_channel(
     if updates.ttl_seconds.is_some() {
         let mut tx = begin_event_write_transaction(pool).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "buzz_channel_ttl:{}:{}",
-                community_id.as_uuid(),
-                channel_id
-            ))
+            .bind(channel_ttl_lock_key(community_id, channel_id))
             .execute(&mut *tx)
             .await?;
         let result = q.execute(&mut *tx).await?;
@@ -1010,6 +1006,14 @@ impl Db {
     pub async fn reap_expired_ephemeral_channels(&self) -> Result<Vec<ReapedEphemeralChannel>> {
         reap_expired_ephemeral_channels(&self.pool).await
     }
+}
+
+/// The per-channel TTL advisory lock key. Event commits take it SHARED
+/// (`event_follow_up::refresh_channel_ttls`, and the 0024 trigger until it is
+/// retired); TTL transitions in [`update_channel`] take it EXCLUSIVE. Both
+/// sides build it here, so the keys cannot drift.
+pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> String {
+    format!("buzz_channel_ttl:{}:{channel}", community.as_uuid())
 }
 
 #[cfg(test)]

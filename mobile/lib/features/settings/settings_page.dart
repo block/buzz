@@ -12,7 +12,6 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/success_haptic.dart';
-import '../../shared/push/push_bridge.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';

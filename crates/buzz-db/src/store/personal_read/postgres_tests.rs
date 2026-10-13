@@ -4,7 +4,7 @@ use crate::{
     Db,
 };
 use buzz_core::CommunityId;
-use nostr::{EventBuilder, Keys, Kind};
+use nostr::{EventBuilder, Keys, Kind, Tag};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -70,6 +70,49 @@ async fn expire(pool: &PgPool, community: CommunityId) {
         .unwrap();
 }
 
+async fn sidebar(db: &Db, community: CommunityId, actor: &Keys) -> SidebarPage {
+    db.personal_read_sidebar(
+        community,
+        &actor.public_key(),
+        DEFAULT_RETENTION_SECONDS,
+        20,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+fn mark_channel(channel: Uuid, message: &nostr::Event) -> ReadIntent {
+    ReadIntent::MarkThrough {
+        target: ReadTarget {
+            channel_id: channel,
+            root_id: None,
+        },
+        message_id: message.id.to_hex(),
+    }
+}
+
+fn mark_thread(channel: Uuid, root: &nostr::Event, message: &nostr::Event) -> ReadIntent {
+    ReadIntent::MarkThrough {
+        target: ReadTarget {
+            channel_id: channel,
+            root_id: Some(root.id.to_hex()),
+        },
+        message_id: message.id.to_hex(),
+    }
+}
+
+/// Address every stored community message to `actor`, so the channel's
+/// mention count is exactly its unread top-level count.
+async fn mention_everywhere(pool: &PgPool, community: CommunityId, actor: &Keys) {
+    sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
+        .bind(community.as_uuid())
+        .bind(serde_json::json!([["p", actor.public_key().to_hex()]]))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 async fn add_history(db: &Db, community: CommunityId, channel: Uuid, count: usize) -> nostr::Event {
     let author = Keys::generate();
     let mut last = None;
@@ -89,47 +132,24 @@ async fn add_history(db: &Db, community: CommunityId, channel: Uuid, count: usiz
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_sidebar_marked_history_keeps_latest_but_unscanned_threads_are_unknown() {
+async fn personal_read_sidebar_marked_history_past_the_scan_cap_is_read_and_keeps_latest() {
     let (db, _pool, community, channel, actor, _) = fixture().await;
     let last = add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
-    db.apply_personal_read_intent(
-        community,
-        &actor.public_key(),
-        &ReadIntent::MarkThrough {
-            target: ReadTarget {
-                channel_id: channel,
-                root_id: None,
-            },
-            message_id: last.id.to_hex(),
-        },
-    )
-    .await
-    .unwrap();
-    let page = db
-        .personal_read_sidebar(
+    let outcome = db
+        .apply_personal_read_intent(
             community,
             &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
+            &mark_channel(channel, &last),
         )
         .await
         .unwrap();
-    assert!(matches!(page.channels[0].unread, ReadCount::Unknown));
-    let wire = serde_json::to_value(&page).unwrap();
-    assert_eq!(
-        wire["channels"][0]["unread"],
-        serde_json::json!({"status":"unknown"})
-    );
-    assert_eq!(
-        wire["channels"][0]["attention"],
-        serde_json::json!({"status":"unknown"})
-    );
-    assert_eq!(
-        page.channels[0].latest_message_id.as_deref(),
-        Some(last.id.to_hex().as_str())
-    );
-    assert!(page.channels[0].latest_message_complete);
+    assert_eq!(outcome, IntentOutcome::Applied);
+    // The scan never reaches the oldest 45 messages; nothing is unread.
+    let row = &sidebar(&db, community, &actor).await.channels[0];
+    assert!(!row.unread);
+    assert_eq!(row.mentions, 0);
+    assert_eq!(row.latest_id.as_deref(), Some(last.id.to_hex().as_str()));
+    assert_eq!(row.read_through_id, row.latest_id);
 }
 
 #[tokio::test]
@@ -138,50 +158,26 @@ async fn personal_read_sidebar_author_window_excludes_expired_and_late_old_messa
     let (db, pool, community, channel, actor, _) = fixture().await;
     let latest = add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
     expire(&pool, community).await;
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
+    let row = &sidebar(&db, community, &actor).await.channels[0];
     assert!(
-        matches!(page.channels[0].unread, ReadCount::Exact { value: 0 }),
-        "an empty author-time window proves exhaustion"
+        !row.unread,
+        "an empty author-time window has nothing unread"
     );
-    assert_eq!(
-        page.channels[0].latest_message_id.as_deref(),
-        Some(latest.id.to_hex().as_str())
-    );
-    assert!(page.channels[0].latest_message_complete);
+    assert_eq!(row.latest_id.as_deref(), Some(latest.id.to_hex().as_str()));
     // Acceptance time is irrelevant: a message accepted now with an author
     // time beyond the horizon stays out; one authored now is counted.
     let now = nostr::Timestamp::now().as_secs();
-    for (age, unread) in [(40 * 86400, 0), (0, 1)] {
+    for (age, unread, mentions) in [(40 * 86400, false, 0), (0, true, 1)] {
         let event = EventBuilder::new(Kind::Custom(9), "accepted now")
+            .tags([Tag::public_key(actor.public_key())])
             .custom_created_at(nostr::Timestamp::from(now - age))
             .sign_with_keys(&Keys::generate())
             .unwrap();
         db.insert_event(community, &event, Some(channel))
             .await
             .unwrap();
-        let page = db
-            .personal_read_sidebar(
-                community,
-                &actor.public_key(),
-                DEFAULT_RETENTION_SECONDS,
-                20,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(
-            matches!(page.channels[0].unread, ReadCount::Exact { value } if value == unread),
-            "age={age}"
-        );
+        let row = &sidebar(&db, community, &actor).await.channels[0];
+        assert_eq!((row.unread, row.mentions), (unread, mentions), "age={age}");
     }
 }
 
@@ -191,18 +187,11 @@ async fn personal_read_sidebar_window_budget_counts_boundary_and_ineligible_tail
     let (db, pool, community, channel, actor, _) = fixture().await;
     // The fixture contributes one event, so this is exactly the evidence budget.
     add_history(&db, community, channel, MAX_UNREAD_SCAN - 1).await;
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        matches!(page.channels[0].unread, ReadCount::Exact { value } if value == MAX_UNREAD_SCAN as u32)
+    mention_everywhere(&pool, community, &actor).await;
+    let mentions = |page: SidebarPage| page.channels[0].mentions;
+    assert_eq!(
+        mentions(sidebar(&db, community, &actor).await),
+        MAX_UNREAD_SCAN as u32
     );
     let overflow = EventBuilder::new(Kind::Custom(9), "one beyond the budget")
         .sign_with_keys(&Keys::generate())
@@ -210,18 +199,11 @@ async fn personal_read_sidebar_window_budget_counts_boundary_and_ineligible_tail
     db.insert_event(community, &overflow, Some(channel))
         .await
         .unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        matches!(page.channels[0].unread, ReadCount::AtLeast { value } if value == MAX_UNREAD_SCAN as u32)
+    mention_everywhere(&pool, community, &actor).await;
+    // The budget bounds the count; the unexamined message is left out.
+    assert_eq!(
+        mentions(sidebar(&db, community, &actor).await),
+        MAX_UNREAD_SCAN as u32
     );
     // Expire all but 601 messages. Of these, 300 are own and 300 deleted.
     // Eligibility is downstream of the bounded unread window, not the old 256 cap.
@@ -231,41 +213,9 @@ async fn personal_read_sidebar_window_budget_counts_boundary_and_ineligible_tail
           deleted_at=CASE WHEN r.n>300 AND r.n<=600 THEN now() ELSE NULL END
         FROM ranked r WHERE e.community_id=$1 AND e.created_at=r.created_at AND e.id=r.id")
         .bind(community.as_uuid()).bind(channel).bind(actor.public_key().to_bytes().as_slice()).execute(&pool).await.unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        page.channels[0].unread,
-        ReadCount::Exact { value: 1 }
-    ));
-    // Filtering ineligible evidence must not erase the raw-window overflow.
-    sqlx::query(
-        "UPDATE events SET created_at=date_trunc('second',now()),pubkey=$2 WHERE community_id=$1 AND channel_id=$3",
-    )
-    .bind(community.as_uuid())
-    .bind(actor.public_key().to_bytes().as_slice())
-    .bind(channel)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(page.channels[0].unread, ReadCount::Unknown));
+    let page = sidebar(&db, community, &actor).await;
+    assert!(page.channels[0].unread);
+    assert_eq!(mentions(page), 1);
 }
 
 #[tokio::test]
@@ -273,15 +223,7 @@ async fn personal_read_sidebar_window_budget_counts_boundary_and_ineligible_tail
 async fn personal_read_sidebar_is_read_only_and_does_not_wait_for_account() {
     let (db, pool, community, channel, actor, event) = fixture().await;
     unstart(&pool, community).await;
-    db.personal_read_sidebar(
-        community,
-        &actor.public_key(),
-        DEFAULT_RETENTION_SECONDS,
-        20,
-        None,
-    )
-    .await
-    .unwrap();
+    sidebar(&db, community, &actor).await;
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM personal_read_accounts WHERE community_id=$1")
             .bind(community.as_uuid())
@@ -289,33 +231,20 @@ async fn personal_read_sidebar_is_read_only_and_does_not_wait_for_account() {
             .await
             .unwrap();
     assert_eq!(count, 0, "GET must not create private state");
-    let mark = ReadIntent::MarkChannelRead {
-        channel_id: channel,
-        message_id: event.id.to_hex(),
-    };
-    db.apply_personal_read_intent(community, &actor.public_key(), &mark)
-        .await
-        .unwrap();
+    db.apply_personal_read_intent(
+        community,
+        &actor.public_key(),
+        &mark_channel(channel, &event),
+    )
+    .await
+    .unwrap();
     let mut held = pool.begin().await.unwrap();
     sqlx::query("SELECT actor FROM personal_read_accounts WHERE community_id=$1 FOR UPDATE")
         .bind(community.as_uuid())
         .fetch_all(&mut *held)
         .await
         .unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        page.channels[0].unread,
-        ReadCount::Exact { value: 0 }
-    ));
+    assert!(!sidebar(&db, community, &actor).await.channels[0].unread);
     held.rollback().await.unwrap();
 }
 
@@ -396,23 +325,11 @@ async fn personal_read_diff_alone_leaves_the_sidebar_row_unchanged() {
                 .await
                 .unwrap();
         }
-        let page = db
-            .personal_read_sidebar(
-                community,
-                &actor.public_key(),
-                DEFAULT_RETENTION_SECONDS,
-                20,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            page.channels[0].unread,
-            ReadCount::Exact { value: 1 }
-        ));
+        let page = sidebar(&db, community, &actor).await;
+        assert!(page.channels[0].unread);
         rows.push(serde_json::to_value(&page.channels[0]).unwrap());
     }
-    assert_eq!(rows[0], rows[1], "not unread, not attention, not latest");
+    assert_eq!(rows[0], rows[1], "not unread, not a mention, not latest");
 }
 
 #[tokio::test]
@@ -446,37 +363,52 @@ async fn personal_read_latest_includes_own_and_excludes_deleted_auxiliary() {
             .unwrap();
         }
     }
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
+    let latest = |page: SidebarPage| page.channels[0].latest_id.clone();
     assert_eq!(
-        page.channels[0].latest_message_id.as_deref(),
-        Some(own.id.to_hex().as_str())
+        latest(sidebar(&db, community, &actor).await),
+        Some(own.id.to_hex())
     );
-    assert!(page.channels[0].latest_message_complete);
     expire(&pool, community).await;
-    let page = db
-        .personal_read_sidebar(
+    assert_eq!(
+        latest(sidebar(&db, community, &actor).await),
+        Some(own.id.to_hex())
+    );
+}
+
+/// A reply marker without canonical ancestry cannot anchor a timeline mark, so
+/// it is never the channel's latest: marking through latest must succeed.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn personal_read_latest_skips_a_reply_without_ancestry() {
+    let (db, pool, community, channel, actor, first) = fixture().await;
+    let orphan = EventBuilder::new(Kind::Custom(9), "reply to a missing parent")
+        .tags([nostr::Tag::parse(["e", &"ab".repeat(32), "", "reply"]).unwrap()])
+        .custom_created_at(nostr::Timestamp::from(first.created_at.as_secs() + 1))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    db.insert_event(community, &orphan, Some(channel))
+        .await
+        .unwrap();
+    let latest = |page: SidebarPage| page.channels[0].latest_id.clone();
+    assert_eq!(
+        latest(sidebar(&db, community, &actor).await),
+        Some(first.id.to_hex())
+    );
+    // The shallow probe applies the same rule once the horizon is empty.
+    expire(&pool, community).await;
+    assert_eq!(
+        latest(sidebar(&db, community, &actor).await),
+        Some(first.id.to_hex())
+    );
+    let outcome = db
+        .apply_personal_read_intent(
             community,
             &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
+            &mark_channel(channel, &first),
         )
         .await
         .unwrap();
-    assert_eq!(
-        page.channels[0].latest_message_id.as_deref(),
-        Some(own.id.to_hex().as_str())
-    );
-    assert!(page.channels[0].latest_message_complete);
+    assert_eq!(outcome, IntentOutcome::Applied);
 }
 
 #[tokio::test]
@@ -497,63 +429,20 @@ async fn personal_read_latest_old_message_is_not_an_empty_channel() {
         .await
         .unwrap()
         .id;
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
+    let page = sidebar(&db, community, &actor).await;
     let old = page
         .channels
         .iter()
         .find(|c| c.channel_id == channel)
         .unwrap();
-    assert_eq!(
-        old.latest_message_id.as_deref(),
-        Some(event.id.to_hex().as_str())
-    );
-    assert!(old.latest_message_complete);
-    assert!(matches!(old.unread, ReadCount::Exact { value: 0 }));
+    assert_eq!(old.latest_id.as_deref(), Some(event.id.to_hex().as_str()));
+    assert!(!old.unread);
     let empty = page
         .channels
         .iter()
         .find(|c| c.channel_id == empty)
         .unwrap();
-    assert!(empty.latest_message_id.is_none());
-    assert!(empty.latest_message_complete);
-    // A long run of ineligible rows must instead report that latest is unknown.
-    sqlx::query("UPDATE events SET kind=7 WHERE community_id=$1")
-        .bind(community.as_uuid())
-        .execute(&pool)
-        .await
-        .unwrap();
-    add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
-    sqlx::query("UPDATE events SET kind=7 WHERE community_id=$1")
-        .bind(community.as_uuid())
-        .execute(&pool)
-        .await
-        .unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    let unknown = page
-        .channels
-        .iter()
-        .find(|c| c.channel_id == channel)
-        .unwrap();
-    assert!(unknown.latest_message_id.is_none());
-    assert!(!unknown.latest_message_complete);
+    assert!(empty.latest_id.is_none());
 }
 
 #[tokio::test]
@@ -561,6 +450,12 @@ async fn personal_read_latest_old_message_is_not_an_empty_channel() {
 async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
     let (db, pool, community, channel, actor, event) = fixture().await;
     unstart(&pool, community).await;
+    let read_through = || async {
+        sidebar(&db, community, &actor).await.channels[0]
+            .read_through_id
+            .clone()
+    };
+    assert_eq!(read_through().await, None, "never marked");
     let target = ReadTarget {
         channel_id: channel,
         root_id: None,
@@ -582,10 +477,7 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
             .await
             .unwrap();
     assert_eq!(count, 0, "invalid intent rolls back account creation");
-    let intent = ReadIntent::MarkThrough {
-        target: target.clone(),
-        message_id: event.id.to_hex(),
-    };
+    let intent = mark_channel(channel, &event);
     for _ in 0..2 {
         assert_eq!(
             db.apply_personal_read_intent(community, &actor.public_key(), &intent)
@@ -594,6 +486,7 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
             IntentOutcome::Applied
         );
     }
+    assert_eq!(read_through().await, Some(event.id.to_hex()));
     // Arrives after `event`; its earlier author time must not matter.
     let later = EventBuilder::new(Kind::Custom(9), "later")
         .custom_created_at(nostr::Timestamp::from(event.created_at.as_secs() - 10))
@@ -606,14 +499,14 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
         (&later, "a later arrival advances the frontier"),
         (&event, "an earlier anchor applies without moving it back"),
     ] {
-        let intent = ReadIntent::MarkThrough {
-            target: target.clone(),
-            message_id: anchor.id.to_hex(),
-        };
         assert_eq!(
-            db.apply_personal_read_intent(community, &actor.public_key(), &intent)
-                .await
-                .unwrap(),
+            db.apply_personal_read_intent(
+                community,
+                &actor.public_key(),
+                &mark_channel(channel, anchor)
+            )
+            .await
+            .unwrap(),
             IntentOutcome::Applied,
             "{why}"
         );
@@ -629,6 +522,11 @@ async fn personal_read_frontier_is_monotonic_and_rejects_malformed_anchors() {
     .await
     .unwrap();
     assert!(at_later_arrival);
+    assert_eq!(
+        read_through().await,
+        Some(later.id.to_hex()),
+        "the anchor follows the frontier, not the last intent"
+    );
     let stranger = Keys::generate();
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM personal_read_frontiers WHERE community_id=$1 AND actor=$2",
@@ -736,24 +634,13 @@ async fn personal_read_counts_only_arrivals_after_the_account_starts() {
     unstart(&pool, community).await;
     let unread = |page: &SidebarPage, id: Uuid| {
         let row = page.channels.iter().find(|c| c.channel_id == id).unwrap();
-        match row.unread {
-            ReadCount::Exact { value } => value,
-            _ => panic!("expected an exact count"),
-        }
-    };
-    let sidebar = || async {
-        db.personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap()
+        (row.unread, row.mentions)
     };
     // Before the first read intent nothing counts, not the 30-day window.
-    assert_eq!(unread(&sidebar().await, channel), 0);
+    assert_eq!(
+        unread(&sidebar(&db, community, &actor).await, channel),
+        (false, 0)
+    );
 
     // The first intent, in another channel, starts the account everywhere.
     let other = db
@@ -778,56 +665,44 @@ async fn personal_read_counts_only_arrivals_after_the_account_starts() {
     db.apply_personal_read_intent(
         community,
         &actor.public_key(),
-        &ReadIntent::MarkThrough {
-            target: ReadTarget {
-                channel_id: other,
-                root_id: None,
-            },
-            message_id: elsewhere.id.to_hex(),
-        },
+        &mark_channel(other, &elsewhere),
     )
     .await
     .unwrap();
     // A channel never marked starts caught up: earlier arrivals stay read.
-    assert_eq!(unread(&sidebar().await, channel), 0);
+    assert_eq!(
+        unread(&sidebar(&db, community, &actor).await, channel),
+        (false, 0)
+    );
 
     // Arrivals after the start count.
     let later = EventBuilder::new(Kind::Custom(9), "after the start")
+        .tags([Tag::public_key(actor.public_key())])
         .sign_with_keys(&Keys::generate())
         .unwrap();
     db.insert_event(community, &later, Some(channel))
         .await
         .unwrap();
-    assert_eq!(unread(&sidebar().await, channel), 1);
+    assert_eq!(
+        unread(&sidebar(&db, community, &actor).await, channel),
+        (true, 1)
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_unstarted_account_is_exactly_caught_up_past_the_scan_cap() {
+async fn personal_read_unstarted_account_is_caught_up_past_the_scan_cap() {
     let (db, pool, community, channel, actor, _) = fixture().await;
     unstart(&pool, community).await;
     let last = add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
+    let page = sidebar(&db, community, &actor).await;
     let row = &page.channels[0];
-    // The start floor covers rows the cap left unexamined: zero, not unknown.
-    assert!(matches!(row.unread, ReadCount::Exact { value: 0 }));
-    assert!(matches!(row.attention, ReadCount::Exact { value: 0 }));
-    assert!(row.threads.items.is_empty());
-    assert!(row.threads.complete);
-    assert_eq!(
-        row.latest_message_id.as_deref(),
-        Some(last.id.to_hex().as_str())
-    );
-    assert!(row.latest_message_complete);
+    // The start floor covers every arrival, examined by the scan or not.
+    assert!(!row.unread);
+    assert_eq!(row.mentions, 0);
+    assert!(row.threads.is_empty());
+    assert_eq!(row.latest_id.as_deref(), Some(last.id.to_hex().as_str()));
+    assert_eq!(row.read_through_id, None);
 }
 
 #[tokio::test]
@@ -835,19 +710,28 @@ async fn personal_read_unstarted_account_is_exactly_caught_up_past_the_scan_cap(
 async fn personal_read_channel_and_thread_never_inherit_each_other() {
     let (db, pool, community, channel, actor, root) = fixture().await;
     let base = root.created_at.as_secs();
-    // Directed, so it counts outside the actor's conversations.
-    let reply = EventBuilder::new(Kind::Custom(9), "unseen thread reply")
-        .tags([nostr::Tag::parse(["p", &actor.public_key().to_hex()]).unwrap()])
-        .custom_created_at(nostr::Timestamp::from(base + 10))
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    db.insert_event(community, &reply, Some(channel))
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
-        VALUES ($1,$2,to_timestamp($3),$4,$5,$5,1)")
-        .bind(community.as_uuid()).bind(reply.id.as_bytes().as_slice()).bind((base+10) as f64)
-        .bind(channel).bind(root.id.as_bytes().as_slice()).execute(&pool).await.unwrap();
+    // Directed, so they count outside the actor's conversations.
+    let reply_at = |at: u64| {
+        let (db, pool) = (db.clone(), pool.clone());
+        let mention = Tag::public_key(actor.public_key());
+        let root = root.id;
+        async move {
+            let reply = EventBuilder::new(Kind::Custom(9), "unseen thread reply")
+                .tags([mention])
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            db.insert_event(community, &reply, Some(channel))
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
+                VALUES ($1,$2,to_timestamp($3),$4,$5,$5,1)")
+                .bind(community.as_uuid()).bind(reply.id.as_bytes().as_slice()).bind(at as f64)
+                .bind(channel).bind(root.as_bytes().as_slice()).execute(&pool).await.unwrap();
+            reply
+        }
+    };
+    let reply = reply_at(base + 10).await;
     let top = EventBuilder::new(Kind::Custom(9), "later timeline message")
         .custom_created_at(nostr::Timestamp::from(base + 20))
         .sign_with_keys(&Keys::generate())
@@ -855,58 +739,68 @@ async fn personal_read_channel_and_thread_never_inherit_each_other() {
     db.insert_event(community, &top, Some(channel))
         .await
         .unwrap();
-    let channel_target = ReadTarget {
-        channel_id: channel,
-        root_id: None,
+    // Arrives last, and still is not the timeline's latest.
+    let newer = reply_at(base + 30).await;
+    let apply = |intent: ReadIntent| {
+        let db = db.clone();
+        let actor = actor.public_key();
+        async move {
+            db.apply_personal_read_intent(community, &actor, &intent)
+                .await
+                .unwrap()
+        }
     };
     assert_eq!(
-        db.apply_personal_read_intent(
-            community,
-            &actor.public_key(),
-            &ReadIntent::MarkThrough {
-                target: channel_target.clone(),
-                message_id: reply.id.to_hex()
-            }
-        )
-        .await
-        .unwrap(),
-        IntentOutcome::Blocked
+        apply(mark_channel(channel, &reply)).await,
+        IntentOutcome::Blocked,
+        "a reply is never a timeline anchor"
     );
-    db.apply_personal_read_intent(
-        community,
-        &actor.public_key(),
-        &ReadIntent::MarkThrough {
-            target: channel_target,
-            message_id: top.id.to_hex(),
-        },
-    )
-    .await
-    .unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        matches!(page.channels[0].unread, ReadCount::Exact { value: 1 }),
-        "timeline reading must leave unseen reply unread"
+    let row = |page: SidebarPage| serde_json::to_value(&page.channels[0]).unwrap();
+    let thread = |mentions: u32, read_through: Option<&nostr::Event>| {
+        serde_json::json!({"root_id":root.id.to_hex(),"unread":true,"mentions":mentions,
+            "read_through_id":read_through.map(|e| e.id.to_hex()),"latest_id":newer.id.to_hex()})
+    };
+    let expected =
+        |read_through: Option<&nostr::Event>, unread: bool, threads: serde_json::Value| {
+            serde_json::json!({"channel_id":channel,"unread":unread,"mentions":0,
+            "read_through_id":read_through.map(|e| e.id.to_hex()),
+            "latest_id":top.id.to_hex(),"threads":threads})
+        };
+    // Unread replies show only on their thread row, never the channel's.
+    assert_eq!(
+        row(sidebar(&db, community, &actor).await),
+        expected(None, true, serde_json::json!([thread(2, None)]))
     );
+    assert_eq!(
+        apply(mark_channel(channel, &top)).await,
+        IntentOutcome::Applied
+    );
+    assert_eq!(
+        row(sidebar(&db, community, &actor).await),
+        expected(Some(&top), false, serde_json::json!([thread(2, None)])),
+        "timeline reading must leave unseen replies unread"
+    );
+    // Thread marks move only the thread; an earlier anchor (the root) applies
+    // without moving it back.
+    for anchor in [&reply, &root] {
+        assert_eq!(
+            apply(mark_thread(channel, &root, anchor)).await,
+            IntentOutcome::Applied
+        );
+        assert_eq!(
+            row(sidebar(&db, community, &actor).await),
+            expected(
+                Some(&top),
+                false,
+                serde_json::json!([thread(1, Some(&reply))])
+            )
+        );
+    }
     let second_actor = Keys::generate();
     db.apply_personal_read_intent(
         community,
         &second_actor.public_key(),
-        &ReadIntent::MarkThrough {
-            target: ReadTarget {
-                channel_id: channel,
-                root_id: Some(root.id.to_hex()),
-            },
-            message_id: reply.id.to_hex(),
-        },
+        &mark_thread(channel, &root, &reply),
     )
     .await
     .unwrap();
@@ -927,218 +821,30 @@ async fn personal_read_channel_and_thread_never_inherit_each_other() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_contexts_bound_selectors_and_use_only_matching_frontiers() {
+async fn personal_read_author_horizon_unresolved_ancestry_and_deletion() {
     let (db, pool, community, channel, actor, root) = fixture().await;
-    let base = root.created_at.as_secs();
-    // A broadcast counts for every reader, in or out of the conversation.
-    let reply = EventBuilder::new(Kind::Custom(9), "thread only")
-        .tags([nostr::Tag::parse(["broadcast", "1"]).unwrap()])
-        .custom_created_at(nostr::Timestamp::from(base + 1))
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    db.insert_event(community, &reply, Some(channel))
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
-        VALUES ($1,$2,to_timestamp($3),$4,$5,$5,1)")
-        .bind(community.as_uuid()).bind(reply.id.as_bytes().as_slice()).bind((base+1) as f64)
-        .bind(channel).bind(root.id.as_bytes().as_slice()).execute(&pool).await.unwrap();
-    let queries = vec![
-        ContextQuery {
-            target: ReadTarget {
-                channel_id: channel,
-                root_id: None,
-            },
-            message_ids: vec![root.id.to_hex(), reply.id.to_hex(), "00".repeat(32)],
-        },
-        ContextQuery {
-            target: ReadTarget {
-                channel_id: channel,
-                root_id: Some(root.id.to_hex()),
-            },
-            message_ids: vec![root.id.to_hex(), reply.id.to_hex()],
-        },
-    ];
-    let page = db
-        .personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &queries,
-        )
-        .await
-        .unwrap();
-    let page = serde_json::to_value(page).unwrap();
-    assert_eq!(page["contexts"][0]["messages"][0]["status"], "unread");
-    assert_eq!(page["contexts"][0]["messages"][1]["status"], "unavailable");
-    assert_eq!(page["contexts"][0]["messages"][2]["status"], "unavailable");
-    assert_eq!(page["contexts"][1]["messages"][0]["status"], "unavailable");
-    assert_eq!(page["contexts"][1]["messages"][1]["status"], "unread");
-    assert_eq!(page["contexts"][1]["messages"][1]["reason"], "broadcast");
-    let accounts: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM personal_read_accounts WHERE community_id=$1")
-            .bind(community.as_uuid())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(accounts, 1, "context GET must never create authority");
-    db.apply_personal_read_intent(
-        community,
-        &actor.public_key(),
-        &ReadIntent::MarkThrough {
-            target: queries[0].target.clone(),
-            message_id: root.id.to_hex(),
-        },
-    )
-    .await
-    .unwrap();
-    let page = serde_json::to_value(
-        db.personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &queries,
-        )
-        .await
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(page["contexts"][0]["messages"][0]["status"], "read");
-    assert_eq!(page["contexts"][1]["messages"][1]["status"], "unread");
-    db.apply_personal_read_intent(
-        community,
-        &actor.public_key(),
-        &ReadIntent::MarkThrough {
-            target: queries[1].target.clone(),
-            message_id: reply.id.to_hex(),
-        },
-    )
-    .await
-    .unwrap();
-    let page = serde_json::to_value(
-        db.personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &queries,
-        )
-        .await
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(page["contexts"][1]["messages"][1]["status"], "read");
-    let other = Keys::generate();
-    let other_page = || async {
-        serde_json::to_value(
-            db.personal_read_contexts(
-                community,
-                &other.public_key(),
-                DEFAULT_RETENTION_SECONDS,
-                &queries,
-            )
-            .await
-            .unwrap(),
-        )
-        .unwrap()
-    };
-    // Nothing counts before an account starts.
-    let page = other_page().await;
-    assert_eq!(page["contexts"][0]["messages"][0]["status"], "read");
-    assert_eq!(page["contexts"][1]["messages"][1]["status"], "read");
-    // Frontiers are per actor: the actor's marks never read for another.
-    start_before_everything(&pool, community, &other.public_key()).await;
-    let page = other_page().await;
-    assert_eq!(page["contexts"][0]["messages"][0]["status"], "unread");
-    assert_eq!(page["contexts"][1]["messages"][1]["status"], "unread");
-    assert!(db
-        .personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &[]
-        )
-        .await
-        .is_err());
-    let oversized = vec![ContextQuery {
-        target: queries[0].target.clone(),
-        message_ids: vec![root.id.to_hex(); MAX_CONTEXT_MESSAGES + 1],
-    }];
-    assert!(db
-        .personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &oversized
-        )
-        .await
-        .is_err());
-    sqlx::query("UPDATE channels SET visibility='private' WHERE community_id=$1 AND id=$2")
-        .bind(community.as_uuid())
-        .bind(channel)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let page = serde_json::to_value(
-        db.personal_read_contexts(
-            community,
-            &other.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &queries,
-        )
-        .await
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        page["contexts"],
-        serde_json::json!([{"status":"unavailable"},{"status":"unavailable"}])
-    );
-    assert!(db
-        .personal_read_accessible_contexts(community, &other.public_key(), &[channel])
-        .await
-        .unwrap()
-        .is_empty());
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn personal_read_context_author_horizon_unknown_ancestry_and_deletion() {
-    let (db, pool, community, channel, actor, root) = fixture().await;
+    let mention = Tag::public_key(actor.public_key());
     let old = EventBuilder::new(Kind::Custom(9), "directed, about to expire")
-        .tags([nostr::Tag::parse(["p", &actor.public_key().to_hex()]).unwrap()])
+        .tags([mention.clone()])
         .sign_with_keys(&Keys::generate())
         .unwrap();
     db.insert_event(community, &old, Some(channel))
         .await
         .unwrap();
+    // Claims to reply, with no recorded ancestry: left out, though directed.
     let unresolved = EventBuilder::new(Kind::Custom(9), "ancestry missing")
-        .tags([nostr::Tag::parse(["e", &root.id.to_hex(), "", "reply"]).unwrap()])
+        .tags([
+            Tag::parse(["e", &root.id.to_hex(), "", "reply"]).unwrap(),
+            mention,
+        ])
         .sign_with_keys(&Keys::generate())
         .unwrap();
     db.insert_event(community, &unresolved, Some(channel))
         .await
         .unwrap();
-    let queries = [ContextQuery {
-        target: ReadTarget {
-            channel_id: channel,
-            root_id: None,
-        },
-        message_ids: vec![old.id.to_hex(), unresolved.id.to_hex(), root.id.to_hex()],
-    }];
-    let page = serde_json::to_value(
-        db.personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &queries,
-        )
-        .await
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(page["contexts"][0]["messages"][0]["status"], "unread");
-    assert_eq!(page["contexts"][0]["messages"][0]["reason"], "mention");
-    assert_eq!(page["contexts"][0]["messages"][1]["status"], "unknown");
+    let row = &sidebar(&db, community, &actor).await.channels[0];
+    assert_eq!((row.unread, row.mentions), (true, 1));
+    assert!(row.threads.is_empty());
     sqlx::query(
         "UPDATE events SET created_at=created_at-interval '31 days' WHERE community_id=$1 AND id=$2",
     )
@@ -1153,112 +859,6 @@ async fn personal_read_context_author_horizon_unknown_ancestry_and_deletion() {
         .execute(&pool)
         .await
         .unwrap();
-    let page = serde_json::to_value(
-        db.personal_read_contexts(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            &queries,
-        )
-        .await
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(page["contexts"][0]["messages"][0]["status"], "not_counted");
-    assert_eq!(page["contexts"][0]["messages"][2]["status"], "not_counted");
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn personal_read_covered_corruption_requires_canonical_matching_frontier() {
-    let (db, pool, community, channel, actor, root) = fixture().await;
-    let reply = EventBuilder::new(Kind::Custom(9), "canonical reply")
-        .custom_created_at(nostr::Timestamp::from(root.created_at.as_secs() - 1))
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    db.insert_event(community, &reply, Some(channel))
-        .await
-        .unwrap();
-    for (event, depth) in [(&root, 0), (&reply, 1)] {
-        sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
-            VALUES ($1,$2,to_timestamp($3),$4,$5,$5,$6)")
-            .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice())
-            .bind(event.created_at.as_secs() as f64).bind(channel)
-            .bind(root.id.as_bytes().as_slice()).bind(depth).execute(&pool).await.unwrap();
-    }
-    db.apply_personal_read_intent(
-        community,
-        &actor.public_key(),
-        &ReadIntent::MarkThrough {
-            target: ReadTarget {
-                channel_id: channel,
-                root_id: None,
-            },
-            message_id: root.id.to_hex(),
-        },
-    )
-    .await
-    .unwrap();
-    // Corrupt both stored payloads. Only canonical evidence plus its matching
-    // frontier can make their tags irrelevant, never the channel prefix alone.
-    sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
-        .bind(community.as_uuid())
-        .bind(serde_json::json!([["p", 42]]))
-        .execute(&pool)
-        .await
-        .unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(page.channels[0].unread, ReadCount::Unknown));
-    sqlx::query("INSERT INTO personal_read_frontiers (community_id,actor,channel_id,root_id,through_timestamp)
-        VALUES ($1,$2,$3,$4,now())")
-        .bind(community.as_uuid()).bind(actor.public_key().to_bytes().as_slice()).bind(channel)
-        .bind(root.id.as_bytes().as_slice())
-        .execute(&pool).await.unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        page.channels[0].unread,
-        ReadCount::Exact { value: 0 }
-    ));
-    assert!(matches!(
-        page.channels[0].attention,
-        ReadCount::Exact { value: 0 }
-    ));
-    // Removing canonical metadata must not let a channel frontier hide unknown
-    // ancestry/corruption, even though both frontiers cover the row.
-    sqlx::query("DELETE FROM thread_metadata WHERE community_id=$1 AND event_id=$2")
-        .bind(community.as_uuid())
-        .bind(reply.id.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
-    let page = db
-        .personal_read_sidebar(
-            community,
-            &actor.public_key(),
-            DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(page.channels[0].unread, ReadCount::Unknown));
-    assert!(matches!(page.channels[0].attention, ReadCount::Unknown));
+    let row = &sidebar(&db, community, &actor).await.channels[0];
+    assert_eq!((row.unread, row.mentions), (false, 0));
 }

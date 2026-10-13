@@ -191,9 +191,20 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         .insert_event(community, &event, Some(channel))
         .await
         .unwrap();
+    state
+        .db
+        .add_member(
+            community,
+            channel,
+            &other.public_key().to_bytes(),
+            buzz_db::channel::MemberRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
     let write_path = "/buzz/v1/me/read-state";
-    let body = serde_json::to_vec(&json!({"intents":[{"type":"mark_channel_read",
-        "channel_id":channel,"message_id":event.id.to_hex()}]}))
+    let body = serde_json::to_vec(&json!({"intents":[{"type":"mark_through",
+        "target":{"channel_id":channel},"message_id":event.id.to_hex()}]}))
     .unwrap();
     let missing_hash = proof(&actor, &host, write_path, "POST", None);
     assert_eq!(
@@ -228,32 +239,30 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
     assert_eq!(applied.0, StatusCode::OK, "{}", applied.1);
     assert_eq!(applied.1["outcomes"][0]["status"], "applied");
     // The frontier belongs to the signer alone.
-    let targets = json!([{"target":{"channel_id":channel},"message_ids":[event.id.to_hex()]}]);
-    let targets: String = targets
-        .to_string()
-        .bytes()
-        .map(|b| format!("%{b:02X}"))
-        .collect();
-    let path = format!("/buzz/v1/me/read-state?targets={targets}");
+    let path = format!("/buzz/v1/me/sidebar?channel_ids={channel}");
     start_before_everything(&state, community, &other).await;
-    for (key, status) in [(&actor, "read"), (&other, "unread")] {
+    for (key, unread, read_through) in [
+        (&actor, false, json!(event.id.to_hex())),
+        (&other, true, Value::Null),
+    ] {
         let auth = proof(key, &host, &path, "GET", None);
         let page = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
         assert_eq!(page.0, StatusCode::OK, "{}", page.1);
-        assert_eq!(page.1["contexts"][0]["messages"][0]["status"], status);
+        assert_eq!(page.1["channels"][0]["unread"], unread, "{}", page.1);
+        assert_eq!(page.1["channels"][0]["read_through_id"], read_through);
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn accessory_context_get_signed_query_and_independent_batch_outcomes() {
+async fn accessory_batch_outcomes_are_independent_and_return_applied_rows() {
     let fixture = crate::api::bridge::postgres_tests::bridge_handler_test_state()
         .await
         .unwrap();
     let mut state = (*fixture).clone();
     Arc::make_mut(&mut state.config).buzz_v1_enabled = true;
     let state = Arc::new(state);
-    let host = format!("bff-context-{}.local", uuid::Uuid::new_v4());
+    let host = format!("bff-batch-{}.local", uuid::Uuid::new_v4());
     let community = state
         .db
         .ensure_configured_community(&host)
@@ -261,76 +270,95 @@ async fn accessory_context_get_signed_query_and_independent_batch_outcomes() {
         .unwrap()
         .id;
     let actor = Keys::generate();
-    let channel = state
-        .db
-        .create_channel(
-            community,
-            "context",
-            buzz_db::channel::ChannelType::Stream,
-            buzz_db::channel::ChannelVisibility::Open,
-            None,
-            &actor.public_key().to_bytes(),
-            None,
-        )
-        .await
-        .unwrap()
-        .id;
-    let event = EventBuilder::new(Kind::Custom(9), "message selector")
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    state
-        .db
-        .insert_event(community, &event, Some(channel))
-        .await
-        .unwrap();
-    let targets = json!([{"target":{"channel_id":channel},"message_ids":[event.id.to_hex()]}]);
-    let encode = |value: &str| {
-        value
-            .bytes()
-            .map(|b| format!("%{b:02X}"))
-            .collect::<String>()
+    let create = |name: &'static str, owner: &Keys| {
+        let (state, owner) = (state.clone(), owner.public_key().to_bytes());
+        async move {
+            state
+                .db
+                .create_channel(
+                    community,
+                    name,
+                    buzz_db::channel::ChannelType::Stream,
+                    buzz_db::channel::ChannelVisibility::Open,
+                    None,
+                    &owner,
+                    None,
+                )
+                .await
+                .unwrap()
+                .id
+        }
     };
-    let path = format!(
-        "/buzz/v1/me/read-state?targets={}",
-        encode(&targets.to_string())
-    );
+    let channel = create("joined", &actor).await;
+    // Open, so marking it applies, but never joined.
+    let unjoined = create("open, not joined", &Keys::generate()).await;
+    let post = |channel| {
+        let state = state.clone();
+        async move {
+            let event = EventBuilder::new(Kind::Custom(9), "read state")
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            state
+                .db
+                .insert_event(community, &event, Some(channel))
+                .await
+                .unwrap();
+            event.id.to_hex()
+        }
+    };
+    let (event, elsewhere) = (post(channel).await, post(unjoined).await);
     start_before_everything(&state, community, &actor).await;
+    let path = format!("/buzz/v1/me/sidebar?channel_ids={channel}");
     let auth = proof(&actor, &host, &path, "GET", None);
     let result = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
     assert_eq!(result.0, StatusCode::OK, "{}", result.1);
-    assert_eq!(result.1["contexts"][0]["messages"][0]["status"], "unread");
-    let auth = proof(&actor, &host, "/buzz/v1/me/read-state", "GET", None);
-    assert_eq!(
-        request(state.clone(), &host, &path, "GET", Some(&auth), b"")
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-    let bad_path = "/buzz/v1/me/read-state?targets=invalid";
-    let auth = proof(&actor, &host, bad_path, "GET", None);
-    assert_eq!(
-        request(state.clone(), &host, bad_path, "GET", Some(&auth), b"")
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
+    let unread = json!({"channel_id":channel,"unread":true,"mentions":0,
+        "read_through_id":null,"latest_id":event,"threads":[]});
+    assert_eq!(result.1["channels"], json!([unread]));
     let write_path = "/buzz/v1/me/read-state";
     let body = serde_json::to_vec(&json!({"intents":[
         {"type":"unknown"},
-        {"type":"mark_through","target":{"channel_id":uuid::Uuid::new_v4()},"message_id":event.id.to_hex()},
-        {"type":"mark_through","target":{"channel_id":channel},"message_id":event.id.to_hex()},
-        {"type":"mark_through","target":{"channel_id":channel},"message_id":"not an event id"}
-    ]})).unwrap();
+        {"type":"mark_through","target":{"channel_id":uuid::Uuid::new_v4()},"message_id":event},
+        {"type":"mark_through","target":{"channel_id":channel},"message_id":event},
+        {"type":"mark_through","target":{"channel_id":channel},"message_id":"not an event id"},
+        {"type":"mark_through","target":{"channel_id":channel},"message_id":event},
+        {"type":"mark_through","target":{"channel_id":unjoined},"message_id":elsewhere}
+    ]}))
+    .unwrap();
     let auth = proof(&actor, &host, write_path, "POST", Some(&body));
     let result = request(state.clone(), &host, write_path, "POST", Some(&auth), &body).await;
     assert_eq!(result.0, StatusCode::OK, "{}", result.1);
     assert_eq!(
         result.1["outcomes"],
-        json!([{"status":"invalid"},{"status":"blocked"},{"status":"applied"},{"status":"invalid"}])
+        json!([{"status":"invalid"},{"status":"blocked"},{"status":"applied"},
+            {"status":"invalid"},{"status":"applied"},{"status":"applied"}])
     );
-    let auth = proof(&actor, &host, &path, "GET", None);
-    let result = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
-    assert_eq!(result.1["contexts"][0]["messages"][0]["status"], "read");
+    // One updated row per applied channel; the blocked and the unjoined
+    // channels have none.
+    let read = json!({"channel_id":channel,"unread":false,"mentions":0,
+        "read_through_id":event,"latest_id":event,"threads":[]});
+    assert_eq!(result.1["channels"], json!([read]));
+
+    // The removed context read is not served, however well signed.
+    let targets = json!([{"target":{"channel_id":channel},"message_ids":[event]}]);
+    let targets: String = targets
+        .to_string()
+        .bytes()
+        .map(|b| format!("%{b:02X}"))
+        .collect();
+    let path = format!("/buzz/v1/me/read-state?targets={targets}");
+    let response = crate::router::build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header("host", &host)
+                .header("authorization", proof(&actor, &host, &path, "GET", None))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -379,8 +407,11 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
         .insert_event(community, &event, Some(channel))
         .await
         .unwrap();
-    let intent = buzz_db::personal_read::ReadIntent::MarkChannelRead {
-        channel_id: channel,
+    let intent = buzz_db::personal_read::ReadIntent::MarkThrough {
+        target: buzz_db::personal_read::ReadTarget {
+            channel_id: channel,
+            root_id: None,
+        },
         message_id: event.id.to_hex(),
     };
     let path = "/buzz/v1/me/read-state";
@@ -456,19 +487,13 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                     "enabled={enabled} known_host={known_host} path={path}"
                 );
                 if enabled && known_host {
-                    let d = &doc["buzz_v1"];
-                    assert_eq!(d["version"], 1);
-                    assert_eq!(d["base_path"], "/buzz/v1");
-                    assert_eq!(d["retention_seconds"], 1234);
-                    assert_eq!(d["max_channels"], buzz_db::personal_read::MAX_CHANNELS);
-                    assert_eq!(d["max_intents"], buzz_db::personal_read::MAX_INTENTS);
-                    assert_eq!(d["max_contexts"], buzz_db::personal_read::MAX_CONTEXTS);
+                    // Exactly these fields: context and thread-cap limits are gone.
                     assert_eq!(
-                        d["max_context_messages"],
-                        buzz_db::personal_read::MAX_CONTEXT_MESSAGES
+                        doc["buzz_v1"],
+                        json!({"version":1,"base_path":"/buzz/v1","retention_seconds":1234,
+                            "max_channels":20,"max_intents":100,
+                            "eligible_kinds":[9, 40002, 45001, 45003]})
                     );
-                    assert_eq!(d["max_thread_summaries"], 5);
-                    assert_eq!(d["eligible_kinds"], json!([9, 40002, 45001, 45003]));
                 }
             }
         }
@@ -613,8 +638,12 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
             .await
             .unwrap();
     }
+    // Addressed to the reader, so its mention count pins the exact number.
     let message = EventBuilder::new(Kind::Custom(9), "unread message to delete")
-        .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
+        .tags([
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::public_key(reader.public_key()),
+        ])
         .sign_with_keys(&author)
         .unwrap();
     let mut tags = vec![Tag::parse(["e", &message.id.to_hex()]).unwrap()];
@@ -662,8 +691,8 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         assert_eq!(channels.len(), 1, "{sidebar}");
         assert_eq!(channels[0]["channel_id"], channel.to_string());
         assert_eq!(
-            channels[0]["unread"],
-            json!({"status":"exact", "value":count}),
+            (&channels[0]["unread"], &channels[0]["mentions"]),
+            (&json!(count == 1), &json!(count)),
             "kind {deletion_kind}, after kind {}: {sidebar}",
             event.kind.as_u16()
         );

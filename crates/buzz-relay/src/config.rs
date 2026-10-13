@@ -361,7 +361,7 @@ pub struct Config {
     /// Used to authenticate internal policy endpoint requests.
     pub git_hook_hmac_secret: String,
 
-    /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
+    /// Whether NIP-PL push discovery, lease acceptance, enqueueing, matching, and delivery
     /// are enabled for this deployment. Defaults to false.
     pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.

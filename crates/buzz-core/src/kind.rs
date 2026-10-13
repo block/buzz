@@ -132,6 +132,35 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
 ];
 
+/// Returns `true` if the event is readable only by its author: an
+/// [`AUTHOR_ONLY_KINDS`] event, or a NIP-09 deletion whose `k` tag names one.
+///
+/// A deletion request reveals its targets' ids and deletion timing, so it
+/// inherits the target's privacy. It is classified by its own `k` tag, not by
+/// a target lookup, so it stays private after the target is gone; ingest
+/// rejects a deletion of a stored author-only event without that tag.
+pub fn is_author_only_event_kind(event: &nostr::Event) -> bool {
+    let kind = event_kind_u32(event);
+    if AUTHOR_ONLY_KINDS.contains(&kind) {
+        return true;
+    }
+    kind == KIND_DELETION && k_tag_kinds(event).any(|k| AUTHOR_ONLY_KINDS.contains(&k))
+}
+
+/// Kinds named by an event's well-formed `["k", "<kind>"]` tags.
+///
+/// Only canonical decimal values count (`"30300"`, not `"030300"` or
+/// `"+30300"`), so this agrees with SQL that matches the tag value as text.
+pub fn k_tag_kinds(event: &nostr::Event) -> impl Iterator<Item = u32> + '_ {
+    event.tags.iter().filter_map(|tag| match tag.as_slice() {
+        [name, value, ..] if name == "k" => value
+            .parse::<u32>()
+            .ok()
+            .filter(|kind| kind.to_string() == *value),
+        _ => None,
+    })
+}
+
 /// Kinds that require a result-level read gate beyond the filter-layer
 /// `#p` check: even a reader who knows an event id MUST match the event's
 /// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
@@ -467,6 +496,9 @@ pub const KIND_PRESENCE_UPDATE: u32 = 20001;
 pub const KIND_PAIRING: u32 = 24134;
 /// Ephemeral: typing indicator for a channel.
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
+/// Ephemeral: an owner's presence for its agents. Content is the status, each
+/// `p` tag names one agent the signer owns. Never the signer's own presence.
+pub const KIND_AGENT_PRESENCE: u32 = 20003;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
@@ -703,6 +735,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_THREAD_WINDOW_BOUNDS,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
+    KIND_AGENT_PRESENCE,
     KIND_HUDDLE_REACTION,
     KIND_BLOSSOM_AUTH,
     KIND_PAIRING,
@@ -966,6 +999,41 @@ mod tests {
             .tags(tag_vec)
             .sign_with_keys(&keys)
             .unwrap()
+    }
+
+    #[test]
+    fn deletion_privacy_follows_its_k_tag() {
+        for &kind in AUTHOR_ONLY_KINDS {
+            let k = kind.to_string();
+            assert!(is_author_only_event_kind(&make_event_of_kind(kind, &[])));
+            assert!(is_author_only_event_kind(&make_event_of_kind(
+                KIND_DELETION,
+                &[&["e", &"ab".repeat(32)], &["k", &k]]
+            )));
+            assert!(is_author_only_event_kind(&make_event_of_kind(
+                KIND_DELETION,
+                &[&["k", "1"], &["k", &k]]
+            )));
+        }
+        for tags in [
+            &[][..],
+            &[&["k", "1"][..]][..],
+            &[&["k", "not-a-kind"][..]][..],
+            // Non-canonical spellings are not markers; SQL matches text.
+            &[&["k", "030300"][..]][..],
+            &[&["k", "+30300"][..]][..],
+            &[&["k", " 30300"][..]][..],
+        ] {
+            assert!(!is_author_only_event_kind(&make_event_of_kind(
+                KIND_DELETION,
+                tags
+            )));
+        }
+        // A `k` tag classifies only deletions.
+        assert!(!is_author_only_event_kind(&make_event_of_kind(
+            1,
+            &[&["k", &KIND_EVENT_REMINDER.to_string()]]
+        )));
     }
 
     fn make_persona_event(tags: &[&[&str]]) -> nostr::Event {

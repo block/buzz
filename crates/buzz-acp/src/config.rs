@@ -506,7 +506,8 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
-    /// Exit after this many seconds with no dispatched events and no turn in flight.
+    /// Exit after this many seconds since the last channel dispatch or completion,
+    /// with no turn in flight. Heartbeat completion does not renew this interval.
     /// 0 disables inactivity self-termination.
     #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
     pub exit_after_inactivity: u64,
@@ -516,8 +517,9 @@ pub struct CliArgs {
     pub lazy_pool: bool,
 
     /// Tear the woken pool back down to the lazy empty-slot state after this
-    /// many seconds with no dispatched turn in flight and an empty queue,
-    /// releasing worker subprocesses until the next accepted event re-wakes.
+    /// many seconds since the last channel dispatch or completion, with no turn
+    /// in flight and an empty queue. Heartbeat completion does not renew the interval.
+    /// Worker subprocesses are released until the next accepted event re-wakes.
     /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,

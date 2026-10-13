@@ -36,8 +36,9 @@ use std::{
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
+/// Verification and delivery services for this gateway's configured application.
 #[derive(Clone)]
-pub struct ProfileRuntime {
+pub struct ApplicationRuntime {
     pub app_attest: Arc<AppAttestVerifier>,
     pub transport: Arc<dyn PushTransport>,
 }
@@ -47,9 +48,9 @@ pub struct AppState {
     pub grant_keyring: Arc<GrantKeyring>,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
-    /// Server-owned dogfood application identity and APNs transport. The wire
-    /// profile selector is fixed and App Attest verifies the configured app ID.
-    pub profile: Arc<ProfileRuntime>,
+    /// Server-owned application identity and APNs transport.
+    /// App Attest verifies the configured app ID.
+    pub application: Arc<ApplicationRuntime>,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
@@ -138,12 +139,10 @@ fn endpoint_bytes(endpoint: &str) -> Option<Vec<u8>> {
         .then(|| hex::decode(endpoint).ok())
         .flatten()
 }
-fn endpoint_fingerprint(profile: AppProfile, token: &[u8]) -> [u8; 32] {
+fn endpoint_fingerprint(token: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(b"buzz-apns-endpoint-v1\0");
-    h.update(profile.as_str().as_bytes());
-    h.update([0]);
+    h.update(b"buzz-apns-endpoint-v2\0");
     h.update(token);
     h.finalize().into()
 }
@@ -194,7 +193,7 @@ struct EnrollTranscript<'a> {
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     key_id: &'a str,
-    app_profile: AppProfile,
+
     endpoint: &'a str,
     endpoint_epoch: i64,
     expires_at: i64,
@@ -209,9 +208,6 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    if r.app_profile != AppProfile::BuzzIosDogfood {
-        return error(StatusCode::BAD_REQUEST, "invalid_request");
-    }
     if r.v != WIRE_VERSION
         || r.endpoint_epoch != 1
         || r.expires_at <= now
@@ -229,7 +225,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         key_id: &r.key_id,
-        app_profile: r.app_profile,
+
         endpoint: &r.endpoint,
         endpoint_epoch: r.endpoint_epoch,
         expires_at: r.expires_at,
@@ -238,21 +234,19 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let verified =
-        match s
-            .profile
-            .app_attest
-            .verify_attestation(&r.attestation, &r.key_id, signed.as_bytes())
-        {
-            Ok(value) => value,
-            Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
-        };
-    let fingerprint = endpoint_fingerprint(r.app_profile, &token);
+    let verified = match s.application.app_attest.verify_attestation(
+        &r.attestation,
+        &r.key_id,
+        signed.as_bytes(),
+    ) {
+        Ok(value) => value,
+        Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
+    };
+    let fingerprint = endpoint_fingerprint(&token);
     match s
         .authority
         .matching_installation(
             &verified.key_id,
-            r.app_profile,
             fingerprint,
             r.endpoint_epoch,
             r.expires_at,
@@ -292,7 +286,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         app_attest_key_id: verified.key_id,
         app_attest_public_key: verified.public_key,
         assertion_counter: 0,
-        profile: r.app_profile,
+
         token_ciphertext: ciphertext,
         token_fingerprint: fingerprint,
         endpoint_epoch: 1,
@@ -337,13 +331,10 @@ async fn verify_installation_assertion<T: serde::Serialize>(
         s.authority.installation(installation_id, now).await
     }
     .map_err(authority_error)?;
-    if installation.profile != AppProfile::BuzzIosDogfood {
-        return Err(error(StatusCode::NOT_FOUND, "not_authorized"));
-    }
     let transcript = transcript(domain, signed)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
     let verified = s
-        .profile
+        .application
         .app_attest
         .verify_assertion(
             assertion,
@@ -442,10 +433,6 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
         v: WIRE_VERSION,
         delegation_id: d.id,
         relay_pubkey: d.relay_pubkey,
-        app_profile: match s.authority.installation(d.installation_id, now).await {
-            Ok(i) => i.profile,
-            Err(e) => return authority_error(e),
-        },
         endpoint_epoch: d.endpoint_epoch,
         generation: d.generation,
         expires_at: d.expires_at,
@@ -486,14 +473,6 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     {
         return error(StatusCode::BAD_REQUEST, "invalid_request");
     }
-    let installation = match s
-        .authority
-        .installation(r.installation_handle, (s.now)())
-        .await
-    {
-        Ok(i) => i,
-        Err(e) => return authority_error(e),
-    };
     let t = RotateTranscript {
         v: r.v,
         audience: ROTATE_ENDPOINT_AUDIENCE,
@@ -531,7 +510,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
             r.endpoint_epoch,
             r.new_endpoint_epoch,
             ciphertext,
-            endpoint_fingerprint(installation.profile, &token),
+            endpoint_fingerprint(&token),
         )
         .await
     {
@@ -735,23 +714,7 @@ async fn deliver(
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
-    if permit.authority.profile != grant.app_profile {
-        crate::metrics::record_delivery_error("profile_mismatch");
-        let _ = s
-            .authority
-            .finish_delivery(permit, DeliveryDisposition::Terminal)
-            .await;
-        return error(StatusCode::NOT_FOUND, "invalid_grant");
-    }
-    if permit.authority.profile != AppProfile::BuzzIosDogfood {
-        crate::metrics::record_delivery_error("profile_disabled");
-        let _ = s
-            .authority
-            .finish_delivery(permit, DeliveryDisposition::Retryable)
-            .await;
-        return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
-    }
-    let transport = Arc::clone(&s.profile.transport);
+    let transport = Arc::clone(&s.application.transport);
     let endpoint = match s.token_keyring.open(&permit.authority.token_ciphertext) {
         Ok(token) => hex::encode(token),
         Err(_) => {
@@ -921,7 +884,7 @@ mod request_limit_tests {
 
     fn state() -> AppState {
         let app_attest = AppAttestVerifier::new(
-            "TEAMID.xyz.block.buzz.dogfood.mobile".to_owned(),
+            "TEAMID.com.example.buzz".to_owned(),
             include_bytes!("../tests/fixtures/apple-app-attestation-root.pem").to_vec(),
         )
         .expect("pinned Apple root fixture");
@@ -933,7 +896,7 @@ mod request_limit_tests {
             token_keyring: Arc::new(
                 TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap(),
             ),
-            profile: Arc::new(ProfileRuntime {
+            application: Arc::new(ApplicationRuntime {
                 app_attest: Arc::new(app_attest),
                 transport: Arc::new(NeverTransport),
             }),
@@ -953,7 +916,7 @@ mod request_limit_tests {
             challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0; 32]),
             key_id: STANDARD.encode([0; 32]),
             attestation: STANDARD.encode(vec![0; MAX_APP_ATTESTATION_BYTES]),
-            app_profile: AppProfile::BuzzIosDogfood,
+
             endpoint: "ab".repeat(MAX_ENDPOINT_HEX_BYTES),
             endpoint_epoch: 1,
             expires_at: fixed_now() + 60,
@@ -1085,7 +1048,7 @@ mod transcript_vector_tests {
             challenge_id: CHALLENGE_ID,
             challenge: CHALLENGE,
             key_id: KEY_ID,
-            app_profile: AppProfile::BuzzIosDogfood,
+
             endpoint: ENDPOINT,
             endpoint_epoch: 1,
             expires_at: 1_752_624_000,

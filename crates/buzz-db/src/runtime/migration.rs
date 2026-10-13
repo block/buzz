@@ -705,7 +705,14 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 57);
+        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations[58].version, 59);
+        assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
+        assert_eq!(migrations[59].version, 60);
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE push_leases DROP COLUMN app_profile"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -716,6 +723,11 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("ALTER TABLE personal_read_accounts ADD COLUMN started_at"));
+        assert_eq!(migrations[57].version, 58);
+        assert!(migrations[57]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN through_message_id"));
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -1322,7 +1334,7 @@ mod postgres_tests {
         assert!(dogfood_profile
             .contains("DROP CONSTRAINT push_gateway_installations_app_profile_check"));
         assert!(dogfood_profile.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
-        assert!(desired_schema.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+        assert!(!desired_schema.contains("app_profile"));
 
         // Drop the Phase-A NIP-FI relay-side authority ledger (0041 + 0042).
         // OSS Buzz is stateless for identity (spec v2, PR #7214); the durable
@@ -2229,6 +2241,18 @@ mod postgres_tests {
             .get("personal_read_accounts")
             .expect("schema.sql personal read accounts")
             .contains(started_at_column));
+        // 0058 replaces the frontier's whole-channel cut with its anchor ID.
+        let threads_through_column = "threads_through_timestamp timestamptz \
+            check (threads_through_timestamp is null or root_id = ''::bytea), ";
+        let through_message_column =
+            "through_message_id bytea check (octet_length(through_message_id) = 32), ";
+        let through_message = MIGRATOR
+            .iter()
+            .find(|m| m.version == 58)
+            .expect("personal read anchor migration")
+            .sql
+            .as_str();
+        assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
         for (table, definition) in personal.tables {
             let in_schema = schema.tables.get(&table).map(|schema_definition| {
                 if table == "personal_read_accounts" {
@@ -2237,6 +2261,11 @@ mod postgres_tests {
                     schema_definition.clone()
                 }
             });
+            let definition = if table == "personal_read_frontiers" {
+                definition.replacen(threads_through_column, through_message_column, 1)
+            } else {
+                definition
+            };
             assert_eq!(
                 in_schema.as_ref(),
                 Some(&definition),
@@ -3233,5 +3262,54 @@ mod postgres_tests {
                 "{err}"
             );
         }
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0060_refuses_active_legacy_leases_without_mutation() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 59)
+            .await
+            .expect("legacy schema");
+        let community = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities(id,host) VALUES($1,'push-cutover.example')")
+            .bind(community)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO push_leases(community_id,author,installation_id,source_event_id,source_created_at,generation,active,app_profile,endpoint_hash,endpoint_grant,max_class,subscriptions,expires_at) VALUES($1,$2,'legacy',$3,1,1,true,'buzz-ios-dogfood',$4,'opaque','default','[]',2000000000)")
+            .bind(community).bind(vec![1_u8;32]).bind(vec![2_u8;32]).bind(vec![3_u8;32])
+            .execute(&pool).await.unwrap();
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("active legacy lease blocks cutover");
+        assert!(
+            error.to_string().contains("no active legacy push leases"),
+            "{error}"
+        );
+        let preserved: (bool, String) =
+            sqlx::query_as("SELECT active,app_profile FROM push_leases WHERE community_id=$1")
+                .bind(community)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, (true, "buzz-ios-dogfood".to_owned()));
+        sqlx::query("UPDATE push_leases SET active=false,app_profile=NULL,endpoint_hash=NULL,endpoint_grant=NULL,max_class=NULL,subscriptions=NULL WHERE community_id=$1")
+            .bind(community).execute(&pool).await.unwrap();
+        run_migrations(&pool)
+            .await
+            .expect("inactive legacy lease permits cutover");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_leases WHERE community_id=$1 AND NOT active",
+        )
+        .bind(community)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(sqlx::query("SELECT app_profile FROM push_leases")
+            .execute(&pool)
+            .await
+            .is_err());
     }
 }

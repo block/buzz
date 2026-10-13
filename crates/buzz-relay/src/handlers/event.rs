@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    event_kind_u32, is_ephemeral, is_unshared_gated_event, KIND_AGENT_OBSERVER_FRAME,
+    KIND_AGENT_PRESENCE, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -136,7 +136,7 @@ pub async fn filter_fanout_by_access(
     // only paths that route author-only kinds — so no such delivery can bypass
     // it. It runs before (and independent of) the channel-membership filter
     // below because author-only kinds are stored globally (channel_id = None).
-    let matches = if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&stored_event.event)) {
+    let matches = if buzz_core::kind::is_author_only_event_kind(&stored_event.event) {
         let author = stored_event.event.pubkey.to_bytes();
         matches
             .into_iter()
@@ -672,11 +672,19 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 
     // Observer frames and ephemeral kinds return before ingest, so they take
-    // the ban / timeout write-block here. Persistent kinds get it in ingest.
-    if kind_u32 == KIND_AGENT_OBSERVER_FRAME || is_ephemeral(kind_u32) {
-        if let Err(e) =
-            super::ingest::enforce_write_restriction(&state, &conn.tenant, kind_u32, &auth_pubkey)
-                .await
+    // the ban / timeout write-block here, over a short-TTL cache because it
+    // runs per frame. Persistent kinds get the uncached check in ingest, and
+    // so does NIP-43 leave (28936), which is ephemeral-range but ingested.
+    if kind_u32 == KIND_AGENT_OBSERVER_FRAME
+        || (is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST)
+    {
+        if let Err(e) = super::ingest::enforce_cached_write_restriction(
+            &state,
+            &conn.tenant,
+            kind_u32,
+            &auth_pubkey,
+        )
+        .await
         {
             let (message, reason) = match e {
                 IngestError::Internal(_) => (
@@ -750,8 +758,10 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        match buzz_deletion::store(&state.db)
-            .is_serving_active(conn.tenant.community())
+        // Cached (10s): this runs per ephemeral event. Persistent ingest keeps
+        // the uncached read as its durable write fence.
+        match state
+            .is_serving_active_cached(conn.tenant.community())
             .await
         {
             Ok(true) => {}
@@ -889,7 +899,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 }
 
-/// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.
+/// Handle ephemeral events (kind 20000–29999) submitted over WebSocket —
+/// never stored. Typing indicators may also arrive over HTTP; see
+/// [`publish_http_typing`].
 ///
 /// Rejections are typed with the ingest taxonomy: [`IngestError::Rejected`]
 /// is a client-input refusal (stays `invalid` in the rejection counter),
@@ -912,6 +924,10 @@ async fn handle_ephemeral_event(
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
         Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
+    }
+
+    if event_kind_u32(&event) == KIND_AGENT_PRESENCE {
+        return set_agent_presence(&state, &conn.tenant, &event, &auth_pubkey).await;
     }
 
     // Special handling for presence events (kind:20001).
@@ -979,36 +995,8 @@ async fn handle_ephemeral_event(
         // publish/fan-out path below so other relay nodes receive the live delta.
     }
 
-    // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        // Membership refusals are client-input rejections, and the shared
-        // gate's message text is surfaced verbatim exactly as before this
-        // typed classification; no behavior change on this path.
-        super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
-            .await
-            .map_err(IngestError::Rejected)?;
-
-        // Mark as local before Redis publish to prevent double-delivery when
-        // the event comes back through the Redis subscriber loop.
-        state.mark_local_event(conn.tenant.community(), &event.id);
-
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Channel(ch_id), &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral publish failed: {e}");
-        }
-
-        // Direct fan-out to local WS subscribers, through the guarded send path
-        // so a stale subscription on a removed/non-member connection cannot
-        // receive this private-channel ephemeral event.
-        // Pass the channel_id so fan_out() uses the channel-kind index.
-        let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        publish_channel_ephemeral(&state, &conn.tenant, event, ch_id, &pubkey_bytes).await?;
     } else {
         // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
         //
@@ -1040,6 +1028,182 @@ async fn handle_ephemeral_event(
     }
 
     Ok(())
+}
+
+/// Most agents one agent presence event (kind:20003) may name.
+const MAX_AGENT_PRESENCE: usize = 256;
+
+/// The status and distinct agents an agent presence event names.
+fn agent_presence_request(event: &Event) -> Result<(&str, Vec<PublicKey>), IngestError> {
+    let status = event.content.as_str();
+    if !matches!(status, "online" | "away" | "offline") {
+        return Err(IngestError::Rejected(
+            "invalid: agent presence must be online, away or offline".into(),
+        ));
+    }
+    let mut agents = Vec::new();
+    for tag in event.tags.iter() {
+        let values = tag.as_slice();
+        if values.first().map(String::as_str) != Some("p") {
+            continue;
+        }
+        let agent = values
+            .get(1)
+            .and_then(|hex| PublicKey::from_hex(hex).ok())
+            .ok_or_else(|| IngestError::Rejected("invalid: agent presence p tag".into()))?;
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    if agents.is_empty() || agents.len() > MAX_AGENT_PRESENCE {
+        return Err(IngestError::Rejected(format!(
+            "invalid: agent presence must name 1 to {MAX_AGENT_PRESENCE} agents"
+        )));
+    }
+    Ok((status, agents))
+}
+
+/// Stores an owner's presence for its agents (kind:20003), the way each
+/// agent's own kind:20001 would be stored, so the presence snapshot reads it
+/// back unchanged. Agents the signer does not own are skipped rather than
+/// failing the rest, as an owner's list can be briefly stale. Not fanned out:
+/// live presence is matched by author, and the author here is the owner.
+async fn set_agent_presence(
+    state: &AppState,
+    tenant: &TenantContext,
+    event: &Event,
+    owner: &PublicKey,
+) -> Result<(), IngestError> {
+    let (status, agents) = agent_presence_request(event)?;
+    let community = tenant.community();
+    let owner_bytes = owner.to_bytes().to_vec();
+    let key = |agent: &PublicKey| (community, agent.to_bytes().to_vec(), owner_bytes.clone());
+    // An owner link never changes once made, so a cached `true` is final. A
+    // missing one may just not be made yet (an agent that has not signed in),
+    // so only `true` is cached here and the rest are asked again, in one query
+    // bounded by the event's own agents.
+    let (mut owned, unknown): (Vec<_>, Vec<_>) = agents
+        .into_iter()
+        .partition(|agent| state.observer_owner_cache.get(&key(agent)) == Some(true));
+    if !unknown.is_empty() {
+        let candidates: Vec<Vec<u8>> = unknown.iter().map(|a| a.to_bytes().to_vec()).collect();
+        let linked = state
+            .db
+            .owned_agents_among(community, &owner_bytes, &candidates)
+            .await
+            .map_err(|e| {
+                warn!(event_id = %event.id.to_hex(), "agent presence owner lookup failed: {e}");
+                IngestError::Internal("error: agent ownership unavailable".into())
+            })?;
+        for agent in unknown {
+            if linked.iter().any(|pubkey| pubkey[..] == agent.to_bytes()) {
+                state.observer_owner_cache.insert(key(&agent), true);
+                owned.push(agent);
+            }
+        }
+    }
+    let stored = if status == "offline" {
+        state.pubsub.clear_presence_many(tenant, &owned).await
+    } else {
+        state.pubsub.set_presence_many(tenant, &owned, status).await
+    };
+    stored.map_err(|e| {
+        warn!(event_id = %event.id.to_hex(), "agent presence storage failed: {e}");
+        IngestError::Internal("error: presence storage unavailable".into())
+    })
+}
+
+/// Publishes a verified channel-scoped ephemeral event to the channel's live
+/// subscribers, on this node and through Redis to the others. The sender must
+/// be a channel member.
+async fn publish_channel_ephemeral(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    ch_id: uuid::Uuid,
+    pubkey_bytes: &[u8],
+) -> Result<(), IngestError> {
+    // Membership refusals are client-input rejections, and the shared
+    // gate's message text is surfaced verbatim.
+    super::ingest::check_channel_membership(tenant, state, ch_id, pubkey_bytes, None)
+        .await
+        .map_err(IngestError::Rejected)?;
+
+    // Mark as local before Redis publish to prevent double-delivery when
+    // the event comes back through the Redis subscriber loop.
+    state.mark_local_event(tenant.community(), &event.id);
+
+    if let Err(e) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Channel(ch_id), &event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event.id.to_hex(), "Ephemeral publish failed: {e}");
+    }
+
+    // Direct fan-out to local WS subscribers, through the guarded send path
+    // so a stale subscription on a removed/non-member connection cannot
+    // receive this private-channel ephemeral event.
+    // Pass the channel_id so fan_out() uses the channel-kind index.
+    let stored_event = StoredEvent::new(event, Some(ch_id));
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored_event).await;
+    Ok(())
+}
+
+/// Upper bound on the serialized JSON of an HTTP typing indicator. Real
+/// indicators carry empty content and at most three short tags (`h`, root
+/// `e`, reply `e`), about 600 bytes with id, pubkey and sig. Measuring the
+/// serialized event, not just content and tag values, also counts tag
+/// structure, so many empty tags cannot slip a near-body-limit event past the
+/// cap and into fan-out to every subscriber.
+const MAX_HTTP_TYPING_BYTES: usize = 2048;
+
+/// Publishes a typing indicator (kind:20002) submitted through HTTP
+/// `POST /events`, for clients that sign but hold no WebSocket, such as
+/// app-hosted agents. Applies the gates the WebSocket path applies to
+/// ephemeral events, then the same channel publish. The caller has already
+/// authenticated `auth_pubkey` and enforced relay membership.
+pub(crate) async fn publish_http_typing(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth_pubkey: PublicKey,
+) -> Result<(), IngestError> {
+    if event.pubkey != auth_pubkey {
+        return Err(IngestError::AuthFailed(
+            "invalid: event pubkey does not match authenticated identity".into(),
+        ));
+    }
+    let ch_id = super::ingest::extract_channel_id(&event).ok_or_else(|| {
+        IngestError::Rejected("invalid: typing indicator needs a channel UUID h tag".into())
+    })?;
+    if nostr::JsonUtil::as_json(&event).len() > MAX_HTTP_TYPING_BYTES {
+        return Err(IngestError::Rejected(format!(
+            "invalid: typing indicator too large (max {MAX_HTTP_TYPING_BYTES} bytes serialized)"
+        )));
+    }
+    let event_clone = event.clone();
+    match tokio::task::spawn_blocking(move || verify_event(&event_clone)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+        Err(_) => return Err(IngestError::Internal("error: internal error".into())),
+    }
+    // Same short-TTL caches as the WebSocket ephemeral path: this runs per
+    // typing pulse, and persistent ingest keeps the uncached durable fence.
+    super::ingest::enforce_cached_write_restriction(
+        state,
+        tenant,
+        KIND_TYPING_INDICATOR,
+        &auth_pubkey,
+    )
+    .await?;
+    super::ingest::map_serving_fence_state(
+        state.is_serving_active_cached(tenant.community()).await,
+    )?;
+    publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1381,6 +1545,48 @@ mod tests {
             !super::super::ingest::requires_h_channel_scope(KIND_PRESENCE_UPDATE),
             "presence updates are global/ephemeral"
         );
+    }
+
+    #[test]
+    fn agent_presence_request_names_distinct_agents_with_a_known_status() {
+        let owner = Keys::generate();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = |status: &str, tags: Vec<Vec<String>>| {
+            EventBuilder::new(Kind::Custom(super::KIND_AGENT_PRESENCE as u16), status)
+                .tags(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()))
+                .sign_with_keys(&owner)
+                .unwrap()
+        };
+        let p = |hex: &str| vec!["p".to_string(), hex.to_string()];
+
+        let ok = event(
+            "away",
+            vec![p(&agent), p(&agent), vec!["h".into(), "x".into()]],
+        );
+        let (status, agents) = super::agent_presence_request(&ok).unwrap();
+        assert_eq!(status, "away");
+        assert_eq!(agents.len(), 1, "duplicates collapse, other tags ignored");
+
+        for bad in [
+            event("busy", vec![p(&agent)]),
+            event("online", vec![]),
+            event("online", vec![p("not-a-pubkey")]),
+            event(
+                "online",
+                (0..=super::MAX_AGENT_PRESENCE)
+                    .map(|_| p(&Keys::generate().public_key().to_hex()))
+                    .collect(),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    super::agent_presence_request(&bad),
+                    Err(super::IngestError::Rejected(_))
+                ),
+                "{:?} must be rejected",
+                bad.content
+            );
+        }
     }
 
     #[test]
@@ -1735,6 +1941,128 @@ mod tests {
         #[ignore = "requires PostgreSQL and Redis"]
         async fn accepts_stores_and_fans_out_online_and_offline() {
             exercise(true, &["online", "offline"]).await;
+        }
+
+        /// An owner's batch (kind:20003) stores presence for the agents it
+        /// owns, skips any it does not, and never touches its own presence.
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn agent_presence_stores_only_owned_agents() {
+            let redis_url = std::env::var("REDIS_URL").expect("test Redis URL required");
+            let state = fanout_access::test_state_with_redis_url(&redis_url).await;
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .unwrap();
+            let community_uuid = Uuid::new_v4();
+            let host = format!("agent-presence-{}.example", community_uuid.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let tenant = TenantContext::resolved(CommunityId::from_uuid(community_uuid), host);
+            let owner = Keys::generate();
+            let other = Keys::generate();
+            let (mine, theirs) = (Keys::generate(), Keys::generate());
+            for (user, user_owner) in [
+                (&owner, None),
+                (&other, None),
+                (&mine, Some(&owner)),
+                (&theirs, Some(&other)),
+            ] {
+                sqlx::query(
+                    "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3)",
+                )
+                .bind(community_uuid)
+                .bind(user.public_key().to_bytes().to_vec())
+                .bind(user_owner.map(|key| key.public_key().to_bytes().to_vec()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            let (send_tx, _send_rx) = mpsc::channel(10);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: tenant.clone(),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: owner.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx: mpsc::channel(1).0,
+                terminal_ctrl_tx: mpsc::channel(1).0,
+                cancel: CancellationToken::new(),
+                backpressure_count: Arc::new(AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+                    CancellationToken::new(),
+                ),
+                community_control: crate::state::CommunityConnectionControl::new(
+                    CancellationToken::new(),
+                ),
+            });
+            let send = |status: &str| {
+                let event = EventBuilder::new(
+                    Kind::Custom(super::super::KIND_AGENT_PRESENCE as u16),
+                    status,
+                )
+                .tags([
+                    Tag::parse(["p", &mine.public_key().to_hex()]).unwrap(),
+                    Tag::parse(["p", &theirs.public_key().to_hex()]).unwrap(),
+                ])
+                .sign_with_keys(&owner)
+                .unwrap();
+                super::super::handle_ephemeral_event(
+                    event,
+                    conn.conn_id,
+                    owner.public_key().to_bytes().to_vec(),
+                    owner.public_key(),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+            };
+            let everyone = [mine.public_key(), theirs.public_key(), owner.public_key()];
+            // A `false` cached before the link existed must not hide it now.
+            for agent in [&mine, &theirs] {
+                state.observer_owner_cache.insert(
+                    (
+                        tenant.community(),
+                        agent.public_key().to_bytes().to_vec(),
+                        owner.public_key().to_bytes().to_vec(),
+                    ),
+                    false,
+                );
+            }
+
+            send("online").await.expect("owner batch accepted");
+            let stored = state
+                .pubsub
+                .get_presence_bulk(&tenant, &everyone)
+                .await
+                .unwrap();
+            assert_eq!(
+                stored.get(&mine.public_key().to_hex()).map(String::as_str),
+                Some("online")
+            );
+            assert_eq!(stored.len(), 1, "only the owned agent: {stored:?}");
+
+            send("offline").await.expect("owner clear accepted");
+            let stored = state
+                .pubsub
+                .get_presence_bulk(&tenant, &everyone)
+                .await
+                .unwrap();
+            assert!(stored.is_empty(), "offline clears it: {stored:?}");
         }
 
         /// Production-seam regression for the rejection classification: a
@@ -3192,6 +3520,7 @@ mod tests {
         fn authed_conn(
             keys: &nostr::Keys,
             tenant: buzz_core::tenant::TenantContext,
+            scopes: Vec<buzz_auth::Scope>,
         ) -> (
             std::sync::Arc<crate::connection::ConnectionState>,
             tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
@@ -3210,7 +3539,7 @@ mod tests {
                 auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
-                        scopes: vec![],
+                        scopes,
                         channel_ids: None,
                         auth_method: buzz_auth::AuthMethod::Nip42,
                         agent_owner_pubkey: None,
@@ -3240,7 +3569,19 @@ mod tests {
             keys: &nostr::Keys,
             event: nostr::Event,
         ) -> String {
-            let (conn, mut rx) = authed_conn(keys, tenant.clone());
+            ok_frame_scoped(state, tenant, keys, event, vec![]).await
+        }
+
+        /// [`ok_frame`] with explicit token scopes, so a stored kind gets past
+        /// ingest's scope check to the restriction and fence checks.
+        async fn ok_frame_scoped(
+            state: &std::sync::Arc<crate::state::AppState>,
+            tenant: &buzz_core::tenant::TenantContext,
+            keys: &nostr::Keys,
+            event: nostr::Event,
+            scopes: Vec<buzz_auth::Scope>,
+        ) -> String {
+            let (conn, mut rx) = authed_conn(keys, tenant.clone(), scopes);
             super::super::handle_event(event, conn, std::sync::Arc::clone(state)).await;
             match rx
                 .try_recv()
@@ -3341,6 +3682,172 @@ mod tests {
             assert!(
                 frame.contains("false") && frame.contains("blocked: you are banned"),
                 "banned owner's agent observer frame must be refused; got {frame}"
+            );
+        }
+
+        /// Fresh community with one unrestricted user.
+        async fn unrestricted_fixture() -> (
+            std::sync::Arc<crate::state::AppState>,
+            buzz_core::tenant::TenantContext,
+            nostr::Keys,
+        ) {
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-cache-gate-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let user = nostr::Keys::generate();
+            state
+                .db
+                .ensure_user(community, user.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+            (state, tenant, user)
+        }
+
+        fn typing_event(keys: &nostr::Keys) -> nostr::Event {
+            nostr::EventBuilder::new(nostr::Kind::Custom(20_555), "typing")
+                .sign_with_keys(keys)
+                .expect("sign ephemeral")
+        }
+
+        /// The ephemeral gate reads the cached restriction row: a cached ban
+        /// refuses a sender Postgres has never restricted, and a cached
+        /// timeout that has since expired admits (the verdict is taken now).
+        /// Mutation: call the uncached `enforce_write_restriction` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_gate_uses_cached_restriction_row() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            let key = (tenant.community(), user.public_key().to_bytes().to_vec());
+
+            state.restriction_cache.insert(
+                key.clone(),
+                buzz_db::moderation::RestrictionState {
+                    banned: true,
+                    muted_until: None,
+                },
+            );
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "a cached ban must refuse the ephemeral event; got {frame}"
+            );
+
+            state.restriction_cache.insert(
+                key,
+                buzz_db::moderation::RestrictionState {
+                    banned: false,
+                    muted_until: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                },
+            );
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains(",true,"),
+                "a cached timeout that has expired must not refuse; got {frame}"
+            );
+        }
+
+        /// The ephemeral community fence reads the cached serving state.
+        /// Mutation: call the uncached `is_serving_active` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_fence_uses_cached_serving_state() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.serving_active_cache.insert(tenant.community(), false);
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains("false") && frame.contains("community writes are fenced"),
+                "a cached fenced community must refuse the ephemeral event; got {frame}"
+            );
+        }
+
+        /// A miss fills both caches from Postgres, so the next pulse skips it.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_gates_fill_caches_on_miss() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert_eq!(
+                state.serving_active_cache.get(&tenant.community()),
+                Some(true)
+            );
+            assert_eq!(
+                state
+                    .restriction_cache
+                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
+                Some(buzz_db::moderation::RestrictionState::default())
+            );
+        }
+
+        fn text_note(keys: &nostr::Keys) -> nostr::Event {
+            nostr::EventBuilder::new(nostr::Kind::TextNote, "stored")
+                .sign_with_keys(keys)
+                .expect("sign text note")
+        }
+
+        /// Stored writes, and NIP-43 leave, skip the cached restriction row:
+        /// a cached ban on a sender Postgres has never restricted refuses
+        /// neither. The leave reaches ingest's later membership check, past
+        /// its uncached restriction check.
+        /// Mutation: make ingest call `enforce_cached_write_restriction`, or
+        /// drop the 28936 carve-out from the `handle_event` gate → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn stored_writes_ignore_cached_ban() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.restriction_cache.insert(
+                (tenant.community(), user.public_key().to_bytes().to_vec()),
+                buzz_db::moderation::RestrictionState {
+                    banned: true,
+                    muted_until: None,
+                },
+            );
+            let scopes = buzz_auth::Scope::all_non_admin();
+
+            let frame =
+                ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+            assert!(
+                frame.contains(",true,"),
+                "a stored write must read the restriction from Postgres; got {frame}"
+            );
+
+            let leave = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
+                "",
+            )
+            .sign_with_keys(&user)
+            .expect("sign leave");
+            let frame = ok_frame_scoped(&state, &tenant, &user, leave, scopes).await;
+            assert!(
+                frame.contains("relay membership is not enabled"),
+                "NIP-43 leave must skip the cached gate and pass ingest's uncached one; got {frame}"
+            );
+        }
+
+        /// Stored writes skip the cached serving state: a cached "fenced"
+        /// for a community Postgres says is active does not refuse them.
+        /// Mutation: make ingest's fence call `is_serving_active_cached` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn stored_writes_ignore_cached_fence() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.serving_active_cache.insert(tenant.community(), false);
+            let frame = ok_frame_scoped(
+                &state,
+                &tenant,
+                &user,
+                text_note(&user),
+                buzz_auth::Scope::all_non_admin(),
+            )
+            .await;
+            assert!(
+                frame.contains(",true,"),
+                "a stored write must read the serving state from Postgres; got {frame}"
             );
         }
 

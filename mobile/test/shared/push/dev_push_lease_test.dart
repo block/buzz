@@ -22,6 +22,15 @@ void main() {
   final grant = _grant(relay.public);
   final now = DateTime.fromMillisecondsSinceEpoch(1752620000 * 1000);
 
+  test('legacy capability does not enable Buzz push', () {
+    final information = _descriptorJson(relay.public);
+    information['supported_extensions'] = ['nip-pl'];
+    expect(
+      () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
+      throwsFormatException,
+    );
+  });
+
   test('publishes strict kind-30350 lease and waits for accepted OK', () async {
     Map<String, dynamic>? submitted;
     final publication = await publishBuzzDevPushLease(
@@ -74,7 +83,6 @@ void main() {
     expect(jsonDecode(plaintext), {
       'v': 1,
       'origin': 'wss://tenant.example:8443',
-      'app_profile': 'buzz-ios-dogfood',
       'transport': 'apns',
       'endpoint': 'opaque-grant',
       'generation': 7,
@@ -355,7 +363,6 @@ void main() {
     for (final field in [
       'origin',
       'keys',
-      'app_profiles',
       'push_kinds',
       'h_grammar',
       'class_support',
@@ -499,14 +506,11 @@ BuzzPushLeaseDescriptor _descriptor(String relayPubkey) =>
     BuzzPushLeaseDescriptor.fromRelayInformation(_descriptorJson(relayPubkey));
 
 Map<String, dynamic> _descriptorJson(String relayPubkey) => {
-  'supported_extensions': ['nip-er', 'nip-pl'],
+  'supported_extensions': ['nip-er', 'buzz-push-v1'],
   'push': {
     'origin': 'wss://tenant.example:8443',
     'keys': [
       {'id': 'relay-v1', 'pubkey': relayPubkey, 'current': true},
-    ],
-    'app_profiles': [
-      {'id': 'buzz-ios-dogfood', 'transport': 'apns'},
     ],
     'push_kinds': [9, 40002, 45001, 45003],
     'h_grammar': 'uuid-v4-lowercase',
@@ -536,7 +540,6 @@ BuzzPushEndpointGrant _grant(String relayPubkey) => BuzzPushEndpointGrant(
   installationId: 'c' * 32,
   endpointGrant: 'opaque-grant',
   endpointHash: 'd' * 64,
-  appProfile: 'buzz-ios-dogfood',
   endpointEpoch: 1,
   generation: 1,
   expiresAt: 1756212000,

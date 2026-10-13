@@ -21,18 +21,6 @@
       "minimum": 1,
       "maximum": 31536000
     },
-    "profiles": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "dogfood"
-      ],
-      "properties": {
-        "dogfood": {
-          "$ref": "#/$defs/enabledProfile"
-        }
-      }
-    },
     "apnsKey": false,
     "deploymentAnnotations": {
       "type": "object",
@@ -338,16 +326,39 @@
     "terminationGracePeriodSeconds": {
       "type": "integer",
       "minimum": 60
-    }
+    },
+    "application": {
+      "$ref": "#/$defs/application"
+    },
+    "profiles": false
   },
   "$defs": {
-    "profileBase": {
+    "apnsCert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secretName",
+        "secretKey"
+      ],
+      "properties": {
+        "secretName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "application": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "appAttestAppId",
         "apnsTopic",
-        "apnsEnvironment"
+        "apnsEnvironment",
+        "apnsCert"
       ],
       "properties": {
         "appAttestAppId": {
@@ -368,43 +379,13 @@
           "$ref": "#/$defs/apnsCert"
         }
       }
-    },
-    "enabledProfile": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/profileBase"
-        },
-        {
-          "required": [
-            "apnsCert"
-          ]
-        }
-      ]
-    },
-    "apnsCert": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "secretName",
-        "secretKey"
-      ],
-      "properties": {
-        "secretName": {
-          "type": "string",
-          "minLength": 1
-        },
-        "secretKey": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
     }
   },
   "required": [
     "replicaCount",
     "existingSecret",
     "maxGrantLifetimeSeconds",
-    "profiles",
+    "application",
     "httpRoute",
     "image",
     "migration",

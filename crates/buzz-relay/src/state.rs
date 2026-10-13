@@ -1193,6 +1193,8 @@ pub struct AppState {
     pub community_connections: Arc<CommunityConnectionRegistry>,
     /// Stops only the periodic lifecycle revalidator during graceful shutdown.
     pub community_revalidator_cancel: CancellationToken,
+    /// Cancels push claims and in-flight delivery on process shutdown.
+    pub push_cancel: CancellationToken,
     /// Test/telemetry counter for archive disconnect publication attempts.
     pub community_disconnect_publish_attempts: Arc<AtomicU64>,
     /// Semaphore limiting total concurrent connections.
@@ -1306,7 +1308,9 @@ pub struct AppState {
     /// Key: (community_id, agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// `agent_owner_pubkey` is immutable inside one community, so a long TTL
     /// (5 min) is safe once the community label is part of the key.
-    /// Prevents repeated DB lookups from bursty observer traffic.
+    /// Prevents repeated DB lookups from bursty observer traffic, and lets
+    /// `materialize_nip_oa_owner` skip its writes for a known mapping. Sized
+    /// for every concurrently active agent so per-request HTTP agents hit.
     #[allow(clippy::type_complexity)]
     pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
     /// Cache for the `author_type` metric label on the ingest path.
@@ -1315,6 +1319,23 @@ pub struct AppState {
     /// first-write-wins and set during auth before an agent's first event,
     /// so a short TTL only bounds staleness for the rare backfill race.
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
+    /// Ephemeral-path cache of `is_serving_active` (community not archived or
+    /// deleted). Key: community. TTL only (10s). Persistent ingest keeps the
+    /// uncached read as its durable write fence; on the ephemeral path archive
+    /// also disconnects the community's live sockets.
+    pub serving_active_cache: Arc<moka::sync::Cache<CommunityId, bool>>,
+    /// Ephemeral-path cache of the raw ban/timeout row, not the verdict, so a
+    /// timeout still lifts the moment `muted_until` passes. (`banned` is
+    /// computed at read time, so an expiring ban can outlive its expiry by up
+    /// to the TTL.) Key: (community, pubkey bytes). The 30s TTL is the only
+    /// staleness bound: on every pod and for every restriction writer, the
+    /// ephemeral path sees a ban/timeout change within 30s. As a best effort,
+    /// signed moderation commands (9040–9043) also drop the target's own entry
+    /// on the pod that handles them; owned agents' entries, other pods, and the
+    /// admin/report paths just age out. Persistent ingest stays uncached.
+    #[allow(clippy::type_complexity)]
+    pub restriction_cache:
+        Arc<moka::sync::Cache<(CommunityId, Vec<u8>), buzz_db::moderation::RestrictionState>>,
 
     /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
     /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
@@ -1479,6 +1500,7 @@ impl AppState {
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
             community_revalidator_cancel: CancellationToken::new(),
+            push_cancel: CancellationToken::new(),
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
@@ -1543,7 +1565,7 @@ impl AppState {
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
-                    .max_capacity(1_000)
+                    .max_capacity(100_000)
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),
@@ -1551,6 +1573,18 @@ impl AppState {
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            serving_active_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(10))
+                    .build(),
+            ),
+            restriction_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(100_000)
+                    .time_to_live(std::time::Duration::from_secs(30))
                     .build(),
             ),
             // Default to NoopTracer: production builds pay zero cost.
@@ -1585,6 +1619,8 @@ impl AppState {
     /// the readiness gauge on its next request.
     pub fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.push_cancel.cancel();
+        self.db.cancel_push_enqueue();
     }
 
     #[cfg(test)]
@@ -1650,6 +1686,53 @@ impl AppState {
         let result = self.db.is_member(community_id, channel_id, pubkey).await?;
         self.membership_cache.insert(key, result);
         Ok(result)
+    }
+
+    /// `is_serving_active` with a 10-second cache, for the ephemeral path only.
+    /// Errors are not cached.
+    pub async fn is_serving_active_cached(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<bool, buzz_db::DbError> {
+        if let Some(cached) = self.serving_active_cache.get(&community_id) {
+            metrics::counter!("buzz_serving_active_cache_hits_total").increment(1);
+            return Ok(cached);
+        }
+        metrics::counter!("buzz_serving_active_cache_misses_total").increment(1);
+        let result = buzz_deletion::store(&self.db)
+            .is_serving_active(community_id)
+            .await?;
+        self.serving_active_cache.insert(community_id, result);
+        Ok(result)
+    }
+
+    /// `moderation_restriction_state` with a 30-second cache, for the
+    /// ephemeral path only. Errors are not cached.
+    pub async fn restriction_state_cached(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<buzz_db::moderation::RestrictionState, buzz_db::DbError> {
+        let key = (community_id, pubkey.to_vec());
+        if let Some(cached) = self.restriction_cache.get(&key) {
+            metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
+            return Ok(cached);
+        }
+        metrics::counter!("buzz_restriction_cache_misses_total").increment(1);
+        let result = self
+            .db
+            .moderation_restriction_state(community_id, pubkey)
+            .await?;
+        self.restriction_cache.insert(key, result.clone());
+        Ok(result)
+    }
+
+    /// Best-effort drop of a pubkey's cached restriction row after a signed
+    /// ban, unban, timeout or untimeout. This pod and this key only; the
+    /// 30-second TTL is the actual bound everywhere else.
+    pub fn invalidate_restriction_cache(&self, community_id: CommunityId, pubkey: &[u8]) {
+        self.restriction_cache
+            .invalidate(&(community_id, pubkey.to_vec()));
     }
 
     /// Invalidate caches after a membership change (add/remove member).
