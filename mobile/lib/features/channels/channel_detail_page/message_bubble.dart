@@ -161,6 +161,30 @@ class _MessageBubble extends HookConsumerWidget {
             child: MessageFooterLayout(
               animateSize: true,
               overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
+              footer: message.reactions.isNotEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.only(
+                        left:
+                            messageAvatarSize +
+                            messageAvatarContentGap +
+                            Grid.xxs,
+                      ),
+                      child: ReactionRow(
+                        combined: true,
+                        messageId: message.id,
+                        channelId: currentChannelId,
+                        reactions: message.reactions,
+                        onToggle: (emoji) =>
+                            toggleReaction(ref, message, emoji),
+                        showAddButton: isMember && !isArchived,
+                        onAddReaction: () => showAddReactionPicker(
+                          context: context,
+                          ref: ref,
+                          message: message,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
               child: RepaintBoundary(
                 key: messageSnapshotKey,
                 child: Stack(
@@ -349,30 +373,6 @@ class _MessageBubble extends HookConsumerWidget {
                   ],
                 ),
               ),
-              footer: message.reactions.isNotEmpty
-                  ? Padding(
-                      padding: const EdgeInsets.only(
-                        left:
-                            messageAvatarSize +
-                            messageAvatarContentGap +
-                            Grid.xxs,
-                      ),
-                      child: ReactionRow(
-                        combined: true,
-                        messageId: message.id,
-                        channelId: currentChannelId,
-                        reactions: message.reactions,
-                        onToggle: (emoji) =>
-                            toggleReaction(ref, message, emoji),
-                        showAddButton: isMember && !isArchived,
-                        onAddReaction: () => showAddReactionPicker(
-                          context: context,
-                          ref: ref,
-                          message: message,
-                        ),
-                      ),
-                    )
-                  : const SizedBox.shrink(),
             ),
           ),
         ),
@@ -381,36 +381,20 @@ class _MessageBubble extends HookConsumerWidget {
   }
 }
 
-Widget _messageTimestamp(BuildContext context, int createdAt, {Key? key}) {
-  return ConstrainedBox(
-    constraints: const BoxConstraints(maxWidth: Grid.xxl),
-    child: Text(
-      key: key,
-      formatMessageTime(createdAt),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: messageTimestampTextStyle.copyWith(
-        color: context.colors.onSurfaceVariant,
-      ),
-    ),
-  );
-}
-
 class _UserAvatar extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
   final bool isAgent;
-  final double size;
 
   const _UserAvatar({
     required this.profile,
     required this.pubkey,
     required this.isAgent,
-    this.size = messageAvatarSize,
   });
 
   @override
   Widget build(BuildContext context) {
+    const size = messageAvatarSize;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     final avatarUrl = profile?.avatarUrl;

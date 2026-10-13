@@ -78,7 +78,6 @@ void main() {
         'installationId': 'b' * 32,
         'endpointGrant': 'test-endpoint-grant',
         'endpointHash': 'c' * 64,
-        'appProfile': buzzDevPushAppProfile,
         'endpointEpoch': 1,
         'generation': 1,
         'expiresAt': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,

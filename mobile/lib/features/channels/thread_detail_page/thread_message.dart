@@ -156,6 +156,30 @@ class _ThreadMessage extends HookConsumerWidget {
               child: MessageFooterLayout(
                 animateSize: true,
                 overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
+                footer: (isThreadHead || message.reactions.isNotEmpty)
+                    ? Padding(
+                        padding: const EdgeInsets.only(
+                          left:
+                              messageAvatarSize +
+                              messageAvatarContentGap +
+                              Grid.xxs,
+                        ),
+                        child: ReactionRow(
+                          combined: true,
+                          messageId: message.id,
+                          channelId: channelId,
+                          reactions: message.reactions,
+                          onToggle: (emoji) =>
+                              toggleReaction(ref, message, emoji),
+                          showAddButton: isMember && !isArchived,
+                          onAddReaction: () => showAddReactionPicker(
+                            context: context,
+                            ref: ref,
+                            message: message,
+                          ),
+                        ),
+                      )
+                    : const SizedBox.shrink(),
                 child: RepaintBoundary(
                   key: messageSnapshotKey,
                   child: Stack(
@@ -349,30 +373,6 @@ class _ThreadMessage extends HookConsumerWidget {
                     ],
                   ),
                 ),
-                footer: (isThreadHead || message.reactions.isNotEmpty)
-                    ? Padding(
-                        padding: const EdgeInsets.only(
-                          left:
-                              messageAvatarSize +
-                              messageAvatarContentGap +
-                              Grid.xxs,
-                        ),
-                        child: ReactionRow(
-                          combined: true,
-                          messageId: message.id,
-                          channelId: channelId,
-                          reactions: message.reactions,
-                          onToggle: (emoji) =>
-                              toggleReaction(ref, message, emoji),
-                          showAddButton: isMember && !isArchived,
-                          onAddReaction: () => showAddReactionPicker(
-                            context: context,
-                            ref: ref,
-                            message: message,
-                          ),
-                        ),
-                      )
-                    : const SizedBox.shrink(),
               ),
             ),
           ),
