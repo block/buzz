@@ -57,7 +57,10 @@ import {
   markPinUnread,
   usePinUnread,
 } from "@/features/pinned-sites/lib/pinUnread";
-import { pollPinWebview } from "@/features/pinned-sites/lib/pinWebview";
+import {
+  pollPinWebview,
+  subscribePinWebviewChanged,
+} from "@/features/pinned-sites/lib/pinWebview";
 import { PINNED_SITES_POLL_INTERVAL_MS } from "@/features/pinned-sites/lib/types";
 import { ProtectedBestieSidebarEntry } from "@protected-feature-components";
 
@@ -460,6 +463,18 @@ function PinnedSiteMenuItem({
     }, PINNED_SITES_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [isActive, pin.id, pin.pollForChanges, pin.url]);
+  // Live pages (prices, feeds, inbox counts): the in-page watcher sends a
+  // content-free "changed" ping; mark unread only while not on screen.
+  React.useEffect(() => {
+    if (isActive || !pin.pollForChanges || !isTauri()) return;
+    const id = pin.id;
+    const stop = subscribePinWebviewChanged((changedId) => {
+      if (changedId === id) markPinUnread(id);
+    });
+    return () => {
+      void stop.then((off) => off());
+    };
+  }, [isActive, pin.id, pin.pollForChanges]);
   return (
     <SidebarSurfaceTabMenu
       label={pin.name}

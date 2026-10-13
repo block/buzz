@@ -7,7 +7,10 @@ import {
   isLeftNavBuzzTermActive,
   useTerminalPanel,
 } from "@/features/terminal/terminalPanelStore";
-import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
+import {
+  isNativeWebviewModalParked,
+  registerBeforeParkHook,
+} from "@/shared/lib/nativeWebviewModalPark";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { Button } from "@/shared/ui/button";
 
@@ -25,6 +28,7 @@ import {
   showPinWebview,
   subscribePinWebviewLoad,
   subscribePinWebviewNav,
+  snapshotPinWebview,
   type PinWebviewBounds,
   type PinWebviewNavState,
 } from "../lib/pinWebview";
@@ -317,6 +321,12 @@ function PinnedSiteSurface({
   const native = isTauri() || import.meta.env.MODE === "e2e";
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const toastInset = useToastStripInset();
+  // DOM stand-in for the native page while menus / dialogs park it (#261):
+  // the last snapshot sits at the same bounds so the site appears to stay
+  // put instead of vanishing. Removed once the webview is shown again.
+  const snapshotRef = React.useRef<string | null>(null);
+  const [standIn, setStandIn] = React.useState<string | null>(null);
+  const visibleRef = React.useRef(false);
   // Left-nav Buzz Term parks playground then notifies pin restore while the
   // pin route stays mounted. Gate show/restore so Term is not covered by the
   // pin WKWebView. Read live snapshot inside openOrResize for sync restore.
@@ -358,7 +368,12 @@ function PinnedSiteSurface({
         bounds,
       })
         .then(() => {
-          if (cancelled || !appliedUrl) return;
+          if (cancelled) return;
+          if (!isNativeWebviewModalParked()) {
+            visibleRef.current = true;
+            setStandIn(null);
+          }
+          if (!appliedUrl) return;
           // Consume deep link once applied; mismatched clear leaves a newer queue.
           clearPinnedSiteOpenUrl(id, appliedUrl);
         })
@@ -394,9 +409,63 @@ function PinnedSiteSurface({
       observer.disconnect();
       window.removeEventListener(PIN_WEBVIEW_RESTORE_EVENT, restore);
       void unlistenLoad.then((stop) => stop());
+      visibleRef.current = false;
       void hidePinWebview(pinId);
     };
   }, [native, pinId, startUrl, leftNavTermActive]);
+
+  // Keep a recent snapshot so a right-click can show it instantly.
+  React.useEffect(() => {
+    if (!native) return;
+    let cancelled = false;
+    const refresh = async () => {
+      if (!visibleRef.current || isNativeWebviewModalParked()) return;
+      const url = await snapshotPinWebview(pinId);
+      if (cancelled || !url) {
+        if (url) URL.revokeObjectURL(url);
+        return;
+      }
+      const previous = snapshotRef.current;
+      snapshotRef.current = url;
+      if (previous) {
+        // Keep the URL alive if it is the stand-in on screen right now.
+        window.setTimeout(() => URL.revokeObjectURL(previous), 5_000);
+      }
+    };
+    const first = window.setTimeout(() => void refresh(), 1_500);
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    const unregister = registerBeforeParkHook(() => {
+      if (!visibleRef.current) return;
+      visibleRef.current = false;
+      if (snapshotRef.current) {
+        setStandIn(snapshotRef.current);
+        // Refresh in the background; parked pages still paint off-screen.
+        void snapshotPinWebview(pinId).then((url) => {
+          if (!url) return;
+          if (cancelled) return URL.revokeObjectURL(url);
+          const previous = snapshotRef.current;
+          snapshotRef.current = url;
+          setStandIn((current) => (current ? url : current));
+          if (previous) window.setTimeout(() => URL.revokeObjectURL(previous), 5_000);
+        });
+        return;
+      }
+      return snapshotPinWebview(pinId).then((url) => {
+        if (!url || cancelled) return;
+        snapshotRef.current = url;
+        setStandIn(url);
+      });
+    });
+    return () => {
+      cancelled = true;
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+      unregister();
+      setStandIn(null);
+      if (snapshotRef.current) URL.revokeObjectURL(snapshotRef.current);
+      snapshotRef.current = null;
+    };
+  }, [native, pinId]);
 
   React.useEffect(() => {
     if (!native || !pollForChanges) return;
@@ -422,6 +491,16 @@ function PinnedSiteSurface({
       ref={hostRef}
       style={toastInset ? { marginBottom: toastInset } : undefined}
     >
+      {native && standIn ? (
+        <img
+          alt=""
+          aria-hidden
+          className="pointer-events-none absolute inset-0 h-full w-full select-none object-cover object-left-top"
+          data-testid="pinned-site-stand-in"
+          draggable={false}
+          src={standIn}
+        />
+      ) : null}
       {native ? (
         loadError ? (
           <PinnedSiteLoadError

@@ -16,7 +16,7 @@ use tauri::{
 use uuid::Uuid;
 
 use policy::{
-    bounds_are_usable, classify_pin_load, is_unusable_document_url, should_navigate_existing,
+    bounds_are_usable, classify_pin_load, classify_title_change, is_unusable_document_url, should_navigate_existing,
     PinLoadVerdict,
 };
 
@@ -197,6 +197,43 @@ pub struct PinWebviewManager {
     parked: Mutex<Vec<String>>,
     /// Labels whose `add_child` is in flight (single creator per label).
     creating: Mutex<std::collections::HashSet<String>>,
+    /// Last real `document.title` per pin label (change-watcher baseline).
+    titles: Mutex<HashMap<String, String>>,
+}
+
+const CHANGE_WATCHER_JS: &str = include_str!("pin_webview/change_watcher.js");
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PinChangedPayload {
+    pin_id: String,
+}
+
+/// Title-changed hook for one pin label: turns watcher pings and real title
+/// changes into a content-free `pin-webview-changed` { pinId } event.
+fn on_pin_title_changed(app: &AppHandle, pin_id: &str, label: &str, title: &str) {
+    let Some(manager) = app.try_state::<PinWebviewManager>() else {
+        return;
+    };
+    let changed = match manager.titles.lock() {
+        Ok(mut titles) => {
+            let (changed, remember) =
+                classify_title_change(titles.get(label).map(String::as_str), title);
+            if let Some(real) = remember {
+                titles.insert(label.to_string(), real);
+            }
+            changed
+        }
+        Err(_) => false,
+    };
+    if changed {
+        let _ = app.emit(
+            "pin-webview-changed",
+            PinChangedPayload {
+                pin_id: pin_id.to_string(),
+            },
+        );
+    }
 }
 
 struct CreateGuard<'a> {
@@ -750,6 +787,14 @@ pub async fn pin_webview_show(
         // background pin can drop those sessions, so it is disabled; the cost
         // is CPU / bandwidth for pins left open (see MAX_LIVE_PARKED_PINS).
         .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
+        .initialization_script(CHANGE_WATCHER_JS)
+        .on_document_title_changed({
+            let title_app = app.clone();
+            let title_pin = pin_id.clone();
+            move |webview, title| {
+                on_pin_title_changed(&title_app, &title_pin, webview.label(), &title);
+            }
+        })
         .on_navigation(move |url| {
             if let Some(manager) = nav_app.try_state::<PinWebviewManager>() {
                 record_navigation(&nav_app, &manager, &nav_pin, url);
@@ -1267,6 +1312,25 @@ pub async fn pin_webview_screenshot(
         mime: "image/png".into(),
         filename: format!("pin-{safe_name}.png"),
     })
+}
+
+/// Raw PNG of the pin's current paint for the DOM stand-in shown while a
+/// menu / dialog parks the native webview. Raw bytes (not a JSON number
+/// array) and a short timeout so it is cheap enough to cache ahead of time.
+#[tauri::command]
+pub async fn pin_webview_snapshot(
+    app: AppHandle,
+    pin_id: String,
+    window_label: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let pin_id = sanitize_pin_id(&pin_id)?;
+    let window_label = normalize_window_label(window_label.as_deref());
+    let label = pin_webview_label(&pin_id, &window_label);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "pin webview is not open".to_string())?;
+    let bytes = crate::playground_webview::capture::snapshot_viewport_png_for_drive_record(&webview)?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[cfg(test)]

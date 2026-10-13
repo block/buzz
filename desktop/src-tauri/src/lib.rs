@@ -878,6 +878,7 @@ pub fn run() {
             pin_webview::pin_webview_inspect,
             pin_webview::pin_webview_close_inspect,
             pin_webview::pin_webview_screenshot,
+            pin_webview::pin_webview_snapshot,
             remote_access::remote_access_status,
             remote_access::remote_access_set_enabled,
             remote_access::remote_access_set_terminals,

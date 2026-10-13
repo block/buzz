@@ -47,8 +47,82 @@ function dispatchWindowEvent(name: string): void {
  * shows cannot resurrect orphans (same class as PRs #53/#54/#59).
  */
 export function parkNativeWebviewsForModal(): void {
+  parkWithStandIns(false);
+}
+
+/**
+ * Before-park hooks let a mounted native surface put a DOM snapshot of its
+ * page at the same bounds, so the site appears to stay put under a menu or
+ * dialog instead of vanishing. A hook returns void when it could show a
+ * cached snapshot immediately, or a Promise when it must capture first (the
+ * park then waits for it, at most {@link STAND_IN_CAPTURE_WAIT_MS}).
+ */
+type BeforeParkHook = () => void | Promise<unknown>;
+const beforeParkHooks = new Set<BeforeParkHook>();
+export const STAND_IN_CAPTURE_WAIT_MS = 300;
+
+export function registerBeforeParkHook(hook: BeforeParkHook): () => void {
+  beforeParkHooks.add(hook);
+  return () => {
+    beforeParkHooks.delete(hook);
+  };
+}
+
+let parkSerial = 0;
+
+function hideNativeNow(): void {
   void hideAllPinWebviews();
   void hideAllPlaygroundWebviews();
+}
+
+function parkWithStandIns(fromAcquire: boolean): void {
+  const serial = ++parkSerial;
+  const pending: Promise<unknown>[] = [];
+  for (const hook of beforeParkHooks) {
+    try {
+      const result = hook();
+      if (result && typeof (result as Promise<unknown>).then === "function") {
+        pending.push(result as Promise<unknown>);
+      }
+    } catch {
+      // A failed stand-in must never block the park.
+    }
+  }
+  if (pending.length === 0) {
+    hideNativeNow();
+    return;
+  }
+  void Promise.race([
+    Promise.allSettled(pending),
+    new Promise((resolve) => setTimeout(resolve, STAND_IN_CAPTURE_WAIT_MS)),
+  ]).then(() => {
+    // Released (or re-parked) while capturing: do not hide behind a closed menu.
+    if (fromAcquire && parkDepth === 0) return;
+    if (serial !== parkSerial && fromAcquire) return;
+    hideNativeNow();
+  });
+}
+
+const parkListeners = new Set<(parked: boolean) => void>();
+
+/** Notified when the modal park starts (true) and ends (false). */
+export function subscribeNativeWebviewModalPark(
+  listener: (parked: boolean) => void,
+): () => void {
+  parkListeners.add(listener);
+  return () => {
+    parkListeners.delete(listener);
+  };
+}
+
+function notifyParkListeners(parked: boolean): void {
+  for (const listener of parkListeners) {
+    try {
+      listener(parked);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 /**
@@ -58,7 +132,8 @@ export function parkNativeWebviewsForModal(): void {
 export function acquireNativeWebviewModalPark(): void {
   parkDepth += 1;
   if (parkDepth === 1) {
-    parkNativeWebviewsForModal();
+    parkWithStandIns(true);
+    notifyParkListeners(true);
   }
 }
 
@@ -73,6 +148,7 @@ export function releaseNativeWebviewModalPark(): void {
   }
   parkDepth -= 1;
   if (parkDepth === 0) {
+    notifyParkListeners(false);
     notifyNativeWebviewRestore();
   }
 }

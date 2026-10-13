@@ -77,6 +77,24 @@ pub fn is_label_exists_error(message: &str) -> bool {
     message.contains("already exists") && message.contains("label")
 }
 
+/// Invisible marker the injected change watcher appends to `document.title`.
+pub const CHANGE_MARK: char = '\u{2063}';
+
+/// Decide whether a title change is a "page changed" signal for a pin.
+/// Returns `(changed, real_title_to_remember)`. A marked title is the
+/// watcher's DOM ping; an unmarked title that differs from the last real
+/// title (e.g. "(3) Inbox") is a change too. The first title is a baseline.
+pub fn classify_title_change(last_real: Option<&str>, title: &str) -> (bool, Option<String>) {
+    if title.contains(CHANGE_MARK) {
+        return (true, None);
+    }
+    match last_real {
+        None => (false, Some(title.to_string())),
+        Some(previous) if previous == title => (false, None),
+        Some(_) => (true, Some(title.to_string())),
+    }
+}
+
 pub fn bounds_are_usable(width: f64, height: f64) -> bool {
     width >= MIN_PIN_WEBVIEW_EDGE && height >= MIN_PIN_WEBVIEW_EDGE
 }
@@ -183,6 +201,21 @@ mod tests {
             "a webview with label `pin-wayfinder` already exists"
         ));
         assert!(!is_label_exists_error("window not found"));
+    }
+
+    #[test]
+    fn title_signals_are_binary_and_ignore_the_watcher_restore() {
+        // First title is the baseline.
+        assert_eq!(classify_title_change(None, "Kalshi"), (false, Some("Kalshi".into())));
+        // Watcher ping (marked) → changed; baseline unchanged.
+        assert_eq!(classify_title_change(Some("Kalshi"), "Kalshi\u{2063}"), (true, None));
+        // Watcher restoring the plain title is not a change.
+        assert_eq!(classify_title_change(Some("Kalshi"), "Kalshi"), (false, None));
+        // Real title change (badge count) is a change.
+        assert_eq!(
+            classify_title_change(Some("Inbox"), "(3) Inbox"),
+            (true, Some("(3) Inbox".into()))
+        );
     }
 
     #[test]

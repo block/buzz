@@ -262,6 +262,36 @@ export async function screenshotPinWebview(
   );
 }
 
+/**
+ * Current paint of a pin as an object URL (caller revokes), for the DOM
+ * stand-in shown while overlays park the native webview. Null when the
+ * webview is not open or capture failed.
+ */
+export async function snapshotPinWebview(pinId: string): Promise<string | null> {
+  if (!isNativePinRuntime() || !isTauri()) return null;
+  try {
+    const raw = await invoke<ArrayBuffer | number[]>(
+      "pin_webview_snapshot",
+      withWindowLabel({ pinId }),
+    );
+    const bytes = raw instanceof ArrayBuffer ? new Uint8Array(raw) : Uint8Array.from(raw);
+    if (bytes.byteLength === 0) return null;
+    return URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+  } catch {
+    return null;
+  }
+}
+
+/** Content-free "this pin's page changed" signal from the injected watcher. */
+export function subscribePinWebviewChanged(
+  onChanged: (pinId: string) => void,
+): Promise<() => void> {
+  if (!isTauri()) return Promise.resolve(() => {});
+  return listen<{ pinId: string }>("pin-webview-changed", (event) => {
+    if (event.payload?.pinId) onChanged(event.payload.pinId);
+  });
+}
+
 export function subscribePinWebviewNav(
   onNav: (state: PinWebviewNavState & { pinId: string }) => void,
 ): Promise<() => void> {
