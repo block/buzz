@@ -135,6 +135,9 @@ run_unit_tests() {
   run_test_step "buzz-admin community archive command tests" \
     cargo test -p buzz-admin communities -- --nocapture
 
+  run_test_step "buzz-admin partition audit outcome contract test" \
+    cargo test -p buzz-admin tests::partition_audit_outcomes_keep_their_json_names_and_exit_codes -- --exact --nocapture
+
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \
@@ -285,6 +288,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay auth metrics contract tests" \
     cargo test -p buzz-relay --lib metrics::contract_tests:: -- --nocapture
+
+  run_test_step "buzz-relay partition alert series tests" \
+    cargo test -p buzz-relay --lib metrics::partition_alert_tests:: -- --nocapture
 
   local nip_fi_exact_tests=(
     audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative

@@ -71,16 +71,20 @@ tests:
         exp_alerts:
           - exp_labels: {pod: early, table: events}
 
-  # A pod terminates at 20 minutes. Range selectors still read its earlier
-  # samples, but it must not start an alert.
+  # A pod terminates at 24 minutes. Range selectors still read its earlier
+  # samples, long enough to complete `for: 5m` at 50 minutes, but it must not
+  # start an alert.
   - interval: 1m
     input_series:
       - series: 'buzz_partition_audit_runs_total{pod="gone",table="events",outcome="ok"}'
-        values: '1x14 2x5 stale'
+        values: '1x14 2x9 stale'
       - series: 'buzz_partition_audit_failures_total{pod="gone"}'
         values: '0x10 1 2 3x7 stale'
     alert_rule_test:
       - eval_time: 45m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 52m
         alertname: BuzzPartitionAuditNotRunning
         exp_alerts: []
       - eval_time: 60m

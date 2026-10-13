@@ -446,10 +446,11 @@ test-unit:
         # suites are otherwise absent from the infra-free unit lane.
         cargo nextest run -p buzz-media --lib \
             -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
-        # buzz-admin: storage-snapshot worker plus the community archive
-        # command parser, validation, and propagation-evidence tests.
+        # buzz-admin: storage-snapshot worker, the community archive command
+        # parser, validation, and propagation-evidence tests, and the partition
+        # audit outcome contract.
         cargo nextest run -p buzz-admin \
-            -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/)'
+            -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/) + test(=tests::partition_audit_outcomes_keep_their_json_names_and_exit_codes)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
@@ -537,7 +538,9 @@ test-unit:
         # DB-backed audio join tests use #[ignore] and run in the postgres lane.
         # NIP-FI (S3/S4) relay witnesses: the wholly-new nip_fi_upgrade and
         # api::nip_fi modules,
-        # the auth metrics contract module, plus the exact NIP-FI tests added,
+        # the auth metrics contract module, the DB-free partition alert series
+        # tests (their Postgres case is #[ignore]d and runs in the PostgreSQL
+        # lane), plus the exact NIP-FI tests added,
         # or whose assertions changed, in mixed modules (audio::room,
         # connection, handlers::*, state). nip_fi_config and router are
         # selected whole by the command above. Mixed modules are listed by exact
@@ -548,6 +551,7 @@ test-unit:
         cargo nextest run -p buzz-relay --lib -E '
                 test(/^nip_fi_upgrade::/)
                 + test(/^metrics::contract_tests::/)
+                + test(/^metrics::partition_alert_tests::/)
                 + test(=audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative)
                 + test(=connection::tests::auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge)
                 + test(=audio::room::tests::b1_pending_peer_removed_before_commit_emits_no_delta)
