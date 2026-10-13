@@ -157,14 +157,7 @@ class ReactionRow extends StatelessWidget {
               onLongPress: openDetails,
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: Color.alphaBlend(
-                    context.colors.onSurface.withValues(
-                      alpha: context.colors.brightness == Brightness.dark
-                          ? 0.14
-                          : 0.04,
-                    ),
-                    context.colors.surface,
-                  ),
+                  color: context.colors.secondaryContainer,
                   borderRadius: BorderRadius.circular(Radii.container),
                   border: Border.all(color: context.colors.surface, width: 2),
                 ),
@@ -236,14 +229,7 @@ class ReactionRow extends StatelessWidget {
       child: combined
           ? DecoratedBox(
               decoration: BoxDecoration(
-                color: Color.alphaBlend(
-                  context.colors.onSurface.withValues(
-                    alpha: context.colors.brightness == Brightness.dark
-                        ? 0.14
-                        : 0.04,
-                  ),
-                  context.colors.surface,
-                ),
+                color: context.colors.secondaryContainer,
                 borderRadius: BorderRadius.circular(Radii.container),
                 border: Border.all(color: context.colors.surface, width: 2),
               ),

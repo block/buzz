@@ -418,15 +418,7 @@ class MessageContent extends HookConsumerWidget {
                           ? (context.colors.brightness == Brightness.dark
                                 ? const Color(0xFFF2F2F2)
                                 : Colors.black)
-                          : Color.alphaBlend(
-                              context.colors.onSurface.withValues(
-                                alpha:
-                                    context.colors.brightness == Brightness.dark
-                                    ? 0.14
-                                    : 0.04,
-                              ),
-                              context.colors.surface,
-                            ),
+                          : context.colors.secondaryContainer,
                       shape: _MessageBubbleShape(
                         start: bubbleStart && index == 0,
                         end:
