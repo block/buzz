@@ -316,6 +316,51 @@ async fn edit_does_not_reveal_target() {
     submit_ok(&client, &other, &edit(&hex(&mine))).await;
 }
 
+/// An author removed from a private channel cannot tell whether their old
+/// message still exists: editing it is rejected exactly like editing a
+/// missing or soft-deleted one.
+#[tokio::test]
+#[ignore]
+async fn removed_author_edit_does_not_reveal_target() {
+    let client = http_client();
+    let owner = Keys::generate();
+    let removed = Keys::generate();
+    let private = create_channel(&client, &owner, "private").await;
+    add_member(&client, &owner, &private, &removed).await;
+    let kept = post(&client, &removed, 9, &private).await;
+    let deleted = post(&client, &removed, 9, &private).await;
+    delete(&client, &removed, &deleted).await;
+    let remove = sign(
+        &owner,
+        9001,
+        "",
+        vec![
+            tag(&["h", &private]),
+            tag(&["p", &removed.public_key().to_hex()]),
+        ],
+    );
+    submit_ok(&client, &owner, &remove).await;
+    let edit = |target: &str| {
+        sign(
+            &removed,
+            40003,
+            "edited",
+            vec![tag(&["e", target]), tag(&["h", &private])],
+        )
+    };
+    assert_uniform(
+        &client,
+        &removed,
+        "invalid: edit target not found or not editable by you",
+        vec![
+            ("missing", edit(MISSING)),
+            ("soft-deleted", edit(&hex(&deleted))),
+            ("existing, author removed", edit(&hex(&kept))),
+        ],
+    )
+    .await;
+}
+
 /// A vote's channel and readability check runs before its kind check, so an
 /// unusable target never reveals its kind.
 #[tokio::test]
@@ -615,7 +660,7 @@ async fn workflow_trigger_does_not_reveal_workflow() {
     assert_uniform(
         &client,
         &other,
-        "invalid: workflow not found",
+        "invalid: workflow not found or not triggerable by you",
         vec![
             (
                 "missing",

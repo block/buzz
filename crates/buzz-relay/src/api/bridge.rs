@@ -4435,6 +4435,73 @@ pub(crate) mod postgres_tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    /// A workflow row without a channel has no readers, so even its owner
+    /// reads its runs exactly like a workflow that does not exist. Ingest
+    /// refuses channelless definitions, so the row is seeded directly.
+    /// Mutation: let a `None` channel through `authorize_workflow_read` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channelless_workflow_runs_read_as_missing() {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres not reachable");
+        let host = format!("channelless-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let owner = Keys::generate();
+        state
+            .db
+            .ensure_user(community, owner.public_key().as_bytes())
+            .await
+            .expect("ensure user");
+        let workflow = state
+            .db
+            .create_workflow(
+                community,
+                None,
+                owner.public_key().as_bytes(),
+                "channelless",
+                "{}",
+                &[0u8; 32],
+            )
+            .await
+            .expect("seed workflow");
+        let read = |id: uuid::Uuid| {
+            let state = state.clone();
+            let host = host.clone();
+            let owner = owner.public_key().to_hex();
+            async move {
+                let resp = crate::router::build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/workflows/{id}/runs"))
+                            .header(header::HOST, host)
+                            .header("x-pubkey", owner)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("oneshot");
+                let status = resp.status();
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                (status, body)
+            }
+        };
+        let missing = read(uuid::Uuid::new_v4()).await;
+        assert_eq!(missing.0, axum::http::StatusCode::NOT_FOUND, "{missing:?}");
+        assert_eq!(read(workflow).await, missing);
+    }
+
     /// Collect buzz_events_rejected_total with (transport, reason) labels from
     /// a DebuggingRecorder snapshot.
     fn http_reject_counts(

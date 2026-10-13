@@ -810,7 +810,7 @@ async fn handle_workflow_def(
 }
 
 /// Trigger rejection for a missing workflow and for one the sender does not own.
-const WORKFLOW_NOT_FOUND: &str = "invalid: workflow not found";
+const WORKFLOW_NOT_FOUND: &str = "invalid: workflow not found or not triggerable by you";
 
 async fn handle_workflow_trigger(
     tenant: &TenantContext,

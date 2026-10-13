@@ -1326,7 +1326,7 @@ async fn validate_edit_ownership(
                     .map(|ch| ch.visibility == "open")
                     .unwrap_or(false);
                 if !is_open {
-                    return Err("restricted: not a channel member".to_string());
+                    return Err(EDIT_TARGET_DENIED.to_string());
                 }
             }
         }
@@ -6920,6 +6920,174 @@ mod postgres_tests {
             .expect("read re-deletion")
             .expect("re-deletion stored");
         assert_eq!(stored.channel_id, Some(channels[0]));
+    }
+
+    /// A community with `author`'s live message in an open channel, an
+    /// author global note, and a second open channel for out-of-scope tokens.
+    struct ScopedTargetFixture {
+        state: Arc<crate::state::AppState>,
+        tenant: TenantContext,
+        tracer: Arc<dyn buzz_conformance::Tracer>,
+        author: nostr::Keys,
+        sender: nostr::Keys,
+        target_channel: Uuid,
+        other_channel: Uuid,
+        live: Event,
+        global: Event,
+    }
+
+    impl ScopedTargetFixture {
+        async fn new(label: &str) -> Self {
+            use buzz_db::channel::{ChannelType, ChannelVisibility};
+            let state = ingest_state().await;
+            let host = format!("{label}-{}.test", Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = TenantContext::resolved(community, &host);
+            let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+            let (author, sender) = (nostr::Keys::generate(), nostr::Keys::generate());
+            let mut channels = Vec::new();
+            for creator in [&author, &sender] {
+                let channel_id = Uuid::new_v4();
+                state
+                    .db
+                    .create_channel_with_id(
+                        community,
+                        channel_id,
+                        &format!("{label}-{}", channel_id.simple()),
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        creator.public_key().to_bytes().as_slice(),
+                        None,
+                    )
+                    .await
+                    .expect("create test channel");
+                channels.push(channel_id);
+            }
+            let publish = |kind: u16, tags: Vec<nostr::Tag>| {
+                EventBuilder::new(Kind::Custom(kind), Uuid::new_v4().to_string())
+                    .tags(tags)
+                    .sign_with_keys(&author)
+                    .expect("sign")
+            };
+            let live = publish(
+                9,
+                vec![nostr::Tag::parse(["h", &channels[0].to_string()]).unwrap()],
+            );
+            let global = publish(1, vec![]);
+            for event in [live.clone(), global.clone()] {
+                let auth = IngestAuth::Http {
+                    pubkey: author.public_key(),
+                    scopes: vec![Scope::MessagesWrite],
+                    auth_method: HttpAuthMethod::Nip98,
+                };
+                ingest_event_inner(&state, &tracer, &tenant, event, auth)
+                    .await
+                    .expect("store target");
+            }
+            Self {
+                state,
+                tenant,
+                tracer,
+                author,
+                sender,
+                target_channel: channels[0],
+                other_channel: channels[1],
+                live,
+                global,
+            }
+        }
+
+        fn scoped(&self, channel: Uuid) -> IngestAuth {
+            IngestAuth::Nip42 {
+                pubkey: self.sender.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                channel_ids: Some(vec![channel]),
+                conn_id: Uuid::new_v4(),
+            }
+        }
+
+        fn sign(&self, kind: u16, tags: Vec<Vec<String>>) -> Event {
+            EventBuilder::new(Kind::Custom(kind), "+")
+                .tags(tags.into_iter().map(|t| nostr::Tag::parse(t).unwrap()))
+                .sign_with_keys(&self.sender)
+                .expect("sign")
+        }
+
+        async fn submit(
+            &self,
+            event: Event,
+            auth: IngestAuth,
+        ) -> Result<IngestResult, IngestError> {
+            ingest_event_inner(&self.state, &self.tracer, &self.tenant, event, auth).await
+        }
+    }
+
+    /// A report sent with a token scoped to another channel answers exactly
+    /// like a report on a missing event.
+    /// Mutation: drop the `token_channels` check in `reporter_can_read` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scoped_token_report_does_not_reveal_target() {
+        let f = ScopedTargetFixture::new("scoped-report").await;
+        let author = f.author.public_key().to_hex();
+        let report = |target: String| {
+            f.sign(
+                KIND_REPORT as u16,
+                vec![
+                    vec!["e".into(), target, "spam".into()],
+                    vec!["p".into(), author.clone()],
+                ],
+            )
+        };
+        for target in ["a".repeat(64), f.live.id.to_hex()] {
+            match f
+                .submit(report(target.clone()), f.scoped(f.other_channel))
+                .await
+            {
+                Err(IngestError::Rejected(msg)) => {
+                    assert_eq!(msg, "invalid: report target event not found", "{target}")
+                }
+                Err(other) => panic!("target {target}: {other:?}"),
+                Ok(_) => panic!("target {target}: accepted"),
+            }
+        }
+        f.submit(report(f.live.id.to_hex()), f.scoped(f.target_channel))
+            .await
+            .expect("in-scope token reports the message");
+    }
+
+    /// A reaction sent with a token scoped to another channel, to a channel
+    /// message or to a global note, answers exactly like one to a missing event.
+    /// Mutation: drop the `(Some(reason), Some(_))` arm, or map the token
+    /// check to its own error → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn scoped_token_reaction_does_not_reveal_target() {
+        let f = ScopedTargetFixture::new("scoped-reaction").await;
+        let react = |target: String| f.sign(KIND_REACTION as u16, vec![vec!["e".into(), target]]);
+        for target in ["a".repeat(64), f.live.id.to_hex(), f.global.id.to_hex()] {
+            match f
+                .submit(react(target.clone()), f.scoped(f.other_channel))
+                .await
+            {
+                Err(IngestError::Rejected(msg)) => assert_eq!(
+                    msg,
+                    format!("invalid: {REACTION_TARGET_NOT_FOUND}"),
+                    "{target}"
+                ),
+                Err(other) => panic!("target {target}: {other:?}"),
+                Ok(_) => panic!("target {target}: accepted"),
+            }
+        }
+        f.submit(react(f.live.id.to_hex()), f.scoped(f.target_channel))
+            .await
+            .expect("in-scope token reacts to the message");
     }
 
     // ── Owner-aware ban/timeout coverage ─────────────────────────────────────
