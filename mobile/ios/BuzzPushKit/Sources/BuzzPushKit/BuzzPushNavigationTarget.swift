@@ -31,6 +31,19 @@ public struct BuzzPushNavigationTarget: Codable, Equatable, Sendable {
     return value
   }
 
+  static func threadRootID(in tags: [[String]]) -> String? {
+    // Inbox opens broadcast replies in the channel and other replies in their
+    // direct parent's thread, even when the NIP-10 root names an outer thread.
+    if tags.contains(where: { $0.count >= 2 && $0[0] == "broadcast" && $0[1] == "1" }) {
+      return nil
+    }
+    let parent = tags.last(where: { $0.count >= 4 && $0[0] == "e" && $0[3] == "reply" })?[1]
+    // Relay ingest ignores malformed reply IDs. An empty marker must not
+    // invalidate the otherwise usable channel/event navigation payload.
+    guard let parent, !parent.isEmpty else { return nil }
+    return parent
+  }
+
   /// Decodes a target without trusting other fields from the APNs payload.
   public static func decodeIfPresent(
     from userInfo: [AnyHashable: Any]

@@ -103,3 +103,21 @@ import Testing
     ) == nil)
   }
 }
+
+@Test func `Empty reply marker preserves channel navigation`() {
+  let thread = BuzzPushNavigationTarget.threadRootID(in: [["e", "", "", "reply"]])
+  #expect(thread == nil)
+  let target = BuzzPushNavigationTarget(
+    eventID: "message", communityID: "community", channelID: "channel", threadRootID: thread
+  )
+  #expect(BuzzPushNavigationTarget.decodeIfPresent(
+    from: [BuzzPushNavigationTarget.userInfoKey: target.userInfoValue]
+  ) == target)
+}
+
+@Test func `Thread destination keeps direct parent and broadcast semantics`() {
+  let tags = [["e", "outer-root", "", "root"], ["e", "direct-parent", "", "reply"]]
+  #expect(BuzzPushNavigationTarget.threadRootID(in: tags) == "direct-parent")
+  #expect(BuzzPushNavigationTarget.threadRootID(in: tags + [["broadcast", "1"]]) == nil)
+  #expect(BuzzPushNavigationTarget.threadRootID(in: [["e", "outer-root", "", "root"]]) == nil)
+}

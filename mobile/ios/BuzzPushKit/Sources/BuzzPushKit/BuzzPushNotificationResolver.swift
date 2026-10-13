@@ -463,7 +463,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
           eventID: event.id,
           communityID: community.id,
           channelID: $0,
-          threadRootID: navigationThreadRootID(event)
+          threadRootID: BuzzPushNavigationTarget.threadRootID(in: event.tags)
         )
       },
       senderPubkey: event.pubkey.lowercased(),
@@ -472,15 +472,6 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       conversationDisplayName: conversation?.displayName,
       conversationRecipientCount: conversation?.recipientCount
     )
-  }
-
-  private static func navigationThreadRootID(_ event: VerifiedNostrEvent) -> String? {
-    // Inbox opens broadcast replies in the channel and other replies in their
-    // direct parent's thread, even when the NIP-10 root names an outer thread.
-    if event.tags.contains(where: { $0.count >= 2 && $0[0] == "broadcast" && $0[1] == "1" }) {
-      return nil
-    }
-    return event.tags.last(where: { $0.count >= 4 && $0[0] == "e" && $0[3] == "reply" })?[1]
   }
 
   private static func ephemeralProfile(
