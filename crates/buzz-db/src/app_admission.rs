@@ -81,10 +81,14 @@ pub struct AppAdmissionGuard {
 pub struct AppRouteSnapshot {
     /// Community that owns the delivery.
     pub community_id: Uuid,
-    /// Canonical `30617:<owner>:<d>` repository coordinate.
-    pub repository_coordinate: String,
-    /// Canonical `30621:<owner>:<d>` project coordinate.
-    pub project_coordinate: String,
+    /// Canonical `30617:<owner>:<d>` repository coordinate. `None` when the
+    /// callback named its destination channel directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_coordinate: Option<String>,
+    /// Canonical `30621:<owner>:<d>` project coordinate. `None` when the
+    /// callback named its destination channel directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_coordinate: Option<String>,
     /// Destination channel selected by the route.
     pub channel_id: Uuid,
 }
@@ -186,6 +190,25 @@ impl AppAdmissionGuard {
             })
         })
         .transpose()
+    }
+
+    /// Live stream channels in this community whose name equals `name`.
+    ///
+    /// Comparison is exact and case-sensitive. Returns at most two IDs so the
+    /// caller can tell a unique match from an ambiguous one. DM, forum, and
+    /// workflow channels are never returned.
+    pub async fn find_live_stream_channels_by_name(&mut self, name: &str) -> Result<Vec<Uuid>> {
+        let rows = sqlx::query(
+            "SELECT id FROM channels \
+             WHERE community_id = $1 AND name = $2 AND channel_type = 'stream' \
+               AND deleted_at IS NULL AND archived_at IS NULL \
+             LIMIT 2",
+        )
+        .bind(self.community_id.as_uuid())
+        .bind(name)
+        .fetch_all(&mut *self.tx)
+        .await?;
+        rows.into_iter().map(|row| Ok(row.try_get("id")?)).collect()
     }
 
     /// Active destination-channel members and display names in this community.

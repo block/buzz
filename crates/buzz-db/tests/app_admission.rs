@@ -89,8 +89,8 @@ async fn make_channel(db: &Db, community: CommunityId, creator: &[u8]) -> Uuid {
 fn route(community: CommunityId, channel_id: Uuid) -> AppRouteSnapshot {
     AppRouteSnapshot {
         community_id: *community.as_uuid(),
-        repository_coordinate: format!("30617:{}:harness-service", "ab".repeat(32)),
-        project_coordinate: format!("30621:{}:gigo-harness", "cd".repeat(32)),
+        repository_coordinate: Some(format!("30617:{}:harness-service", "ab".repeat(32))),
+        project_coordinate: Some(format!("30621:{}:gigo-harness", "cd".repeat(32))),
         channel_id,
     }
 }

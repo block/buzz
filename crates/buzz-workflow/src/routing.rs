@@ -50,6 +50,10 @@ pub enum RouteFailure {
     ProjectAmbiguous,
     /// The project channel reference is missing or malformed.
     ProjectChannelInvalid,
+    /// No live stream channel matched the requested channel name.
+    ChannelMissing,
+    /// More than one live stream channel matched the requested channel name.
+    ChannelAmbiguous,
     /// Caller is not authorized for the resolved route.
     RouteUnauthorized,
     /// A previously valid route is no longer usable.
@@ -69,6 +73,8 @@ impl RouteFailure {
             Self::ProjectMissing => "project_missing",
             Self::ProjectAmbiguous => "project_ambiguous",
             Self::ProjectChannelInvalid => "project_channel_invalid",
+            Self::ChannelMissing => "channel_missing",
+            Self::ChannelAmbiguous => "channel_ambiguous",
             Self::RouteUnauthorized => "route_unauthorized",
             Self::RouteStale => "route_stale",
             Self::IdempotencyConflict => "idempotency_conflict",
@@ -94,6 +100,8 @@ impl RouteFailure {
             Self::ProjectMissing => "project could not be resolved",
             Self::ProjectAmbiguous => "project is ambiguous",
             Self::ProjectChannelInvalid => "project channel is invalid",
+            Self::ChannelMissing => "channel could not be resolved",
+            Self::ChannelAmbiguous => "channel is ambiguous",
             Self::RouteUnauthorized => "route is unauthorized",
             Self::RouteStale => "route is no longer valid",
             Self::IdempotencyConflict => "idempotency key already used with a different payload",
@@ -110,6 +118,8 @@ impl RouteFailure {
             "project_missing" => Some(Self::ProjectMissing),
             "project_ambiguous" => Some(Self::ProjectAmbiguous),
             "project_channel_invalid" => Some(Self::ProjectChannelInvalid),
+            "channel_missing" => Some(Self::ChannelMissing),
+            "channel_ambiguous" => Some(Self::ChannelAmbiguous),
             "route_unauthorized" => Some(Self::RouteUnauthorized),
             "route_stale" => Some(Self::RouteStale),
             "idempotency_conflict" => Some(Self::IdempotencyConflict),

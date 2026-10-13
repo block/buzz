@@ -42,10 +42,13 @@ const RATE_WINDOW_SECS: u64 = 60;
 const RATE_LIMIT: u64 = 60;
 const IDEMPOTENCY_KEY_MAX_BYTES: usize = 512;
 const REPOSITORY_NAME_MAX_BYTES: usize = 512;
+/// Matches the `channels.name` column width.
+const CHANNEL_NAME_MAX_BYTES: usize = 255;
 
 const ALLOWED_KEYS: &[&str] = &[
     "idempotency_key",
     "repository_name",
+    "channel_name",
     "event_type",
     "content",
     "metadata",
@@ -294,9 +297,16 @@ enum ParseError {
     InvalidControl,
 }
 
+/// Where the callback asks to be delivered. A named channel wins over a
+/// repository when both are present.
+enum CallbackTarget {
+    Channel(String),
+    Repository(String),
+}
+
 struct ValidatedCallback {
     key_hash: [u8; 32],
-    repository_name: String,
+    target: CallbackTarget,
     event_type: String,
     content: String,
     payload: Value,
@@ -329,7 +339,19 @@ fn parse_callback(body: Value) -> Result<ValidatedCallback, ParseError> {
         }
     }
     let idempotency_key = non_empty_string(obj, "idempotency_key", IDEMPOTENCY_KEY_MAX_BYTES)?;
-    let repository_name = non_empty_string(obj, "repository_name", REPOSITORY_NAME_MAX_BYTES)?;
+    let target = if obj.contains_key("channel_name") {
+        CallbackTarget::Channel(non_empty_string(
+            obj,
+            "channel_name",
+            CHANNEL_NAME_MAX_BYTES,
+        )?)
+    } else {
+        CallbackTarget::Repository(non_empty_string(
+            obj,
+            "repository_name",
+            REPOSITORY_NAME_MAX_BYTES,
+        )?)
+    };
     let event_type = non_empty_string(obj, "event_type", 64)?;
     if !valid_event_type(&event_type) {
         return Err(ParseError::InvalidControl);
@@ -345,7 +367,7 @@ fn parse_callback(body: Value) -> Result<ValidatedCallback, ParseError> {
     drop(idempotency_key);
     Ok(ValidatedCallback {
         key_hash,
-        repository_name,
+        target,
         event_type,
         content,
         payload,
@@ -371,6 +393,49 @@ enum ResolveRouteError {
 }
 
 async fn resolve_app_route(
+    guard: &mut AppAdmissionGuard,
+    community_id: CommunityId,
+    target: &CallbackTarget,
+) -> Result<AppRouteSnapshot, ResolveRouteError> {
+    match target {
+        CallbackTarget::Channel(name) => resolve_channel_route(guard, community_id, name).await,
+        CallbackTarget::Repository(name) => {
+            resolve_repository_route(guard, community_id, name).await
+        }
+    }
+}
+
+async fn resolve_channel_route(
+    guard: &mut AppAdmissionGuard,
+    community_id: CommunityId,
+    channel_name: &str,
+) -> Result<AppRouteSnapshot, ResolveRouteError> {
+    let channels = guard
+        .find_live_stream_channels_by_name(channel_name)
+        .await
+        .map_err(|_| ResolveRouteError::Transient)?;
+    let channel_id = match channels.as_slice() {
+        [id] => *id,
+        [] => {
+            return Err(ResolveRouteError::Deterministic(
+                RouteFailure::ChannelMissing,
+            ))
+        }
+        _ => {
+            return Err(ResolveRouteError::Deterministic(
+                RouteFailure::ChannelAmbiguous,
+            ))
+        }
+    };
+    Ok(AppRouteSnapshot {
+        community_id: *community_id.as_uuid(),
+        repository_coordinate: None,
+        project_coordinate: None,
+        channel_id,
+    })
+}
+
+async fn resolve_repository_route(
     guard: &mut AppAdmissionGuard,
     community_id: CommunityId,
     repository_name: &str,
@@ -420,8 +485,8 @@ async fn resolve_app_route(
         ))?;
     Ok(AppRouteSnapshot {
         community_id: *community_id.as_uuid(),
-        repository_coordinate,
-        project_coordinate: project.coordinate.clone(),
+        repository_coordinate: Some(repository_coordinate),
+        project_coordinate: Some(project.coordinate.clone()),
         channel_id,
     })
 }
@@ -454,11 +519,15 @@ fn build_app_event(
     let mut tags = vec![
         Tag::parse(["h", &route.channel_id.to_string()]).map_err(|_| ())?,
         Tag::parse(["buzz:app", &app_id.to_string()]).map_err(|_| ())?,
-        Tag::parse(["a", &route.repository_coordinate, "repository"]).map_err(|_| ())?,
-        Tag::parse(["a", &route.project_coordinate, "project"]).map_err(|_| ())?,
-        Tag::parse(["buzz:app-delivery", &delivery_id.to_string()]).map_err(|_| ())?,
-        Tag::parse(["buzz:app-event", event_type]).map_err(|_| ())?,
     ];
+    if let Some(repository) = &route.repository_coordinate {
+        tags.push(Tag::parse(["a", repository, "repository"]).map_err(|_| ())?);
+    }
+    if let Some(project) = &route.project_coordinate {
+        tags.push(Tag::parse(["a", project, "project"]).map_err(|_| ())?);
+    }
+    tags.push(Tag::parse(["buzz:app-delivery", &delivery_id.to_string()]).map_err(|_| ())?);
+    tags.push(Tag::parse(["buzz:app-event", event_type]).map_err(|_| ())?);
     for pubkey in mention_pubkeys {
         tags.push(Tag::parse(["p", pubkey]).map_err(|_| ())?);
     }
@@ -764,26 +833,25 @@ async fn admit_vacant(
     mut guard: AppAdmissionGuard,
 ) -> Result<(StatusCode, Json<Value>, Observation), (Response, Observation)> {
     let community_uuid = *community_id.as_uuid();
-    let snapshot =
-        match resolve_app_route(&mut guard, community_id, &validated.repository_name).await {
-            Ok(snapshot) => snapshot,
-            Err(ResolveRouteError::Deterministic(failure)) => {
-                return reject_vacant(community_uuid, app_id, guard, failure).await;
-            }
-            Err(ResolveRouteError::Transient) => {
-                drop(guard);
-                return Err((
-                    unavailable_err(),
-                    observe(
-                        Some(community_uuid),
-                        Some(app_id),
-                        None,
-                        "unavailable",
-                        "none",
-                    ),
-                ));
-            }
-        };
+    let snapshot = match resolve_app_route(&mut guard, community_id, &validated.target).await {
+        Ok(snapshot) => snapshot,
+        Err(ResolveRouteError::Deterministic(failure)) => {
+            return reject_vacant(community_uuid, app_id, guard, failure).await;
+        }
+        Err(ResolveRouteError::Transient) => {
+            drop(guard);
+            return Err((
+                unavailable_err(),
+                observe(
+                    Some(community_uuid),
+                    Some(app_id),
+                    None,
+                    "unavailable",
+                    "none",
+                ),
+            ));
+        }
+    };
 
     let members = match guard
         .list_named_destination_members(snapshot.channel_id)
@@ -979,6 +1047,65 @@ mod tests {
                 "key {key} must be invalid_callback"
             );
         }
+    }
+
+    #[test]
+    fn parse_callback_prefers_channel_name_over_repository() {
+        let both = parse_callback(json!({
+            "idempotency_key": "k",
+            "channel_name": "3q-chess-dev",
+            "repository_name": "repo",
+            "event_type": "push",
+            "content": "hi",
+        }))
+        .unwrap();
+        assert!(matches!(both.target, CallbackTarget::Channel(ref name) if name == "3q-chess-dev"));
+
+        let channel_only = parse_callback(json!({
+            "idempotency_key": "k",
+            "channel_name": "3q-chess-dev",
+            "event_type": "push",
+            "content": "hi",
+        }))
+        .unwrap();
+        assert!(matches!(channel_only.target, CallbackTarget::Channel(_)));
+
+        let repository_only = parse_callback(json!({
+            "idempotency_key": "k",
+            "repository_name": "repo",
+            "event_type": "push",
+            "content": "hi",
+        }))
+        .unwrap();
+        assert!(
+            matches!(repository_only.target, CallbackTarget::Repository(ref name) if name == "repo")
+        );
+    }
+
+    #[test]
+    fn parse_callback_rejects_invalid_channel_name() {
+        for channel_name in [json!(""), json!(7), json!("x".repeat(256))] {
+            let body = json!({
+                "idempotency_key": "k",
+                "channel_name": channel_name,
+                "repository_name": "repo",
+                "event_type": "push",
+                "content": "hi",
+            });
+            assert!(matches!(
+                parse_callback(body),
+                Err(ParseError::InvalidControl)
+            ));
+        }
+        let neither = json!({
+            "idempotency_key": "k",
+            "event_type": "push",
+            "content": "hi",
+        });
+        assert!(matches!(
+            parse_callback(neither),
+            Err(ParseError::InvalidControl)
+        ));
     }
 
     #[test]

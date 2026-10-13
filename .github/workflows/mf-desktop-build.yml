@@ -1,0 +1,355 @@
+name: MF Desktop Build
+
+# Fork-only desktop build on self-hosted runners. Upstream release.yml is
+# gated to block/buzz, so this file owns desktop builds for the fork and never
+# conflicts with upstream merges.
+#
+# Trigger: push tag desktop-v<X.Y.Z>-mf.<N>. The tag supplies the version;
+# set-version-from-tag.mjs patches the manifests at build time.
+#
+# macOS builds are ad-hoc signed (no Apple Developer ID, no notarization).
+
+concurrency:
+  group: mf-desktop-build-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    tags:
+      - 'desktop-v[0-9]*-mf.[0-9]*'
+
+permissions:
+  contents: read
+
+env:
+  BUZZ_UPDATER_ENDPOINT: https://s3.ap-southeast-1.wasabisys.com/game-mobile-registry/buzz-desktop/latest.json
+  BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY }}
+
+jobs:
+  setup:
+    name: Setup
+    if: github.repository == 'kevinle128/buzz'
+    runs-on: [self-hosted, Linux, X64, buzz]
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-mf\.[0-9]+$'; then
+            echo "::error::Invalid version '$VERSION'. Expected X.Y.Z-mf.N (e.g. 0.5.26-mf.1)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag-bound source
+        id: source
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          scripts/verify-release-ref.sh desktop-v "$VERSION"
+          echo "source_sha=$(git rev-parse 'HEAD^{commit}')" >> "$GITHUB_OUTPUT"
+
+      - name: Check signing secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          missing=()
+          [[ -n "$BUZZ_UPDATER_PUBLIC_KEY" ]] || missing+=(BUZZ_UPDATER_PUBLIC_KEY)
+          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]] || missing+=(TAURI_SIGNING_PRIVATE_KEY)
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Missing repository secrets: ${missing[*]}"
+            exit 1
+          fi
+
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: [self-hosted, macOS, ARM64, buzz]
+    needs: setup
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          # Upstream ships mesh-llm (Metal) only on Apple Silicon.
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            features: --features mesh-llm
+            mesh: true
+          - arch: x64
+            target: x86_64-apple-darwin
+            features: ""
+            mesh: false
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      # Ad-hoc signature: Tauri signs the bundle with Entitlements.plist but
+      # without a developer identity.
+      APPLE_SIGNING_IDENTITY: "-"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag-bound source
+        run: scripts/verify-release-ref.sh desktop-v "$VERSION"
+
+      # Keep Hermit packages and the pnpm store inside the job temp dir so the
+      # clean step removes them and shared caches on the host stay untouched.
+      - name: Use job-local caches
+        run: |
+          echo "HERMIT_STATE_DIR=$RUNNER_TEMP/mf-cache/hermit" >> "$GITHUB_ENV"
+          echo "pnpm_config_store_dir=$RUNNER_TEMP/mf-cache/pnpm-store" >> "$GITHUB_ENV"
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Add Rust target
+        run: rustup target add "$TARGET"
+
+      - name: Patch version
+        run: |
+          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri && cargo update --workspace
+
+      - name: Generate release config
+        run: cd desktop && node scripts/build-release-config.mjs
+
+      - name: Build sidecars
+        run: |
+          cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh "$TARGET"
+
+      # Mesh rev derived from Cargo.lock; cache key tracks it.
+      - name: Resolve mesh-llm rev
+        if: matrix.mesh
+        id: mesh_rev
+        run: |
+          set -euo pipefail
+          # awk instead of python tomllib: the runner's system python3 may predate 3.11.
+          REV=$(awk '/^name = "mesh-llm-sdk"$/{f=1} f&&/^source = /{s=$3; gsub(/"/,"",s); sub(/.*#/,"",s); print s; exit}' Cargo.lock)
+          [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build mesh llama native libraries
+        if: matrix.mesh
+        env:
+          MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
+        run: |
+          set -euo pipefail
+          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
+          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$MESH_REV_SHORT" -type d -name "$MESH_REV_SHORT" | head -1)
+          [[ -n "$MESH_ROOT" ]] || { echo "::error::mesh-llm checkout for $MESH_REV_SHORT not found after cargo fetch"; exit 1; }
+          export LLAMA_STAGE_BACKEND=metal
+          export LLAMA_STAGE_BUILD_DIR="$GITHUB_WORKSPACE/.cache/mesh-llama/build-stage-abi-metal"
+          export CMAKE_OSX_DEPLOYMENT_TARGET=10.15
+          "$MESH_ROOT/scripts/prepare-llama.sh" pinned
+          "$MESH_ROOT/scripts/build-llama.sh" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+
+      - name: Build Tauri app
+        run: cd desktop && pnpm tauri build --verbose --target "$TARGET" ${{ matrix.features }} --config src-tauri/tauri.release.conf.json
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
+          LLAMA_STAGE_BACKEND: metal
+          LLAMA_STAGE_BUILD_DIR: ${{ github.workspace }}/.cache/mesh-llama/build-stage-abi-metal
+          SKIPPY_LLAMA_AUTO_BUILD: "0"
+          # No TAURI_BUNDLER_DMG_IGNORE_CI: the Finder layout step needs a GUI session
+          # and Automation permission, which the launchd runner does not have.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Verify ad-hoc signature and entitlements
+        run: |
+          APP="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Buzz.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          desktop/scripts/verify-macos-entitlements.sh "$APP"
+
+      - name: Locate build artifacts
+        id: artifacts
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="desktop/src-tauri/target/${TARGET}/release/bundle"
+          DMG=$(find "$BUNDLE_DIR/dmg" -name '*.dmg' -type f | head -1)
+          [[ -n "$DMG" ]] || { echo "::error::No DMG found in $BUNDLE_DIR/dmg"; exit 1; }
+
+          ARCHIVE=$(find "$BUNDLE_DIR/macos" -name '*.tar.gz' ! -name '*.sig' -type f | head -1)
+          [[ -n "$ARCHIVE" && -f "${ARCHIVE}.sig" ]] || { echo "::error::Updater archive or signature not found in $BUNDLE_DIR/macos"; exit 1; }
+          # Give each architecture a unique basename before artifacts are merged.
+          RENAMED="$(dirname "$ARCHIVE")/Buzz_${VERSION}_${ARCH}.app.tar.gz"
+          if [[ "$ARCHIVE" != "$RENAMED" ]]; then
+            mv "$ARCHIVE" "$RENAMED"
+            mv "${ARCHIVE}.sig" "${RENAMED}.sig"
+          fi
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "archive=$RENAMED" >> "$GITHUB_OUTPUT"
+          echo "sig=${RENAMED}.sig" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-macos-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.artifacts.outputs.dmg }}
+            ${{ steps.artifacts.outputs.archive }}
+            ${{ steps.artifacts.outputs.sig }}
+
+      # Self-hosted runners keep the workspace between runs; free the disk after every build.
+      - name: Clean workspace
+        if: always()
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          # Hermit installs packages read-only; make them writable before removal.
+          if [[ -d "$RUNNER_TEMP/mf-cache" ]]; then chmod -R u+w "$RUNNER_TEMP/mf-cache"; fi
+          rm -rf "$RUNNER_TEMP/mf-cache"
+
+  build-linux:
+    name: Build Linux (x64)
+    runs-on: [self-hosted, Linux, X64, buzz]
+    # Clean, pinned build environment on the shared server.
+    container: ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+    needs: setup
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+      # AppImage tools are AppImages themselves; containers lack FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -o Acquire::Retries=3
+          apt-get install -y --no-install-recommends -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 \
+            build-essential ca-certificates curl desktop-file-utils file git \
+            libasound2-dev libayatana-appindicator3-dev libgtk-3-dev librsvg2-dev \
+            libssl-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config \
+            squashfs-tools wget xdg-utils
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark workspace safe for git (containerized job)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Verify tag-bound source
+        run: scripts/verify-release-ref.sh desktop-v "$VERSION"
+
+      # Keep Hermit packages and the pnpm store inside the job temp dir so the
+      # clean step removes them and shared caches on the host stay untouched.
+      - name: Use job-local caches
+        run: |
+          echo "HERMIT_STATE_DIR=$RUNNER_TEMP/mf-cache/hermit" >> "$GITHUB_ENV"
+          echo "pnpm_config_store_dir=$RUNNER_TEMP/mf-cache/pnpm-store" >> "$GITHUB_ENV"
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install appimagetool
+        run: |
+          set -euo pipefail
+          # Pinned release tags and hashes, same as upstream release.yml.
+          wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+          install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+          wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
+            "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
+          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+          install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
+          echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Patch version
+        run: |
+          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri && cargo update --workspace
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      - name: Generate release config
+        run: cd desktop && node scripts/build-release-config.mjs
+
+      - name: Build Linux Tauri app
+        run: cd desktop && pnpm tauri build --verbose --ci --bundles deb,appimage --features mesh-llm --config src-tauri/tauri.release.conf.json
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Fix AppImage (remove infra libs, shim host GStreamer)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          mapfile -t APPIMAGES < <(find desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f)
+          [[ ${#APPIMAGES[@]} -eq 1 ]] || { echo "::error::Expected exactly one AppImage, found ${#APPIMAGES[@]}"; exit 1; }
+          bash desktop/scripts/fix-appimage.sh "${APPIMAGES[0]}"
+
+      - name: Locate Linux build artifacts
+        id: artifacts
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="desktop/src-tauri/target/release/bundle"
+          DEB=$(find "$BUNDLE_DIR/deb" -name '*.deb' -type f | head -1)
+          APPIMAGE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' -type f | head -1)
+          [[ -n "$DEB" && -n "$APPIMAGE" ]] || { echo "::error::DEB or AppImage missing in $BUNDLE_DIR"; exit 1; }
+          # Tauri 2.11+ signs the AppImage directly; older versions wrap it in a tar.gz.
+          ARCHIVE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage.tar.gz' ! -name '*.sig' -type f | head -1)
+          [[ -n "$ARCHIVE" ]] || ARCHIVE="$APPIMAGE"
+          [[ -f "${ARCHIVE}.sig" ]] || { echo "::error::Updater signature not found for $ARCHIVE"; exit 1; }
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+          echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "sig=${ARCHIVE}.sig" >> "$GITHUB_OUTPUT"
+
+      # .deb is not auto-updatable; only the AppImage is.
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-linux-x64
+          if-no-files-found: error
+          path: |
+            ${{ steps.artifacts.outputs.deb }}
+            ${{ steps.artifacts.outputs.appimage }}
+            ${{ steps.artifacts.outputs.archive }}
+            ${{ steps.artifacts.outputs.sig }}
+
+      # Files in the container are owned by root, so clean them here, not on the host.
+      - name: Clean workspace
+        if: always()
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          # Hermit installs packages read-only; make them writable before removal.
+          if [[ -d "$RUNNER_TEMP/mf-cache" ]]; then chmod -R u+w "$RUNNER_TEMP/mf-cache"; fi
+          rm -rf "$RUNNER_TEMP/mf-cache"
+          # The container HOME is a host bind mount; remove what tools cached there.
+          find "$HOME" -mindepth 1 -maxdepth 1 -exec rm -rf {} +

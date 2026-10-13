@@ -136,12 +136,13 @@ Content-Type: application/json
 | Field | Required | Contract |
 | --- | --- | --- |
 | `idempotency_key` | yes | Non-empty string, at most 512 UTF-8 bytes. Hashed as given; not trimmed. Dropped after hashing and never stored. |
-| `repository_name` | yes | Non-empty string, at most 512 UTF-8 bytes. Passed unchanged to the exact-tier route resolver. |
+| `channel_name` | no | Non-empty string, at most 255 UTF-8 bytes. When present, routes directly to the live stream channel with this exact name and `repository_name` is ignored. See [Routing](#routing). |
+| `repository_name` | when `channel_name` is absent | Non-empty string, at most 512 UTF-8 bytes. Passed unchanged to the exact-tier route resolver. |
 | `event_type` | yes | Lowercase ASCII matching `[a-z0-9][a-z0-9._:-]{0,63}`. |
 | `content` | yes | Non-empty UTF-8. The 64 KiB HTTP body limit is the effective bound. Published as the kind `9` message content. |
 | `metadata` | no | JSON object. Opaque to routing and attribution. Defaults to absent, which is **not** the same payload as `"metadata": {}`. |
 
-Allowed top-level keys are exactly those five. Unknown keys and authority-like
+Allowed top-level keys are exactly those six. Unknown keys and authority-like
 fields are rejected as `400` / `invalid_callback`. Reserved examples:
 
 `channel_id`, `project_id`, `community_id`, `app_id`, `pubkey`, `author`,
@@ -197,6 +198,22 @@ Errors use `{"error": "<redacted message>", "code": "<stable_code>"}`.
 
 ## Routing
 
+### Named channel
+
+When the body has `channel_name`, Buzz looks for a channel in the same
+community with exactly that name (case-sensitive, no trimming) that is a
+`stream` channel, not archived, and not deleted. DM, forum, and workflow
+channels never match. Private channels match too; the App does not need
+channel membership.
+
+Zero matches → `channel_missing`. Multiple matches → `channel_ambiguous`.
+Buzz never falls back to `repository_name` when the named channel does not
+resolve. The published message has no repository or project `a` tags.
+
+### Repository
+
+When `channel_name` is absent, Buzz routes by repository:
+
 The App path reuses the shared repository → project → channel resolver with an
 **empty alias map**. Comparison is case-sensitive and does not trim or
 normalize Unicode.
@@ -220,8 +237,8 @@ The selected project's single valid `buzz-channel` UUID must exist, be live,
 not archived, and belong to the same community (`project_channel_invalid`
 otherwise). The App does not need channel membership.
 
-Buzz never falls back to another project, a callback-supplied channel, an App
-default channel, or a workflow home channel.
+Buzz never falls back to another project, an App default channel, or a
+workflow home channel.
 
 ## Idempotency and retries
 
@@ -264,6 +281,8 @@ secrets count toward the quota. `429` includes `Retry-After`.
 | `422` | `project_missing` | No claim-valid project for the repository. |
 | `422` | `project_ambiguous` | More than one claim-valid project. |
 | `422` | `project_channel_invalid` | Missing, malformed, archived, deleted, or cross-community destination channel. |
+| `422` | `channel_missing` | No live stream channel has the requested `channel_name`. |
+| `422` | `channel_ambiguous` | More than one live stream channel has the requested `channel_name`. |
 | `429` | `rate_limited` | Quota exceeded. `Retry-After` is seconds until the window resets. |
 | `503` | `service_unavailable` | Transient database, Redis, signer, route-read, or mention-read failure. Retry with the same key. |
 
