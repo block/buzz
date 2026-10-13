@@ -2736,11 +2736,11 @@ async fn authorize_moderation_read(
             None,
             state.config.require_auth_token || nip_fi_active,
         )
-        .map(|auth| auth.proof(auth.event_id_bytes))
+        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
     let pubkey = *admission.proven_pubkey();
-    let event_id_bytes = admission.into_extra();
+    let (event_id_bytes, signed_created_at) = admission.into_extra();
 
     check_nip98_replay(state, &tenant, event_id_bytes)
         .await
@@ -2753,7 +2753,7 @@ async fn authorize_moderation_read(
         tenant.community(),
         &pubkey_bytes,
         super::relay_members::extract_auth_tag_header(headers),
-        None,
+        signed_created_at,
     )
     .await
     .map_err(|e| e.into_response())?;
@@ -2953,7 +2953,7 @@ mod typing_postgres_tests;
 #[cfg(test)]
 pub(crate) mod postgres_tests {
     use super::*;
-    use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
+    use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag, Timestamp};
     use std::sync::Mutex;
 
     fn redis_pool() -> deadpool_redis::Pool {
@@ -5330,6 +5330,16 @@ pub(crate) mod postgres_tests {
         method: &str,
         body: &[u8],
     ) -> axum::http::HeaderMap {
+        make_nip98_headers_with_created_at(keys, url, method, body, Timestamp::now().as_secs())
+    }
+
+    fn make_nip98_headers_with_created_at(
+        keys: &Keys,
+        url: &str,
+        method: &str,
+        body: &[u8],
+        created_at: u64,
+    ) -> axum::http::HeaderMap {
         use base64::engine::general_purpose::STANDARD as BASE64;
         use sha2::{Digest, Sha256};
         let payload_hex = hex::encode(Sha256::digest(body));
@@ -5340,6 +5350,7 @@ pub(crate) mod postgres_tests {
         ];
         let event = EventBuilder::new(Kind::HttpAuth, "")
             .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
             .sign_with_keys(keys)
             .expect("sign NIP-98 event");
         let event_json = serde_json::to_string(&event).expect("serialize NIP-98 event");
@@ -6467,6 +6478,170 @@ pub(crate) mod postgres_tests {
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "NIP-FI Off mode MUST NOT produce 503 from the gate [FI-INV-15]"
         );
+    }
+
+    /// A moderator-privileged agent remains subject to its verified NIP-OA
+    /// owner's ban on moderation reads. The first request has no stored owner
+    /// link and uses a time-bounded auth tag; the second uses the durable owner
+    /// link. A clear fresh-owner control reaches the queue.
+    /// Mutation: discard `signed_created_at` in `authorize_moderation_read` →
+    /// the fresh-owner ban is missed and the moderator agent receives 200 → RED.
+    #[test]
+    #[ignore = "requires Postgres and disposable Redis via REDIS_URL"]
+    fn moderation_read_honors_fresh_and_stored_banned_agent_owners() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let Some(mut state) = rt.block_on(nip_fi_off_test_state()) else {
+            panic!("local Postgres and Redis must be available");
+        };
+        let mut config = state.config.as_ref().clone();
+        config.require_relay_membership = true;
+        Arc::get_mut(&mut state)
+            .expect("test state has one owner")
+            .config = Arc::new(config);
+
+        rt.block_on(async {
+            let issuer = Keys::generate();
+            for scenario in ["fresh-banned-owner", "stored-banned-owner", "fresh-clear-owner"] {
+                let host = format!(
+                    "moderation-owner-{scenario}-{}.local",
+                    uuid::Uuid::new_v4().simple()
+                );
+                let community = state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community")
+                    .id;
+                let owner = Keys::generate();
+                let agent = Keys::generate();
+                for keys in [&owner, &agent] {
+                    state
+                        .db
+                        .ensure_user(community, keys.public_key().as_bytes())
+                        .await
+                        .expect("ensure owner and moderator-agent users");
+                }
+                state
+                    .db
+                    .add_relay_member(
+                        community,
+                        &owner.public_key().to_hex(),
+                        "member",
+                        None,
+                    )
+                    .await
+                    .expect("seed owner as a community member");
+                state
+                    .db
+                    .add_relay_member(
+                        community,
+                        &agent.public_key().to_hex(),
+                        "admin",
+                        None,
+                    )
+                    .await
+                    .expect("seed agent's own moderator role");
+
+                let stored_owner = scenario == "stored-banned-owner";
+                if stored_owner {
+                    assert!(state
+                        .db
+                        .set_agent_owner_for_authorization(
+                            community,
+                            agent.public_key().as_bytes(),
+                            owner.public_key().as_bytes(),
+                        )
+                        .await
+                        .expect("store agent owner link"));
+                }
+                let linked_owner = state
+                    .db
+                    .get_agent_channel_policy(community, agent.public_key().as_bytes())
+                    .await
+                    .expect("read agent owner link")
+                    .and_then(|(_, owner)| owner);
+                assert_eq!(
+                    linked_owner,
+                    stored_owner.then(|| owner.public_key().to_bytes().to_vec()),
+                    "fresh and stored owner variants must be distinct"
+                );
+
+                let banned_owner = scenario != "fresh-clear-owner";
+                if banned_owner {
+                    state
+                        .db
+                        .ban_community_member(
+                            community,
+                            owner.public_key().as_bytes(),
+                            issuer.public_key().as_bytes(),
+                            None,
+                            None,
+                        )
+                        .await
+                        .expect("seed owner ban");
+                }
+
+                // The signed event is older than the NIP-OA upper bound while
+                // remaining fresh for NIP-98. Passing `Utc::now()` or dropping
+                // the signed time would therefore fail to resolve this owner.
+                let auth_created_at = Timestamp::now().as_secs().saturating_sub(5);
+                let owner_tag = buzz_sdk::nip_oa::compute_auth_tag(
+                    &owner,
+                    &agent.public_key(),
+                    &format!("created_at<{}", auth_created_at + 1),
+                )
+                .expect("sign time-bounded owner proof");
+                let url = format!("https://{host}/moderation/reports");
+                let mut headers = make_nip98_headers_with_created_at(
+                    &agent,
+                    &url,
+                    "GET",
+                    b"",
+                    auth_created_at,
+                );
+                if !stored_owner {
+                    headers.insert(
+                        "x-auth-tag",
+                        owner_tag.parse().expect("valid NIP-OA auth header"),
+                    );
+                }
+
+                let (status, _, body) = oneshot_request_full(
+                    Arc::clone(&state),
+                    "GET",
+                    "/moderation/reports",
+                    &host,
+                    headers,
+                    b"",
+                )
+                .await;
+                if banned_owner {
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::FORBIDDEN,
+                        "{scenario}: an agent with its own admin role must still inherit its owner's ban; body: {body:?}"
+                    );
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&body).expect("ban response JSON");
+                    assert_eq!(
+                        body["error"],
+                        "blocked: you are banned from this community",
+                        "{scenario}: denial must come from the ban gate, not the moderator role gate"
+                    );
+                } else {
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::OK,
+                        "a moderator agent with an unbanned owner must reach the queue"
+                    );
+                    assert_eq!(body.as_ref(), b"[]", "fresh clear-owner control");
+                }
+            }
+        });
     }
 
     // ── T2-seam: admitted malformed query through real handler → 400 ─────────

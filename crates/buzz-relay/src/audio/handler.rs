@@ -3797,7 +3797,7 @@ mod tests {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = require_relay_membership;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1 -- unreachable local-only connection for DB-free tests
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let mut pool_options = sqlx::postgres::PgPoolOptions::new();
         if let Some(timeout) = acquire_timeout {
@@ -13834,6 +13834,134 @@ mod tests {
 
             let (frames, _) =
                 run_audio_auth_in(state, tenant, channel_id, None, &member_key, true).await;
+
+            assert_eq!(
+                frames,
+                vec![serde_json::json!({
+                    "type": "error",
+                    "message": "blocked: you are banned from this community"
+                })
+                .to_string()]
+            );
+        }
+
+        /// A relay and channel administrator is still subject to a community
+        /// ban at huddle admission. The member control proves the fixture has
+        /// working channel admission before the banned administrator is tried.
+        /// Mutation: bypass the huddle ban gate for admins → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn audio_join_rejects_banned_admin() {
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let (tenant, channel_id, admin) = seed_audio_fixture(state.db.pool()).await;
+            sqlx::query(
+                "UPDATE channel_members SET role = 'admin' \
+                 WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(channel_id)
+            .bind(admin.public_key().to_bytes().to_vec())
+            .execute(state.db.pool())
+            .await
+            .expect("promote channel administrator");
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &admin.public_key().to_hex(),
+                    "admin",
+                    None,
+                )
+                .await
+                .expect("seed relay administrator");
+
+            let control = nostr::Keys::generate();
+            sqlx::query(
+                "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+                 VALUES ($1, $2, $3, 'member')",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(channel_id)
+            .bind(control.public_key().to_bytes().to_vec())
+            .execute(state.db.pool())
+            .await
+            .expect("seed unbanned huddle control");
+            let (mut control_socket, control_server) =
+                open_admitted_audio_socket(&state, tenant.clone(), channel_id, &control, None)
+                    .await;
+            control_socket
+                .close(None)
+                .await
+                .expect("close allowed huddle control");
+            control_server.abort();
+
+            state
+                .db
+                .ban_community_member(
+                    tenant.community(),
+                    &admin.public_key().to_bytes(),
+                    &nostr::Keys::generate().public_key().to_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("seed administrator ban");
+
+            let (frames, _) =
+                run_audio_auth_in(state, tenant, channel_id, None, &admin, true).await;
+
+            assert_eq!(
+                frames,
+                vec![serde_json::json!({
+                    "type": "error",
+                    "message": "blocked: you are banned from this community"
+                })
+                .to_string()]
+            );
+        }
+
+        /// A delegated agent is refused at huddle admission when its proven
+        /// NIP-OA owner is community-banned, even though the agent has no
+        /// direct ban row. The owner is also a channel member so the denial
+        /// reaches the ban gate rather than failing channel authorization.
+        /// Mutation: omit the proven owner from the huddle restriction lookup
+        /// → the agent is admitted → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn audio_join_rejects_banned_owner_agent() {
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let (tenant, channel_id, owner) = seed_audio_fixture(state.db.pool()).await;
+            let agent = nostr::Keys::generate();
+            state
+                .db
+                .ban_community_member(
+                    tenant.community(),
+                    &owner.public_key().to_bytes(),
+                    &nostr::Keys::generate().public_key().to_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("seed owner ban");
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign owner proof");
+            let auth_tag: Vec<String> =
+                serde_json::from_str(&auth_tag).expect("decode auth tag JSON");
+
+            let (frames, _) = run_audio_auth_tagged(
+                state,
+                tenant,
+                channel_id,
+                None,
+                &agent,
+                true,
+                Some(auth_tag),
+            )
+            .await;
 
             assert_eq!(
                 frames,

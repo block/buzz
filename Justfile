@@ -397,6 +397,7 @@ test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
+    python3 scripts/check-community-ban-route-inventory.py
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         cargo nextest run -p buzz-audit --lib
@@ -591,6 +592,8 @@ test-unit:
                 + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
                 + test(/^api::nip_fi::/)'
+        # Retain partially consumed mesh receives across housekeeping ticks.
+        cargo nextest run -p buzz-relay --lib -E 'test(=mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks)'
         # boot_lifecycle spawns the real relay binary and asserts its startup
         # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
         # non-ignored tests need no Postgres or Redis; the Postgres cases are
