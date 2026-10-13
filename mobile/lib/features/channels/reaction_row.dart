@@ -440,6 +440,11 @@ class _ReactionDetailSheet extends HookConsumerWidget {
                       child: FilterChip(
                         key: ValueKey('reaction-toggle-${reaction.emoji}'),
                         tooltip: dataset.displayName(reaction.emoji),
+                        side: BorderSide(
+                          color: reaction.reactedByCurrentUser
+                              ? context.colors.primary.withValues(alpha: 0.40)
+                              : context.colors.outlineVariant,
+                        ),
                         label: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -708,6 +713,7 @@ Future<bool> _showNativeReactionDetails(
         'requestId': requestId,
         'sheetColor': sheetColors.surface.toARGB32(),
         'foregroundColor': sheetColors.primary.toARGB32(),
+        'outlineColor': Theme.of(context).colorScheme.outlineVariant.toARGB32(),
         'dark': Theme.of(context).brightness == Brightness.dark,
         'profiles': profiles(),
         'reactions': reactionData(),

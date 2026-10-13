@@ -7,6 +7,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   var onToggle: ((String) -> Void)?
   private let sheetColor: UIColor
   private let foregroundColor: UIColor
+  private let outlineColor: UIColor
   private var reactions: [[String: Any]]
   private var profiles: [String: [String: Any]]
   private let table = UITableView(frame: .zero, style: .plain)
@@ -30,6 +31,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     }
     sheetColor = color("sheetColor", fallback: .systemGroupedBackground)
     foregroundColor = color("foregroundColor", fallback: .label)
+    outlineColor = color("outlineColor", fallback: .separator)
     reactions = data["reactions"] as? [[String: Any]] ?? []
     profiles = data["profiles"] as? [String: [String: Any]] ?? [:]
     super.init(nibName: nil, bundle: nil)
@@ -142,6 +144,8 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     let selected = reaction?["selected"] as? Bool == true
     config.baseBackgroundColor = selected ? foregroundColor : .tertiarySystemFill
     config.baseForegroundColor = selected ? foregroundColor : .label
+    config.background.strokeWidth = 1
+    config.background.strokeColor = selected ? foregroundColor.withAlphaComponent(0.40) : outlineColor
     let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
       guard let self else { return }
       guard let emoji else { return }
