@@ -453,11 +453,13 @@ export async function sendDesktopNotification(
   // discard the returned promise without a rejection handler, so an
   // un-guarded throw becomes an unhandled rejection. Treat constructor failure
   // as a delivery miss (return false) and log the failed delivery.
-  // Web with live push on this device: the push notification (which iOS requires us to show) is the one OS
-  // notification per message, so the in-app local one stands down entirely for message events.
-  if (!isTauri() && payload.target?.eventId) {
-    const { webPushActive } = await import("@/platform/web/push/seen");
-    if (webPushActive()) return true;
+  // Web: one OS notification per message. Catch-up events never notify, and with push live on this device the push
+  // (which iOS requires us to show) is the notification — see platform/web/push/seen.ts.
+  if (!isTauri()) {
+    const { suppressLocalNotification } = await import(
+      "@/platform/web/push/seen"
+    );
+    if (await suppressLocalNotification(payload.target)) return true;
   }
 
   try {

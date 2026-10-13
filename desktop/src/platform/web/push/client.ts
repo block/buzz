@@ -34,6 +34,7 @@ import {
   type PushDescriptor,
 } from "./lease";
 import { errMsg, setDiag } from "./diag";
+import { setWebPushActive } from "./seen";
 
 const NOTIFICATION_SETTINGS_KEY = "buzz-notification-settings.v2";
 const STATE_KEY = "buzz-web-push-state.v2";
@@ -265,6 +266,7 @@ async function ensurePushSubscribedInner(): Promise<boolean> {
   setDiag({ gateway: "enrolled + delegated" }, "gateway ok");
   await publishLease(d, handle, generation, endpoint_grant, me, expiration);
   lastSentAt = Date.now();
+  setWebPushActive(true);
   setDiag({ lease: "accepted by relay", leaseAt: lastSentAt }, "lease sent ok");
   save({
     pubkey: me,
@@ -315,6 +317,7 @@ export async function disablePush(): Promise<void> {
     ?.unsubscribe()
     .catch(() => false);
   save(null);
+  setWebPushActive(false);
 }
 
 /** Route notification clicks (warm: SW postMessage; cold: ?push= on launch) to the app's activation handler. */

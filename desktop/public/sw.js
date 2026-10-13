@@ -2,7 +2,7 @@
 // Caches ONLY the static shell (hashed /assets/*, fonts/icons/css, and the navigation document).
 // Never touches: cross-origin requests, non-GET, the relay API paths (/query /events /count /media /upload /api /info /health ...),
 // or WebSocket upgrades (the SW cannot intercept those anyway).
-const VERSION = "buzz-web-v5";
+const VERSION = "buzz-web-v6";
 const PREFETCH_CACHE = "buzz-push-prefetch-v1"; // kept across shell versions; entries are short-lived
 const SHELL = ["/", "/manifest.webmanifest", "/buzz.svg", "/boot.css", "/pwa/icon-192.png", "/pwa/icon-512.png"];
 const API = /^\/(query|events|count|media|upload|api|info|health|_liveness|_readiness|workflows|hooks|huddle|operator|invite|\.well-known)(\/|$)/;
@@ -77,6 +77,13 @@ async function bumpBadge() {
   if (self.navigator && self.navigator.setAppBadge) await self.navigator.setAppBadge(n).catch(() => undefined);
 }
 
+// Event ids this SW showed a push notification for; the page never fires a local notification for them.
+async function rememberNotified(id) {
+  const list = (await kvGet("notified")) || [];
+  if (!list.includes(id)) list.push(id);
+  await kvSet("notified", list.slice(-200));
+}
+
 self.addEventListener("push", (e) => {
   let data = {};
   try {
@@ -98,6 +105,7 @@ self.addEventListener("push", (e) => {
       target ? kvSet("pending", { target, at: Date.now() }) : null,
       prefetch(data).catch(() => undefined),
       bumpBadge().catch(() => undefined),
+      target && target.eventId ? rememberNotified(target.eventId).catch(() => undefined) : null,
       // Always show the notification above (iOS userVisibleOnly: a push without one risks revocation). An open page
       // hears about it here and its in-app OS notification for the same event stands down (platform/web/push/seen.ts).
       self.clients.matchAll({ type: "window" }).then((list) => list.forEach((c) => c.postMessage({ type: "buzz-push-arrived", target }))),

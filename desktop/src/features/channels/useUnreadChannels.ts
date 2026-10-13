@@ -328,6 +328,11 @@ export function useUnreadChannels(
         topLevelOnly?: boolean;
       } = {},
     ) => {
+      if (typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)) {
+        void import("@/platform/web/push/seen").then((m) =>
+          m.closePushNotificationsFor(channelId),
+        );
+      }
       if (
         !preserveForcedUnread &&
         Object.hasOwn(forcedUnreadRef.current, channelId)
