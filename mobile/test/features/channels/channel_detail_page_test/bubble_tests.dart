@@ -66,9 +66,7 @@ void bubbleLayoutTests() {
     },
   );
 
-  testWidgets('single-line activity icon and author share a vertical center', (
-    tester,
-  ) async {
+  testWidgets('single-line activity uses text without an icon', (tester) async {
     await tester.pumpWidget(
       _buildTestable(
         messages: [
@@ -85,12 +83,8 @@ void bubbleLayoutTests() {
     await tester.pumpAndSettle();
     final card = find.byKey(const ValueKey('activity-card-single-line'));
     final icon = find.descendant(of: card, matching: find.byType(Icon));
-    final text = find.byKey(const ValueKey('system-message-author-alice'));
-    expect(tester.getCenter(icon).dy, closeTo(tester.getCenter(text).dy, 0.01));
-    expect(
-      tester.getTopLeft(text).dx - tester.getTopRight(icon).dx,
-      closeTo(4, 0.01),
-    );
+    expect(icon, findsNothing);
+    expect(findRichText('left the channel'), findsOneWidget);
   });
 
   testWidgets(
@@ -125,17 +119,7 @@ void bubbleLayoutTests() {
       expect(timestampFinder, findsNothing);
       final card = find.byKey(const ValueKey('activity-card-sys-accessible'));
       final icon = find.descendant(of: card, matching: find.byType(Icon));
-      expect(
-        tester.getCenter(icon).dy,
-        closeTo(
-          tester
-              .getCenter(
-                find.byKey(const ValueKey('system-message-author-alice')),
-              )
-              .dy,
-          0.01,
-        ),
-      );
+      expect(icon, findsNothing);
       expect(tester.takeException(), isNull);
     },
   );

@@ -244,7 +244,7 @@ void main() {
         actorPubkey: 'pk1',
         targetPubkey: 'pk2',
       );
-      expect(event.describe(resolve), 'Bob was added by Alice');
+      expect(event.describe(resolve), 'Alice added Bob to the channel');
     });
 
     test('member_left', () {

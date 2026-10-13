@@ -111,7 +111,7 @@ class SystemEvent {
           return '$actor joined the channel';
         }
         final target = resolveLabel(targetPubkey);
-        return '$target was added by $actor';
+        return '$actor added $target to the channel';
       }(),
       SystemEventType.memberLeft => '$actor left the channel',
       SystemEventType.memberRemoved => () {

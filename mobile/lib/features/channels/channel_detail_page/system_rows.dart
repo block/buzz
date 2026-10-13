@@ -201,18 +201,10 @@ class _SystemMessageRow extends HookConsumerWidget {
                               resolveLabel: resolveLabel,
                               userCache: userCache,
                               actionSpans: messageStyleAction,
-                              icon: _systemEventIcon(systemEvent.type),
                             )
                           : Text.rich(
                               TextSpan(
                                 children: [
-                                  WidgetSpan(
-                                    alignment: PlaceholderAlignment.middle,
-                                    child: _systemActivityIcon(
-                                      context,
-                                      _systemEventIcon(systemEvent.type),
-                                    ),
-                                  ),
                                   TextSpan(
                                     text: systemEvent.describe(resolveLabel),
                                   ),
@@ -376,11 +368,17 @@ class _MembershipSystemMessageContent extends StatelessWidget {
         .toList();
     final actionStyle = _systemActionTextStyle(context);
     final actionSpans = <InlineSpan>[
-      TextSpan(text: event.isSelfJoin ? 'joined the channel' : 'was added by '),
+      TextSpan(text: event.isSelfJoin ? 'joined the channel' : 'added '),
       if (!event.isSelfJoin)
-        _systemNameSpan(context, event.actorPubkey!, channelId, resolveLabel),
+        _systemNameSpan(context, firstTarget, channelId, resolveLabel),
       if (additionalTargets.isNotEmpty)
-        TextSpan(text: event.isSelfJoin ? ' along with ' : ', along with '),
+        TextSpan(
+          text: event.isSelfJoin
+              ? ' along with '
+              : additionalTargets.length == 1
+              ? ' and '
+              : ', ',
+        ),
       ..._memberNameSpans(
         context,
         visibleTargets: visibleTargets,
@@ -388,16 +386,16 @@ class _MembershipSystemMessageContent extends StatelessWidget {
         resolveLabel: resolveLabel,
         style: actionStyle,
       ),
+      if (!event.isSelfJoin) const TextSpan(text: ' to the channel'),
     ];
 
     return _MessageStyleSystemMessageContent(
-      displayPubkey: firstTarget,
+      displayPubkey: event.isSelfJoin ? firstTarget : event.actorPubkey!,
       channelId: channelId,
       createdAt: createdAt,
       resolveLabel: resolveLabel,
       userCache: userCache,
       actionSpans: actionSpans,
-      icon: BuzzIcons.userPlus,
     );
   }
 }
@@ -415,7 +413,6 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
   final String Function(String? pubkey) resolveLabel;
   final Map<String, UserProfile> userCache;
   final List<InlineSpan> actionSpans;
-  final IconData icon;
 
   const _MessageStyleSystemMessageContent({
     required this.displayPubkey,
@@ -424,7 +421,6 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     required this.resolveLabel,
     required this.userCache,
     required this.actionSpans,
-    required this.icon,
   });
 
   @override
@@ -432,34 +428,7 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     return Text.rich(
       TextSpan(
         children: [
-          WidgetSpan(
-            alignment: PlaceholderAlignment.baseline,
-            baseline: TextBaseline.alphabetic,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: max(
-                  0,
-                  MediaQuery.sizeOf(context).width -
-                      Grid.gutter * 2 -
-                      Grid.twelve * 2,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IgnoreBaseline(child: _systemActivityIcon(context, icon)),
-                  Flexible(
-                    child: _systemNameSpan(
-                      context,
-                      displayPubkey,
-                      channelId,
-                      resolveLabel,
-                    ).child,
-                  ),
-                ],
-              ),
-            ),
-          ),
+          _systemNameSpan(context, displayPubkey, channelId, resolveLabel),
           const TextSpan(text: ' '),
           ...actionSpans,
         ],
@@ -509,24 +478,6 @@ WidgetSpan _systemNameSpan(
     ),
   );
 }
-
-Widget _systemActivityIcon(BuildContext context, IconData icon) => Padding(
-  padding: const EdgeInsets.only(right: Grid.half),
-  child: Icon(icon, size: Grid.xs, color: context.colors.onSurfaceVariant),
-);
-
-IconData _systemEventIcon(SystemEventType type) => switch (type) {
-  SystemEventType.memberJoined => BuzzIcons.userPlus,
-  SystemEventType.memberLeft => BuzzIcons.arrowLeft,
-  SystemEventType.memberRemoved => BuzzIcons.userMinus,
-  SystemEventType.topicChanged ||
-  SystemEventType.purposeChanged => BuzzIcons.pencil,
-  SystemEventType.channelCreated => BuzzIcons.users,
-  SystemEventType.channelArchived => BuzzIcons.archive,
-  SystemEventType.channelUnarchived => BuzzIcons.archiveRestore,
-  SystemEventType.huddleStarted => BuzzIcons.headphones,
-  SystemEventType.huddleEnded => BuzzIcons.phoneOff,
-};
 
 List<InlineSpan> _memberNameSpans(
   BuildContext context, {

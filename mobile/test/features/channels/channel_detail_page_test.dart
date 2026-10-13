@@ -9196,7 +9196,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Bob'), findsOneWidget);
-      final addedAction = findRichText('was added by ');
+      final addedAction = findRichText('added ');
       expect(addedAction, findsOneWidget);
       expect(find.text('Alice added Bob to the channel'), findsNothing);
       expect(find.byType(CircleAvatar), findsNothing);
@@ -9208,8 +9208,22 @@ void main() {
         find.byKey(const ValueKey('system-message-timestamp-bob')),
         findsNothing,
       );
+      final card = find.byKey(const ValueKey('activity-card-sys1'));
+      expect(
+        find.descendant(of: card, matching: find.byType(Icon)),
+        findsNothing,
+      );
+      final actor = find.byKey(const ValueKey('system-message-author-alice'));
+      final target = find.byKey(const ValueKey('system-message-author-bob'));
+      expect(tester.getCenter(actor).dx, lessThan(tester.getCenter(target).dx));
+      expect(findRichText(' to the channel'), findsOneWidget);
+      await tester.tap(target);
+      await tester.pumpAndSettle();
+      expect(find.byType(UserProfileSheet), findsOneWidget);
+      Navigator.of(tester.element(find.byType(UserProfileSheet))).pop();
+      await tester.pumpAndSettle();
       final addedText = tester.widget<RichText>(addedAction);
-      expect(effectiveFontSizeForText(addedText.text, 'was added by '), 14);
+      expect(effectiveFontSizeForText(addedText.text, 'added '), 14);
     });
 
     testWidgets('groups member additions with tappable overflow names', (
@@ -9275,10 +9289,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Bob'), findsOneWidget);
-      expect(
-        findRichText(', along with Carol, Dave, Erin, and '),
-        findsOneWidget,
-      );
+      expect(findRichText(', Carol, Dave, Erin, and '), findsOneWidget);
       expect(find.byKey(const Key('membership-overflow')), findsOneWidget);
       expect(find.text('1 others'), findsOneWidget);
       expect(find.byTooltip('Frank'), findsOneWidget);

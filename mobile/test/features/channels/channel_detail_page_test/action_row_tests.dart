@@ -126,7 +126,7 @@ void actionRowTests() {
                 ? BuzzIcons.userMinus
                 : BuzzIcons.pencil,
           ),
-          findsOneWidget,
+          findsNothing,
         );
         expect(
           find.byKey(const ValueKey('system-message-timestamp-fallback')),
