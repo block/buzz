@@ -106,18 +106,22 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
   final eventId = arguments['eventId'];
   final communityId = arguments['communityId'];
   final channelId = arguments['channelId'];
+  final threadRootId = arguments['threadRootId'];
   if (eventId is! String ||
       eventId.isEmpty ||
       communityId is! String ||
       communityId.isEmpty ||
       channelId is! String ||
-      channelId.isEmpty) {
+      channelId.isEmpty ||
+      (threadRootId != null &&
+          (threadRootId is! String || threadRootId.isEmpty))) {
     return null;
   }
   return MessageDeepLink(
     communityId: communityId,
     channelId: channelId,
     messageId: eventId,
+    threadRootId: threadRootId as String?,
   );
 }
 

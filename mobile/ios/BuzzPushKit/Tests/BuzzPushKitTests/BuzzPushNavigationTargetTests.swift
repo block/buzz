@@ -75,3 +75,31 @@ import Testing
   #expect(buffer.take() == first)
   #expect(buffer.take() == nil)
 }
+
+@Test func `Reply target preserves containing thread through user info and cold-start buffer`() {
+  let target = BuzzPushNavigationTarget(
+    eventID: "reply", communityID: "community", channelID: "channel", threadRootID: "parent"
+  )
+  let decoded = BuzzPushNavigationTarget.decodeIfPresent(
+    from: [BuzzPushNavigationTarget.userInfoKey: target.userInfoValue]
+  )
+  #expect(decoded == target)
+  let buffer = BuzzPushNavigationBuffer()
+  buffer.record(target)
+  #expect(buffer.take() == target)
+}
+
+@Test func `Reject malformed optional thread and unknown navigation fields`() {
+  let cases: [[String: Any]] = [
+    ["thread_root_id": ""], ["thread_root_id": 42], ["unknown": "value"],
+  ]
+  for extra in cases {
+    var raw: [String: Any] = [
+      "event_id": "reply", "community_id": "community", "channel_id": "channel",
+    ]
+    raw.merge(extra) { _, new in new }
+    #expect(BuzzPushNavigationTarget.decodeIfPresent(
+      from: [BuzzPushNavigationTarget.userInfoKey: raw]
+    ) == nil)
+  }
+}

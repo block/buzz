@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 
 import '../profile/presence_snapshot_test.dart'
@@ -11769,6 +11770,91 @@ void main() {
         expect(find.text('My reply'), findsOneWidget);
         expect(attempts(), 1);
       });
+    });
+
+    testWidgets('push tap highlights its exact reply after newer arrivals', (
+      tester,
+    ) async {
+      pendingPushNotificationLink.value = null;
+      installBuzzPushMethodHandler();
+      addTearDown(() {
+        pendingPushNotificationLink.value = null;
+      });
+      const channel = MethodChannel('buzz/push');
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage(
+            channel.name,
+            channel.codec.encodeMethodCall(
+              const MethodCall('notificationOpened', {
+                'eventId': 'target',
+                'communityId': 'community',
+                'channelId': _channelId,
+                'threadRootId': 'parent',
+              }),
+            ),
+            (_) {},
+          );
+      final link = pendingPushNotificationLink.value!;
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Outer root',
+        createdAt: 1000,
+      );
+      final parent = _textMsg(
+        id: 'parent',
+        pubkey: 'alice',
+        content: 'Containing thread',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'alice',
+        content: 'Notification reply',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'parent', '', 'reply'],
+        ],
+      );
+      final newer = _textMsg(
+        id: 'newer',
+        pubkey: 'alice',
+        content: 'Newer reply',
+        createdAt: 1300,
+        extraTags: const [
+          ['e', 'root', '', 'root'],
+          ['e', 'parent', '', 'reply'],
+        ],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, parent, target, newer],
+          initialMessageId: link.messageId,
+          initialThreadRootId: link.threadRootId,
+          threadReplies: {
+            'root': [parent, target, newer],
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final page = tester.widget<ThreadDetailPage>(
+        find.byType(ThreadDetailPage),
+      );
+      expect(page.threadHead.id, 'parent');
+      expect(page.initialMessageId, 'target');
+      final decoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(decoration.color!.a, closeTo(0.12, 0.001));
+      expect(find.text('Newer reply'), findsOneWidget);
     });
 
     testWidgets('opens a nested reply in its direct-parent thread', (
