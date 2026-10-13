@@ -5,6 +5,10 @@ import { runBootGate, startSignerBanner, type SignerActions } from "./signer/sig
 import { startBootWatch } from "./signer/bootWatch";
 import { sendStatus } from "@/shared/lib/sendStatus";
 import { reloadForStaleBuild } from "@/shared/lib/lazyWithReload";
+import { setWebDocumentTitle } from "./documentTitle";
+
+// iOS Add to Home Screen uses document.title; keep it HulaBuzz (desktop Tauri uses productName).
+setWebDocumentTitle();
 
 // A chunk from the previous deploy is gone: reload once onto the new build instead of failing a lazy screen.
 window.addEventListener("vite:preloadError", (e) => {

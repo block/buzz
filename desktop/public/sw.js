@@ -2,7 +2,7 @@
 // Caches ONLY the static shell (hashed /assets/*, fonts/icons/css, and the navigation document).
 // Never touches: cross-origin requests, non-GET, the relay API paths (/query /events /count /media /upload /api /info /health ...),
 // or WebSocket upgrades (the SW cannot intercept those anyway).
-const VERSION = "buzz-web-v7";
+const VERSION = "buzz-web-v8";
 const PREFETCH_CACHE = "buzz-push-prefetch-v1"; // kept across shell versions; entries are short-lived
 const SHELL = ["/", "/manifest.webmanifest", "/buzz.svg", "/boot.css", "/pwa/icon-192.png", "/pwa/icon-512.png"];
 const API = /^\/(query|events|count|media|upload|api|info|health|_liveness|_readiness|workflows|hooks|huddle|operator|invite|\.well-known)(\/|$)/;

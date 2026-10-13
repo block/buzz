@@ -1,4 +1,5 @@
 import { openExternalUrl } from "@/shared/lib/externalLinks";
+import { setWebDocumentTitle } from "./documentTitle";
 // window / webview / app / path / plugin shims (web: no-ops or browser equivalents)
 const noop = async () => undefined;
 const win = new Proxy(
@@ -11,14 +12,18 @@ const win = new Proxy(
           ? async () => document.hasFocus()
           : p === "isVisible"
             ? async () => true
-            : p === "onFocusChanged" ||
-                p === "onResized" ||
-                p === "onMoved" ||
-                p === "onCloseRequested" ||
-                p === "listen" ||
-                p === "onDragDropEvent"
-              ? async () => () => {}
-              : noop,
+            : p === "setTitle"
+              ? async (title?: string) => {
+                  setWebDocumentTitle(title);
+                }
+              : p === "onFocusChanged" ||
+                  p === "onResized" ||
+                  p === "onMoved" ||
+                  p === "onCloseRequested" ||
+                  p === "listen" ||
+                  p === "onDragDropEvent"
+                ? async () => () => {}
+                : noop,
   },
 );
 export const getCurrentWindow = () => win as any;

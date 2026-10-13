@@ -24,7 +24,7 @@ export async function openConversationInNewTab(input: {
     label,
     popoutPayloadFromInput({
       kind: "thread",
-      title: input.title ?? "Buzz",
+      title: input.title ?? "HulaBuzz",
       channelId: input.channelId,
       threadId: input.threadId,
     }),
