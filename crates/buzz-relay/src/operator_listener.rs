@@ -636,7 +636,7 @@ mod tests {
         );
     }
 
-    async fn read_http_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+    async fn read_http_request(stream: &mut TcpStream) -> (String, Vec<u8>, String) {
         let mut reader = BufReader::new(stream);
         let mut request_line = String::new();
         reader
@@ -645,6 +645,7 @@ mod tests {
             .expect("read request line");
 
         let mut content_length = 0;
+        let mut authorization = String::new();
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).await.expect("read header");
@@ -654,6 +655,8 @@ mod tests {
             if let Some((name, value)) = line.split_once(':') {
                 if name.eq_ignore_ascii_case("content-length") {
                     content_length = value.trim().parse().expect("valid content length");
+                } else if name.eq_ignore_ascii_case("authorization") {
+                    authorization = value.trim().to_owned();
                 }
             }
         }
@@ -663,7 +666,67 @@ mod tests {
             .read_exact(&mut body)
             .await
             .expect("read request body");
-        (request_line, body)
+        (request_line, body, authorization)
+    }
+
+    #[tokio::test]
+    async fn successful_http_delivery_is_signed_and_completes_claim() {
+        use nostr::nips::nip98::{verify_auth_header, HttpMethod};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("HTTP listener");
+        let endpoint = url::Url::parse(&format!(
+            "http://{}/mentions",
+            listener.local_addr().expect("listener address")
+        ))
+        .expect("HTTP endpoint");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept delivery");
+            let request = read_http_request(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write success response");
+            request
+        });
+        let (_, relay_keypair, delivery) = delivery_fixture(1);
+        let routes = HashMap::from([(hex::encode(&delivery.listener_pubkey), endpoint.clone())]);
+        let store = MockStore::default();
+        let http = build_delivery_http_client(Duration::from_secs(2)).expect("delivery client");
+        let transport = ReqwestDeliveryTransport { http: &http };
+
+        deliver_one(
+            &routes,
+            &relay_keypair,
+            &store,
+            &transport,
+            delivery.clone(),
+        )
+        .await;
+
+        let (request_line, body, authorization) =
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("HTTP server completed")
+                .expect("HTTP server task");
+        assert!(request_line.starts_with("POST /mentions HTTP/1.1"));
+        let signer = verify_auth_header(
+            &authorization,
+            &endpoint,
+            HttpMethod::POST,
+            nostr::Timestamp::now(),
+            Some(&body),
+        )
+        .expect("valid signature binding the HTTP endpoint and body");
+        assert_eq!(signer, relay_keypair.public_key());
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("notification JSON");
+        assert_eq!(payload["pubkey"], hex::encode(&delivery.target_pubkey));
+        assert_eq!(payload["event_id"], hex::encode(&delivery.event_id));
+        assert_eq!(
+            store.calls(),
+            [StoreCall::Complete(delivery.id, delivery.claim_id)]
+        );
     }
 
     #[tokio::test]

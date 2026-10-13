@@ -175,6 +175,9 @@ run_unit_tests() {
   run_test_step "buzz-relay push runtime tests" \
     cargo test -p buzz-relay --lib push_runtime:: -- --nocapture
 
+  run_test_step "buzz-relay operator listener tests" \
+    cargo test -p buzz-relay --lib operator_listener::tests:: -- --nocapture
+
   run_test_step "buzz-relay channel authorization tests" \
     cargo test -p buzz-relay --lib handlers::channel_authz:: -- --nocapture
 

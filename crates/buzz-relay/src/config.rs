@@ -289,7 +289,7 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
-    /// Configured operator-listener identities and their HTTPS delivery URLs.
+    /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
 
     /// Allow NIP-OA owner attestation for relay membership.
@@ -532,7 +532,7 @@ fn parse_operator_listener_delivery_urls(
                 "BUZZ_OPERATOR_LISTENERS endpoint is not a valid URL: {e}"
             ))
         })?;
-        if url.scheme() != "https"
+        if !matches!(url.scheme(), "http" | "https")
             || url.host().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
@@ -540,7 +540,7 @@ fn parse_operator_listener_delivery_urls(
             || url.fragment().is_some()
         {
             return Err(ConfigError::InvalidValue(
-                "BUZZ_OPERATOR_LISTENERS endpoints must be HTTPS URLs without credentials, query, or fragment"
+                "BUZZ_OPERATOR_LISTENERS endpoints must be HTTP(S) URLs without credentials, query, or fragment"
                     .to_string(),
             ));
         }
@@ -2686,9 +2686,14 @@ mod tests {
     fn operator_listener_routes_reject_unsafe_or_duplicate_entries() {
         let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         for raw in [
-            format!("{key}:http://listener.example/mentions"),
+            format!("{key}:ftp://listener.example/mentions"),
+            format!("{key}:http://user:pass@listener:8080/mentions"),
+            format!("{key}:http://listener:8080/mentions?token=secret"),
+            format!("{key}:http://listener:8080/mentions#fragment"),
             format!("{key}:https://user:pass@listener.example/mentions"),
             format!("{key}:https://listener.example/mentions?token=secret"),
+            format!("{key}:https://listener.example/mentions#fragment"),
+            format!("{key}:http://listener:8080/mentions;{key}:https://other.example"),
             format!("{key}:https://listener.example/mentions;{key}:https://other.example"),
         ] {
             assert!(
@@ -2740,15 +2745,23 @@ mod tests {
     fn valid_and_absent_operator_listener_config_preserve_routes() {
         let _guards = env_guards();
         let key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let raw = format!("{key}:https://listener.example/mentions");
-        let config = config_with_operator_listeners(Some(&raw)).expect("valid listener config");
-        assert_eq!(
-            config
-                .operator_listener_delivery_urls
-                .get(key)
-                .map(url::Url::as_str),
-            Some("https://listener.example/mentions")
-        );
+        for endpoint in [
+            "https://listener.example/mentions",
+            "http://operator-listener/mentions",
+            "http://operator-listener:8080/mentions",
+            "http://127.0.0.1:8080/mentions",
+            "http://[::1]:8080/mentions",
+        ] {
+            let raw = format!("{key}:{endpoint}");
+            let config = config_with_operator_listeners(Some(&raw)).expect("valid listener config");
+            assert_eq!(
+                config
+                    .operator_listener_delivery_urls
+                    .get(key)
+                    .map(url::Url::as_str),
+                Some(endpoint)
+            );
+        }
 
         let config = config_with_operator_listeners(None).expect("absent listener config");
         assert!(config.operator_listener_delivery_urls.is_empty());
