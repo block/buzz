@@ -150,6 +150,27 @@ class _ThreadMessageList extends HookWidget {
     const headIndex = 0;
     final tailAnchorIndex = replies.length + 1;
 
+    useIosScrollToTop(context, () {
+      if (!itemScrollController.isAttached) return;
+      onUserScrollStart();
+      if (MediaQuery.disableAnimationsOf(context)) {
+        itemScrollController.jumpTo(index: 0);
+        onUserScrollEnd();
+      } else {
+        unawaited(
+          itemScrollController
+              .scrollTo(
+                index: 0,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOutCubic,
+              )
+              .whenComplete(() {
+                if (context.mounted) onUserScrollEnd();
+              }),
+        );
+      }
+    });
+
     return LaidOutViewportReporter(
       viewport: viewport,
       child: KeyboardDismissOnDrag(

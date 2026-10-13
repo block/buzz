@@ -212,6 +212,7 @@ private final class NavigationContentController: UIViewController {
     view = scrollView
     scrollView.contentSize = CGSize(width: 1, height: 10000)
     scrollView.isUserInteractionEnabled = false
+    scrollView.scrollsToTop = false
     scrollView.backgroundColor = .clear
     if #available(iOS 26.0, *) {
       // Configure the native effect before UIKit lays out the bar; the
@@ -269,6 +270,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     if #available(iOS 27.0, *) {
       edgeScrollView.accessibilityIdentifier = "navigation-status-edge"
       edgeScrollView.isUserInteractionEnabled = false
+      edgeScrollView.scrollsToTop = false
       edgeScrollView.accessibilityElementsHidden = true
       edgeScrollView.backgroundColor = .clear
       edgeScrollView.contentInsetAdjustmentBehavior = .never

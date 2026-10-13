@@ -673,6 +673,26 @@ class _MessageList extends HookConsumerWidget {
       return null;
     }, [latestEntryId, localSendAnimations]);
 
+    useIosScrollToTop(context, () {
+      if (!itemScrollController.isAttached || displayEntries.isEmpty) return;
+      followsLatest.value = false;
+      hasUserScrolled.value = true;
+      isAtLatest.value = false;
+      if (showUnreadNavigation) detachedWhileUnreadShown.value = true;
+      final index = displayEntries.length - 1;
+      if (MediaQuery.disableAnimationsOf(context)) {
+        itemScrollController.jumpTo(index: index);
+      } else {
+        unawaited(
+          itemScrollController.scrollTo(
+            index: index,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+    });
+
     if (entries.isEmpty) {
       return Center(
         child: Column(

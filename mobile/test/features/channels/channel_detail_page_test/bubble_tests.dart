@@ -1,6 +1,69 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  for (final thread in [false, true]) {
+    testWidgets(
+      'status bar tap reaches oldest content, thread=$thread',
+      (tester) async {
+        final events = [
+          _textMsg(
+            id: 'top-root',
+            pubkey: 'bob',
+            content: 'Oldest content',
+            createdAt: 900,
+          ),
+          for (var index = 0; index < 60; index++)
+            _textMsg(
+              id: 'top-$index',
+              pubkey: 'alice',
+              content: 'Message $index',
+              createdAt: 1000 + index,
+              extraTags: thread
+                  ? const [
+                      ['e', 'top-root', '', 'reply'],
+                    ]
+                  : const [],
+            ),
+        ];
+        final messages = formatTimeline(events);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: events,
+            home: thread
+                ? ThreadDetailPage(
+                    threadHead: messages.firstWhere((m) => m.id == 'top-root'),
+                    allMessages: messages,
+                    channelId: _channelId,
+                    currentPubkey: 'me',
+                    isMember: true,
+                    isArchived: false,
+                  )
+                : null,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final list = tester.widget<ScrollablePositionedList>(
+          find.byKey(
+            ValueKey(thread ? 'thread-message-list' : 'channel-message-list'),
+          ),
+        );
+        list.itemScrollController!.jumpTo(index: thread ? 55 : 0);
+        await tester.pumpAndSettle();
+        expect(find.text('Oldest content').hitTestable(), findsNothing);
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          'flutter/status_bar',
+          const JSONMethodCodec().encodeMethodCall(
+            const MethodCall('handleScrollToTop'),
+          ),
+          (_) {},
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Oldest content').hitTestable(), findsOneWidget);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+  }
+
   testWidgets('newest short message keeps the same group gap', (tester) async {
     await tester.pumpWidget(
       _buildTestable(

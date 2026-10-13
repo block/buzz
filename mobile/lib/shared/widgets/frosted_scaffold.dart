@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'ios_navigation_bar.dart';
+import 'ios_scroll_to_top.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
@@ -171,7 +172,9 @@ class FrostedScaffold extends HookWidget {
           // rotation) can apply its new collapse range without another scroll.
           final next = topContentDepth.clamp(0.0, double.infinity);
           if ((scrollOffset.value - next).abs() > 0.1) {
-            scrollOffset.value = next;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (context.mounted) scrollOffset.value = next;
+            });
           }
         }
         final next = topContentDepth > 0.5;
@@ -180,20 +183,36 @@ class FrostedScaffold extends HookWidget {
       },
       child: body,
     );
-    final scaffold = IosNavigationScrollScope(
-      offset: scrollOffset,
-      child: Scaffold(
-        backgroundColor: backgroundColor,
-        resizeToAvoidBottomInset: resizeToAvoidBottomInset,
-        floatingActionButton: floatingActionButton,
-        body: FrostedScrollUnderScope(
-          isScrolledUnder: isScrolledUnder.value,
-          child: Stack(
-            children: _stackChildren(
-              observedBody,
-              pinnedController,
-              pinnedStorage,
-              pinnedKey,
+    final scaffold = IosScrollToTop(
+      onScrollToTop: nativePinned
+          ? () {
+              if (!pinnedController.hasClients) return;
+              if (MediaQuery.disableAnimationsOf(context)) {
+                pinnedController.jumpTo(0);
+              } else {
+                pinnedController.animateTo(
+                  0,
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOutCubic,
+                );
+              }
+            }
+          : null,
+      child: IosNavigationScrollScope(
+        offset: scrollOffset,
+        child: Scaffold(
+          backgroundColor: backgroundColor,
+          resizeToAvoidBottomInset: resizeToAvoidBottomInset,
+          floatingActionButton: floatingActionButton,
+          body: FrostedScrollUnderScope(
+            isScrolledUnder: isScrolledUnder.value,
+            child: Stack(
+              children: _stackChildren(
+                observedBody,
+                pinnedController,
+                pinnedStorage,
+                pinnedKey,
+              ),
             ),
           ),
         ),

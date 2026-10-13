@@ -1,3 +1,4 @@
+import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'dart:async';
 import 'dart:math' show cos, max, min, pi;
