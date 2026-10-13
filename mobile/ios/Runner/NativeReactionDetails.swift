@@ -1,22 +1,21 @@
 import UIKit
 import ImageIO
 
-/// Native resizable sheet: selected emoji first, with All and per-emoji filters.
+/// Native reaction toggles above the complete list of reactors.
 final class NativeReactionDetailsViewController: UIViewController, UITableViewDataSource {
   var onClose: (() -> Void)?
+  var onToggle: ((String) -> Void)?
   private let sheetColor: UIColor
   private let foregroundColor: UIColor
-  private let reactions: [[String: Any]]
+  private var reactions: [[String: Any]]
   private var profiles: [String: [String: Any]]
-  private var selectedEmoji: String?
   private let table = UITableView(frame: .zero, style: .plain)
   private let filters = UIStackView()
   private var filterHeight: NSLayoutConstraint?
   private var rows: [(String, [String: Any])] = []
 
   private func rebuildRows() {
-    rows = reactions.filter { selectedEmoji == nil || $0["emoji"] as? String == selectedEmoji }
-      .flatMap { reaction in
+    rows = reactions.flatMap { reaction in
         (reaction["users"] as? [String] ?? []).map { ($0, reaction) }
       }
   }
@@ -33,8 +32,6 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     foregroundColor = color("foregroundColor", fallback: .label)
     reactions = data["reactions"] as? [[String: Any]] ?? []
     profiles = data["profiles"] as? [String: [String: Any]] ?? [:]
-    let initial = data["initialEmoji"] as? String
-    selectedEmoji = reactions.contains { $0["emoji"] as? String == initial } ? initial : nil
     super.init(nibName: nil, bundle: nil)
     rebuildRows()
     overrideUserInterfaceStyle = data["dark"] as? Bool == true ? .dark : .light
@@ -132,8 +129,6 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
 
   private func rebuildFilters() {
     for child in filters.arrangedSubviews { child.removeFromSuperview() }
-    let count = reactions.reduce(0) { $0 + ($1["count"] as? Int ?? 0) }
-    addFilter(title: "All \(count)", emoji: nil, reaction: nil)
     for reaction in reactions {
       guard let emoji = reaction["emoji"] as? String else { continue }
       addFilter(title: "\(reaction["count"] as? Int ?? 0)", emoji: emoji, reaction: reaction)
@@ -144,20 +139,17 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     var config = UIButton.Configuration.tinted()
     config.cornerStyle = .capsule
     config.title = reaction == nil ? title : "       \(title)"
-    config.baseBackgroundColor = selectedEmoji == emoji ? foregroundColor : .tertiarySystemFill
-    config.baseForegroundColor = selectedEmoji == emoji ? foregroundColor : .label
+    let selected = reaction?["selected"] as? Bool == true
+    config.baseBackgroundColor = selected ? foregroundColor : .tertiarySystemFill
+    config.baseForegroundColor = selected ? foregroundColor : .label
     let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
       guard let self else { return }
-      guard self.selectedEmoji != emoji else { return }
-      self.selectedEmoji = emoji
-      self.rebuildRows()
-      self.rebuildFilters()
-      self.table.reloadData()
-      self.table.setContentOffset(.zero, animated: false)
+      guard let emoji else { return }
+      self.onToggle?(emoji)
       UISelectionFeedbackGenerator().selectionChanged()
     })
     button.accessibilityLabel = reaction.map { "\($0["label"] as? String ?? emoji ?? "") \(title)" } ?? title
-    if selectedEmoji == emoji { button.accessibilityTraits.insert(.selected) }
+    if selected { button.accessibilityTraits.insert(.selected) }
     if let reaction {
       let glyph = NativeMessageGlyph(data: reaction, size: 22)
       glyph.isUserInteractionEnabled = false
@@ -171,6 +163,14 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
       ])
     }
     filters.addArrangedSubview(button)
+  }
+
+  func updateReactions(_ reactions: [[String: Any]]) {
+    self.reactions = reactions
+    rebuildRows()
+    guard isViewLoaded else { return }
+    rebuildFilters()
+    table.reloadData()
   }
 
   func updateProfiles(_ profiles: [String: [String: Any]]) {

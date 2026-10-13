@@ -11,6 +11,7 @@ import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -111,6 +112,73 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 }
 
 void main() {
+  testWidgets(
+    'native toggles use the current callback and stream updated counts',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final completion = Completer<Map<String, Object?>>();
+      Map<Object?, Object?>? payload;
+      Map<Object?, Object?>? updated;
+      final toggles = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions') {
+            payload = call.arguments as Map;
+            return completion.future;
+          }
+          if (call.method == 'updateReactions') updated = call.arguments as Map;
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await _pumpRow(
+        tester,
+        reactions: [_reaction()],
+        onToggle: (emoji) => toggles.add('old:$emoji'),
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      await _pumpRow(
+        tester,
+        reactions: [_reaction(count: 2, reactedByCurrentUser: true)],
+        onToggle: (emoji) => toggles.add('new:$emoji'),
+      );
+      expect((updated!['reactions'] as List).single, containsPair('count', 2));
+      expect(
+        (updated!['reactions'] as List).single,
+        containsPair('selected', true),
+      );
+      expect(updated!['requestId'], payload!['requestId']);
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        NativeMessagePresentation.channel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('toggleReaction', {
+            'requestId': payload!['requestId'],
+            'emoji': _fire,
+          }),
+        ),
+        (_) {},
+      );
+      await tester.pump();
+      expect(toggles, ['new:$_fire']);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      expect(updated!['reactions'], isEmpty);
+      completion.complete({});
+      await tester.pumpAndSettle();
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets(
     'native reactor labels retain channel qualifications and live updates',
     (tester) async {
@@ -304,7 +372,7 @@ void main() {
   );
 
   testWidgets(
-    'holding a pill opens native membership with the selected emoji without toggling',
+    'holding a pill opens native membership with all reactions without toggling',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -341,7 +409,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(toggles, 0);
       expect(messageHolds, 0);
-      expect(payload!['initialEmoji'], _eyes);
+      expect(payload!.containsKey('initialEmoji'), isFalse);
+      expect(
+        ((payload!['reactions'] as List).first as Map)['selected'],
+        isFalse,
+      );
       expect((payload!['reactions'] as List).length, 2);
       final profiles = payload!['profiles'] as Map;
       expect((profiles[_alice] as Map)['name'], 'Alice');
@@ -371,54 +443,39 @@ void main() {
         find.descendant(of: pill, matching: find.text('1')),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Reactions'), findsNothing);
-      expect(find.text('All 2'), findsOneWidget);
-      final controller = DefaultTabController.of(
-        tester.element(find.byType(TabBar)),
-      );
-      expect(controller.index, 2);
+      expect(find.text('Reactions'), findsOneWidget);
+      expect(find.text('All 2'), findsNothing);
+      for (final emoji in [_fire, _eyes]) {
+        expect(
+          find.byKey(ValueKey('reactor-$_alice-$emoji')).hitTestable(),
+          findsOneWidget,
+        );
+      }
       expect(
-        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
-        findsOneWidget,
+        tester
+            .widget<FilterChip>(
+              find.byKey(const ValueKey('reaction-toggle-$_fire')),
+            )
+            .selected,
+        isTrue,
       );
       expect(
-        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
-        findsNothing,
+        tester
+            .widget<FilterChip>(
+              find.byKey(const ValueKey('reaction-toggle-$_eyes')),
+            )
+            .selected,
+        isFalse,
       );
-      await tester.tap(find.byKey(const ValueKey('reaction-filter-all')));
+      await tester.tap(find.byKey(const ValueKey('reaction-toggle-$_fire')));
       await tester.pumpAndSettle();
-      expect(controller.index, 0);
-      expect(
-        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
-        findsOneWidget,
-      );
-      await tester.tap(find.byKey(const ValueKey('reaction-filter-$_fire')));
-      await tester.pumpAndSettle();
-      expect(controller.index, 1);
-      expect(
-        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
-        findsNothing,
-      );
-      expect(
-        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
-        findsOneWidget,
-      );
-      await tester.drag(find.byType(TabBarView), const Offset(-500, 0));
-      await tester.pumpAndSettle();
-      expect(controller.index, 2);
-      expect(
-        find.byKey(ValueKey('reactor-$_alice-$_eyes')).hitTestable(),
-        findsOneWidget,
-      );
-      expect(
-        find.byKey(ValueKey('reactor-$_alice-$_fire')).hitTestable(),
-        findsNothing,
-      );
-      expect(toggles, 0);
+      expect(toggles, 1);
+      for (final emoji in [_fire, _eyes]) {
+        expect(
+          find.byKey(ValueKey('reactor-$_alice-$emoji')).hitTestable(),
+          findsOneWidget,
+        );
+      }
       expect(messageHolds, 0);
       await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
@@ -533,8 +590,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byTooltip(':fire:'), findsOneWidget);
-      expect(find.byType(TabBar), findsOneWidget);
-      expect(find.text('All 1'), findsOneWidget);
+      expect(find.byType(FilterChip), findsOneWidget);
+      expect(find.text('All 1'), findsNothing);
       expect(find.text('Alice'), findsOneWidget);
     });
   });
