@@ -541,22 +541,19 @@ export function TerminalBootstrap({
       const applyFrame = (delivery: TerminalDelivery) => {
         update((session) => ({ ...session, delivery, frame: delivery.frame }));
       };
-      // Web: merge frames that outpace the screen and render once per animation frame (desktop unchanged).
-      // Web: the desktop keeps one frame in flight and sends the next only after our ack. Acking after React has
-      // painted put render time inside every keystroke's round trip; ack on arrival instead so the next frame is on
-      // the wire while this one paints, and merge any that land before the next paint (desktop unchanged).
-      const webFrames = isTauri() ? null : createFrameCoalescer(applyFrame);
-      const onFrame = !webFrames
-        ? applyFrame
-        : (delivery: TerminalDelivery) => {
-            termProbe.frameArrived();
-            const { sequence, subscriptionId } = delivery.frame;
-            if (sequence > (acknowledgedSequenceRef.current.get(subscriptionId) ?? -1)) {
-              acknowledgedSequenceRef.current.set(subscriptionId, sequence);
-              void delivery.acknowledge().catch(() => {});
-            }
-            webFrames.push(delivery);
-          };
+      // Web and desktop: the publisher keeps a small window of frames in flight (cumulative acks). Acking after React
+      // has painted put render time inside every keystroke's round trip; ack on arrival instead so the next frames are
+      // on the wire while this one paints, and merge any that land before the next animation frame into one render.
+      const coalescedFrames = createFrameCoalescer(applyFrame);
+      const onFrame = (delivery: TerminalDelivery) => {
+        if (!isTauri()) termProbe.frameArrived();
+        const { sequence, subscriptionId } = delivery.frame;
+        if (sequence > (acknowledgedSequenceRef.current.get(subscriptionId) ?? -1)) {
+          acknowledgedSequenceRef.current.set(subscriptionId, sequence);
+          void delivery.acknowledge().catch(() => {});
+        }
+        coalescedFrames.push(delivery);
+      };
 
       const size = sizeRef.current;
       void (async () => {

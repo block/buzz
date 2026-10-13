@@ -2,14 +2,19 @@
 //!
 //! Tauri channels are ordered, but they do not expose consumer credit and
 //! channel delivery is unordered with respect to invoke responses.  This state
-//! machine therefore permits one frame on the wire, retains at most one newer
-//! complete snapshot, and independently gates a resized viewport until the
+//! machine therefore permits up to [`MAX_IN_FLIGHT`] frames on the wire
+//! (ordered, acknowledged cumulatively), retains at most one newer complete
+//! snapshot once that window is full, and independently gates a resized viewport until the
 //! renderer confirms that it knows the applied [`Viewport`].
 
 use crate::{damage::Frame, Viewport};
 use std::fmt;
 
 use uuid::Uuid;
+
+/// Frames that may be on the wire before the renderer acknowledges. More than
+/// one keeps the next frame moving while the renderer paints the previous one.
+pub const MAX_IN_FLIGHT: u64 = 3;
 
 /// A renderer attachment. Messages from an attachment that has been replaced
 /// cannot release the new attachment's credit.
@@ -52,7 +57,8 @@ pub enum OfferError {
 struct Subscription {
     id: SubscriptionId,
     next_sequence: u64,
-    in_flight: Option<u64>,
+    /// Highest sequence the renderer has acknowledged (cumulative).
+    acked: u64,
     pending: Option<Frame>,
     viewport_ready: bool,
 }
@@ -90,7 +96,7 @@ impl FramePublisher {
         let mut subscription = Subscription {
             id,
             next_sequence: 1,
-            in_flight: None,
+            acked: 0,
             pending: None,
             viewport_ready: true,
         };
@@ -104,7 +110,7 @@ impl FramePublisher {
     /// path before taking the terminal lock.
     pub fn requires_snapshot(&self) -> bool {
         self.subscription.as_ref().is_some_and(|subscription| {
-            subscription.in_flight.is_some() || !subscription.viewport_ready
+            Self::window_full(subscription) || !subscription.viewport_ready
         })
     }
 
@@ -119,7 +125,7 @@ impl FramePublisher {
             return Ok(None);
         };
 
-        if subscription.in_flight.is_some() || !subscription.viewport_ready {
+        if Self::window_full(subscription) || !subscription.viewport_ready {
             if !frame.full {
                 return Err(OfferError::PendingFrameMustBeSnapshot);
             }
@@ -144,14 +150,19 @@ impl FramePublisher {
         }
     }
 
-    /// Release ordinary frame credit only for the exact live subscription and
-    /// exact frame in flight.
+    /// Release ordinary frame credit for the exact live subscription, up to and
+    /// including the acknowledged frame.
     pub fn acknowledge(&mut self, id: SubscriptionId, sequence: u64) -> Option<Publication> {
         let subscription = self.subscription.as_mut()?;
-        if subscription.id != id || subscription.in_flight != Some(sequence) {
+        // Cumulative: an ACK for sequence N releases every frame up to N. Only
+        // sequences actually published on this subscription count.
+        if subscription.id != id
+            || sequence <= subscription.acked
+            || sequence >= subscription.next_sequence
+        {
             return None;
         }
-        subscription.in_flight = None;
+        subscription.acked = sequence;
         Self::flush(subscription)
     }
 
@@ -200,21 +211,24 @@ impl FramePublisher {
     }
 
     fn flush(subscription: &mut Subscription) -> Option<Publication> {
-        if subscription.in_flight.is_some() || !subscription.viewport_ready {
+        if Self::window_full(subscription) || !subscription.viewport_ready {
             return None;
         }
         let frame = subscription.pending.take()?;
         Some(Self::publish(subscription, frame))
     }
 
+    fn window_full(subscription: &Subscription) -> bool {
+        subscription.next_sequence - 1 - subscription.acked >= MAX_IN_FLIGHT
+    }
+
     fn publish(subscription: &mut Subscription, frame: Frame) -> Publication {
-        debug_assert!(subscription.in_flight.is_none());
+        debug_assert!(!Self::window_full(subscription));
         let sequence = subscription.next_sequence;
         subscription.next_sequence = subscription
             .next_sequence
             .checked_add(1)
             .expect("terminal publication sequence exhausted");
-        subscription.in_flight = Some(sequence);
         Publication {
             subscription_id: subscription.id,
             sequence,
@@ -254,6 +268,38 @@ mod tests {
         }
     }
 
+    /// Publish incremental frames until the in-flight window is full.
+    fn fill_window(publisher: &mut FramePublisher, viewport: Viewport) {
+        for marker in 1..MAX_IN_FLIGHT {
+            assert!(publisher
+                .offer(frame(viewport, 100 + marker as usize, false))
+                .unwrap()
+                .is_some());
+        }
+        assert!(publisher.requires_snapshot());
+    }
+
+    #[test]
+    fn window_allows_several_frames_and_acks_cumulatively() {
+        let v0 = viewport(0, 80, 24);
+        let mut publisher = FramePublisher::new(v0);
+        let id = SubscriptionId::new();
+        publisher.attach(id, frame(v0, 0, true)).unwrap();
+        assert!(!publisher.requires_snapshot());
+        let second = publisher.offer(frame(v0, 1, false)).unwrap().unwrap();
+        assert_eq!(second.sequence, 2);
+        let third = publisher.offer(frame(v0, 2, false)).unwrap().unwrap();
+        assert_eq!(third.sequence, 3);
+        assert!(publisher.requires_snapshot());
+        assert_eq!(publisher.offer(frame(v0, 3, true)).unwrap(), None);
+        // Unpublished and stale sequences are inert.
+        assert_eq!(publisher.acknowledge(id, 9), None);
+        let next = publisher.acknowledge(id, 3).unwrap();
+        assert_eq!(next.sequence, 4);
+        assert_eq!(publisher.acknowledge(id, 2), None);
+        assert!(!publisher.requires_snapshot());
+    }
+
     #[test]
     fn attach_bootstraps_then_ack_releases_only_latest_snapshot() {
         let v0 = viewport(0, 80, 24);
@@ -261,12 +307,12 @@ mod tests {
         let id = SubscriptionId::new();
         let bootstrap = publisher.attach(id, frame(v0, 0, true)).unwrap();
         assert_eq!(bootstrap.sequence, 1);
-        assert!(publisher.requires_snapshot());
+        fill_window(&mut publisher, v0);
 
         assert_eq!(publisher.offer(frame(v0, 1, true)).unwrap(), None);
         assert_eq!(publisher.offer(frame(v0, 2, true)).unwrap(), None);
         let successor = publisher.acknowledge(id, 1).unwrap();
-        assert_eq!(successor.sequence, 2);
+        assert_eq!(successor.sequence, MAX_IN_FLIGHT + 1);
         assert_eq!(successor.frame.rows[0].line, 2);
     }
 
@@ -276,6 +322,7 @@ mod tests {
         let mut publisher = FramePublisher::new(v0);
         let id = SubscriptionId::new();
         publisher.attach(id, frame(v0, 0, true)).unwrap();
+        fill_window(&mut publisher, v0);
         assert_eq!(
             publisher.offer(frame(v0, 1, false)),
             Err(OfferError::PendingFrameMustBeSnapshot)
@@ -326,6 +373,7 @@ mod tests {
         let mut publisher = FramePublisher::new(v0);
         let id = SubscriptionId::new();
         publisher.attach(id, frame(v0, 0, true)).unwrap();
+        fill_window(&mut publisher, v0);
         publisher.resize_applied(v1);
         publisher.offer(frame(v1, 1, true)).unwrap();
 
@@ -361,6 +409,7 @@ mod tests {
 
         let new = SubscriptionId::new();
         publisher.attach(new, frame(v0, 1, true)).unwrap();
+        fill_window(&mut publisher, v0);
         publisher.offer(frame(v0, 2, true)).unwrap();
         assert_eq!(publisher.acknowledge(old, 1), None);
         assert_eq!(publisher.viewport_ready(old, v0), None);
