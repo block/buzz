@@ -4,6 +4,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { isBroadcastReply } from "@/features/messages/lib/threading";
 import type { Channel } from "@/shared/api/types";
 import type { PanelValueSetter } from "./useChannelPanelHistoryState";
+import { consumeNotificationOpenTarget } from "@/app/navigation/notificationOpenTarget";
 
 function getThreadRouteTarget(
   targetMessage: TimelineMessage,
@@ -117,6 +118,11 @@ export function useChannelRouteTarget({
     }
 
     if (!targetMessage.parentId) {
+      // Notification tap on a top-level message: the main timeline scrolls to and highlights it; no reply panel.
+      if (consumeNotificationOpenTarget(targetMessage.id)) {
+        handledThreadRouteTargetRef.current = targetKey;
+        return;
+      }
       if (!requireThreadEditResolution()) {
         return;
       }

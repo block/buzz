@@ -1,4 +1,5 @@
 import { isThreadReply } from "@/features/messages/lib/threading";
+import { markNotificationOpenTarget } from "@/app/navigation/notificationOpenTarget";
 import type { DesktopNotificationTarget } from "@/features/notifications/lib/desktop";
 import type { SearchHit } from "@/shared/api/types";
 
@@ -212,6 +213,7 @@ export async function activateDesktopNotificationTarget(
     navigation = actions.goHome();
   } else {
     const anchor = toSearchHit(target);
+    markNotificationOpenTarget(anchor?.eventId);
     navigation = anchor
       ? actions.openSearchHit(anchor, { force: true, signal })
       : actions.goChannel(target.channelId, { force: true });
