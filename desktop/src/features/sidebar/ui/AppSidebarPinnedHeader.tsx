@@ -1,6 +1,9 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { useNavigate } from "@tanstack/react-router";
-import { WebRemoteWatcher, useWebRemoteNav } from "@/features/bridge/ui/WebRemoteSettings";
+import {
+  WebRemoteWatcher,
+  useWebRemoteNav,
+} from "@/features/bridge/ui/WebRemoteSettings";
 import {
   Activity,
   AppWindow,
@@ -31,6 +34,7 @@ import {
 import { usePinnedSites } from "@/features/pinned-sites/hooks";
 import { getPinnedSiteIcon } from "@/features/pinned-sites/lib/icons";
 import type { PinnedSite } from "@/features/pinned-sites/lib/types";
+import { usePinnedSitesSeparateSection } from "@/features/pinned-sites/lib/separateSectionPreference";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { scopedPrimaryMenuTestId } from "@/features/sidebar/lib/primaryMenu";
 import { useSidebarMenuCounts } from "@/features/sidebar/lib/useSidebarMenuCounts";
@@ -173,10 +177,25 @@ export function AppSidebarPrimaryMenu({
   // Buzz term is plain greyed out while unavailable; clicking opens an instructions page.
   const terminalLocked = web && !remoteNav.terminal;
   const pins = isTauri() ? allPins : []; // web/mobile: pinned sites are desktop-only (docs/pwa-web-differences.md #1)
+  const separateSection = usePinnedSitesSeparateSection();
   const { preferences, counts } = useSidebarMenuCounts();
   const terminalPanel = useTerminalPanel();
   const buzzTermActive = isLeftNavBuzzTermActive(terminalPanel);
   const rowTestId = (id: string) => scopedPrimaryMenuTestId(testIdScope, id);
+  const pinRows = pins.map((pin) => (
+    <PinnedSiteMenuItem
+      isActive={isPrimaryNavRowActive(
+        selectedView === "pin" && selectedPinId === pin.id,
+        terminalPanel,
+      )}
+      key={pin.id}
+      onSelect={parkPlaygroundThen(
+        leaveLeftNavBuzzTermThen(() => onSelectPinnedSite(pin.id)),
+      )}
+      pin={pin}
+      testId={rowTestId(`open-pinned-site-${pin.id}`)}
+    />
+  ));
   return (
     <>
       {web ? <WebRemoteWatcher /> : null}
@@ -330,7 +349,10 @@ export function AppSidebarPrimaryMenu({
               />
             </SidebarMenuItem>
           </PrimaryTabRow>
-          <PrimaryTabRow label={web ? "Buzz term" : "Buzz Term"} target={{ kind: "buzz-term" }}>
+          <PrimaryTabRow
+            label={web ? "Buzz term" : "Buzz Term"}
+            target={{ kind: "buzz-term" }}
+          >
             <SidebarMenuItem>
               <SidebarMenuButton
                 className={`data-[active=true]:font-normal${terminalLocked ? " opacity-50" : ""}`}
@@ -352,7 +374,9 @@ export function AppSidebarPrimaryMenu({
                 type="button"
               >
                 <SquareTerminal className="h-4 w-4" />
-                <SidebarMenuLabel>{web ? "Buzz term" : "Buzz Term"}</SidebarMenuLabel>
+                <SidebarMenuLabel>
+                  {web ? "Buzz term" : "Buzz Term"}
+                </SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </PrimaryTabRow>
@@ -377,21 +401,19 @@ export function AppSidebarPrimaryMenu({
               </SidebarMenuItem>
             </PrimaryTabRow>
           </FeatureGate>
-          {pins.map((pin) => (
-            <PinnedSiteMenuItem
-              isActive={isPrimaryNavRowActive(
-                selectedView === "pin" && selectedPinId === pin.id,
-                terminalPanel,
-              )}
-              key={pin.id}
-              onSelect={parkPlaygroundThen(
-                leaveLeftNavBuzzTermThen(() => onSelectPinnedSite(pin.id)),
-              )}
-              pin={pin}
-              testId={rowTestId(`open-pinned-site-${pin.id}`)}
-            />
-          ))}
+          {separateSection ? null : pinRows}
         </SidebarMenu>
+        {separateSection && pins.length > 0 ? (
+          <div
+            className="border-t border-sidebar-border/70 pt-2 pb-2"
+            data-testid={rowTestId("pinned-sites-section")}
+          >
+            <div className="px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70 group-data-[collapsible=icon]:hidden">
+              Pinned
+            </div>
+            <SidebarMenu>{pinRows}</SidebarMenu>
+          </div>
+        ) : null}
       </SidebarHeader>
       {includeProjects ? <SidebarProjectsSection /> : null}
     </>

@@ -39,6 +39,10 @@ import {
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 
 import { usePinnedSites } from "../hooks";
+import {
+  setPinnedSitesSeparateSection,
+  usePinnedSitesSeparateSection,
+} from "../lib/separateSectionPreference";
 import { PINNED_SITE_ICONS, getPinnedSiteIcon } from "../lib/icons";
 import type {
   PinnedSite,
@@ -57,6 +61,7 @@ import { BROWSER_SHARE_SECURITY_NOTE } from "@/features/browser-share/lib/types"
 export function PinnedSitesSettingsCard() {
   const { pins, canShareCommunity, isLoading, savePin, deletePin } =
     usePinnedSites();
+  const separateSection = usePinnedSitesSeparateSection();
   const [editing, setEditing] = React.useState<PinnedSite | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [importShareOpen, setImportShareOpen] = React.useState(false);
@@ -96,6 +101,25 @@ export function PinnedSitesSettingsCard() {
         description="Put websites in the primary menu. Each pin opens in the main view with no address bar. Community pins are shared with everyone; logins stay on this device."
         title="Pinned sites"
       />
+
+      <SettingsOptionGroup title="Layout">
+        <SettingsOptionRow>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">
+              Show pinned sites as a separate section
+            </p>
+            <p className="text-xs text-muted-foreground/70">
+              On: pins get their own group below the menu icons. Off: pins sit
+              in the menu with Agents, Bots and the rest.
+            </p>
+          </div>
+          <Switch
+            checked={separateSection}
+            data-testid="pinned-sites-separate-section"
+            onCheckedChange={setPinnedSitesSeparateSection}
+          />
+        </SettingsOptionRow>
+      </SettingsOptionGroup>
 
       {isLoading ? (
         <SettingsOptionGroup title="Pins">
