@@ -74,7 +74,7 @@ void main() {
     await tester.pump(localMessageSendTransitionDuration ~/ 2);
     expect(
       tester.getSize(find.byType(LocalSendRow)).height,
-      inExclusiveRange(35, 45),
+      inExclusiveRange(15, 35),
     );
     expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
     expect(
@@ -91,6 +91,20 @@ void main() {
       tester.getTopLeft(find.byKey(const ValueKey('history'))).dy,
       history.top - 80,
     );
+  });
+  testWidgets('contraction leads the overlapping lift and settles first', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_testable());
+    LocalSendProgress motion() => tester.widget(find.byType(LocalSendProgress));
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(motion().widthProgress, greaterThan(motion().progress));
+    expect(motion().progress, greaterThan(0));
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(motion().widthProgress, 1);
+    expect(motion().progress, inExclusiveRange(0, 1));
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(motion().progress, 1);
   });
   for (final reduced in [false, true]) {
     testWidgets('settled or reduced motion does not expand, reduced=$reduced', (

@@ -15,7 +15,7 @@ void main() {
       (tester) async {
         final key = GlobalKey();
         Rect? origin;
-        Future<void> draw(double progress) async {
+        Future<void> draw(double progress, {double? widthProgress}) async {
           await tester.pumpWidget(
             MaterialApp(
               home: Center(
@@ -30,6 +30,7 @@ void main() {
                         alignment: Alignment.topLeft,
                         child: LocalSendProgress(
                           progress: progress,
+                          widthProgress: widthProgress,
                           startOffset: 0,
                           origin: origin,
                           child: LocalSendBubbleSurface(
@@ -102,6 +103,21 @@ void main() {
           return (inside, outside);
         });
         expect(image, (0, 255));
+        // Width can settle while the bubble is still partway up its flight.
+        await draw(0.5, widthProgress: 1);
+        final staged = await tester.runAsync(() async {
+          final result = await (boundary as RenderRepaintBoundary).toImage();
+          final bytes = (await result.toByteData(
+            format: ui.ImageByteFormat.rawRgba,
+          ))!;
+          final inside = bytes.getUint8((28 * 300 + 12) * 4 + 1);
+          final outside = bytes.getUint8(
+            (28 * 300 + finalWidth.ceil() + 14) * 4 + 1,
+          );
+          result.dispose();
+          return (inside, outside);
+        });
+        expect(staged, (0, 255));
         await draw(1);
         expect(tester.takeException(), isNull);
       },

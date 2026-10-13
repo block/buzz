@@ -7,7 +7,7 @@ import 'composer_send_origin.dart';
 import 'local_send_row.dart';
 
 /// Duration of a local message's entrance transition.
-const localMessageSendTransitionDuration = Duration(milliseconds: 360);
+const localMessageSendTransitionDuration = Duration(milliseconds: 320);
 
 /// Default travel multiplier for a message entrance.
 const localMessageSendTransitionStartOffset = 1.5;
@@ -55,11 +55,6 @@ class LocalMessageSendTransition extends HookConsumerWidget {
       duration: localMessageSendTransitionDuration,
       initialValue: animate && !reduceMotion ? 0 : 1,
     );
-    final easedAnimation = useMemoized(
-      () => CurvedAnimation(parent: controller, curve: Curves.easeInOutCubic),
-      [controller],
-    );
-    useEffect(() => easedAnimation.dispose, [easedAnimation]);
 
     useEffect(() {
       if (animate && !reduceMotion) {
@@ -77,13 +72,30 @@ class LocalMessageSendTransition extends HookConsumerWidget {
     }, [animate, controller, reduceMotion]);
 
     return AnimatedBuilder(
-      animation: easedAnimation,
+      animation: controller,
       child: child,
       builder: (context, child) => LocalSendProgress(
-        progress: easedAnimation.value,
+        progress: const Interval(
+          0.15,
+          1,
+          curve: Curves.easeInOutCubic,
+        ).transform(controller.value),
+        widthProgress: const Interval(
+          0,
+          0.6,
+          curve: Curves.easeInOutCubic,
+        ).transform(controller.value),
         origin: origin,
         startOffset: 24 * startOffsetFactor,
-        child: LocalSendRow(progress: easedAnimation.value, child: child!),
+        // History follows the lift, while width contracts ahead of it.
+        child: LocalSendRow(
+          progress: const Interval(
+            0.15,
+            1,
+            curve: Curves.easeInOutCubic,
+          ).transform(controller.value),
+          child: child!,
+        ),
       ),
     );
   }
@@ -95,10 +107,15 @@ class LocalSendProgress extends InheritedWidget {
   const LocalSendProgress({
     super.key,
     required this.progress,
+    this.widthProgress,
     this.origin,
     this.startOffset = 36,
     required super.child,
   });
+
+  /// Horizontal contraction, independent of vertical travel.
+  /// Defaults to [progress] for surfaces without a staged entrance.
+  final double? widthProgress;
 
   /// Captured composer rectangle in global coordinates.
   final Rect? origin;
@@ -122,5 +139,6 @@ class LocalSendProgress extends InheritedWidget {
 
   @override
   bool updateShouldNotify(LocalSendProgress oldWidget) =>
-      progress != oldWidget.progress;
+      progress != oldWidget.progress ||
+      widthProgress != oldWidget.widthProgress;
 }

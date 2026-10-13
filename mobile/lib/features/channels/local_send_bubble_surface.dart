@@ -86,7 +86,20 @@ class _RenderSendBubble extends RenderProxyBox {
             size.height,
           )
         : origin.shift(-localToGlobal(Offset.zero));
-    final rect = Rect.lerp(start, end, progress)!;
+    // Contract horizontally first, then finish lifting into the timeline.
+    // Both tracks share a clock, but their overlapping curves differ.
+    final horizontal = Rect.lerp(
+      start,
+      end,
+      motion?.widthProgress ?? progress,
+    )!;
+    final vertical = Rect.lerp(start, end, progress)!;
+    final rect = Rect.fromLTWH(
+      horizontal.left,
+      vertical.top,
+      horizontal.width,
+      vertical.height,
+    );
     final path = shape.getOuterPath(rect.shift(offset));
     context.canvas.drawPath(path, Paint()..color = color);
     if (child case final child?) {
