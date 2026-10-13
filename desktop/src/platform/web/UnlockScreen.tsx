@@ -15,6 +15,7 @@ import {
   type NostrConnectFlow,
   beginNostrConnect,
   connectBunker,
+  nudgeSignerHandshake,
 } from "./signer/nip46";
 import { dbgEnabled, nip46Debug } from "./signer/nip46Debug";
 import { peekPendingConnect } from "./signer/nip46Store";
@@ -91,6 +92,14 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
   const [resumed, setResumed] = useState<boolean>(!!peekPendingConnect());
   const [err, setErr] = useState<string | null>(null);
   const flowRef = useRef<NostrConnectFlow | null>(null);
+  // Seconds spent waiting on a bunker sign-in: after a few seconds explain the Clave "Medium" access trap and offer a retry.
+  const [waitSec, setWaitSec] = useState(0);
+  useEffect(() => {
+    if (busy !== "bunker") return setWaitSec(0);
+    const t0 = Date.now();
+    const iv = setInterval(() => setWaitSec(Math.round((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(iv);
+  }, [busy]);
   // Unmount: stop listening but KEEP the pending attempt (a reload must be able to resume it).
   useEffect(() => () => flowRef.current?.detach(), []);
 
@@ -187,6 +196,22 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
             >
               {resumed ? "Finishing sign-in…" : "Waiting for your signer…"}
             </p>
+          )}
+          {busy === "bunker" && waitSec >= 8 && (
+            <div style={{ display: "grid", gap: 6 }} data-testid="web-unlock-bunker-stalled">
+              <p role="status" style={note}>
+                Still waiting on your signer. In Clave, open HulaBuzz's connection and set access to Full (Medium can
+                silently hold the request). Then come back here: HulaBuzz re-sends the request on its own, no refresh needed.
+              </p>
+              <button
+                type="button"
+                style={ghost}
+                data-testid="web-unlock-bunker-retry"
+                onClick={() => nudgeSignerHandshake()}
+              >
+                Reconnect to signer
+              </button>
+            </div>
           )}
           {!resumed && (
             <p style={note} data-testid="web-unlock-signer-perms-hint">

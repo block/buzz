@@ -43,6 +43,7 @@ export const DEFAULT_SIGNER_RELAYS = [
 const REQUEST_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 120_000; // bunker connect / get_public_key
 const AUTH_URL_TIMEOUT_MS = 180_000; // user is approving in a browser tab / signer app
+const HANDSHAKE_METHODS = new Set(["connect", "get_public_key"]);
 
 // Plain methods plus explicit per-kind sign_event grants: some signers (Primal) only pre-approve kinds that are named.
 // Kinds Buzz web signs: auth 22242, HTTP auth 27235, profile 0, notes 1, deletes 5, reactions 7, chat 9, join/leave 9021/9022,
@@ -141,10 +142,15 @@ type Pending = {
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   method: string;
+  params: string[];
   /** sockets this request was already published on: a request goes to each signer relay ONCE (no multiplied load). */
   sentOn: WeakSet<WebSocket>;
   at: number;
   rechecked?: boolean;
+  /** how many times a FRESH wire event (new event id, same request id) was published for this request */
+  resends: number;
+  lastSentAt: number;
+  timeoutMs: number;
 };
 type RelayConn = {
   url: string;
@@ -177,6 +183,10 @@ export class Nip46Client {
     // Back from a signer app (Primal etc.): iOS may have frozen sockets that still claim OPEN → replace them, resubscribe with `since`.
     const away = this.hiddenAt ? Date.now() - this.hiddenAt : 0;
     this.hiddenAt = 0;
+    // Back from the signer app with requests still waiting (e.g. the user just switched Clave from Medium to Full access):
+    // the signer already saw (and dropped) our original event id and relays de-duplicate it, so republishing the same event
+    // never reaches it again. Re-sign a fresh event for every pending request and give it a full deadline again.
+    if (this.pending.size && away > 1500) void this.resendPending("foreground", true);
     this.reconnectAll(away > 3000);
   };
   /** Every 15s while visible: reopen dead signer sockets, and if a request has gone unanswered for 10s, rebuild the sockets once. */
@@ -192,7 +202,43 @@ export class Nip46Client {
         this.reconnectAll(true);
         break;
       }
+    // Handshake requests (connect/get_public_key) that stay unanswered get a fresh event with backoff (20s, 40s, 60s…).
+    if ([...this.pending.values()].some((p) => HANDSHAKE_METHODS.has(p.method) && now - p.lastSentAt > Math.min(60_000, 20_000 * 2 ** p.resends)))
+      void this.resendPending("backoff", false);
   };
+
+  /** Re-sign and republish every pending request as a NEW event (same request id, so either answer matches). */
+  async resendPending(why: string, extendDeadline: boolean) {
+    if (this.closed || !this.remotePubkey) return;
+    for (const p of [...this.pending.values()]) {
+      if (why === "backoff" && !HANDSHAKE_METHODS.has(p.method)) continue;
+      try {
+        const content = await this.encrypt(this.remotePubkey, JSON.stringify({ id: p.id, method: p.method, params: p.params }));
+        p.event = finalizeEvent(
+          { kind: NIP46_KIND, created_at: Math.floor(Date.now() / 1000), tags: [["p", this.remotePubkey]], content },
+          this.clientSk,
+        ) as unknown as Pending["event"];
+      } catch {
+        continue;
+      }
+      if (!this.pending.has(p.id)) continue;
+      p.resends++;
+      p.lastSentAt = Date.now();
+      p.sentOn = new WeakSet();
+      if (extendDeadline) {
+        clearTimeout(p.timer);
+        p.timer = setTimeout(() => this.fail(p, "timeout"), p.timeoutMs);
+        p.at = Date.now();
+        p.rechecked = false;
+      }
+      nlog(`re-sending ${p.method} as a fresh event (${why}, #${p.resends})`);
+      for (const c of this.conns)
+        if (c.ws?.readyState === WebSocket.OPEN) {
+          p.sentOn.add(c.ws);
+          c.ws.send(JSON.stringify(["EVENT", p.event]));
+        }
+    }
+  }
 
   constructor(
     clientSecretHex: string,
@@ -384,6 +430,14 @@ export class Nip46Client {
     clearTimeout(p.timer);
     this.pending.delete(body.id as string);
     this.updateStatus();
+    // A re-sent bunker connect can be answered "secret already used" because the signer accepted an earlier copy: treat it as
+    // connected; finish()'s get_public_key round trip proves we're actually authorized.
+    if (body.error && p.method === "connect" && p.resends > 0 && /secret|already/i.test(body.error)) {
+      nlog(`connect re-send answered "${body.error}": treating as connected, verifying via get_public_key`);
+      signerHealth.success();
+      p.resolve("ack");
+      return;
+    }
     if (body.error) {
       signerHealth.error(body.error);
       p.reject(new Nip46Error("rejected", body.error));
@@ -457,8 +511,12 @@ export class Nip46Client {
         resolve,
         reject,
         method,
+        params,
         sentOn: new WeakSet(),
         at: Date.now(),
+        resends: 0,
+        lastSentAt: Date.now(),
+        timeoutMs,
         timer: setTimeout(() => this.fail(p, "timeout"), timeoutMs),
       };
       this.pending.set(id, p);
@@ -536,6 +594,15 @@ export class Nip46Client {
 }
 
 let currentClient: Nip46Client | null = null;
+/** Client of an in-flight bunker sign-in, so the unlock screen's "Try again" can re-send without a page refresh. */
+let handshakeClient: Nip46Client | null = null;
+export function nudgeSignerHandshake() {
+  const c = handshakeClient;
+  if (!c) return false;
+  c.reconnectAll(true);
+  void c.resendPending("manual", true);
+  return true;
+}
 
 /**
  * Boot/mid-session liveness probe: a real round trip (get_public_key must come back as the saved pubkey) within `timeoutMs`.
@@ -636,6 +703,7 @@ export async function connectBunker(
   const b = parseBunkerUrl(bunkerUrl);
   const client = new Nip46Client(newClientKey(), b.remotePubkey, b.relays);
   client.start();
+  handshakeClient = client;
   try {
     const r = await client.request(
       "connect",
@@ -651,6 +719,8 @@ export async function connectBunker(
   } catch (e) {
     client.stop();
     throw e;
+  } finally {
+    if (handshakeClient === client) handshakeClient = null;
   }
 }
 
