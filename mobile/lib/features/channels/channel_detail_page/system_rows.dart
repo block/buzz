@@ -203,20 +203,23 @@ class _SystemMessageRow extends HookConsumerWidget {
                               actionSpans: messageStyleAction,
                               icon: _systemEventIcon(systemEvent.type),
                             )
-                          : Row(
-                              children: [
-                                _SystemActivityIcon(
-                                  icon: _systemEventIcon(systemEvent.type),
-                                ),
-                                const SizedBox(width: Grid.xxs),
-                                Expanded(
-                                  child: Text(
-                                    systemEvent.describe(resolveLabel),
-                                    textAlign: TextAlign.center,
-                                    style: _systemActionTextStyle(context),
+                          : Text.rich(
+                              TextSpan(
+                                children: [
+                                  WidgetSpan(
+                                    alignment: PlaceholderAlignment.middle,
+                                    child: _systemActivityIcon(
+                                      context,
+                                      _systemEventIcon(systemEvent.type),
+                                    ),
                                   ),
-                                ),
-                              ],
+                                  TextSpan(
+                                    text: systemEvent.describe(resolveLabel),
+                                  ),
+                                ],
+                              ),
+                              textAlign: TextAlign.center,
+                              style: _systemActionTextStyle(context),
                             ),
                     ),
                   ),
@@ -426,30 +429,43 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        _SystemActivityIcon(icon: icon),
-        const SizedBox(width: Grid.xxs),
-        Expanded(
-          child: Text.rich(
-            textAlign: TextAlign.center,
-            TextSpan(
-              style: _systemActionTextStyle(context),
-              children: [
-                _systemNameSpan(
-                  context,
-                  displayPubkey,
-                  channelId,
-                  resolveLabel,
+    return Text.rich(
+      TextSpan(
+        children: [
+          WidgetSpan(
+            alignment: PlaceholderAlignment.baseline,
+            baseline: TextBaseline.alphabetic,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: max(
+                  0,
+                  MediaQuery.sizeOf(context).width -
+                      Grid.gutter * 2 -
+                      Grid.twelve * 2,
                 ),
-                const TextSpan(text: ' '),
-                ...actionSpans,
-              ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IgnoreBaseline(child: _systemActivityIcon(context, icon)),
+                  Flexible(
+                    child: _systemNameSpan(
+                      context,
+                      displayPubkey,
+                      channelId,
+                      resolveLabel,
+                    ).child,
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
-      ],
+          const TextSpan(text: ' '),
+          ...actionSpans,
+        ],
+      ),
+      textAlign: TextAlign.center,
+      style: _systemActionTextStyle(context),
     );
   }
 }
@@ -494,17 +510,10 @@ WidgetSpan _systemNameSpan(
   );
 }
 
-class _SystemActivityIcon extends StatelessWidget {
-  final IconData icon;
-  const _SystemActivityIcon({required this.icon});
-
-  @override
-  Widget build(BuildContext context) => SizedBox(
-    width: Grid.sm,
-    height: Grid.sm,
-    child: Icon(icon, size: Grid.xs, color: context.colors.onSurfaceVariant),
-  );
-}
+Widget _systemActivityIcon(BuildContext context, IconData icon) => Padding(
+  padding: const EdgeInsets.only(right: Grid.half),
+  child: Icon(icon, size: Grid.xs, color: context.colors.onSurfaceVariant),
+);
 
 IconData _systemEventIcon(SystemEventType type) => switch (type) {
   SystemEventType.memberJoined => BuzzIcons.userPlus,
