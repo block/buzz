@@ -80,6 +80,11 @@ range-based rule therefore also requires the counter to be exported now, which
 it is for the whole life of a relay, so a terminated pod cannot keep or start an
 alert.
 
+`BuzzPartitionAuditNotRunning` also requires the run counter to have existed one
+window ago. After a successful startup audit, the first periodic audit runs a
+full interval later, so a new pod's counter stays flat until then and would
+otherwise read as a stopped loop.
+
 ```yaml
 # The last success is older than two default audit intervals. This also fires
 # for a table that has never audited successfully, whose timestamp is 0, and
@@ -92,11 +97,14 @@ alert.
 # The relay is running but its audit loop has stopped. Use a window of about
 # two audit intervals, and keep the window plus `for` below the gauge idle
 # timeout (2,700 s by default), so this fires before the stopped loop's
-# timestamp is evicted and the stale rule resolves.
+# timestamp is evicted and the stale rule resolves. Use the same duration for
+# the window and the offset. A loop that stops in a pod's first window is
+# caught once the pod is a window old, at about 35 minutes.
 - alert: BuzzPartitionAuditNotRunning
   expr: |
     sum without (outcome) (increase(buzz_partition_audit_runs_total[30m])) == 0
       and sum without (outcome) (buzz_partition_audit_runs_total)
+      and sum without (outcome) (buzz_partition_audit_runs_total offset 30m)
   for: 5m
 
 # Explicit audit attempts keep failing, even if a later attempt succeeds.
@@ -110,15 +118,16 @@ The counters exist from relay start, and the success timestamp exists after the
 first audit attempt, whether or not it succeeded. The startup audit runs within
 seconds of the zero baselines, usually before the first scrape, so
 `BuzzPartitionAuditFailing` can miss a failure in that one attempt; if it does
-not recover, `BuzzPartitionAuditStale` fires. To also catch a live relay that
-never exports audit runs, compare its scrape target health with the run
-counter, for example
-`up == 1 unless on (namespace, pod) count by (namespace, pod) (buzz_partition_audit_runs_total)`,
-scoped to the relay job.
+not recover, `BuzzPartitionAuditStale` fires. The run counters are exported
+before the relay connects to the database, so a live relay that is stuck before
+its first audit shows flat zero counters, which `BuzzPartitionAuditNotRunning`
+catches.
 
 `degraded` asks for operator attention; it does not mean rows cannot be
-written. Because historical legacy leaves no longer count, a repaired catalog
-returns to `ok` once the current month passes the repaired range. Coverage
+written. Historical legacy leaves no longer count, so a repaired catalog
+returns to `ok` once the current month passes the repaired range and every
+current and lookahead month is a bounded monthly partition. Months still covered
+by a catch-all stay `degraded` until advancement moves the catch-all. Coverage
 problems show directly in `buzz_partition_serving_safe` and
 `buzz_partition_uncovered_months`.
 
@@ -127,5 +136,15 @@ that the production exporter and audit emit the series these rules read: zero
 counter baselines before the first audit, a `0` timestamp before any success,
 the last success kept through failures past the idle timeout, and run counters
 that outlive an evicted timestamp. They do not
-evaluate the rules, their `for` durations, or label matching; validate those
-with `promtool test rules` against your alerting configuration.
+evaluate the rules, their `for` durations, or label matching.
+`partition-catalog-monitoring.rules.test.yml` evaluates the rules in
+`partition-catalog-monitoring.rules.yml`, including their `for` durations,
+against a fresh pod, a stopped loop, a terminated pod, a table that never
+succeeded, and repeated failures. CI does not run it. Keep the rules file
+identical to the block above, and run it after changing either:
+
+```bash
+promtool test rules docs/partition-catalog-monitoring.rules.test.yml
+```
+
+Then validate label matching against your own alerting configuration.
