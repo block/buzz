@@ -4,7 +4,7 @@ export const WEB_PUSH_URL = (
   (import.meta.env.VITE_BUZZ_WEB_PUSH_URL as string | undefined) || ""
 ).replace(/\/+$/, "");
 export const WEB_PUSH_FLAG = WEB_PUSH_URL !== "";
-/** Background prefetch with scoped read tokens: off until the relay side ships (VITE_BUZZ_WEB_PUSH_PREFETCH=1). */
+/** Background prefetch with scoped read tokens: on in prod builds (VITE_BUZZ_WEB_PUSH_PREFETCH, default "1" via vite.config.web.ts). */
 export const WEB_PUSH_PREFETCH =
   import.meta.env?.VITE_BUZZ_WEB_PUSH_PREFETCH === "1";
 

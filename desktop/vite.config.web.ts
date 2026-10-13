@@ -115,6 +115,10 @@ export default defineConfig(({ command }) => ({
       process.env.VITE_BUZZ_LINK_PREVIEW_URL ??
         (command === "build" ? "https://buzz.huladesk.com/lp" : ""),
     ),
+    // Push prefetch (relay-scoped read tokens, GET /push/prefetch): on by default in prod builds; set "0" to disable.
+    "import.meta.env.VITE_BUZZ_WEB_PUSH_PREFETCH": JSON.stringify(
+      process.env.VITE_BUZZ_WEB_PUSH_PREFETCH ?? (command === "build" ? "1" : ""),
+    ),
   },
   resolve: {
     alias: [
