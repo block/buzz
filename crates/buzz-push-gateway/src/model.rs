@@ -63,6 +63,31 @@ pub struct WebPushHint {
     /// Thread root event id (lowercase hex) when the event is a thread reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_root_id: Option<String>,
+    /// Optional relay prefetch capability passed through opaquely to the
+    /// service worker (short-lived HMAC read token; carries no content).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefetch: Option<PrefetchHint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefetchHint {
+    pub url: String,
+    pub token: String,
+}
+
+impl PrefetchHint {
+    pub fn is_valid(&self) -> bool {
+        self.url.len() <= 256
+            && self.url.starts_with("https://")
+            && self.url.bytes().all(|b| b.is_ascii_graphic())
+            && !self.token.is_empty()
+            && self.token.len() <= 512
+            && self
+                .token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    }
 }
 
 fn is_hex_id(s: &str) -> bool {
@@ -82,6 +107,7 @@ impl WebPushHint {
                 .channel_id
                 .as_ref()
                 .is_none_or(|c| c.len() == 36 && uuid::Uuid::parse_str(c).is_ok())
+            && self.prefetch.as_ref().is_none_or(PrefetchHint::is_valid)
     }
 }
 

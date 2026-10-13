@@ -117,6 +117,7 @@ pub fn build_payload(hint: Option<&WebPushHint>) -> Vec<u8> {
         "body": body,
         "tag": hint.map(|h| format!("buzz-{}", h.event_id)),
         "target": target,
+        "prefetch": hint.and_then(|h| h.prefetch.as_ref()),
     }))
     .expect("payload serializes")
 }
@@ -393,6 +394,7 @@ mod tests {
             event_id: "ab".repeat(32),
             channel_id: Some("123e4567-e89b-42d3-a456-426614174000".into()),
             thread_root_id: Some("b".repeat(64)),
+            prefetch: None,
         };
         let p: serde_json::Value = serde_json::from_slice(&build_payload(Some(&hint))).unwrap();
         assert_eq!(p["body"], "New direct message");
@@ -402,7 +404,51 @@ mod tests {
         bad.thread_root_id = Some("XYZ".into());
         assert!(!bad.is_valid());
         assert!(hint.is_valid());
-        assert_eq!(p.as_object().unwrap().len(), 4);
+        assert_eq!(p.as_object().unwrap().len(), 5);
+        assert!(p["prefetch"].is_null());
+    }
+
+    #[test]
+    fn prefetch_hint_passthrough_and_validation() {
+        let pf = crate::model::PrefetchHint {
+            url: "https://relay.example.com/push/prefetch".into(),
+            token: "eyJ2IjoxfQ.c2ln-_".into(),
+        };
+        let hint = WebPushHint {
+            class: "mention".into(),
+            event_id: "ab".repeat(32),
+            channel_id: None,
+            thread_root_id: None,
+            prefetch: Some(pf.clone()),
+        };
+        assert!(hint.is_valid());
+        let p: serde_json::Value = serde_json::from_slice(&build_payload(Some(&hint))).unwrap();
+        assert_eq!(p["prefetch"]["url"], pf.url);
+        assert_eq!(p["prefetch"]["token"], pf.token);
+        for bad in [
+            crate::model::PrefetchHint {
+                url: "http://x/y".into(),
+                ..pf.clone()
+            },
+            crate::model::PrefetchHint {
+                token: "a b".into(),
+                ..pf.clone()
+            },
+            crate::model::PrefetchHint {
+                token: "a".repeat(513),
+                ..pf.clone()
+            },
+            crate::model::PrefetchHint {
+                url: format!("https://{}", "a".repeat(250)),
+                ..pf.clone()
+            },
+        ] {
+            let mut h = hint.clone();
+            h.prefetch = Some(bad);
+            assert!(!h.is_valid());
+        }
+        let json = r#"{"class":"dm","event_id":"x","channel_id":null,"prefetch":{"url":"https://a","token":"t","extra":1}}"#;
+        assert!(serde_json::from_str::<WebPushHint>(json).is_err());
     }
 
     #[test]

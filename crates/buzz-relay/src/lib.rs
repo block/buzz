@@ -58,6 +58,7 @@ pub mod operator_listener;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
 /// Durable NIP-PL matcher and delivery worker.
+pub mod push_prefetch;
 pub mod push_runtime;
 /// Readiness-probe telemetry and the per-pod dependency sampler behind `/_status`.
 pub mod readiness;

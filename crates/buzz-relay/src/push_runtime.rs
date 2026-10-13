@@ -48,6 +48,8 @@ struct WebPushHint {
     channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_root_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefetch: Option<crate::push_prefetch::PrefetchHint>,
 }
 
 const WEB_APP_PROFILE: &str = "buzz-web";
@@ -58,6 +60,7 @@ fn web_hint(wake: &buzz_db::push::ClaimedWake, thread_root: Option<&[u8]>) -> Op
         event_id: hex::encode(&wake.event_id),
         channel_id: wake.channel_id.map(|c| c.to_string()),
         thread_root_id: thread_root.map(hex::encode),
+        prefetch: crate::push_prefetch::hint_for(wake, thread_root),
     })
 }
 
@@ -966,6 +969,31 @@ mod tests {
         // Not a member of that DM -> membership gate still blocks it.
         ctx.memberships.clear();
         assert!(match_job(&msg, &ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prefetch_hint_is_scoped_to_wake() {
+        let key = b"0123456789abcdef0123456789abcdef";
+        let w = wake(Some("buzz-web"));
+        let h = crate::push_prefetch::hint_with(
+            key,
+            "https://r.example/push/prefetch",
+            &w,
+            Some(&[0xcd; 32]),
+            1000,
+        )
+        .unwrap();
+        let c = crate::push_prefetch::verify(key, &h.token, 1000).unwrap();
+        assert_eq!(c.ch, uuid::Uuid::nil());
+        assert_eq!(c.c, *w.community.as_uuid());
+        assert_eq!(c.a, "01".repeat(32));
+        assert_eq!(c.s, "ab".repeat(32));
+        assert_eq!(c.r.as_deref(), Some("cd".repeat(32).as_str()));
+        assert_eq!(c.e, 1000 + crate::push_prefetch::TOKEN_TTL_SECS);
+        assert!(h.token.len() <= 512);
+        let mut no_channel = w.clone();
+        no_channel.channel_id = None;
+        assert!(crate::push_prefetch::hint_with(key, "https://r", &no_channel, None, 0).is_none());
     }
 
     #[test]

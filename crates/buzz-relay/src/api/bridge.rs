@@ -1242,21 +1242,34 @@ pub async fn query_events(
     // [NIP-FI.md:619-637]
     let nip_fi_enforce = matches!(state.config.nip_fi.mode, NipFiMode::Enforce);
 
-    // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
-    let admission = admit_nip_fi_http_on_state(&state, &headers, || {
-        verify_bridge_auth_with_options(
-            &headers,
-            "POST",
-            &url,
-            Some(&body),
-            state.config.require_auth_token || nip_fi_active,
-            nip_fi_enforce,
-        )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
-        .map_err(|e| e.into_response())
-    })?;
-    let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, signed_created_at) = admission.into_extra();
+    // Web session bearer (one signature per session) when NIP-FI is off; NIP-FI modes always require a
+    // real NIP-98 event, so the session is ignored there.
+    let session = if nip_fi_active {
+        None
+    } else {
+        super::web_session::resolve(&state, &tenant, &headers).await
+    };
+    let (pubkey, event_id_bytes, signed_created_at) = if let Some(session) = session {
+        let auth = session.map_err(|e| e.into_response())?;
+        (auth.pubkey, auth.event_id_bytes, auth.signed_created_at)
+    } else {
+        // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+        let admission = admit_nip_fi_http_on_state(&state, &headers, || {
+            verify_bridge_auth_with_options(
+                &headers,
+                "POST",
+                &url,
+                Some(&body),
+                state.config.require_auth_token || nip_fi_active,
+                nip_fi_enforce,
+            )
+            .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+            .map_err(|e| e.into_response())
+        })?;
+        let pubkey = *admission.proven_pubkey();
+        let (event_id_bytes, signed_created_at) = admission.into_extra();
+        (pubkey, event_id_bytes, signed_created_at)
+    };
     let pubkey_hex = pubkey.to_hex();
 
     // Admission, replay, membership, and filter execution all run inside the
@@ -1873,21 +1886,34 @@ pub async fn count_events(
     // [NIP-FI.md:619-637]
     let nip_fi_enforce = matches!(state.config.nip_fi.mode, NipFiMode::Enforce);
 
-    // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
-    let admission = admit_nip_fi_http_on_state(&state, &headers, || {
-        verify_bridge_auth_with_options(
-            &headers,
-            "POST",
-            &url,
-            Some(&body),
-            state.config.require_auth_token || nip_fi_active,
-            nip_fi_enforce,
-        )
-        .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
-        .map_err(|e| e.into_response())
-    })?;
-    let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, signed_created_at) = admission.into_extra();
+    // Web session bearer (one signature per session) when NIP-FI is off; NIP-FI modes always require a
+    // real NIP-98 event, so the session is ignored there.
+    let session = if nip_fi_active {
+        None
+    } else {
+        super::web_session::resolve(&state, &tenant, &headers).await
+    };
+    let (pubkey, event_id_bytes, signed_created_at) = if let Some(session) = session {
+        let auth = session.map_err(|e| e.into_response())?;
+        (auth.pubkey, auth.event_id_bytes, auth.signed_created_at)
+    } else {
+        // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+        let admission = admit_nip_fi_http_on_state(&state, &headers, || {
+            verify_bridge_auth_with_options(
+                &headers,
+                "POST",
+                &url,
+                Some(&body),
+                state.config.require_auth_token || nip_fi_active,
+                nip_fi_enforce,
+            )
+            .map(|auth| Nip98Proof::new(auth.pubkey, (auth.event_id_bytes, auth.signed_created_at)))
+            .map_err(|e| e.into_response())
+        })?;
+        let pubkey = *admission.proven_pubkey();
+        let (event_id_bytes, signed_created_at) = admission.into_extra();
+        (pubkey, event_id_bytes, signed_created_at)
+    };
     let pubkey_hex = pubkey.to_hex();
 
     // Admission, replay, membership, and count execution all run inside the

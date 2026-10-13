@@ -295,6 +295,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // WebSocket + NIP-11
         .route("/", get(nip11_or_ws_handler))
         .route("/info", get(relay_info_handler))
+        .route(
+            "/push/prefetch",
+            get(crate::push_prefetch::prefetch_handler)
+                .options(crate::push_prefetch::options_handler),
+        )
         .route("/.well-known/nostr.json", get(api::nip05::nostr_nip05))
         // Health endpoints
         .route("/health", get(health_handler))
@@ -303,6 +308,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Nostr HTTP bridge (NIP-98 auth)
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
+        .route(
+            api::web_session::PATH,
+            post(api::web_session::mint_session).delete(api::web_session::revoke_session),
+        )
         .route("/count", post(api::bridge::count_events))
         // Relay-owned third-party GIF metadata proxy (NIP-98 auth).
         .route(api::gifs::SEARCH_PATH, post(api::gifs::search))
