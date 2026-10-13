@@ -1,0 +1,2075 @@
+{
+  "$comment": "NIP-FP conformance fixtures. Each case lists UNSIGNED event templates, in dependency order, with the fixture key that signs each. Placeholders: {pk:<key>} is that key's hex pubkey; {id:<ref>} is the id of an earlier event once signed. `auth` adds a NIP-OA tag from the named owner with empty conditions. `mutate` corrupts the copy the origin serves (tamper_sig flips the signature; tamper_content changes content under the original id). `served_except` lists events the origin withholds from the viewer. The fingerprint is signed last, selecting the named refs at `origin`. `expect.items` is exhaustive and flattens the report: `rung` and `viewer_known` come from the interpretation, every other field from the observed item. Every event the verifier reports must appear, keyed by ref, and nothing else; listed fields must match. `rung: null` means no rung. Signing is not deterministic across implementations, so consumers sign with these keys and compare by ref. Spec: docs/nips/NIP-FP.md.",
+  "version": 1,
+  "fingerprint_kind": 30340,
+  "origin": "https://origin.example",
+  "relay_self": "relay",
+  "cutoff": 1790100000,
+  "keys": {
+    "owner": "0000000000000000000000000000000000000000000000000000000000000001",
+    "subject": "0000000000000000000000000000000000000000000000000000000000000002",
+    "maintainer": "0000000000000000000000000000000000000000000000000000000000000003",
+    "requester": "0000000000000000000000000000000000000000000000000000000000000004",
+    "outsider": "0000000000000000000000000000000000000000000000000000000000000005",
+    "ring_a": "0000000000000000000000000000000000000000000000000000000000000006",
+    "ring_b": "0000000000000000000000000000000000000000000000000000000000000007",
+    "sibling": "0000000000000000000000000000000000000000000000000000000000000008",
+    "relay": "0000000000000000000000000000000000000000000000000000000000000009",
+    "maint_agent": "000000000000000000000000000000000000000000000000000000000000000a"
+  },
+  "cases": [
+    {
+      "name": "control_merged_pr",
+      "note": "Passing control. The subject's PR is merged by the repo owner, and a relay-signed ref state shows main at the merge commit. The merger is unrelated by any owner link, so independence is unknown, never independent. The viewer's policy knows the maintainer, so the rung-2 basis is viewer_known. A second ref state, signed by an outsider at an unrelated commit, bears on no reported merge: it is counted in coverage and not listed.",
+      "policy": {
+        "viewer_known": [
+          "maintainer"
+        ]
+      },
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "unrelated_ref",
+          "signer": "outsider",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000150,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 2,
+            "viewer_known": true
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "verifiable",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "positive",
+            "ref": "corroborated",
+            "target": "pr",
+            "target_selected": true
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "refstate": {
+            "role": "ref",
+            "bucket": "verifiable"
+          }
+        }
+      }
+    },
+    {
+      "name": "tampered_signature",
+      "note": "The origin serves the merge status with a corrupted signature. The status is invalid and evidence of nothing, so the PR stays at rung 1.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        }
+      ],
+      "mutate": [
+        {
+          "ref": "merged",
+          "op": "tamper_sig"
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "invalid"
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "refstate": {
+            "role": "ref",
+            "bucket": "verifiable"
+          }
+        }
+      }
+    },
+    {
+      "name": "tampered_content",
+      "note": "The origin serves the merge status with altered content under the original id. The id no longer matches, so the status is invalid.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        }
+      ],
+      "mutate": [
+        {
+          "ref": "merged",
+          "op": "tamper_content"
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "invalid"
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "refstate": {
+            "role": "ref",
+            "bucket": "verifiable"
+          }
+        }
+      }
+    },
+    {
+      "name": "tampered_fingerprint",
+      "note": "The fingerprint's own signature is corrupted. It is not the subject's selection, so the verifier fetches nothing.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ],
+        "mutate": "tamper_sig"
+      },
+      "expect": {
+        "fingerprint": "invalid",
+        "items": {}
+      }
+    },
+    {
+      "name": "inaccessible_event",
+      "note": "The subject selects an issue the origin does not serve to this viewer. It stays inaccessible: no rung, neither pass nor fail.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "issue",
+          "signer": "subject",
+          "template": {
+            "kind": 1621,
+            "created_at": 1790000120,
+            "content": "Seen in staging.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Uploads stall on 503"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        }
+      ],
+      "served_except": [
+        "issue"
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr",
+          "issue"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 2
+          },
+          "issue": {
+            "role": "work",
+            "bucket": "inaccessible",
+            "rung": null
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "verifiable",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "positive",
+            "ref": "corroborated",
+            "target": "pr",
+            "target_selected": true
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "refstate": {
+            "role": "ref",
+            "bucket": "verifiable"
+          }
+        }
+      }
+    },
+    {
+      "name": "missing_outcome",
+      "note": "A PR with no status at all. It is attributed (rung 1) and the interpretation reports that no outcome was found in scope before the cutoff, not that the PR failed.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          }
+        }
+      }
+    },
+    {
+      "name": "self_endorsement",
+      "note": "A sibling agent of the subject's owner asks, the subject answers, and the sibling accepts. The acceptance is authorized (the sibling is the requester) but same_owner, so it never raises the rung. The subject's own label is an opinion from the same signer.",
+      "events": [
+        {
+          "ref": "request",
+          "signer": "sibling",
+          "template": {
+            "kind": 1,
+            "created_at": 1790000000,
+            "content": "How should the uploader retry after a 503?",
+            "tags": []
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "answer",
+          "signer": "subject",
+          "template": {
+            "kind": 1,
+            "created_at": 1790000060,
+            "content": "Retry with capped exponential backoff and jitter; give up after five tries.",
+            "tags": [
+              [
+                "e",
+                "{id:request}",
+                "",
+                "reply"
+              ],
+              [
+                "p",
+                "{pk:sibling}"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "sib_label",
+          "signer": "sibling",
+          "template": {
+            "kind": 1985,
+            "created_at": 1790000120,
+            "content": "",
+            "tags": [
+              [
+                "L",
+                "buzz.wot"
+              ],
+              [
+                "l",
+                "accepted",
+                "buzz.wot"
+              ],
+              [
+                "e",
+                "{id:answer}",
+                ""
+              ],
+              [
+                "p",
+                "{pk:subject}"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "self_label",
+          "signer": "subject",
+          "template": {
+            "kind": 1985,
+            "created_at": 1790000130,
+            "content": "",
+            "tags": [
+              [
+                "L",
+                "buzz.wot"
+              ],
+              [
+                "l",
+                "accepted",
+                "buzz.wot"
+              ],
+              [
+                "e",
+                "{id:answer}",
+                ""
+              ],
+              [
+                "p",
+                "{pk:subject}"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "answer"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "answer": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1
+          },
+          "request": {
+            "role": "request",
+            "bucket": "verifiable"
+          },
+          "sib_label": {
+            "role": "outcome",
+            "bucket": "verifiable",
+            "authority": "authorized",
+            "independence": "same_owner",
+            "polarity": "positive",
+            "target": "answer",
+            "target_selected": true
+          },
+          "self_label": {
+            "role": "outcome",
+            "bucket": "unknown",
+            "authority": "opinion",
+            "independence": "same_signer",
+            "polarity": "positive",
+            "target": "answer",
+            "target_selected": true
+          }
+        }
+      }
+    },
+    {
+      "name": "forged_1631",
+      "note": "A key with no repo authority publishes a merge status. Relays may accept it; the verifier reports it self_asserted with no ref corroboration, and the PR stays at rung 1.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "forged",
+          "signer": "outsider",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "forged": {
+            "role": "outcome",
+            "bucket": "unknown",
+            "authority": "self_asserted",
+            "independence": "unknown",
+            "polarity": "positive",
+            "ref": "unverified",
+            "target": "pr",
+            "target_selected": true
+          }
+        }
+      }
+    },
+    {
+      "name": "cherry_picked_index",
+      "note": "The subject selects its merged PR and omits a second PR the maintainer closed. Discovery by issuer (the repo coordinate) finds the close even though it tags only the repo owner, and reports it as contrary and omitted by the selection.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr2",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000300,
+            "content": "Skip certificate validation in the uploader.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Disable TLS checks"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "closed",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1632,
+            "created_at": 1790000400,
+            "content": "Closing: this disables certificate validation.",
+            "tags": [
+              [
+                "e",
+                "{id:pr2}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "omitted_contrary": [
+          "closed"
+        ],
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 2
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "verifiable",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "positive",
+            "ref": "corroborated",
+            "target": "pr",
+            "target_selected": true
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "refstate": {
+            "role": "ref",
+            "bucket": "verifiable"
+          },
+          "pr2": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1,
+            "selected": false
+          },
+          "closed": {
+            "role": "outcome",
+            "bucket": "contrary",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "contrary",
+            "target": "pr2",
+            "target_selected": false
+          }
+        }
+      }
+    },
+    {
+      "name": "sybil_ring",
+      "note": "Two fresh keys with no owner links ask, accept, and praise the subject's answer. Signatures cannot tell them from strangers: the acceptance is authorized and reaches rung 2, but with independence unknown and not viewer_known. Only viewer policy can discount it; the report never calls it independent.",
+      "events": [
+        {
+          "ref": "request",
+          "signer": "ring_a",
+          "template": {
+            "kind": 1,
+            "created_at": 1790000000,
+            "content": "How should the uploader retry after a 503?",
+            "tags": []
+          }
+        },
+        {
+          "ref": "answer",
+          "signer": "subject",
+          "template": {
+            "kind": 1,
+            "created_at": 1790000060,
+            "content": "Retry with capped exponential backoff and jitter; give up after five tries.",
+            "tags": [
+              [
+                "e",
+                "{id:request}",
+                "",
+                "reply"
+              ],
+              [
+                "p",
+                "{pk:ring_a}"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "ring_accept",
+          "signer": "ring_a",
+          "template": {
+            "kind": 1985,
+            "created_at": 1790000120,
+            "content": "",
+            "tags": [
+              [
+                "L",
+                "buzz.wot"
+              ],
+              [
+                "l",
+                "accepted",
+                "buzz.wot"
+              ],
+              [
+                "e",
+                "{id:answer}",
+                ""
+              ],
+              [
+                "p",
+                "{pk:subject}"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "ring_praise",
+          "signer": "ring_b",
+          "template": {
+            "kind": 1985,
+            "created_at": 1790000130,
+            "content": "",
+            "tags": [
+              [
+                "L",
+                "buzz.wot"
+              ],
+              [
+                "l",
+                "reused",
+                "buzz.wot"
+              ],
+              [
+                "e",
+                "{id:answer}",
+                ""
+              ],
+              [
+                "p",
+                "{pk:subject}"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "answer"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "answer": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 2,
+            "viewer_known": false
+          },
+          "request": {
+            "role": "request",
+            "bucket": "verifiable"
+          },
+          "ring_accept": {
+            "role": "outcome",
+            "bucket": "verifiable",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "positive",
+            "target": "answer",
+            "target_selected": true
+          },
+          "ring_praise": {
+            "role": "outcome",
+            "bucket": "unknown",
+            "authority": "opinion",
+            "independence": "unknown",
+            "polarity": "positive",
+            "target": "answer",
+            "target_selected": true
+          }
+        }
+      }
+    },
+    {
+      "name": "authority_at_time_unknown",
+      "note": "The merger appears in the maintainers list of a 30617 published after the merge. The verifier does not apply the newer set backward: authority is unknown and the PR stays at rung 1.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000300,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "maintainers",
+                "{pk:outsider}"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "outsider",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "unknown",
+            "authority": "unknown",
+            "independence": "unknown",
+            "polarity": "positive",
+            "ref": "unverified",
+            "target": "pr",
+            "target_selected": true
+          }
+        }
+      }
+    },
+    {
+      "name": "delegated_merge",
+      "note": "An agent of the repo owner merges, with a verified owner link. Authority is delegated and reported as such.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maint_agent",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "maintainer",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 2
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "refstate": {
+            "role": "ref",
+            "bucket": "verifiable"
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "verifiable",
+            "authority": "delegated",
+            "independence": "unknown",
+            "polarity": "positive",
+            "ref": "corroborated",
+            "target": "pr",
+            "target_selected": true
+          }
+        }
+      }
+    },
+    {
+      "name": "requester_correction",
+      "note": "Non-code contrary chain: the requester labels the subject's answer corrected. It is contrary and authorized, on a selected item.",
+      "events": [
+        {
+          "ref": "request",
+          "signer": "requester",
+          "template": {
+            "kind": 1,
+            "created_at": 1790000000,
+            "content": "How should the uploader retry after a 503?",
+            "tags": []
+          }
+        },
+        {
+          "ref": "answer",
+          "signer": "subject",
+          "template": {
+            "kind": 1,
+            "created_at": 1790000060,
+            "content": "Retry with capped exponential backoff and jitter; give up after five tries.",
+            "tags": [
+              [
+                "e",
+                "{id:request}",
+                "",
+                "reply"
+              ],
+              [
+                "p",
+                "{pk:requester}"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "correction",
+          "signer": "requester",
+          "template": {
+            "kind": 1985,
+            "created_at": 1790000200,
+            "content": "",
+            "tags": [
+              [
+                "L",
+                "buzz.wot"
+              ],
+              [
+                "l",
+                "corrected",
+                "buzz.wot"
+              ],
+              [
+                "e",
+                "{id:answer}",
+                ""
+              ],
+              [
+                "p",
+                "{pk:subject}"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "answer"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "answer": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 1
+          },
+          "request": {
+            "role": "request",
+            "bucket": "verifiable"
+          },
+          "correction": {
+            "role": "outcome",
+            "bucket": "contrary",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "contrary",
+            "target": "answer",
+            "target_selected": true
+          }
+        }
+      }
+    },
+    {
+      "name": "reopened_after_merge",
+      "note": "The maintainer merges, then reopens. The merge still supports rung 2; the reopen is reported alongside it as contrary.",
+      "events": [
+        {
+          "ref": "repo",
+          "signer": "maintainer",
+          "template": {
+            "kind": 30617,
+            "created_at": 1790000000,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "name",
+                "tools"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "pr",
+          "signer": "subject",
+          "template": {
+            "kind": 1618,
+            "created_at": 1790000100,
+            "content": "Retry failed uploads with capped backoff.",
+            "tags": [
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "subject",
+                "Add retry with backoff"
+              ]
+            ]
+          },
+          "auth": {
+            "owner": "owner",
+            "conditions": ""
+          }
+        },
+        {
+          "ref": "merged",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1631,
+            "created_at": 1790000200,
+            "content": "Merged.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ],
+              [
+                "merge-commit",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "r",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "refstate",
+          "signer": "relay",
+          "template": {
+            "kind": 30618,
+            "created_at": 1790000190,
+            "content": "",
+            "tags": [
+              [
+                "d",
+                "tools"
+              ],
+              [
+                "refs/heads/main",
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              ],
+              [
+                "HEAD",
+                "ref: refs/heads/main"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        },
+        {
+          "ref": "reopened",
+          "signer": "maintainer",
+          "template": {
+            "kind": 1630,
+            "created_at": 1790000500,
+            "content": "Reopening: the retry loop never terminates.",
+            "tags": [
+              [
+                "e",
+                "{id:pr}",
+                "",
+                "root"
+              ],
+              [
+                "a",
+                "30617:{pk:maintainer}:tools"
+              ],
+              [
+                "p",
+                "{pk:maintainer}"
+              ]
+            ]
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "pr"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "pr": {
+            "role": "work",
+            "bucket": "verifiable",
+            "rung": 2
+          },
+          "merged": {
+            "role": "outcome",
+            "bucket": "verifiable",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "positive",
+            "ref": "corroborated",
+            "target": "pr",
+            "target_selected": true
+          },
+          "repo": {
+            "role": "authority",
+            "bucket": "verifiable"
+          },
+          "refstate": {
+            "role": "ref",
+            "bucket": "verifiable"
+          },
+          "reopened": {
+            "role": "outcome",
+            "bucket": "contrary",
+            "authority": "authorized",
+            "independence": "unknown",
+            "polarity": "contrary",
+            "target": "pr",
+            "target_selected": true
+          }
+        }
+      }
+    },
+    {
+      "name": "unattributed_selection",
+      "note": "The subject selects an event signed by an unrelated key. It is signed (rung 0) but not attributed, so it is unknown.",
+      "events": [
+        {
+          "ref": "foreign",
+          "signer": "outsider",
+          "template": {
+            "kind": 1,
+            "created_at": 1790000050,
+            "content": "Someone else's work.",
+            "tags": []
+          }
+        }
+      ],
+      "fingerprint": {
+        "signer": "subject",
+        "auth": "owner",
+        "select": [
+          "foreign"
+        ]
+      },
+      "expect": {
+        "fingerprint": "valid",
+        "items": {
+          "foreign": {
+            "role": "work",
+            "bucket": "unknown",
+            "rung": 0
+          }
+        }
+      }
+    }
+  ]
+}

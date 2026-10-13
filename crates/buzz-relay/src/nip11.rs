@@ -242,7 +242,12 @@ impl RelayInfo {
             supported_nips.push(NIP_RELAY_MEMBERSHIP);
         }
 
-        let mut supported_extensions = vec!["nip-er".to_string(), "nip-ar".to_string()];
+        let mut supported_extensions = vec![
+            "nip-er".to_string(),
+            "nip-ar".to_string(),
+            // NIP-FP: kind:30340 work fingerprints are accepted at ingest.
+            "nip-fp".to_string(),
+        ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
             GifDescriptor {
@@ -575,6 +580,25 @@ mod tests {
         assert!(
             SUPPORTED_NIPS.contains(&56),
             "NIP-56 (reporting) must be advertised — kind:1984 ingest is live"
+        );
+    }
+
+    #[test]
+    fn build_advertises_nip_fp_extension() {
+        let info = RelayInfo::build(
+            None,
+            None,
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            info.supported_extensions
+                .expect("extensions")
+                .contains(&"nip-fp".to_string()),
+            "NIP-FP must be advertised — kind:30340 ingest is live"
         );
     }
 

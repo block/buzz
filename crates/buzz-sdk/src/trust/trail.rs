@@ -1,0 +1,1321 @@
+//! The sans-IO local work trail (policy `buzz.work/v1`).
+//!
+//! A trail starts from a request, a contribution, or an actor, inside a
+//! declared scope, and reads request → contribution(s) → outcome(s) from
+//! signed events. It reuses the NIP-FP fetch, verification, authority, and
+//! relationship checks; it needs no fingerprint.
+//!
+//! ```text
+//! Trail::new(entry, scope) → loop { next_queries → fetch → ingest } → finish → WorkTrail
+//! ```
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use nostr::{Alphabet, Event, EventId, Filter, Kind, PublicKey, SingleLetterTag, Timestamp};
+
+use super::assess::wording;
+use super::evidence::{self, Coord, KEYED_OUTCOME_KINDS, OUTCOME_KINDS, STATUS_KINDS};
+use super::fetch::{Fetch, Step, Stored};
+use super::judge::{authority, Judge};
+use super::work::{self, Message, Part, WorkRole};
+use super::{
+    AuthorityStatus as A, Contribution, ContributionRole, Evidence, EvidenceEvent, Gap,
+    Independence, Outcome, OutcomeScope, PolicyRef, Query, Response, Source, Task, TaskRequest,
+    TrailScope, WorkTrail,
+};
+use crate::SdkError;
+
+/// Name of the work-trail policy.
+pub const TRAIL_POLICY: &str = "buzz.work/v1";
+
+/// Rounds of exact-id follow-up fetches before the rest are reported.
+const MAX_CONTEXT_ROUNDS: usize = 8;
+
+/// Patch, pull request, and pull-request update.
+const CODE_KINDS: [u16; 3] = [1617, 1618, 1619];
+
+/// A code issue (NIP-34): a request.
+const ISSUE: u16 = 1621;
+
+/// How [`Evidence`] keeps envelopes.
+const EVIDENCE_FORM: &str = "each event is the NIP-01 JSON object as served; its id and signature recheck from it alone; transport bytes are not kept";
+
+/// Where a work trail starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    /// A typed request, a code issue, or a PR or patch.
+    Request(EventId),
+    /// One contribution.
+    Contribution(EventId),
+    /// Tasks one key requested or contributed to, in the declared scope.
+    Actor(PublicKey),
+}
+
+/// What the viewer declares it may read and asks about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    /// The origin to read.
+    pub origin: String,
+    /// Channels to search for an actor's typed work.
+    pub channels: Vec<String>,
+    /// Repository coordinates (`30617:<owner>:<d>`) to search for an
+    /// actor's code work.
+    pub repos: Vec<String>,
+    /// Lower bound of every discovery read, in Unix seconds.
+    pub since: Option<u64>,
+    /// Upper bound (`until`) of every discovery read, in Unix seconds.
+    pub until: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Seed,
+    Linked,
+    Outcomes,
+    Repo,
+    Done,
+}
+
+/// Reads one work trail. Sans-IO: call [`Trail::next_queries`], answer each
+/// [`Query`] with [`Trail::ingest`], and repeat until no queries come back;
+/// then call [`Trail::finish`].
+pub struct Trail {
+    entry: Entry,
+    scope: Scope,
+    fetch: Fetch,
+    phase: Phase,
+    asked: BTreeSet<EventId>,
+    rounds: usize,
+    gaps: Vec<Gap>,
+}
+
+impl Trail {
+    /// Start a trail read.
+    pub fn new(entry: Entry, scope: Scope) -> Self {
+        Self {
+            entry,
+            scope,
+            fetch: Fetch::default(),
+            phase: Phase::Seed,
+            asked: BTreeSet::new(),
+            rounds: 0,
+            gaps: Vec::new(),
+        }
+    }
+
+    /// The queries for the next round; empty when the read is done.
+    ///
+    /// Queries of the previous round left unanswered are recorded as failed.
+    pub fn next_queries(&mut self) -> Vec<Query> {
+        let pages = self.fetch.next_pages();
+        if !pages.is_empty() {
+            return pages;
+        }
+        loop {
+            if let Some(query) = self.context() {
+                return vec![query];
+            }
+            let queries = match self.phase {
+                Phase::Seed => {
+                    self.phase = Phase::Linked;
+                    self.seed()
+                }
+                Phase::Linked => {
+                    self.phase = Phase::Outcomes;
+                    self.linked()
+                }
+                Phase::Outcomes => {
+                    self.phase = Phase::Repo;
+                    self.outcomes()
+                }
+                Phase::Repo => {
+                    self.phase = Phase::Done;
+                    self.repos()
+                }
+                Phase::Done => return Vec::new(),
+            };
+            if !queries.is_empty() {
+                return queries;
+            }
+        }
+    }
+
+    /// Record an origin's answer to the query with this `scope`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::InvalidInput`] for an unknown or already answered
+    /// scope.
+    pub fn ingest(&mut self, scope: usize, response: Response) -> Result<(), SdkError> {
+        self.fetch.ingest(scope, response, None)
+    }
+
+    /// [`Trail::ingest`], recording when the caller received the answer, in
+    /// Unix seconds by its own clock. The time is kept in [`Evidence`] only;
+    /// nothing in the trail is derived from it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Trail::ingest`].
+    pub fn ingest_at(
+        &mut self,
+        scope: usize,
+        response: Response,
+        observed_at: u64,
+    ) -> Result<(), SdkError> {
+        self.fetch.ingest(scope, response, Some(observed_at))
+    }
+
+    fn bounded(&self, kinds: &[u16]) -> Filter {
+        let filter = Filter::new()
+            .kinds(kinds.iter().map(|k| Kind::from(*k)))
+            .until(Timestamp::from(self.scope.until));
+        match self.scope.since {
+            Some(since) => filter.since(Timestamp::from(since)),
+            None => filter,
+        }
+    }
+
+    fn walk(&mut self, step: Step, filter: Filter) -> Query {
+        let origin = self.scope.origin.clone();
+        self.fetch.walk(&origin, step, filter)
+    }
+
+    fn seed(&mut self) -> Vec<Query> {
+        let origin = self.scope.origin.clone();
+        let mut queries = vec![self.fetch.relay_info(&origin, Step::RelayInfo)];
+        match self.entry {
+            Entry::Request(id) | Entry::Contribution(id) => {
+                self.asked.insert(id);
+                queries.extend(self.fetch.ids(&origin, Step::Seed, BTreeSet::from([id])));
+            }
+            Entry::Actor(actor) => {
+                if self.scope.channels.is_empty() {
+                    self.gap(
+                        None,
+                        "no channels declared; typed work by the actor was not searched",
+                    );
+                } else {
+                    let typed = self
+                        .bounded(&[9])
+                        .author(actor)
+                        .custom_tags(lower(Alphabet::H), self.scope.channels.clone())
+                        .custom_tags(lower(Alphabet::T), WorkRole::ALL.map(WorkRole::tag));
+                    queries.push(self.walk(Step::Seed, typed));
+                }
+                if self.scope.repos.is_empty() {
+                    self.gap(
+                        None,
+                        "no repositories declared; code work and repository statuses were not searched",
+                    );
+                } else {
+                    let repos = self.scope.repos.clone();
+                    let code = self
+                        .bounded(&[1617, 1618, 1619, ISSUE])
+                        .author(actor)
+                        .custom_tags(lower(Alphabet::A), repos.clone());
+                    queries.push(self.walk(Step::Seed, code));
+                    // Statuses in the window may judge older work and name
+                    // only the repository owner; their targets are fetched
+                    // and kept only when they are the actor's tasks.
+                    let statuses = self
+                        .bounded(&STATUS_KINDS)
+                        .custom_tags(lower(Alphabet::A), repos);
+                    queries.push(self.walk(Step::ByIssuer, statuses));
+                }
+                let keyed = self
+                    .bounded(&KEYED_OUTCOME_KINDS)
+                    .custom_tags(lower(Alphabet::P), [actor.to_hex()]);
+                queries.push(self.walk(Step::BySubject, keyed));
+            }
+        }
+        queries
+    }
+
+    /// Replies to typed requests, and updates of pull requests.
+    fn linked(&mut self) -> Vec<Query> {
+        let tasks = self.actor_tasks();
+        let requests: Vec<String> = self
+            .in_scope(tasks.as_ref())
+            .filter(|e| matches!(work::read(e), Message::Request(_)))
+            .map(|e| e.id.to_hex())
+            .collect();
+        let roots: Vec<String> = self
+            .in_scope(tasks.as_ref())
+            .filter(|e| e.kind.as_u16() == 1618)
+            .map(|e| e.id.to_hex())
+            .collect();
+        let mut queries = Vec::new();
+        if !requests.is_empty() {
+            let replies = self.bounded(&[9]).custom_tags(lower(Alphabet::E), requests);
+            queries.push(self.walk(Step::Linked, replies));
+        }
+        if !roots.is_empty() {
+            let updates = self
+                .bounded(&[1619])
+                .custom_tags(SingleLetterTag::uppercase(Alphabet::E), roots);
+            queries.push(self.walk(Step::Linked, updates));
+        }
+        queries
+    }
+
+    /// Outcomes on every contribution, PR, and issue.
+    fn outcomes(&mut self) -> Vec<Query> {
+        let tasks = self.actor_tasks();
+        let ids: Vec<String> = self
+            .in_scope(tasks.as_ref())
+            .filter(|e| is_contribution(e) || e.kind.as_u16() == ISSUE)
+            .map(|e| e.id.to_hex())
+            .collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let filter = self
+            .bounded(&OUTCOME_KINDS)
+            .custom_tags(lower(Alphabet::E), ids);
+        vec![self.walk(Step::Outcomes, filter)]
+    }
+
+    /// Repository authority and ref state for every repository touched.
+    fn repos(&mut self) -> Vec<Query> {
+        let tasks = self.actor_tasks();
+        let coords: BTreeSet<Coord> = self
+            .in_scope(tasks.as_ref())
+            .filter(|e| CODE_KINDS.contains(&e.kind.as_u16()) || e.kind.as_u16() == ISSUE)
+            .filter_map(evidence::repo)
+            .collect();
+        let mut queries = Vec::new();
+        for coord in coords {
+            let announcement = Filter::new()
+                .kind(Kind::from(30617))
+                .author(coord.owner)
+                .identifier(coord.d.clone());
+            let state = self.bounded(&[30618]).identifier(coord.d);
+            queries.push(self.walk(Step::Repo, announcement));
+            queries.push(self.walk(Step::RefState, state));
+        }
+        queries
+    }
+
+    /// Fetch, by exact id, events the trail references but has not seen:
+    /// requests, original PRs, previous submissions, and outcome targets.
+    fn context(&mut self) -> Option<Query> {
+        let missing: BTreeSet<EventId> = self
+            .references()
+            .into_iter()
+            .filter(|id| !self.fetch.store.contains_key(id) && !self.asked.contains(id))
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        if self.rounds >= MAX_CONTEXT_ROUNDS {
+            for id in &missing {
+                self.gap(
+                    Some(*id),
+                    &format!(
+                        "not fetched: {MAX_CONTEXT_ROUNDS}-round follow-up budget reached; unknown"
+                    ),
+                );
+            }
+            self.asked.extend(missing);
+            return None;
+        }
+        self.rounds += 1;
+        self.asked.extend(missing.iter().copied());
+        let origin = self.scope.origin.clone();
+        self.fetch.ids(&origin, Step::Targets, missing)
+    }
+
+    fn references(&self) -> BTreeSet<EventId> {
+        let mut out = BTreeSet::new();
+        for stored in self.fetch.store.values().filter(|s| s.valid) {
+            let event = &stored.event;
+            match event.kind.as_u16() {
+                9 => {
+                    if let Message::Part(part) = work::read(event) {
+                        out.insert(part.request);
+                        out.extend(part.previous);
+                    }
+                }
+                1619 => out.extend(single_id(event, "E")),
+                1617 => out.extend(root_e(event)),
+                _ if self.found_as_outcome(stored) => match work::read_label(event) {
+                    Some(Ok(label)) => {
+                        out.insert(label.target);
+                    }
+                    Some(Err(_)) => {}
+                    None if STATUS_KINDS.contains(&event.kind.as_u16()) => {
+                        out.extend(evidence::e_ids(event));
+                    }
+                    None => {}
+                },
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn valid(&self) -> impl Iterator<Item = &Event> {
+        self.fetch
+            .store
+            .values()
+            .filter(|s| s.valid)
+            .map(|s| &s.event)
+    }
+
+    /// In an actor read, the tasks the actor requested or contributed to,
+    /// keyed as [`task_key`]; `None` for other reads, which keep every task.
+    fn actor_tasks(&self) -> Option<BTreeSet<EventId>> {
+        let Entry::Actor(actor) = self.entry else {
+            return None;
+        };
+        Some(
+            self.valid()
+                .filter(|e| e.pubkey == actor && self.declared(e))
+                .filter_map(task_key)
+                .collect(),
+        )
+    }
+
+    /// Whether a work event lies inside the declared channels or
+    /// repositories. Events fetched by id (a status's target, say) may be
+    /// older than the window, but never widen the declared scope.
+    fn declared(&self, event: &Event) -> bool {
+        let kind = event.kind.as_u16();
+        if kind == 9 {
+            evidence::tag_value(event, "h")
+                .is_some_and(|h| self.scope.channels.iter().any(|c| c == h))
+        } else if CODE_KINDS.contains(&kind) || kind == ISSUE {
+            matches!(one_repo(event), Ok(Some(a)) if self.scope.repos.iter().any(|r| r == a))
+        } else {
+            true
+        }
+    }
+
+    /// Valid events that belong to a task in `tasks` (every task if `None`).
+    fn in_scope<'s>(
+        &'s self,
+        tasks: Option<&'s BTreeSet<EventId>>,
+    ) -> impl Iterator<Item = &'s Event> {
+        self.valid()
+            .filter(move |e| tasks.is_none_or(|t| task_key(e).is_some_and(|k| t.contains(&k))))
+    }
+
+    fn found_as_outcome(&self, stored: &Stored) -> bool {
+        stored
+            .scopes
+            .iter()
+            .any(|s| self.fetch.step(*s).is_some_and(Step::finds_outcomes))
+            && OUTCOME_KINDS.contains(&stored.event.kind.as_u16())
+    }
+
+    fn gap(&mut self, id: Option<EventId>, reason: &str) {
+        self.gaps.push(Gap {
+            id: id.map(|id| id.to_hex()),
+            reason: reason.to_owned(),
+        });
+    }
+
+    /// Finish the read and produce the work trail.
+    pub fn finish(self) -> WorkTrail {
+        let judge = Judge {
+            fetch: &self.fetch,
+            owners: self.fetch.owners(|_| true),
+        };
+        let mut reduce = Reduce {
+            trail: &self,
+            judge,
+            actor_tasks: self.actor_tasks(),
+            tasks: BTreeMap::new(),
+            index: BTreeMap::new(),
+            gaps: self.gaps.clone(),
+        };
+        reduce.invalid();
+        reduce.contributions();
+        reduce.outcomes();
+        reduce.conversation();
+        reduce.entry();
+        let Reduce { tasks, gaps, .. } = reduce;
+        let mut tasks: Vec<Task> = tasks.into_values().map(TaskBuild::done).collect();
+        tasks.sort_by_key(|t| {
+            (
+                t.request
+                    .created_at
+                    .or(t.contributions.first().map(|c| c.created_at)),
+                t.request.id.clone(),
+                t.contributions.first().map(|c| c.id.clone()),
+            )
+        });
+        WorkTrail {
+            policy: PolicyRef {
+                name: TRAIL_POLICY.into(),
+                version: 1,
+            },
+            entry: match self.entry {
+                Entry::Request(id) => format!("request {id}"),
+                Entry::Contribution(id) => format!("contribution {id}"),
+                Entry::Actor(pk) => format!("actor {pk}"),
+            },
+            scope: TrailScope {
+                origin: self.scope.origin.clone(),
+                channels: self.scope.channels.clone(),
+                repos: self.scope.repos.clone(),
+                since: self.scope.since,
+                cutoff: self.scope.until,
+            },
+            tasks,
+            gaps,
+            coverage: self.fetch.coverage.iter().map(wording).collect(),
+            records: self.fetch.coverage.clone(),
+            evidence: self.evidence(),
+        }
+    }
+
+    /// Every fetched event as served, kept apart from the reduction.
+    fn evidence(&self) -> Evidence {
+        let events = self
+            .fetch
+            .store
+            .values()
+            .map(|s| {
+                let mut records = s.scopes.clone();
+                records.sort_unstable();
+                EvidenceEvent {
+                    id: s.event.id.to_hex(),
+                    valid: s.valid,
+                    origin: s.origin.clone(),
+                    records,
+                    observed_at: s.observed_at,
+                    event: s.raw.clone(),
+                }
+            })
+            .collect();
+        Evidence {
+            form: EVIDENCE_FORM,
+            events,
+        }
+    }
+}
+
+/// A task while it is being assembled.
+struct TaskBuild<'a> {
+    task: Task,
+    /// The verified requester of a typed request.
+    requester: Option<PublicKey>,
+    /// The original PR, or the root patch of a series.
+    root: Option<&'a Event>,
+    series: bool,
+}
+
+impl TaskBuild<'_> {
+    fn done(mut self) -> Task {
+        let by_time = |a: &Outcome, b: &Outcome| (a.created_at, &a.id).cmp(&(b.created_at, &b.id));
+        self.task
+            .contributions
+            .sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+        for c in &mut self.task.contributions {
+            c.outcomes.sort_by(by_time);
+        }
+        self.task.unbound.sort_by(by_time);
+        self.task
+            .conversation
+            .sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+        self.task
+    }
+}
+
+/// Where a contribution sits, and what outcomes need to know about it.
+struct Placed<'a> {
+    task: EventId,
+    at: usize,
+    event: &'a Event,
+    role: ContributionRole,
+    resolved: bool,
+}
+
+struct Reduce<'a> {
+    trail: &'a Trail,
+    judge: Judge<'a>,
+    actor_tasks: Option<BTreeSet<EventId>>,
+    tasks: BTreeMap<EventId, TaskBuild<'a>>,
+    index: BTreeMap<EventId, Placed<'a>>,
+    gaps: Vec<Gap>,
+}
+
+impl<'a> Reduce<'a> {
+    fn store(&self) -> impl Iterator<Item = &'a Stored> {
+        self.trail.fetch.store.values()
+    }
+
+    fn valid(&self, id: &EventId) -> Option<&'a Event> {
+        self.trail.fetch.valid(id)
+    }
+
+    /// Whether `event` is work outside an actor read's tasks.
+    fn outside(&self, event: &Event) -> bool {
+        self.actor_tasks
+            .as_ref()
+            .is_some_and(|t| task_key(event).is_none_or(|k| !t.contains(&k)))
+    }
+
+    fn gap(&mut self, id: EventId, reason: String) {
+        self.gaps.push(Gap {
+            id: Some(id.to_hex()),
+            reason,
+        });
+    }
+
+    /// Events whose bytes fail verification support nothing.
+    fn invalid(&mut self) {
+        let invalid: Vec<EventId> = self
+            .store()
+            .filter(|s| !s.valid)
+            .map(|s| s.event.id)
+            .collect();
+        for id in invalid {
+            self.gap(
+                id,
+                "id or signature does not verify; supports nothing".into(),
+            );
+        }
+    }
+
+    fn task(&mut self, key: EventId, code: bool) -> &mut TaskBuild<'a> {
+        let request = (!code).then(|| self.valid(&key)).flatten();
+        let fetched = self.trail.fetch.store.contains_key(&key);
+        let root = code.then(|| self.valid(&key)).flatten();
+        self.tasks.entry(key).or_insert_with(|| {
+            let mut req = TaskRequest {
+                id: None,
+                kind: None,
+                requester: None,
+                created_at: None,
+                title: None,
+                task_type: None,
+                acceptance_criteria: Vec::new(),
+                status: "request not linked".into(),
+            };
+            let mut requester = None;
+            if !code {
+                req.id = Some(key.to_hex());
+                req.status = match request.map(|e| (e, work::read(e))) {
+                    Some((e, _)) if e.kind.as_u16() == ISSUE => {
+                        requester = Some(e.pubkey);
+                        req.kind = Some(ISSUE);
+                        req.requester = Some(e.pubkey.to_hex());
+                        req.created_at = Some(e.created_at.as_secs());
+                        req.title = evidence::tag_value(e, "subject").map(str::to_owned);
+                        "code issue; its signer is the requester".into()
+                    }
+                    Some((e, Message::Request(body))) => {
+                        requester = Some(e.pubkey);
+                        req.kind = Some(9);
+                        req.requester = Some(e.pubkey.to_hex());
+                        req.created_at = Some(e.created_at.as_secs());
+                        req.title = Some(body.title);
+                        req.task_type = Some(body.task_type);
+                        req.acceptance_criteria = body.acceptance_criteria;
+                        "typed request; its signer is the requester".into()
+                    }
+                    Some((_, Message::Malformed(reason))) => {
+                        format!("not a typed request ({reason}); requester unknown")
+                    }
+                    Some(_) => "not a typed request; requester unknown".into(),
+                    None if fetched => "request does not verify; requester unknown".into(),
+                    None => "request unavailable to this viewer; requester unknown".into(),
+                };
+            }
+            TaskBuild {
+                task: Task {
+                    request: req,
+                    contributions: Vec::new(),
+                    unbound: Vec::new(),
+                    conversation: Vec::new(),
+                },
+                requester,
+                root,
+                series: false,
+            }
+        })
+    }
+
+    fn place(
+        &mut self,
+        key: EventId,
+        code: bool,
+        event: &'a Event,
+        mentions: &[PublicKey],
+        mut c: Contribution,
+    ) {
+        let task = self.task(key, code);
+        if c.unresolved.is_none() {
+            if let (
+                Some(requester),
+                ContributionRole::Commitment
+                | ContributionRole::Update
+                | ContributionRole::Submission,
+            ) = (task.requester, c.role)
+            {
+                if !mentions.contains(&requester) {
+                    c.unresolved = Some("its p tags do not name the requester".into());
+                }
+            }
+        }
+        let role = c.role;
+        let resolved = c.unresolved.is_none();
+        task.task.contributions.push(c);
+        let at = task.task.contributions.len() - 1;
+        self.index.insert(
+            event.id,
+            Placed {
+                task: key,
+                at,
+                event,
+                role,
+                resolved,
+            },
+        );
+    }
+
+    fn contributions(&mut self) {
+        let events: Vec<&'a Event> = self.store().filter(|s| s.valid).map(|s| &s.event).collect();
+        for event in events {
+            if task_key(event).is_some() && self.outside(event) {
+                continue;
+            }
+            match event.kind.as_u16() {
+                9 => match work::read(event) {
+                    Message::Part(part) => {
+                        let c = self.part(event, &part);
+                        self.place(part.request, false, event, &part.mentions, c);
+                    }
+                    Message::Request(_) => {
+                        self.task(event.id, false);
+                    }
+                    Message::Malformed(reason) if !replies_to_request(event) => {
+                        self.gap(
+                            event.id,
+                            format!(
+                                "tries to be typed work but is not ({reason}); not read as work"
+                            ),
+                        );
+                    }
+                    _ => {}
+                },
+                1618 => {
+                    let unresolved = match (count(event, "c"), count(event, "a")) {
+                        (1, 1) => None,
+                        _ => Some(
+                            "needs exactly one c tip commit and one a repository; revision unknown"
+                                .into(),
+                        ),
+                    };
+                    let c = code(event, ContributionRole::Proposal, unresolved, None);
+                    self.place(event.id, true, event, &[], c);
+                }
+                1619 => match single_id(event, "E") {
+                    Some(root) => {
+                        let unresolved = self.update_link(event, root).err();
+                        let c = code(
+                            event,
+                            ContributionRole::ProposalUpdate,
+                            unresolved,
+                            Some(root),
+                        );
+                        self.place(root, true, event, &[], c);
+                    }
+                    None => self.gap(
+                        event.id,
+                        "pull-request update names no single original PR (E); unresolved".into(),
+                    ),
+                },
+                ISSUE => {
+                    self.task(event.id, false);
+                }
+                1617 => {
+                    let root = root_e(event).unwrap_or(event.id);
+                    let c = code(
+                        event,
+                        ContributionRole::Patch,
+                        Some("patch revisions are series-scoped; revision unknown".into()),
+                        (root != event.id).then_some(root),
+                    );
+                    self.place(root, true, event, &[], c);
+                    if let Some(task) = self.tasks.get_mut(&root) {
+                        task.series = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn part(&mut self, event: &'a Event, part: &Part) -> Contribution {
+        let role = match part.role {
+            WorkRole::Commitment => ContributionRole::Commitment,
+            WorkRole::Update => ContributionRole::Update,
+            _ => ContributionRole::Submission,
+        };
+        let mut previous = part.previous;
+        if let Some(q) = previous {
+            let same = self.valid(&q).is_some_and(|p| {
+                matches!(work::read(p), Message::Part(prior)
+                    if prior.role == WorkRole::Submission && prior.request == part.request)
+            });
+            if !same {
+                previous = None;
+                self.gap(event.id, format!(
+                    "q names {q}, which is not a verified submission to the same request; revision link unresolved"
+                ));
+            }
+        }
+        Contribution {
+            id: event.id.to_hex(),
+            kind: 9,
+            role,
+            signer: event.pubkey.to_hex(),
+            owner_link: evidence::owner_link(event),
+            created_at: event.created_at.as_secs(),
+            summary: Some(part.summary.clone()),
+            state: part.state.clone(),
+            artifact: part.artifact.clone(),
+            revision: part.artifact_revision.clone(),
+            previous: previous.map(|id| id.to_hex()),
+            unresolved: None,
+            outcomes: Vec::new(),
+        }
+    }
+
+    /// Validate a `1619` against its original PR (engineering plan §3, code
+    /// revision binding). The error says why it stays unresolved.
+    fn update_link(&self, update: &Event, root: EventId) -> Result<(), String> {
+        let Some(original) = self.valid(&root).filter(|e| e.kind.as_u16() == 1618) else {
+            return Err(format!(
+                "original PR {root} unavailable or not a verified 1618; unresolved update"
+            ));
+        };
+        pr_revision(original, update)?;
+        let origin = |e: &Event| self.trail.fetch.store.get(&e.id).map(|s| s.origin.as_str());
+        if origin(update) != origin(original) {
+            return Err(
+                "fetched from a different origin than the original PR; unresolved update".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn outcomes(&mut self) {
+        let candidates: Vec<&'a Event> = self
+            .store()
+            .filter(|s| s.valid && self.trail.found_as_outcome(s))
+            .map(|s| &s.event)
+            .collect();
+        for event in candidates {
+            match event.kind.as_u16() {
+                1985 => self.label(event),
+                5 => self.retraction(event),
+                _ => self.status(event),
+            }
+        }
+    }
+
+    fn attach(&mut self, target: EventId, outcome: Outcome) {
+        if let Some(placed) = self.index.get(&target) {
+            let (task, at) = (placed.task, placed.at);
+            if let Some(t) = self.tasks.get_mut(&task) {
+                t.task.contributions[at].outcomes.push(outcome);
+            }
+        }
+    }
+
+    fn label(&mut self, event: &'a Event) {
+        let label = match work::read_label(event) {
+            None => return,
+            Some(Err(reason)) => {
+                return self.gap(event.id, format!("label not interpreted: {reason}"));
+            }
+            Some(Ok(label)) => label,
+        };
+        let Some(placed) = self.index.get(&label.target) else {
+            let why = if self.trail.fetch.store.contains_key(&label.target) {
+                "is not a contribution in this trail; not interpreted"
+            } else {
+                "was not served; unknown"
+            };
+            return self.gap(
+                event.id,
+                format!("label judges {}, which {why}", label.target),
+            );
+        };
+        let target = placed.event;
+        let problem = if !placed.resolved {
+            Some("judges an unresolved contribution")
+        } else if matches!(
+            placed.role,
+            ContributionRole::Commitment | ContributionRole::Update
+        ) {
+            Some("judges a commitment or update; outcomes judge a submitted revision")
+        } else if label.subject != target.pubkey {
+            Some("p does not name the contribution's signer")
+        } else if evidence::tag_value(target, "h") != Some(label.channel.as_str())
+            || count(target, "h") != 1
+        {
+            Some("h does not match the contribution's channel")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return self.gap(event.id, format!("label not interpreted: {problem}"));
+        }
+        let requester = self.tasks.get(&placed.task).and_then(|t| t.requester);
+        let request = placed.task;
+        let authority = match (label.claim, requester) {
+            ("reused", _) => authority(A::Opinion, "anyone may say this; an attributed opinion"),
+            (_, Some(r)) if r == event.pubkey => authority(
+                A::Authorized,
+                &format!("requester: signer of request {request}; for that request only"),
+            ),
+            (_, Some(r)) => authority(
+                A::Opinion,
+                &format!("not the requester ({r}); an attributed opinion, not task state"),
+            ),
+            (_, None) if placed.role == ContributionRole::Submission => authority(
+                A::Unknown,
+                &format!("requester unknown: request {request} unavailable or untyped"),
+            ),
+            (_, None) => authority(A::Opinion, "no typed request; an attributed opinion"),
+        };
+        let outcome = Outcome {
+            id: event.id.to_hex(),
+            kind: 1985,
+            signer: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            claim: label.claim,
+            scope: OutcomeScope::Revision,
+            note: None,
+            authority,
+            relationship: self.judge.relationship(&event.pubkey, &target.pubkey),
+            ref_state: None,
+            reason: Some(label.reason),
+            criteria_checked: label.criteria_checked,
+            evidence_refs: label.evidence_refs,
+        };
+        self.attach(label.target, outcome);
+    }
+
+    /// A deletion by a contribution's own signer withdraws it.
+    fn retraction(&mut self, event: &'a Event) {
+        for id in evidence::e_ids(event) {
+            let own = self
+                .index
+                .get(&id)
+                .is_some_and(|p| p.event.pubkey == event.pubkey);
+            if !own {
+                continue;
+            }
+            let outcome = Outcome {
+                id: event.id.to_hex(),
+                kind: 5,
+                signer: event.pubkey.to_hex(),
+                created_at: event.created_at.as_secs(),
+                claim: "retracted",
+                scope: OutcomeScope::Revision,
+                note: None,
+                authority: authority(A::Authorized, "the contribution's signer withdraws it"),
+                relationship: Independence::SameSigner,
+                ref_state: None,
+                reason: None,
+                criteria_checked: Vec::new(),
+                evidence_refs: Vec::new(),
+            };
+            self.attach(id, outcome);
+        }
+    }
+
+    fn status(&mut self, event: &'a Event) {
+        let key = match status_root(event) {
+            Ok(key) => key,
+            Err(why) => {
+                return self.gap(
+                    event.id,
+                    format!("status {why}; whose work it judges is ambiguous; not interpreted"),
+                );
+            }
+        };
+        if let Some(target) = self.valid(&key) {
+            match (one_repo(event), one_repo(target)) {
+                (Err(why), _) => {
+                    return self.gap(event.id, format!("status {why}; not interpreted"));
+                }
+                (Ok(Some(named)), Ok(actual)) if Some(named) != actual => {
+                    return self.gap(
+                        event.id,
+                        format!(
+                            "status names repository {named}, but its target {key} is in {}; not interpreted",
+                            actual.unwrap_or("no single repository")
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+        match self.valid(&key) {
+            Some(target) if self.outside(target) && task_key(target).is_some() => return,
+            Some(issue) if issue.kind.as_u16() == ISSUE => {
+                return self.request_status(event, key, issue);
+            }
+            None if !self.trail.fetch.store.contains_key(&key) => {
+                return self.gap(
+                    event.id,
+                    format!(
+                        "status names {key}, which was not served; whose work it judges is unknown"
+                    ),
+                );
+            }
+            _ => {}
+        }
+        let Some(task) = self
+            .tasks
+            .get(&key)
+            .filter(|t| t.root.is_some() || t.series || t.task.request.id.is_none())
+        else {
+            return self.gap(event.id, format!(
+                "status names {key}, which is not a PR or patch series in this trail; not interpreted"
+            ));
+        };
+        let (root, series) = (task.root, task.series);
+        let claim = match event.kind.as_u16() {
+            1630 => "open",
+            1631 if series => "applied",
+            1631 => "merged",
+            1632 => "closed",
+            _ => "draft",
+        };
+        let authority = match root {
+            None => authority(A::Unknown, "the PR or series root is unavailable"),
+            Some(r) if claim != "merged" && r.pubkey == event.pubkey => {
+                authority(A::Authorized, "signer of the PR or series")
+            }
+            Some(r) => self.judge.repo_authority(event, r),
+        };
+        let ref_state = (event.kind.as_u16() == 1631).then(|| self.judge.ref_check(event, root));
+        let (bound, scope, note) = if series {
+            (
+                None,
+                OutcomeScope::Series,
+                Some(format!("series-level {claim} claim; revision unknown")),
+            )
+        } else {
+            match self.revision(event, key) {
+                Ok(revision) => (Some(revision), OutcomeScope::Revision, None),
+                Err(why) => {
+                    let what = if claim == "merged" { "merge" } else { claim };
+                    (
+                        None,
+                        OutcomeScope::PullRequest,
+                        Some(format!(
+                            "PR-level {what} claim; judged revision unknown{why}"
+                        )),
+                    )
+                }
+            }
+        };
+        let judged = bound
+            .and_then(|id| self.index.get(&id))
+            .map(|p| p.event.pubkey)
+            .or(root.map(|r| r.pubkey));
+        let outcome = Outcome {
+            id: event.id.to_hex(),
+            kind: event.kind.as_u16(),
+            signer: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            claim,
+            scope,
+            note,
+            authority,
+            relationship: judged.map_or(Independence::Unknown, |pk| {
+                self.judge.relationship(&event.pubkey, &pk)
+            }),
+            ref_state,
+            reason: None,
+            criteria_checked: Vec::new(),
+            evidence_refs: Vec::new(),
+        };
+        match bound {
+            Some(id) => self.attach(id, outcome),
+            None => {
+                if let Some(t) = self.tasks.get_mut(&key) {
+                    t.task.unbound.push(outcome);
+                }
+            }
+        }
+    }
+
+    /// A status of a code issue: about the request, never a contribution.
+    fn request_status(&mut self, event: &'a Event, key: EventId, issue: &'a Event) {
+        let claim = match event.kind.as_u16() {
+            1630 => "open",
+            1631 => "resolved",
+            1632 => "closed",
+            _ => "draft",
+        };
+        let authority = if event.pubkey == issue.pubkey {
+            authority(A::Authorized, "signer of the issue")
+        } else {
+            self.judge.repo_authority(event, issue)
+        };
+        let outcome = Outcome {
+            id: event.id.to_hex(),
+            kind: event.kind.as_u16(),
+            signer: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            claim,
+            scope: OutcomeScope::Request,
+            note: Some(format!(
+                "request-level {claim} claim; judges no contribution"
+            )),
+            authority,
+            relationship: self.judge.relationship(&event.pubkey, &issue.pubkey),
+            ref_state: None,
+            reason: None,
+            criteria_checked: Vec::new(),
+            evidence_refs: Vec::new(),
+        };
+        if let Some(t) = self.tasks.get_mut(&key) {
+            t.task.unbound.push(outcome);
+        }
+    }
+
+    /// The exact revision a status judges: exactly one `e` reply naming the
+    /// original PR or a validated update of it. Never the newest tip. The
+    /// error is a suffix explaining why the revision is unknown.
+    fn revision(&self, event: &Event, root: EventId) -> Result<EventId, String> {
+        // Every raw reply counts: a malformed one is not dropped, it makes
+        // the judged revision ambiguous. `status` already checked that the
+        // repository the status names is its target's.
+        let replies: Vec<Option<EventId>> = marked(event, "reply").collect();
+        let revision = match replies.as_slice() {
+            [] => return Err(String::new()),
+            [Some(one)] => *one,
+            [None] => return Err("; its revision reply is not an event id".into()),
+            _ => return Err("; names more than one revision".into()),
+        };
+        match self.index.get(&revision) {
+            Some(p) if p.task == root && p.resolved => Ok(revision),
+            Some(_) => Err(format!(
+                "; names {revision}, which is not a validated revision of this PR"
+            )),
+            None => Err(format!("; names {revision}, which is unavailable")),
+        }
+    }
+
+    /// Untyped and malformed replies to requests: conversation, with links.
+    fn conversation(&mut self) {
+        let replies: Vec<&'a Event> = self
+            .store()
+            .filter(|s| s.valid && s.event.kind.as_u16() == 9)
+            .map(|s| &s.event)
+            .collect();
+        for event in replies {
+            let note = match work::read(event) {
+                Message::Plain => "conversation; not read as work or acceptance".to_owned(),
+                Message::Malformed(reason) => {
+                    format!("tries to be typed work but is not ({reason}); conversation, not work")
+                }
+                _ => continue,
+            };
+            for id in evidence::e_ids(event).into_iter().collect::<BTreeSet<_>>() {
+                if let Some(task) = self
+                    .tasks
+                    .get_mut(&id)
+                    .filter(|t| t.task.request.id.is_some())
+                {
+                    task.task.conversation.push(Source {
+                        id: event.id.to_hex(),
+                        signer: event.pubkey.to_hex(),
+                        created_at: event.created_at.as_secs(),
+                        note: note.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn entry(&mut self) {
+        let id = match self.trail.entry {
+            Entry::Request(id) | Entry::Contribution(id) => id,
+            Entry::Actor(_) => return,
+        };
+        if !self.trail.fetch.store.contains_key(&id) {
+            self.gap(id, "entry not served to this viewer; unknown".into());
+        } else if self.valid(&id).is_some()
+            && !self.tasks.contains_key(&id)
+            && !self.index.contains_key(&id)
+        {
+            self.gap(
+                id,
+                format!("entry is not typed work or code work under {TRAIL_POLICY}"),
+            );
+        }
+    }
+}
+
+fn code(
+    event: &Event,
+    role: ContributionRole,
+    unresolved: Option<String>,
+    previous: Option<EventId>,
+) -> Contribution {
+    Contribution {
+        id: event.id.to_hex(),
+        kind: event.kind.as_u16(),
+        role,
+        signer: event.pubkey.to_hex(),
+        owner_link: evidence::owner_link(event),
+        created_at: event.created_at.as_secs(),
+        summary: evidence::tag_value(event, "subject").map(str::to_owned),
+        state: None,
+        artifact: None,
+        revision: (count(event, "c") == 1)
+            .then(|| evidence::tag_value(event, "c").map(str::to_owned))
+            .flatten(),
+        previous: previous.map(|id| id.to_hex()),
+        unresolved,
+        outcomes: Vec::new(),
+    }
+}
+
+/// Check that `revision` is a revision of the PR `original` that a status
+/// may judge exactly: `original` itself (a `1618` with one `c` and one `a`),
+/// or a `1619` whose single `E`, `P`, `a`, and `c` name `original`, its
+/// signer, and its repository, signed by that same key (plan §3, code
+/// revision binding). Both events must already be signature-verified and
+/// fetched from one origin; the reader checks origin separately.
+///
+/// Writers call this before signing a revision-level status; the trail
+/// reader applies the same rule again. Delegated update signers are not
+/// supported.
+///
+/// # Errors
+///
+/// Returns why `revision` cannot be bound to `original`.
+pub fn pr_revision(original: &Event, revision: &Event) -> Result<(), String> {
+    if original.kind.as_u16() != 1618 {
+        return Err(format!("{} is not a 1618 pull request", original.id));
+    }
+    if count(original, "c") != 1 || count(original, "a") != 1 {
+        return Err(format!(
+            "original PR {} needs exactly one c tip commit and one a repository",
+            original.id
+        ));
+    }
+    if revision.id == original.id {
+        return Ok(());
+    }
+    if revision.kind.as_u16() != 1619 {
+        return Err(format!(
+            "{} is neither the original PR nor a 1619 update",
+            revision.id
+        ));
+    }
+    for name in ["E", "P", "a", "c"] {
+        if count(revision, name) != 1 {
+            return Err(format!("needs exactly one {name} tag; unresolved update"));
+        }
+    }
+    if single_id(revision, "E") != Some(original.id) {
+        return Err("E does not name the original PR; unresolved update".into());
+    }
+    if evidence::tag_value(revision, "P") != Some(original.pubkey.to_hex().as_str()) {
+        return Err("P does not name the original PR's signer; unresolved update".into());
+    }
+    if evidence::tag_value(revision, "a") != evidence::tag_value(original, "a") {
+        return Err("names a different repository than the original PR; unresolved update".into());
+    }
+    if revision.pubkey != original.pubkey {
+        return Err("signed by a key other than the original PR's signer; unresolved update (delegation is not supported)".into());
+    }
+    Ok(())
+}
+
+/// The task an event of work belongs to: a request or issue is its own task,
+/// a typed part belongs to its request, an update to its original PR, and a
+/// patch to its series root.
+fn task_key(event: &Event) -> Option<EventId> {
+    match event.kind.as_u16() {
+        9 => match work::read(event) {
+            Message::Request(_) => Some(event.id),
+            Message::Part(part) => Some(part.request),
+            _ => None,
+        },
+        1618 | ISSUE => Some(event.id),
+        1619 => single_id(event, "E"),
+        1617 => Some(root_e(event).unwrap_or(event.id)),
+        _ => None,
+    }
+}
+
+fn is_contribution(event: &Event) -> bool {
+    CODE_KINDS.contains(&event.kind.as_u16()) || matches!(work::read(event), Message::Part(_))
+}
+
+fn replies_to_request(event: &Event) -> bool {
+    evidence::tags(event, "e").next().is_some()
+}
+
+fn count(event: &Event, name: &str) -> usize {
+    evidence::tags(event, name).count()
+}
+
+fn single_id(event: &Event, name: &str) -> Option<EventId> {
+    let mut values = evidence::tags(event, name).filter_map(|p| p.get(1));
+    match (values.next(), values.next()) {
+        (Some(id), None) => EventId::from_hex(id).ok(),
+        _ => None,
+    }
+}
+
+/// Every `e` tag marked `marker`, parsed: `None` for one that does not name
+/// an event id, so malformed references are counted, never dropped.
+fn marked<'e>(event: &'e Event, marker: &'e str) -> impl Iterator<Item = Option<EventId>> + 'e {
+    evidence::tags(event, "e")
+        .filter(move |p| p.get(3).is_some_and(|m| m == marker))
+        .map(|p| p.get(1).and_then(|id| EventId::from_hex(id).ok()))
+}
+
+/// The work a status judges: its one `root`-marked `e` tag. A missing,
+/// repeated, or malformed root makes the status ambiguous.
+fn status_root(event: &Event) -> Result<EventId, String> {
+    let roots: Vec<Option<EventId>> = marked(event, "root").collect();
+    match roots.as_slice() {
+        [Some(root)] => Ok(*root),
+        [] => Err("names no root-marked e tag".into()),
+        [None] => Err("names a root that is not an event id".into()),
+        _ => Err(format!("names {} roots", roots.len())),
+    }
+}
+
+/// The repository an event names: every `30617` `a` tag must agree.
+fn one_repo(event: &Event) -> Result<Option<&str>, String> {
+    let named: BTreeSet<&str> = evidence::tags(event, "a")
+        .filter_map(|p| p.get(1))
+        .map(String::as_str)
+        .filter(|a| a.starts_with("30617:"))
+        .collect();
+    match named.len() {
+        0 => Ok(None),
+        1 => Ok(named.into_iter().next()),
+        n => Err(format!("names {n} different repositories")),
+    }
+}
+
+fn root_e(event: &Event) -> Option<EventId> {
+    evidence::tags(event, "e")
+        .find(|p| p.get(3).is_some_and(|m| m == "root"))
+        .and_then(|p| p.get(1))
+        .and_then(|id| EventId::from_hex(id).ok())
+}
+
+fn lower(letter: Alphabet) -> SingleLetterTag {
+    SingleLetterTag::lowercase(letter)
+}

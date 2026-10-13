@@ -319,6 +319,47 @@ pub fn verify_auth_tag_for_auth_event(
     Ok(owner_pubkey)
 }
 
+/// Verify a NIP-OA `auth` tag carried by `event`.
+///
+/// The tag must verify for `event.pubkey`, and every clause of its conditions
+/// must hold for the event: `kind=` against `event.kind`, and the strict
+/// `created_at<` / `created_at>` bounds against `event.created_at`.
+///
+/// Returns the owner's [`PublicKey`] on success.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] when the tag is invalid or a condition
+/// does not hold for the event.
+pub fn verify_auth_tag_for_event(
+    auth_tag_json: &str,
+    event: &nostr::Event,
+) -> Result<PublicKey, SdkError> {
+    let parsed = parse_auth_tag_fields(auth_tag_json)?;
+    let owner_pubkey = verify_parsed_auth_tag(&parsed, &event.pubkey)?;
+    let kind = u64::from(event.kind.as_u16());
+    let created_at = event.created_at.as_secs();
+    let holds = parsed.conditions.is_empty()
+        || parsed.conditions.split('&').all(|clause| {
+            if let Some(value) = clause.strip_prefix("kind=") {
+                value.parse::<u64>() == Ok(kind)
+            } else if let Some(value) = clause.strip_prefix("created_at<") {
+                value.parse::<u64>().is_ok_and(|bound| created_at < bound)
+            } else if let Some(value) = clause.strip_prefix("created_at>") {
+                value.parse::<u64>().is_ok_and(|bound| created_at > bound)
+            } else {
+                false
+            }
+        });
+    if !holds {
+        return Err(SdkError::InvalidInput(format!(
+            "auth conditions {:?} do not hold for this event",
+            parsed.conditions
+        )));
+    }
+    Ok(owner_pubkey)
+}
+
 /// Parse a NIP-OA `auth` tag JSON string into a [`Tag`] without verifying the
 /// signature.
 ///
@@ -689,6 +730,45 @@ mod tests {
             verify_auth_tag_for_auth_event(&in_window, &agent_pubkey, 200)
                 .expect("in-window credential passes"),
             owner_keys.public_key()
+        );
+    }
+
+    #[test]
+    fn event_conditions_bind_kind_and_time_of_the_carrying_event() {
+        let owner_keys = Keys::generate();
+        let agent = Keys::generate();
+        let sign = |conditions: &str, kind: u16, at: u64| {
+            let tag = compute_auth_tag(&owner_keys, &agent.public_key(), conditions)
+                .expect("sign credential");
+            let event = nostr::EventBuilder::new(nostr::Kind::from(kind), "")
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&agent)
+                .expect("sign event");
+            verify_auth_tag_for_event(&tag, &event)
+        };
+        assert_eq!(
+            sign("", 1, 5).expect("empty conditions"),
+            owner_keys.public_key()
+        );
+        assert!(sign("kind=1631&created_at>9&created_at<11", 1631, 10).is_ok());
+        assert!(sign("kind=1631", 1632, 10).is_err(), "kind must match");
+        assert!(
+            sign("created_at<10", 1, 10).is_err(),
+            "upper bound is strict"
+        );
+        assert!(
+            sign("created_at>10", 1, 10).is_err(),
+            "lower bound is strict"
+        );
+
+        let other = Keys::generate();
+        let tag = compute_auth_tag(&owner_keys, &agent.public_key(), "").expect("sign");
+        let event = nostr::EventBuilder::new(nostr::Kind::from(1), "")
+            .sign_with_keys(&other)
+            .expect("sign event");
+        assert!(
+            verify_auth_tag_for_event(&tag, &event).is_err(),
+            "a tag lifted onto another signer's event is no link"
         );
     }
 

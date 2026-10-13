@@ -1,4 +1,5 @@
 use crate::client::BuzzClient;
+use crate::commands::trust::fetch_verified;
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{
@@ -169,6 +170,7 @@ pub async fn cmd_pr_status(
     euc: Option<&str>,
     to: &[String],
     merge_commit: Option<&str>,
+    revision: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(pr)?;
     let status = crate::commands::patches::parse_status(status)?;
@@ -204,9 +206,14 @@ pub async fn cmd_pr_status(
         }
     }
 
+    if let Some(revision) = revision {
+        validate_hex64(revision)?;
+        check_revision(client, pr, revision, repo.as_ref()).await?;
+    }
+
     let meta = GitStatusMeta {
         root_event: pr.to_string(),
-        accepted_revision_root: None,
+        accepted_revision_root: revision.map(str::to_string),
         repo,
         euc: euc.map(str::to_string),
         recipients,
@@ -220,6 +227,41 @@ pub async fn cmd_pr_status(
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
+    Ok(())
+}
+
+/// Refuse to sign a revision-level status the trail reader would not bind:
+/// fetch the PR and the named revision, verify both, and apply the reader's
+/// rule ([`buzz_sdk::trust::pr_revision`]). Other writers can still publish
+/// unchecked claims; readers show those as revision-unknown.
+async fn check_revision(
+    client: &BuzzClient,
+    pr: &str,
+    revision: &str,
+    repo: Option<&GitRepoCoord>,
+) -> Result<(), CliError> {
+    let original = fetch_verified(client, pr).await?;
+    let judged = if revision == pr {
+        original.clone()
+    } else {
+        fetch_verified(client, revision).await?
+    };
+    buzz_sdk::trust::pr_revision(&original, &judged)
+        .map_err(|why| CliError::Usage(format!("--revision {revision}: {why}")))?;
+    if let Some(repo) = repo {
+        let named = format!("30617:{}:{}", repo.owner, repo.id);
+        let pr_repo = original
+            .tags
+            .iter()
+            .find(|t| t.kind() == nostr::TagKind::a())
+            .and_then(|t| t.content());
+        if pr_repo != Some(named.as_str()) {
+            return Err(CliError::Usage(format!(
+                "--repo-owner/--repo-id name {named}, but PR {pr} is in {}",
+                pr_repo.unwrap_or("no repository")
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -318,6 +360,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
             euc,
             to,
             merge_commit,
+            revision,
         } => {
             cmd_pr_status(
                 client,
@@ -330,6 +373,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
                 euc.as_deref(),
                 &to,
                 merge_commit.as_deref(),
+                revision.as_deref(),
             )
             .await
         }

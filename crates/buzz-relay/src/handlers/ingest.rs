@@ -21,20 +21,20 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_LABEL, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, KIND_WORK_FINGERPRINT, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -594,6 +594,11 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // NIP-MP: a project is repository metadata — grouping repositories needs
         // the same scope as announcing them.
         KIND_PROJECT => Ok(Scope::ReposWrite),
+        // NIP-FP: a work fingerprint is the subject's own public claim about
+        // which of its work to show, written like long-form content.
+        KIND_WORK_FINGERPRINT => Ok(Scope::MessagesWrite),
+        // NIP-32 label on one channel event; written like a reply to it.
+        KIND_LABEL => Ok(Scope::MessagesWrite),
         KIND_GIT_PATCH
         | KIND_GIT_PULL_REQUEST
         | KIND_GIT_PR_UPDATE
@@ -622,6 +627,77 @@ pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
         }
     }
     None
+}
+
+/// The one target of a kind:1985 label, checked before any lookup.
+///
+/// First slice (engineering plan §3): exactly one `e` (the target), exactly
+/// one `p` (its signer), exactly one `h`, at least one `l`, and no other
+/// NIP-32 target (`a`, `r`, `t`, `q`), so a label never mixes scopes.
+pub(crate) fn label_target_id(event: &Event) -> Result<Vec<u8>, &'static str> {
+    let values = |name: &str| -> Vec<&str> {
+        event
+            .tags
+            .iter()
+            .filter(|t| t.kind().to_string() == name)
+            .map(|t| t.content().unwrap_or(""))
+            .collect()
+    };
+    if ["a", "r", "t", "q"].iter().any(|n| !values(n).is_empty()) {
+        return Err("invalid: a label may target only one event (no a, r, t or q tags)");
+    }
+    if values("l").is_empty() {
+        return Err("invalid: a label needs an l tag");
+    }
+    let [target] = values("e")[..] else {
+        return Err("invalid: a label needs exactly one e tag naming its target");
+    };
+    if values("p").len() != 1 {
+        return Err("invalid: a label needs exactly one p tag naming the target's signer");
+    }
+    if values("h").len() != 1 {
+        return Err("invalid: a label needs exactly one h tag naming the target's channel");
+    }
+    match hex::decode(target) {
+        Ok(bytes) if bytes.len() == 32 => Ok(bytes),
+        _ => Err("invalid: label target is not an event id"),
+    }
+}
+
+/// One rejection for every label target that is missing, global, deleted, or
+/// in a channel that is not open, so the label path is no oracle for events
+/// the writer cannot already see.
+const LABEL_TARGET_UNAVAILABLE: &str =
+    "restricted: label target must be an event in an open channel";
+
+/// First slice gate for a kind:1985 label, after its target is looked up.
+///
+/// The channel is the stored target's channel, and it must be an open, live,
+/// non-DM channel: private work outcomes wait for target-inherited access
+/// (engineering plan §3). Only then are the label's own tags compared: its
+/// `h` must equal the target's channel and its `p` the target's signer.
+pub(crate) fn check_label_target(
+    event: &Event,
+    target_signer: &nostr::PublicKey,
+    channel: Option<&buzz_db::channel::ChannelRecord>,
+) -> Result<(), &'static str> {
+    let Some(ch) = channel
+        .filter(|ch| ch.visibility == "open" && ch.channel_type != "dm" && ch.deleted_at.is_none())
+    else {
+        return Err(LABEL_TARGET_UNAVAILABLE);
+    };
+    if extract_channel_id(event) != Some(ch.id) {
+        return Err("invalid: label h tag does not match the target's channel");
+    }
+    let p = event
+        .tags
+        .iter()
+        .find(|t| t.kind().to_string() == "p")
+        .and_then(|t| t.content());
+    if p != Some(target_signer.to_hex().as_str()) {
+        return Err("invalid: label p tag does not name the target's signer");
+    }
+    Ok(())
 }
 
 /// Result of resolving a reaction's target channel.
@@ -738,6 +814,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // `buzz-channel` tag is a metadata reference, not a routing directive,
             // so a project's state is never channel-scoped.
             | KIND_PROJECT
+            // NIP-FP: a work fingerprint is addressed by (pubkey, kind, d_tag) and
+            // may index work across channels and relays, so it is never
+            // channel-scoped.
+            | KIND_WORK_FINGERPRINT
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -2597,6 +2677,9 @@ async fn ingest_event_inner(
         });
     }
 
+    // Set only for kind:1985: the stored target's signer, checked against the
+    // label's `p` once the target's channel row is loaded.
+    let mut label_target_signer = None;
     let mut channel_id = if kind_u32 == KIND_REACTION {
         match derive_reaction_channel(tenant.community(), &state.db, &event).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
@@ -2619,6 +2702,20 @@ async fn ingest_event_inner(
         }
     } else if is_gift_wrap {
         None
+    } else if kind_u32 == KIND_LABEL {
+        let target_id = label_target_id(&event).map_err(|e| IngestError::Rejected(e.into()))?;
+        let target = state
+            .db
+            .get_event_by_id_for_event_write(tenant.community(), &target_id)
+            .await
+            .map_err(|e| {
+                IngestError::Internal(format!(
+                    "error: internal error looking up label target: {e}"
+                ))
+            })?
+            .ok_or_else(|| IngestError::Rejected(LABEL_TARGET_UNAVAILABLE.into()))?;
+        label_target_signer = Some(target.event.pubkey);
+        target.channel_id
     } else if kind_u32 == KIND_DELETION {
         // Standard deletion (kind:5): derive channel from the target event.
         // kind:5 events don't carry an h-tag, so we look up the target event
@@ -2695,6 +2792,10 @@ async fn ingest_event_inner(
         Some(ch_id) => load_channel_for_write(tenant, state, ch_id).await?,
         None => None,
     };
+    if let Some(signer) = &label_target_signer {
+        check_label_target(&event, signer, channel_row.as_ref())
+            .map_err(|e| IngestError::Rejected(e.into()))?;
+    }
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
     // here, through the same `channel_visibility_cached` gate fan-out uses
     // (fence 2: cached `private` wins over the prefetched row; a `private`
@@ -4066,6 +4167,18 @@ mod postgres_tests {
     fn long_form_is_global_only() {
         // kind:30023 is always global — ingest nulls channel_id even if an h-tag is present
         assert!(is_global_only_kind(KIND_LONG_FORM));
+    }
+
+    #[test]
+    fn work_fingerprint_is_a_global_member_write() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_WORK_FINGERPRINT, &dummy),
+            Ok(Scope::MessagesWrite),
+            "kind:30340 must be accepted as an ordinary member write"
+        );
+        assert!(is_global_only_kind(KIND_WORK_FINGERPRINT));
+        assert!(!requires_h_channel_scope(KIND_WORK_FINGERPRINT));
     }
 
     #[test]
@@ -6487,6 +6600,202 @@ mod postgres_tests {
             Ok(_) => panic!("a failed channel lookup must deny the post, got accepted"),
         }
         assert_eq!(stored, 0, "denied post must not be stored");
+    }
+
+    /// kind:1985 labels are accepted only on a stored event in an open
+    /// channel, with `h` equal to the target's channel and `p` its signer.
+    /// Private, global, and unknown targets share one rejection, so the label
+    /// path reveals nothing about events the writer cannot already see.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn label_ingest_is_target_derived_and_open_channel_only() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use nostr::{Keys, Tag};
+
+        let db_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect test Postgres");
+        let state = build_canvas_ingest_state(&db_url, &pool).await;
+        let host = format!("label-ingest-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+
+        let author = Keys::generate();
+        let judge = Keys::generate();
+        let outsider = Keys::generate();
+        let channel = |visibility| {
+            let state = state.clone();
+            let creator = author.public_key().to_bytes();
+            async move {
+                let id = Uuid::new_v4();
+                state
+                    .db
+                    .create_channel_with_id(
+                        community,
+                        id,
+                        &format!("label-{}", id.simple()),
+                        ChannelType::Stream,
+                        visibility,
+                        None,
+                        creator.as_slice(),
+                        None,
+                    )
+                    .await
+                    .expect("create channel");
+                id
+            }
+        };
+        let open = channel(ChannelVisibility::Open).await;
+        let private = channel(ChannelVisibility::Private).await;
+        for ch in [open, private] {
+            for k in [&author, &judge] {
+                state
+                    .membership_cache
+                    .insert((community, ch, k.public_key().to_bytes().to_vec()), true);
+            }
+        }
+
+        let stored_target = |kind: u16, channel: Option<Uuid>| {
+            let state = state.clone();
+            let author = author.clone();
+            async move {
+                let mut b = EventBuilder::new(Kind::Custom(kind), "work");
+                if let Some(ch) = channel {
+                    b = b.tags([Tag::parse(["h", &ch.to_string()]).unwrap()]);
+                }
+                let event = b.sign_with_keys(&author).expect("sign target");
+                state
+                    .db
+                    .insert_event(community, &event, channel)
+                    .await
+                    .expect("store target");
+                event
+            }
+        };
+        let open_work = stored_target(9, Some(open)).await;
+        let private_work = stored_target(9, Some(private)).await;
+        let global_work = stored_target(1, None).await;
+
+        let label = |signer: &Keys, tags: Vec<Vec<String>>| {
+            let mut all = vec![
+                vec!["L".to_string(), "buzz.wot".to_string()],
+                vec!["l".into(), "accepted".into(), "buzz.wot".into()],
+            ];
+            all.extend(tags);
+            EventBuilder::new(Kind::Custom(KIND_LABEL as u16), "{}")
+                .tags(all.into_iter().map(|t| Tag::parse(t).unwrap()))
+                .allow_self_tagging()
+                .sign_with_keys(signer)
+                .expect("sign label")
+        };
+        let on = |target: &nostr::Event, h: Uuid, p: nostr::PublicKey| {
+            vec![
+                vec!["e".to_string(), target.id.to_hex()],
+                vec!["p".into(), p.to_hex()],
+                vec!["h".into(), h.to_string()],
+            ]
+        };
+        let submit = |signer: &Keys, event: nostr::Event| {
+            let state = state.clone();
+            let tracer = tracer.clone();
+            let tenant = tenant.clone();
+            let auth = IngestAuth::Http {
+                pubkey: signer.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            async move {
+                let id = event.id.to_bytes().to_vec();
+                let result = ingest_event_inner(&state, &tracer, &tenant, event, auth).await;
+                let stored: Option<Option<Uuid>> =
+                    sqlx::query_scalar("SELECT channel_id FROM events WHERE id = $1")
+                        .bind(&id)
+                        .fetch_optional(state.db.pool())
+                        .await
+                        .expect("read back");
+                (result.map(|_| ()), stored)
+            }
+        };
+        let rejected = |(result, stored): (Result<(), IngestError>, Option<Option<Uuid>>)| {
+            assert_eq!(stored, None, "a rejected label must not be stored");
+            match result {
+                Err(IngestError::Rejected(reason)) => reason,
+                other => panic!("expected a rejection, got {other:?}"),
+            }
+        };
+        let author_pk = author.public_key();
+
+        // Accepted: an outcome on open-channel work lands in that channel —
+        // including a self-judgment, which stays visible for readers to qualify.
+        for signer in [&judge, &author, &outsider] {
+            let (result, stored) =
+                submit(signer, label(signer, on(&open_work, open, author_pk))).await;
+            assert!(
+                result.is_ok(),
+                "open-channel label must be accepted: {result:?}"
+            );
+            assert_eq!(
+                stored,
+                Some(Some(open)),
+                "stored under the target's channel"
+            );
+        }
+
+        // The label's own tags are checked against the target, never trusted.
+        assert_eq!(
+            rejected(submit(&judge, label(&judge, on(&open_work, private, author_pk))).await),
+            "invalid: label h tag does not match the target's channel"
+        );
+        assert_eq!(
+            rejected(
+                submit(
+                    &judge,
+                    label(&judge, on(&open_work, open, judge.public_key()))
+                )
+                .await
+            ),
+            "invalid: label p tag does not name the target's signer"
+        );
+        let mut two_targets = on(&open_work, open, author_pk);
+        two_targets.push(vec!["e".into(), private_work.id.to_hex()]);
+        assert_eq!(
+            rejected(submit(&judge, label(&judge, two_targets)).await),
+            "invalid: a label needs exactly one e tag naming its target"
+        );
+        let mut mixed = on(&open_work, open, author_pk);
+        mixed.push(vec!["t".into(), "work".into()]);
+        assert_eq!(
+            rejected(submit(&judge, label(&judge, mixed)).await),
+            "invalid: a label may target only one event (no a, r, t or q tags)"
+        );
+
+        // Private (even for a member), global, and unknown targets: one answer.
+        let unknown = nostr::EventId::from_slice(&[7u8; 32]).unwrap();
+        let mut unknown_tags = on(&open_work, open, author_pk);
+        unknown_tags[0][1] = unknown.to_hex();
+        for tags in [
+            on(&private_work, private, author_pk),
+            on(&global_work, open, author_pk),
+            unknown_tags,
+        ] {
+            assert_eq!(
+                rejected(submit(&judge, label(&judge, tags.clone())).await),
+                LABEL_TARGET_UNAVAILABLE
+            );
+            assert_eq!(
+                rejected(submit(&outsider, label(&outsider, tags)).await),
+                LABEL_TARGET_UNAVAILABLE
+            );
+        }
     }
 
     /// An artifact move whose source-channel lookup fails is an internal
