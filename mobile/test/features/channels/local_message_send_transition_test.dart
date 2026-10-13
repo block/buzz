@@ -92,36 +92,37 @@ void main() {
       closeTo(history.top - 80, 0.01),
     );
   });
-  testWidgets('contraction leads the overlapping lift and settles first', (
-    tester,
-  ) async {
+  testWidgets('spring contraction leads the overlapping lift', (tester) async {
     await tester.pumpWidget(_testable());
     LocalSendProgress motion() => tester.widget(find.byType(LocalSendProgress));
     await tester.pump(localMessageSendTransitionDuration ~/ 4);
     expect(motion().widthProgress, greaterThan(motion().progress));
     expect(motion().progress, greaterThan(0));
     await tester.pump(localMessageSendTransitionDuration * 0.375);
-    expect(motion().widthProgress, 1);
+    expect(motion().widthProgress, greaterThan(1));
     expect(motion().progress, inExclusiveRange(0, 1));
     await tester.pump(localMessageSendTransitionDuration * 0.375);
     expect(motion().progress, 1);
   });
-  testWidgets('late settling shrinks the bubble and returns to full size', (
-    tester,
-  ) async {
-    await tester.pumpWidget(_testable());
-    LocalSendProgress motion() => tester.widget(find.byType(LocalSendProgress));
-    final avatar = tester.getRect(find.byKey(const ValueKey('avatar')));
-    expect(motion().settleScale, 1);
-    await tester.pump(localMessageSendTransitionDuration * 0.55);
-    expect(motion().settleScale, 1);
-    await tester.pump(localMessageSendTransitionDuration * 0.23);
-    expect(motion().settleScale, closeTo(0.96, 0.0001));
-    expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
-    await tester.pump(localMessageSendTransitionDuration * 0.22);
-    expect(motion().settleScale, 1);
-    expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
-  });
+  testWidgets(
+    'spring gently overshoots width and settles with the avatar fixed',
+    (tester) async {
+      await tester.pumpWidget(_testable());
+      LocalSendProgress motion() =>
+          tester.widget(find.byType(LocalSendProgress));
+      final avatar = tester.getRect(find.byKey(const ValueKey('avatar')));
+      expect(motion().widthProgress, 0);
+      await tester.pump(localMessageSendTransitionDuration * 0.65);
+      final peak = motion().widthProgress!;
+      expect(peak, inExclusiveRange(1, 1.02));
+      expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
+      await tester.pump(localMessageSendTransitionDuration * 0.2);
+      expect(motion().widthProgress, inExclusiveRange(1, peak));
+      await tester.pump(localMessageSendTransitionDuration * 0.15);
+      expect(motion().widthProgress, 1);
+      expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
+    },
+  );
   for (final reduced in [false, true]) {
     testWidgets('settled or reduced motion does not expand, reduced=$reduced', (
       tester,
@@ -133,7 +134,7 @@ void main() {
       expect(
         tester
             .widget<LocalSendProgress>(find.byType(LocalSendProgress))
-            .settleScale,
+            .widthProgress,
         1,
       );
       await tester.pump(const Duration(milliseconds: 100));

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'composer_send_origin.dart';
@@ -9,13 +10,25 @@ import 'local_send_row.dart';
 /// Duration of a local message's entrance transition.
 const localMessageSendTransitionDuration = Duration(milliseconds: 500);
 
-// A small late undershoot lets the bubble settle without moving its avatar.
-double _settleScale(double time) {
-  if (time <= 0.55 || time >= 1) return 1;
-  if (time < 0.78) {
-    return 1 - 0.04 * Curves.easeInOutSine.transform((time - 0.55) / 0.23);
-  }
-  return 0.96 + 0.04 * Curves.easeOutCubic.transform((time - 0.78) / 0.22);
+// A damped spring contracts quickly, gently passes the target width, then
+// settles. Normalize the endpoint so there is no snap when the clock completes.
+final _contractionSpring = _SendContractionSpring();
+
+class _SendContractionSpring extends Curve {
+  final _simulation = SpringSimulation(
+    SpringDescription.withDampingRatio(mass: 1, stiffness: 256, ratio: 0.82),
+    0,
+    1,
+    4,
+  );
+
+  double get _seconds =>
+      localMessageSendTransitionDuration.inMicroseconds /
+      Duration.microsecondsPerSecond;
+
+  @override
+  double transformInternal(double t) =>
+      _simulation.x(t * _seconds) / _simulation.x(_seconds);
 }
 
 /// Default travel multiplier for a message entrance.
@@ -89,12 +102,7 @@ class LocalMessageSendTransition extends HookConsumerWidget {
           1,
           curve: Curves.easeInOutCubic,
         ).transform(controller.value),
-        widthProgress: const Interval(
-          0,
-          0.6,
-          curve: Curves.easeInOutCubic,
-        ).transform(controller.value),
-        settleScale: _settleScale(controller.value),
+        widthProgress: _contractionSpring.transform(controller.value),
         origin: origin,
         startOffset: 24 * startOffsetFactor,
         // History follows the lift, while width contracts ahead of it.
@@ -118,14 +126,10 @@ class LocalSendProgress extends InheritedWidget {
     super.key,
     required this.progress,
     this.widthProgress,
-    this.settleScale = 1,
     this.origin,
     this.startOffset = 36,
     required super.child,
   });
-
-  /// Paint-only scale for the late shrink and return to resting size.
-  final double settleScale;
 
   /// Horizontal contraction, independent of vertical travel.
   /// Defaults to [progress] for surfaces without a staged entrance.
@@ -154,6 +158,5 @@ class LocalSendProgress extends InheritedWidget {
   @override
   bool updateShouldNotify(LocalSendProgress oldWidget) =>
       progress != oldWidget.progress ||
-      widthProgress != oldWidget.widthProgress ||
-      settleScale != oldWidget.settleScale;
+      widthProgress != oldWidget.widthProgress;
 }

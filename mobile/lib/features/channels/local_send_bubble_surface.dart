@@ -4,7 +4,7 @@ import 'package:flutter/rendering.dart';
 import 'local_message_send_transition.dart';
 
 /// Paints a local-send bubble from the captured composer rectangle.
-/// The text keeps its final layout while sharing the bubble's subtle settling scale.
+/// The text travels with the bubble while keeping its final size and wrapping.
 class LocalSendBubbleSurface extends SingleChildRenderObjectWidget {
   /// Creates an animated background without changing the child layout.
   const LocalSendBubbleSurface({
@@ -100,25 +100,6 @@ class _RenderSendBubble extends RenderProxyBox {
       horizontal.width,
       vertical.height,
     );
-    final scale = motion?.settleScale ?? 1;
-    if (scale == 1) {
-      _paintBubble(context, offset, rect);
-      return;
-    }
-    // Scale only the bubble and its text, around the lower leading corner.
-    // Row allocation, reaction controls, and avatar geometry remain unchanged.
-    context.pushTransform(
-      needsCompositing,
-      offset,
-      Matrix4.identity()
-        ..translateByDouble(rect.left, rect.bottom, 0, 1)
-        ..scaleByDouble(scale, scale, 1, 1)
-        ..translateByDouble(-rect.left, -rect.bottom, 0, 1),
-      (context, offset) => _paintBubble(context, offset, rect),
-    );
-  }
-
-  void _paintBubble(PaintingContext context, Offset offset, Rect rect) {
     final path = shape.getOuterPath(rect.shift(offset));
     context.canvas.drawPath(path, Paint()..color = color);
     if (child case final child?) {
