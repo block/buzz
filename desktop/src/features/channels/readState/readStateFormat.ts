@@ -6,7 +6,12 @@ export interface ReadStateBlob {
 
 export const READ_STATE_D_TAG_PREFIX = "read-state:";
 export const READ_STATE_FETCH_LIMIT = 500;
-export const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
+// One span for every unread/Inbox window, shared by web (PWA) and desktop so
+// both count the same items: Inbox DM/thread-reply rows, the kind:30078
+// read-marker fetch, local marker pruning, and the native observed-unread
+// store (desktop/src-tauri/src/observed_unread.rs mirrors this value).
+export const INBOX_WINDOW_SECONDS = 14 * 24 * 60 * 60;
+export const READ_STATE_HORIZON_SECONDS = INBOX_WINDOW_SECONDS;
 
 export const MAX_CONTEXTS = 10_000;
 

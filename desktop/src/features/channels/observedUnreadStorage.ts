@@ -17,7 +17,7 @@
  *  - Registered in PURE_CACHE_KEY_PREFIXES so the 2 MiB LRU eviction budget applies.
  *  - Payload includes `updatedAt` (ms timestamp) for LRU ordering across scopes.
  *  - Field-level validation: malformed or non-finite values are discarded silently.
- *  - Age pruning: events older than READ_STATE_HORIZON_SECONDS (7 days) are dropped.
+ *  - Age pruning: events older than READ_STATE_HORIZON_SECONDS (14 days) are dropped.
  *  - Per-channel cap: newest CATCH_UP_LIMIT events per channel.
  *  - Global cap: newest GLOBAL_OBSERVED_UNREAD_CAP events across all channels.
  *  - Write failure is non-fatal; callers degrade to session-only behavior.

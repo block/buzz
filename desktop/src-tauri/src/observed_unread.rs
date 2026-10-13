@@ -24,7 +24,8 @@ use tauri::{AppHandle, Manager, State};
 const SCHEMA_VERSION: i64 = 1;
 const PER_CHANNEL_CAP: i64 = 1_000;
 const GLOBAL_CAP: i64 = 5_000;
-const HORIZON_SECONDS: i64 = 7 * 24 * 60 * 60;
+// Must equal INBOX_WINDOW_SECONDS in desktop/src/features/channels/readState/readStateFormat.ts.
+const HORIZON_SECONDS: i64 = 14 * 24 * 60 * 60;
 
 /// Serializes the two observed-unread commands against each other.
 ///

@@ -31,6 +31,7 @@ import {
   KIND_DM_VISIBILITY,
   KIND_READ_STATE,
 } from "@/shared/constants/kinds";
+import { READ_STATE_HORIZON_SECONDS } from "@/features/channels/readState/readStateFormat";
 
 const KIND_NIP29_GROUP_METADATA = 39000;
 const KIND_NIP29_GROUP_MEMBERS = 39002;
@@ -87,7 +88,6 @@ const METADATA_LIMIT = 1000;
 const UNREAD_EXISTENCE_LIMIT = 50;
 const MENTION_COUNT_LIMIT = 100;
 const READ_STATE_FETCH_LIMIT = 500;
-const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 
 export type CommunityUnreadObserverResult = {
   hasUnread: boolean;

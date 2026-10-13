@@ -6,12 +6,13 @@ import {
   NOTIFY_MESSAGE_KINDS,
   participatedRoots,
 } from "@/features/home/lib/notificationInbox";
+import { INBOX_WINDOW_SECONDS } from "@/features/channels/readState/readStateFormat";
 import { relayClient } from "@/shared/api/relayClient";
 import type { Channel, FeedItem, RelayEvent } from "@/shared/api/types";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 
-const LOOKBACK_SECS = 14 * 24 * 3600;
+const LOOKBACK_SECS = INBOX_WINDOW_SECONDS;
 const MY_HISTORY_SECS = 30 * 24 * 3600;
 const MAX_DM_CHANNELS = 60;
 const MAX_ROOTS = 100;

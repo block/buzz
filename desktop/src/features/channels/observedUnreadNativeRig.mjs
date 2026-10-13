@@ -16,7 +16,7 @@
  * up as a suite.
  */
 
-const HORIZON_SECONDS = 7 * 24 * 60 * 60;
+const HORIZON_SECONDS = 14 * 24 * 60 * 60;
 const PER_CHANNEL_CAP = 1_000;
 const GLOBAL_CAP = 5_000;
 

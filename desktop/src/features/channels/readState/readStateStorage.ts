@@ -110,7 +110,7 @@ function isPrunableContextKey(contextId: string): boolean {
 }
 
 /**
- * Drops msg:/thread: markers older than the relay's 7-day horizon, then caps
+ * Drops msg:/thread: markers older than the shared 14-day horizon, then caps
  * the survivors at LOCAL_MAX_PRUNABLE_CONTEXTS (oldest first). Channel keys
  * are never pruned — they are small, bounded by membership, and losing one
  * would resurrect the channel's unread badge. Mirrors the eviction order the
