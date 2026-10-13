@@ -415,6 +415,8 @@ void main() {
         isFalse,
       );
       expect((payload!['reactions'] as List).length, 2);
+      expect(((payload!['reactions'] as List).first as Map)['burst'], isTrue);
+      expect(((payload!['reactions'] as List).last as Map)['burst'], isFalse);
       final profiles = payload!['profiles'] as Map;
       expect((profiles[_alice] as Map)['name'], 'Alice');
       expect(find.byType(BottomSheet), findsNothing);
@@ -595,6 +597,35 @@ void main() {
       expect(find.text('Alice'), findsOneWidget);
     });
   });
+
+  for (final entry in [
+    (emoji: _fire, selected: false, bursts: true),
+    (emoji: _fire, selected: true, bursts: false),
+    (emoji: _eyes, selected: false, bursts: false),
+  ]) {
+    testWidgets('sheet burst for ${entry.emoji}, selected=${entry.selected}', (
+      tester,
+    ) async {
+      final container = await _pumpRow(
+        tester,
+        reactions: [
+          _reaction(emoji: entry.emoji, reactedByCurrentUser: entry.selected),
+        ],
+      );
+      final controller = container.read(emojiBurstControllerProvider);
+      await tester.longPress(
+        find.byKey(ValueKey('reaction-pill-${entry.emoji}')),
+      );
+      await tester.pumpAndSettle();
+      final chip = find.byKey(ValueKey('reaction-toggle-${entry.emoji}'));
+      expect(tester.widget<FilterChip>(chip).side!.width, 1);
+      await tester.tap(chip);
+      await tester.pump();
+      expect(controller.hasParticles, entry.bursts);
+      if (entry.bursts)
+        expect(controller.debugLastBurstOrigin, tester.getCenter(chip));
+    });
+  }
 
   group('reaction bursts', () {
     testWidgets('adding a positive reaction bursts from the pill', (

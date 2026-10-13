@@ -437,24 +437,37 @@ class _ReactionDetailSheet extends HookConsumerWidget {
                   for (final reaction in reactions)
                     Padding(
                       padding: const EdgeInsets.only(right: Grid.half),
-                      child: FilterChip(
-                        key: ValueKey('reaction-toggle-${reaction.emoji}'),
-                        tooltip: dataset.displayName(reaction.emoji),
-                        side: BorderSide(
-                          color: reaction.reactedByCurrentUser
-                              ? context.colors.primary.withValues(alpha: 0.40)
-                              : context.colors.outlineVariant,
+                      child: Builder(
+                        builder: (chipContext) => FilterChip(
+                          key: ValueKey('reaction-toggle-${reaction.emoji}'),
+                          tooltip: dataset.displayName(reaction.emoji),
+                          side: BorderSide(
+                            color: reaction.reactedByCurrentUser
+                                ? context.colors.primary.withValues(alpha: 0.40)
+                                : context.colors.onSurface.withValues(
+                                    alpha: 0.25,
+                                  ),
+                          ),
+                          label: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _ReactionEmoji(reaction: reaction, size: 20),
+                              const SizedBox(width: Grid.quarter),
+                              Text('${reaction.count}'),
+                            ],
+                          ),
+                          selected: reaction.reactedByCurrentUser,
+                          onSelected: (_) {
+                            if (!reaction.reactedByCurrentUser) {
+                              burstEmojiFromContext(
+                                ref,
+                                chipContext,
+                                reaction.emoji,
+                              );
+                            }
+                            onToggle(reaction.emoji);
+                          },
                         ),
-                        label: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _ReactionEmoji(reaction: reaction, size: 20),
-                            const SizedBox(width: Grid.quarter),
-                            Text('${reaction.count}'),
-                          ],
-                        ),
-                        selected: reaction.reactedByCurrentUser,
-                        onSelected: (_) => onToggle(reaction.emoji),
                       ),
                     ),
                 ],
@@ -681,6 +694,7 @@ Future<bool> _showNativeReactionDetails(
           'label': dataset.displayName(reaction.emoji),
           'count': reaction.count,
           'selected': reaction.reactedByCurrentUser,
+          'burst': isPositiveEmojiParticle(reaction.emoji),
           'users': reaction.userPubkeys.toSet().toList(),
           if (reaction.emojiUrl case final String url) ...{
             'url': url,
@@ -713,7 +727,9 @@ Future<bool> _showNativeReactionDetails(
         'requestId': requestId,
         'sheetColor': sheetColors.surface.toARGB32(),
         'foregroundColor': sheetColors.primary.toARGB32(),
-        'outlineColor': Theme.of(context).colorScheme.outlineVariant.toARGB32(),
+        'outlineColor': Theme.of(
+          context,
+        ).colorScheme.onSurface.withValues(alpha: 0.25).toARGB32(),
         'dark': Theme.of(context).brightness == Brightness.dark,
         'profiles': profiles(),
         'reactions': reactionData(),

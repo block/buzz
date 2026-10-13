@@ -14,6 +14,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   private let filters = UIStackView()
   private var filterHeight: NSLayoutConstraint?
   private var rows: [(String, [String: Any])] = []
+  private var burstGlyphs: [UILabel] = []
 
   private func rebuildRows() {
     rows = reactions.flatMap { reaction in
@@ -145,10 +146,16 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     config.baseBackgroundColor = selected ? foregroundColor : .tertiarySystemFill
     config.baseForegroundColor = selected ? foregroundColor : .label
     config.background.strokeWidth = 1
-    config.background.strokeColor = selected ? foregroundColor.withAlphaComponent(0.40) : outlineColor
-    let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
+    let stroke = selected ? foregroundColor.withAlphaComponent(0.40) : outlineColor
+    config.background.strokeColor = stroke
+    config.background.strokeColorTransformer = UIConfigurationColorTransformer { _ in stroke }
+    let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] action in
       guard let self else { return }
       guard let emoji else { return }
+      if !selected, reaction?["burst"] as? Bool == true,
+        let button = action.sender as? UIButton {
+        self.burst(emoji, from: button)
+      }
       self.onToggle?(emoji)
       UISelectionFeedbackGenerator().selectionChanged()
     })
@@ -167,6 +174,73 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
       ])
     }
     filters.addArrangedSubview(button)
+  }
+
+  /// Mirrors Flutter EmojiBurstController's five-particle, fixed-60Hz physics.
+  /// UIKit owns this sheet, so Flutter's underlying overlay cannot paint above it.
+  private func burst(_ emoji: String, from button: UIView) {
+    guard !UIAccessibility.isReduceMotionEnabled,
+      burstGlyphs.count + 5 <= 160, let window = view.window else { return }
+    let origin = button.convert(CGPoint(x: button.bounds.midX, y: button.bounds.midY), to: window)
+    for _ in 0..<5 {
+      let glyph = UILabel()
+      glyph.text = emoji
+      glyph.font = .systemFont(ofSize: 18 + ceil(CGFloat.random(in: 0..<24)))
+      glyph.sizeToFit()
+      glyph.center = origin
+      glyph.isUserInteractionEnabled = false
+      glyph.isAccessibilityElement = false
+      window.addSubview(glyph)
+      burstGlyphs.append(glyph)
+      var x = origin.x, y = origin.y
+      var xv = CGFloat.random(in: -2.2..<2.2)
+      var yv = -CGFloat.random(in: 2.1..<4.45)
+      var rotation = CGFloat.random(in: -11..<11)
+      let spin = CGFloat.random(in: -2.6..<2.6)
+      let gravity = -CGFloat.random(in: 0.018..<0.036)
+      var scale: CGFloat = 0.25
+      var positions = [NSValue(cgPoint: origin)]
+      var rotations = [rotation * .pi / 180]
+      var scales = [scale]
+      var opacities: [CGFloat] = [1]
+      for frame in 1...108 {
+        rotation += spin
+        yv = (yv + gravity) * 0.998
+        xv *= 0.965
+        x += xv
+        y += yv
+        scale += (1 - scale) * 0.28
+        positions.append(NSValue(cgPoint: CGPoint(x: x, y: y)))
+        rotations.append(rotation * .pi / 180)
+        scales.append(scale)
+        opacities.append(min(1, CGFloat(108 - frame) / (108 * 0.24)))
+      }
+      let values: [(String, [Any])] = [
+        ("position", positions), ("transform.rotation.z", rotations),
+        ("transform.scale", scales), ("opacity", opacities),
+      ]
+      let group = CAAnimationGroup()
+      group.duration = 108.0 / 60.0
+      group.animations = values.map { key, frames in
+        let animation = CAKeyframeAnimation(keyPath: key)
+        animation.values = frames
+        animation.duration = group.duration
+        animation.calculationMode = .linear
+        return animation
+      }
+      glyph.layer.opacity = 0
+      glyph.layer.add(group, forKey: "reaction-burst")
+      DispatchQueue.main.asyncAfter(deadline: .now() + group.duration) { [weak self, weak glyph] in
+        glyph?.removeFromSuperview()
+        self?.burstGlyphs.removeAll { $0 === glyph }
+      }
+    }
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    burstGlyphs.forEach { $0.removeFromSuperview() }
+    burstGlyphs.removeAll()
   }
 
   func updateReactions(_ reactions: [[String: Any]]) {
