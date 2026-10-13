@@ -38,12 +38,12 @@ pub fn is_unusable_document_url(url: Option<&Url>) -> bool {
     matches!(url.scheme(), "about" | "data")
 }
 
-pub fn same_https_origin(left: &Url, right: &Url) -> bool {
-    left.origin() == right.origin()
-}
-
-/// Reuse an existing `pin-{id}` webview only when it already shows a live
-/// document on this pin's start origin. Otherwise navigate to `start_url`.
+/// Reuse an existing `pin-{id}` webview whenever it already shows a live
+/// document for the same start URL, even if the site moved to another origin
+/// (SSO / IdP redirects, app hosts such as Amazon WorkSpaces). Re-showing a
+/// pin must resume the live page, never reset it to `start_url` — that reset
+/// tore down logged-in sessions. Navigate only on a failed / blank load, an
+/// explicit new start (deep link), or a lost session with a different URL.
 pub fn should_navigate_existing(
     current: Option<&Url>,
     start_url: &Url,
@@ -68,10 +68,7 @@ pub fn should_navigate_existing(
             None => true,
         };
     }
-    match current {
-        Some(url) => !same_https_origin(url, start_url),
-        None => true,
-    }
+    current.is_none()
 }
 
 pub fn bounds_are_usable(width: f64, height: f64) -> bool {
@@ -116,9 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn reuse_navigates_when_origin_is_wrong() {
+    fn reuse_keeps_live_page_on_another_origin() {
+        // SSO / WorkSpaces style: logged-in page lives off the start origin.
         let start = url("https://wayfinder.huladesk.com/");
-        assert!(should_navigate_existing(
+        assert!(!should_navigate_existing(
             Some(&url("https://example.com/")),
             &start,
             Some(&start),
