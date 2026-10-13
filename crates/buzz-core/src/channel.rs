@@ -18,7 +18,7 @@ pub fn canonical_channel_name(name: &str) -> &str {
 }
 
 /// Tags that identify a channel on every NIP-29 group-state event the relay
-/// signs (kinds 39000–39003), in this order:
+/// signs (kinds 39000–39002), in this order:
 ///
 /// 1. `["t", <channel_type>]`. It comes first, so a client that reads the
 ///    first `t` tag gets the channel type.

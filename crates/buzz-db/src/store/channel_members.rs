@@ -302,7 +302,7 @@ pub async fn insert_auto_membership_in_transaction(
 // ── End transaction-level helpers ─────────────────────────────────────────────
 
 /// The immutable facts that every relay-signed group-state event
-/// (kinds 39000–39003) publishes about its channel.
+/// (kinds 39000–39002) publishes about its channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelIdentity {
     /// Channel type string (e.g. `"stream"`, `"forum"`, `"dm"`).

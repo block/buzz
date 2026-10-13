@@ -7,7 +7,7 @@ Channel Identity and Discovery
 `draft` `optional` `relay`
 
 This NIP adds identity facts to the relay-signed NIP-29 channel-state events
-(kinds 39000–39003). With these facts, a client can find channels with
+(kinds 39000–39002). With these facts, a client can find channels with
 ordinary NIP-01 filters. It needs no new filter key and no relay-specific API.
 
 ## Motivation
@@ -50,8 +50,8 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 
 | Tag | Kinds | Meaning |
 | --- | --- | --- |
-| first `t` | 39000–39003 | Channel type. |
-| `P` | 39000–39003 | Public key that signed the kind:9007 that created the channel. |
+| first `t` | 39000–39002 | Channel type. |
+| `P` | 39000–39002 | Public key that signed the kind:9007 that created the channel. |
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
@@ -69,6 +69,13 @@ would mix creators with members.
 **Creation time.** The `created_at` tag does not change when the channel is
 edited. Use it, not the event's `created_at`, to compare the age of channels.
 
+**Older events.** A relay adds these tags only when it publishes a
+channel-state event. An event that a relay version without this NIP published
+can lack them, including one published during an upgrade. Such an event stays
+until the channel next changes, for example on an edit or a membership
+change. A client MUST treat a missing tag as unknown. A missing `P` does not
+mean that a key did not create the channel.
+
 ## Finding channels
 
 Use ordinary NIP-01 filters on the channel-state kinds.
@@ -77,6 +84,10 @@ Use ordinary NIP-01 filters on the channel-state kinds.
 | --- | --- |
 | Channels that a key created | `{"kinds": [39000], "#P": ["<creator>"]}` |
 | Channels of one type | `{"kinds": [39000], "#t": ["<type>"]}` |
+
+A `#P` filter does not return a channel whose events lack `P` (see
+**Older events**). So it can miss channels that a key created before the relay
+supported this NIP.
 
 ## Trust
 
