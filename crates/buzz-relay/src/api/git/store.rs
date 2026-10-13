@@ -169,6 +169,8 @@ impl From<ProbeFailure> for StoreError {
 #[derive(Clone)]
 pub struct GitStore {
     bucket: Arc<Bucket>,
+    /// Same bucket without a request deadline, for whole-object transfers.
+    transfer_bucket: Arc<Bucket>,
 }
 
 impl GitStore {
@@ -212,17 +214,19 @@ impl GitStore {
             }
         }
         .map_err(|e| StoreError::Backend(S3Error::Credentials(e)))?;
-        let mut bucket = Bucket::new(bucket_name, region, creds).map_err(StoreError::Backend)?;
-        // rust-s3 0.38 enforces the bucket's 60 s default on every request, body
-        // included. Pack transfers can run longer, so keep requests unbounded as
-        // they were before 0.38.
-        bucket.set_request_timeout(None);
+        let bucket = Bucket::new(bucket_name, region, creds).map_err(StoreError::Backend)?;
         let bucket = match addressing_style {
             buzz_media::config::S3AddressingStyle::Path => bucket.with_path_style(),
             buzz_media::config::S3AddressingStyle::Virtual => bucket,
         };
+        // rust-s3 0.38 enforces the bucket's 60 s default on every request, body
+        // included. Pack transfers can run longer, so they keep the unbounded
+        // behaviour from before 0.38; pointer and metadata calls stay bounded.
+        let mut transfer_bucket = bucket.clone();
+        transfer_bucket.set_request_timeout(None);
         Ok(Self {
             bucket: Arc::from(bucket),
+            transfer_bucket: Arc::from(transfer_bucket),
         })
     }
 
@@ -270,7 +274,7 @@ impl GitStore {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
         match self
-            .bucket
+            .transfer_bucket
             .put_object_with_content_type_and_headers(&key, bytes, content_type, Some(headers))
             .await
         {
@@ -354,7 +358,7 @@ impl GitStore {
     /// detectability. This raw `get` exists for the pointer (whose key is not a
     /// digest).
     pub async fn get(&self, key: &str) -> Result<Bytes, StoreError> {
-        match self.bucket.get_object(key).await {
+        match self.transfer_bucket.get_object(key).await {
             Ok(resp) => Ok(Bytes::from(resp.to_vec())),
             Err(S3Error::HttpFailWithBody(404, _)) => Err(StoreError::NotFound(key.into())),
             Err(e) => Err(StoreError::Backend(e)),
@@ -993,8 +997,11 @@ mod tests {
             .expect("construct git store");
             assert_eq!(store.bucket.url(), expected_url);
             assert_eq!(store.bucket.is_path_style(), path_style);
-            // Pack transfers may outlast rust-s3's 60 second default.
-            assert_eq!(store.bucket.request_timeout(), None);
+            // Pack transfers may outlast rust-s3's 60 second default; pointer
+            // and metadata calls must not hang on a stalled endpoint.
+            assert_eq!(store.transfer_bucket.request_timeout(), None);
+            assert_eq!(store.transfer_bucket.url(), expected_url);
+            assert!(store.bucket.request_timeout().is_some());
         }
     }
 
