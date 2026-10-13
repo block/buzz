@@ -23,6 +23,7 @@ class _QuickReactionRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final dataset = ref.watch(emojiDatasetOrEmptyProvider);
     final customEmoji = ref.watch(customEmojiListProvider);
     final emoji = quickReactionEmoji(
       ref.watch(recentEmojiProvider),
@@ -35,6 +36,12 @@ class _QuickReactionRow extends ConsumerWidget {
     };
 
     void react(String value) {
+      if (message.reactions.any(
+        (r) => r.emoji == value && r.reactedByCurrentUser,
+      )) {
+        toggleReaction(pageRef, message, value);
+        return;
+      }
       // The generic picker is also used for composing and statuses. Record
       // recency here, at the reaction call site, so only reactions drive the
       // quick-reaction row.
@@ -65,8 +72,12 @@ class _QuickReactionRow extends ConsumerWidget {
               key: ValueKey('quick-reaction-${emoji[index]}'),
               child: _QuickReactionCircle(
                 size: circleSize,
+                label: dataset.displayName(emoji[index]),
+                selected: message.reactions.any(
+                  (r) => r.emoji == emoji[index] && r.reactedByCurrentUser,
+                ),
                 onTap: () {
-                  Navigator.of(sheetContext).pop(true);
+                  if (!_selectMessageAction(context)) return;
                   react(emoji[index]);
                 },
                 child: _QuickReactionGlyph(
@@ -79,8 +90,9 @@ class _QuickReactionRow extends ConsumerWidget {
             key: const ValueKey('quick-reaction-more'),
             child: _QuickReactionCircle(
               size: circleSize,
+              label: 'Add reaction',
               onTap: () {
-                Navigator.of(sheetContext).pop(true);
+                if (!_selectMessageAction(context)) return;
                 showEmojiPicker(context: pageContext, onSelect: react);
               },
               child: Icon(

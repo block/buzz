@@ -19,6 +19,7 @@ import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
@@ -41,6 +42,22 @@ part 'message_actions/quick_reaction_row.dart';
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
 const _reminderPreviewLength = 100;
+
+// A weak, route-owned latch shared by every action, including pointers that
+// were already down when another selection started dismissing the sheet.
+final _selectedMessageActionRoutes = Expando<bool>();
+
+bool _selectMessageAction(BuildContext context) {
+  final route = ModalRoute.of(context);
+  if (route == null ||
+      !route.isCurrent ||
+      _selectedMessageActionRoutes[route] == true) {
+    return false;
+  }
+  _selectedMessageActionRoutes[route] = true;
+  Navigator.of(context).pop(true);
+  return true;
+}
 
 /// Presents message reactions and grouped actions in the shared bottom sheet.
 /// Snapshot and preview callbacks are not used by the sheet presentation.
@@ -133,7 +150,7 @@ Future<void> showMessageActions({
                           leading: const Icon(BuzzIcons.copy),
                           title: const Text('Copy text'),
                           onTap: () {
-                            Navigator.of(sheetContext).pop(true);
+                            if (!_selectMessageAction(sheetContext)) return;
                             // Copy to clipboard
                             final data = ClipboardData(text: message.content);
                             Clipboard.setData(data);
@@ -149,7 +166,7 @@ Future<void> showMessageActions({
                           leading: const Icon(BuzzIcons.pencil),
                           title: const Text('Edit message'),
                           onTap: () {
-                            Navigator.of(sheetContext).pop(true);
+                            if (!_selectMessageAction(sheetContext)) return;
                             _showEditSheet(
                               context: context,
                               ref: ref,
@@ -168,7 +185,7 @@ Future<void> showMessageActions({
                             style: TextStyle(color: sheetContext.colors.error),
                           ),
                           onTap: () {
-                            Navigator.of(sheetContext).pop(true);
+                            if (!_selectMessageAction(sheetContext)) return;
                             _confirmDelete(
                               context: context,
                               ref: ref,
@@ -495,7 +512,7 @@ class _MarkReadUnreadTile extends ConsumerWidget {
       leading: Icon(unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen),
       title: Text(unread ? 'Mark read' : 'Mark unread'),
       onTap: () {
-        Navigator.of(context).pop(true);
+        if (!_selectMessageAction(context)) return;
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
           // Advances the `msg:` marker and clears this message's own forced
@@ -536,7 +553,7 @@ class _FollowThreadTile extends ConsumerWidget {
       leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () {
-        Navigator.of(context).pop(true);
+        if (!_selectMessageAction(context)) return;
         final notifier = ref.read(threadFollowsProvider.notifier);
         if (following) {
           notifier.unfollowThread(rootId);
@@ -581,7 +598,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
           icon: BuzzIcons.messageSquareReply,
           label: 'Reply',
           onTap: () {
-            Navigator.of(context).pop(true);
+            if (!_selectMessageAction(context)) return;
             Navigator.of(pageContext).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(
@@ -600,7 +617,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
         icon: BuzzIcons.link2,
         label: 'Copy link',
         onTap: () {
-          Navigator.of(context).pop(true);
+          if (!_selectMessageAction(context)) return;
           copyToClipboard(
             pageContext,
             messageLinkFor(message: message, channelId: channelId),
@@ -617,7 +634,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
               context,
               rootNavigator: true,
             ).context;
-            Navigator.of(context).pop(true);
+            if (!_selectMessageAction(context)) return;
             showRemindMeLaterSheet(
               context: rootContext,
               ref: ref,
@@ -731,29 +748,48 @@ class _QuickReactionCircle extends StatelessWidget {
   final VoidCallback onTap;
   final Widget child;
   final double size;
+  final String label;
+  final bool? selected;
 
   const _QuickReactionCircle({
     required this.onTap,
     required this.child,
     required this.size,
+    required this.label,
+    this.selected,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
-        unawaited(HapticFeedback.lightImpact());
-        onTap();
-      },
-      child: Container(
-        width: size,
-        height: size,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: context.colors.surfaceContainerHighest,
-          shape: BoxShape.circle,
+    return Semantics(
+      button: true,
+      label: label,
+      selected: selected,
+      excludeSemantics: true,
+      onTap: onTap,
+      child: GestureDetector(
+        excludeFromSemantics: true,
+        onTap: () {
+          unawaited(HapticFeedback.lightImpact());
+          onTap();
+        },
+        child: Container(
+          width: size,
+          height: size,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected == true
+                ? context.colors.primary.withValues(alpha: 0.10)
+                : context.colors.surfaceContainerHighest,
+            border: selected == true
+                ? Border.all(
+                    color: context.colors.primary.withValues(alpha: 0.40),
+                  )
+                : null,
+            shape: BoxShape.circle,
+          ),
+          child: child,
         ),
-        child: child,
       ),
     );
   }

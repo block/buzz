@@ -30,6 +30,7 @@ TimelineMessage _message({
   bool isSystem = false,
   String? rootId,
   List<List<String>> tags = const [],
+  List<TimelineReaction> reactions = const [],
 }) => TimelineMessage(
   id: id,
   pubkey: pubkey,
@@ -38,7 +39,21 @@ TimelineMessage _message({
   isSystem: isSystem,
   rootId: rootId,
   tags: tags,
+  reactions: reactions,
 );
+
+class _RecordingReactionActions implements ChannelActions {
+  final added = <String>[];
+  final removed = <String>[];
+  @override
+  Future<void> addReaction(String eventId, String emoji) async =>
+      added.add(emoji);
+  @override
+  Future<void> removeReaction(String eventId, String emoji) async =>
+      removed.add(eventId);
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 final _listedChannel = Channel(
   id: _channelId,
@@ -379,6 +394,73 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
 }
 
 void main() {
+  testWidgets(
+    'quick reactions show selection, label controls, and remove our reaction',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      final actions = _RecordingReactionActions();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(
+          reactions: [
+            const TimelineReaction(
+              emoji: '👍',
+              count: 1,
+              reactedByCurrentUser: true,
+              userPubkeys: ['self'],
+              currentUserReactionId: 'our-reaction',
+            ),
+          ],
+        ),
+        prefs: await _mockPrefs(),
+        createChannelActions: (_) => actions,
+      );
+      final emoji = find.byKey(const ValueKey('quick-reaction-👍'));
+      final owner = tester.widget<Semantics>(
+        find.descendant(of: emoji, matching: find.byType(Semantics)).first,
+      );
+      expect(owner.properties.button, isTrue);
+      expect(owner.properties.selected, isTrue);
+      expect(owner.properties.label, isNotEmpty);
+      expect(owner.properties.onTap, isNotNull);
+      expect(find.bySemanticsLabel('Add reaction'), findsOneWidget);
+      await tester.tap(emoji);
+      await tester.pumpAndSettle();
+      expect(actions.removed, ['our-reaction']);
+      expect(actions.added, isEmpty);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('two active pointers select only one sheet action', (
+    tester,
+  ) async {
+    final actions = _RecordingReactionActions();
+    await _pumpMessageActionsPopover(
+      tester,
+      message: _message(),
+      prefs: await _mockPrefs(),
+      launcherOnNestedRoute: true,
+      createChannelActions: (_) => actions,
+    );
+    final first = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('quick-reaction-👍'))),
+      pointer: 1,
+    );
+    final second = await tester.startGesture(
+      tester.getCenter(find.text('Copy text')),
+      pointer: 2,
+    );
+    await first.up();
+    await second.up();
+    await tester.pumpAndSettle();
+    expect(actions.added, ['👍']);
+    expect(
+      find.byKey(const ValueKey('message-actions-underlying-page')),
+      findsOneWidget,
+    );
+  });
+
   // Some sheets build the app lifecycle, which listens for network changes.
   // That listen is asynchronous, so a missing plugin fails whichever test
   // happens to be running. Flutter documents mock handlers as cleared after

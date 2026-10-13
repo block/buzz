@@ -112,6 +112,63 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 }
 
 void main() {
+  testWidgets('removing the sole reaction closes the sheet', (tester) async {
+    final reactions = ValueNotifier<List<TimelineReaction>>([
+      _reaction(reactedByCurrentUser: true),
+    ]);
+    addTearDown(reactions.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+        ],
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => showReactionDetailSheet(
+              context: context,
+              channelId: 'channel',
+              reactions: reactions,
+              onToggle: (_) => reactions.value = [],
+            ),
+            child: const Text('Open'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reaction-toggle-$_fire')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('reaction-details-sheet')), findsNothing);
+    expect(find.text('Open'), findsOneWidget);
+  });
+
+  testWidgets('a stale toggle for an absent emoji does nothing', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Consumer(
+          builder: (context, ref, _) => TextButton(
+            onPressed: () => toggleReaction(
+              ref,
+              TimelineMessage(
+                id: 'message',
+                pubkey: _alice,
+                createdAt: 1,
+                content: '',
+              ),
+              _fire,
+            ),
+            child: const Text('Toggle'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Toggle'));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'native toggles use the current callback and stream updated counts',
     (tester) async {

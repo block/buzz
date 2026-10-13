@@ -244,6 +244,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
   }
 
   func updateReactions(_ reactions: [[String: Any]]) {
+    guard !reactions.isEmpty else { onClose?(); return }
     self.reactions = reactions
     rebuildRows()
     guard isViewLoaded else { return }

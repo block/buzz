@@ -49,8 +49,9 @@ const _pillGlyphSize = 16.0;
 /// Used by channel detail, thread detail, and system message rows to avoid
 /// duplicating the toggle wiring.
 void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
+  final reaction = message.reactions.where((r) => r.emoji == emoji).firstOrNull;
+  if (reaction == null) return;
   final actions = ref.read(channelActionsProvider);
-  final reaction = message.reactions.firstWhere((r) => r.emoji == emoji);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
     actions.removeReaction(reaction.currentUserReactionId!, emoji);
   } else {
@@ -383,11 +384,22 @@ Future<void> showReactionDetailSheet({
     showDragHandle: true,
     builder: (_) => ValueListenableBuilder<List<TimelineReaction>>(
       valueListenable: reactions,
-      builder: (_, value, _) => _ReactionDetailSheet(
-        channelId: channelId,
-        reactions: value,
-        onToggle: onToggle,
-      ),
+      builder: (sheetContext, value, _) {
+        if (value.isEmpty) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (sheetContext.mounted &&
+                ModalRoute.of(sheetContext)?.isCurrent == true) {
+              Navigator.of(sheetContext).pop();
+            }
+          });
+          return const SizedBox.shrink();
+        }
+        return _ReactionDetailSheet(
+          channelId: channelId,
+          reactions: value,
+          onToggle: onToggle,
+        );
+      },
     ),
   );
 }
