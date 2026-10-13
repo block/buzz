@@ -2,6 +2,7 @@
 import { QRCodeSVG } from "qrcode.react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import {
   adopt,
   detectNip07,
@@ -21,27 +22,41 @@ import { peekPendingConnect } from "./signer/nip46Store";
 const isIos = () =>
   /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+// Matches the desktop onboarding neutral (light) theme: white card, ink #171717, pill CTAs.
+const INK = "#171717";
 const input: React.CSSProperties = {
-  padding: "12px 12px",
-  borderRadius: 10,
-  border: "1px solid #444",
-  background: "#111",
-  color: "#f5f5f5",
+  padding: "10px 14px",
+  borderRadius: 12,
+  border: "1px solid #e5e5e5",
+  background: "#fff",
+  color: INK,
   fontSize: 16, // 16px: iOS Safari zooms on smaller inputs
   width: "100%",
   boxSizing: "border-box",
+  outline: "none",
 };
-const ghost: React.CSSProperties = {
-  padding: "12px 16px",
-  borderRadius: 10,
-  border: "1px solid #444",
-  background: "transparent",
-  color: "#ddd",
-  fontWeight: 600,
-  fontSize: 15,
+const pill: React.CSSProperties = {
+  height: 38,
+  padding: "0 24px",
+  borderRadius: 999,
+  border: 0,
+  fontWeight: 500,
+  fontSize: 14,
   cursor: "pointer",
   textAlign: "center",
   textDecoration: "none",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+  boxSizing: "border-box",
+  width: "100%",
+};
+const ghost: React.CSSProperties = {
+  ...pill,
+  height: 36,
+  background: "rgba(23,23,23,0.1)",
+  color: INK,
 };
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -162,7 +177,7 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
       {busy === "connect" && (
         <p
           role="status"
-          style={{ ...note, color: "#e6b450", fontSize: 15 }}
+          style={{ ...note, color: WARN, fontSize: 15 }}
           data-testid="web-unlock-finishing"
         >
           {resumed ? "Finishing sign-in…" : "Waiting for your signer…"}
@@ -197,7 +212,7 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
           style={{ display: "grid", gap: 10, justifyItems: "center" }}
           data-testid="web-unlock-nostrconnect-panel"
         >
-          <div style={{ background: "#fff", padding: 10, borderRadius: 10 }}>
+          <div style={{ background: "#fff", padding: 10, borderRadius: 16, border: "1px solid #e5e5e5" }}>
             <QRCodeSVG value={uri} size={200} />
           </div>
           <a
@@ -212,6 +227,15 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
             data-testid="web-unlock-open-signer"
           >
             Open in signer app
+          </a>
+          <a
+            // Clave (iOS NIP-46 signer) universal link: opens Clave's approval sheet, or its install page.
+            href={`https://clave.casa/connect?uri=${encodeURIComponent(uri)}`}
+            style={ghost}
+            data-testid="web-unlock-open-clave"
+          >
+            <img src="/signers/clave.png" alt="" width={20} height={20} style={{ borderRadius: 5 }} />
+            Open in Clave
           </a>
           <input
             style={input}
@@ -244,7 +268,7 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
       {err && (
         <p
           role="alert"
-          style={{ color: "#ff6b6b" }}
+          style={{ color: ERR }}
           data-testid="web-unlock-nip46-error"
         >
           {err}
@@ -259,34 +283,38 @@ const box: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  background: "#000",
-  color: "#f5f5f5",
-  font: "15px/1.5 Inter, system-ui, sans-serif",
+  color: INK,
+  font: "15px/1.5 Inter, system-ui, -apple-system, sans-serif",
+  // Desktop onboarding backdrop: dot grid over the chartreuse -> light-blue gradient.
+  backgroundColor: "#d7e7f6",
+  backgroundImage:
+    "radial-gradient(circle, rgb(0 0 0 / 0.08) 1px, transparent 1px), linear-gradient(to bottom, #d7d72e, #d7e7f6)",
+  backgroundSize: "24px 24px, auto",
+  backgroundAttachment: "fixed",
+  boxSizing: "border-box",
   padding:
-    "env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)",
+    "calc(env(safe-area-inset-top) + 24px) calc(env(safe-area-inset-right) + 16px) calc(env(safe-area-inset-bottom) + 24px) calc(env(safe-area-inset-left) + 16px)",
 };
 const card: React.CSSProperties = {
-  width: "min(420px, 92vw)",
+  width: "min(calc(100vw - 2rem), calc(38rem + 2px))",
+  boxSizing: "border-box",
   display: "grid",
   gap: 14,
-};
-const btn: React.CSSProperties = {
-  padding: "12px 16px",
-  borderRadius: 10,
-  border: "1px solid #444",
   background: "#fff",
-  color: "#000",
-  fontWeight: 600,
-  fontSize: 15,
-  cursor: "pointer",
+  borderRadius: 32,
+  padding: "28px 24px",
+  boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)",
 };
+const btn: React.CSSProperties = { ...pill, background: INK, color: "#fff" };
 const btnOff: React.CSSProperties = {
-  ...btn,
-  background: "#111",
-  color: "#888",
+  ...pill,
+  background: "rgba(23,23,23,0.06)",
+  color: "#a3a3a3",
   cursor: "not-allowed",
 };
-const note: React.CSSProperties = { color: "#9a9a9a", fontSize: 13 };
+const note: React.CSSProperties = { color: "#737373", fontSize: 13, margin: 0 };
+const ERR = "#dc2626";
+const WARN = "#a16207";
 
 function Unlock({ onDone }: { onDone: (pubkey: string) => void }) {
   const [ext, setExt] = useState<boolean | null>(null);
@@ -308,7 +336,27 @@ function Unlock({ onDone }: { onDone: (pubkey: string) => void }) {
   return (
     <div style={box}>
       <div style={card} data-testid="web-unlock">
-        <h1 style={{ fontSize: 24, margin: 0 }}>Sign in to Buzz</h1>
+        <div
+          aria-hidden
+          data-testid="web-unlock-bee"
+          style={{
+            justifySelf: "center",
+            width: 64,
+            height: 64,
+            borderRadius: "50%",
+            background: "#d7d72e",
+            color: INK,
+            display: "grid",
+            placeItems: "center",
+          }}
+        >
+          <span style={{ display: "block", width: 40, lineHeight: 0 }}>
+            <BuzzMark className="web-unlock-bee-mark" />
+          </span>
+        </div>
+        <h1 style={{ fontSize: 24, lineHeight: "32px", fontWeight: 600, margin: 0, textAlign: "center" }}>
+          Sign in to HulaBuzz
+        </h1>
         <p style={note}>
           Your private key never enters this page. Sign-in and every message is
           signed by your browser extension or remote signer.
@@ -333,13 +381,13 @@ function Unlock({ onDone }: { onDone: (pubkey: string) => void }) {
             <button type="button" style={btnOff} disabled>
               Sign in with browser extension
             </button>
-            <p style={{ ...note, color: "#e6b450" }}>
+            <p style={{ ...note, color: WARN }}>
               No NIP-07 extension (window.nostr) found. Install one such as
               Alby, nos2x or Nostr Connect, then reload this page.
             </p>
             <button
               type="button"
-              style={{ ...btn, background: "transparent", color: "#ddd" }}
+              style={ghost}
               onClick={() => {
                 setExt(null);
                 void detectNip07(3000).then(setExt);
@@ -351,7 +399,7 @@ function Unlock({ onDone }: { onDone: (pubkey: string) => void }) {
         )}
         <div
           style={{
-            borderTop: ext ? "1px solid #222" : undefined,
+            borderTop: ext ? "1px solid #e5e5e5" : undefined,
             paddingTop: 12,
             display: "grid",
             gap: 8,
@@ -359,8 +407,9 @@ function Unlock({ onDone }: { onDone: (pubkey: string) => void }) {
         >
           <strong data-testid="web-unlock-nip46">Remote signer (NIP-46)</strong>
           <p style={note}>
-            Sign with nsec.app, Amber, Primal or any bunker. Your key stays in
-            that app.
+            Sign with nsec.app, Amber, Primal, Clave or any bunker. Your key
+            stays in that app. Using Clave on this iPhone? Paste its bunker://
+            code below for the most reliable sign-in.
             {isIos() && " Extensions don't exist on iPhone/iPad, so use this."}
           </p>
           <Nip46Panel onDone={onDone} />
@@ -379,7 +428,7 @@ function Unlock({ onDone }: { onDone: (pubkey: string) => void }) {
           </button>
         )}
         {err && (
-          <p role="alert" style={{ color: "#ff6b6b" }}>
+          <p role="alert" style={{ color: ERR }}>
             {err}
           </p>
         )}
@@ -407,7 +456,7 @@ export function showUnlock(): Promise<string> {
 export function showUnlockOverlay(): Promise<string> {
   const host = document.createElement("div");
   host.setAttribute("data-testid", "signer-reconnect-overlay");
-  host.style.cssText = "position:fixed;inset:0;z-index:2147483647;overflow:auto;background:var(--background,#0b0b0b)";
+  host.style.cssText = "position:fixed;inset:0;z-index:2147483647;overflow:auto;background:#d7e7f6";
   document.body.appendChild(host);
   const root = createRoot(host);
   return new Promise((resolve) => {
