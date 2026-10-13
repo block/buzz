@@ -490,6 +490,123 @@ async fn admins_can_change_labels() {
     );
 }
 
+/// Ensure race: one creator sends two kind:9007s for the same label at
+/// once. The relay keeps both channels, a `#P` + `#t` lookup finds both,
+/// and every reader that follows the NIP-CL rule picks the same one: the
+/// lowest stored creation time, then the lowest ID.
+/// Mutation: rank by the 39000's own created_at after an edit, or let the
+/// lookup miss one channel → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn racing_creates_resolve_to_the_same_oldest_channel() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-ensure-race").await;
+    let creator = Keys::generate();
+    let extra: &[&[&str]] = &[&["t", "ensure-race"]];
+
+    let (first, second) = tokio::join!(
+        create_channel(&state, &tenant, &creator, extra),
+        create_channel(&state, &tenant, &creator, extra),
+    );
+    assert_ne!(
+        first, second,
+        "both creates must succeed as separate channels"
+    );
+
+    // Edit whichever channel is older so its 39000 becomes the newest event.
+    // Readers must still pick it, because it was created first.
+    let created = |id: Uuid| {
+        let state = state.clone();
+        let tenant = tenant.clone();
+        async move {
+            state
+                .db
+                .get_channel_for_event_write(tenant.community(), id)
+                .await
+                .expect("channel")
+                .created_at
+                .timestamp()
+        }
+    };
+    let mut ranked = [
+        (created(first).await, first.to_string()),
+        (created(second).await, second.to_string()),
+    ];
+    ranked.sort();
+    let expected = ranked[0].1.clone();
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    edit_channel(
+        &state,
+        &tenant,
+        &creator,
+        expected.parse().unwrap(),
+        &[&["about", "edited after the race"]],
+    )
+    .await
+    .expect("edit the older channel");
+
+    // Step 1 of Ensure: the creator's label lookup finds both channels.
+    let found = req_event_ids(
+        &state,
+        &tenant,
+        &creator,
+        serde_json::json!({
+            "kinds": [39000],
+            "#P": [creator.public_key().to_hex()],
+            "#t": ["ensure-race"],
+        }),
+    )
+    .await;
+    assert_eq!(found.len(), 2, "lookup must find both channels: {found:?}");
+
+    let mut events = Vec::new();
+    for id in [first, second] {
+        let stored = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![39000]),
+                d_tag: Some(id.to_string()),
+                limit: Some(1),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("query 39000");
+        let event = stored.into_iter().next().expect("39000").event;
+        assert!(
+            found.contains(&event.id.to_hex()),
+            "lookup returned the current 39000"
+        );
+        events.push(event);
+    }
+    // NIP-CL "Choosing one channel": the lowest `created_at` tag, then the
+    // lowest channel ID. The edited channel's event is the newest, so this
+    // only works if its tag still holds the stored creation time.
+    let pick = |events: Vec<&nostr::Event>| {
+        events
+            .into_iter()
+            .map(|event| {
+                let created_at = event
+                    .tags
+                    .iter()
+                    .find_map(|tag| match tag.as_slice() {
+                        [name, value, ..] if name == buzz_core::channel::CHANNEL_CREATED_AT_TAG => {
+                            value.parse::<u64>().ok()
+                        }
+                        _ => None,
+                    })
+                    .expect("created_at tag");
+                (
+                    created_at,
+                    event.tags.identifier().expect("d tag").to_owned(),
+                )
+            })
+            .min()
+            .map(|(_, id)| id)
+    };
+    assert_eq!(pick(vec![&events[0], &events[1]]), Some(expected.clone()));
+    assert_eq!(pick(vec![&events[1], &events[0]]), Some(expected));
+}
+
 /// Run one historical REQ as `reader` and return the IDs of the events sent
 /// before EOSE.
 async fn req_event_ids(
