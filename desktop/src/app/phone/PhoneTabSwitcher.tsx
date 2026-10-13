@@ -1,7 +1,7 @@
-// Phone-only tab switcher: a floating round button (top-left, under the safe area) with the open-tab count, which
+// Phone-only tab switcher: a compact pill that always floats top-right (under the safe area) with the open-tab count, which
 // fans out one list of all surface tabs (channels, DMs, threads, pages) and Buzz Term tabs. Uses the existing
 // SurfaceTabsProvider and TerminalBootstrap handlers; no separate tab state.
-import { Hash, MessageCircle, MessagesSquare, PanelTop, SquareTerminal, X } from "lucide-react";
+import { Hash, Layers, MessageCircle, MessagesSquare, PanelTop, SquareTerminal, X } from "lucide-react";
 import * as React from "react";
 
 import { setPhoneOverlay } from "@/app/phone/phoneTabs";
@@ -123,7 +123,8 @@ export function PhoneTabSwitcher({
         ref={buttonRef}
         type="button"
       >
-        {count > 99 ? "99+" : count}
+        <Layers aria-hidden="true" />
+        <span>{count > 99 ? "99+" : count}</span>
       </button>
       {open ? (
         <div className="phone-tab-switcher-panel" data-testid="phone-tab-switcher-list" ref={panelRef} role="menu">
