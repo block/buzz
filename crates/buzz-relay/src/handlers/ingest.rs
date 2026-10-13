@@ -2413,7 +2413,11 @@ async fn ingest_event_inner(
 
     // Typing indicators (kind:20002) never reach this gate: the HTTP bridge
     // routes them to `publish_http_typing` before ingest.
-    if auth.is_http() && (kind_u32 == KIND_GIFT_WRAP || kind_u32 == KIND_PRESENCE_UPDATE) {
+    if auth.is_http()
+        && (kind_u32 == KIND_GIFT_WRAP
+            || kind_u32 == KIND_PRESENCE_UPDATE
+            || kind_u32 == buzz_core::kind::KIND_AGENT_PRESENCE)
+    {
         return Err(IngestError::Rejected(format!(
             "invalid: kind {kind_u32} is only accepted via WebSocket"
         )));

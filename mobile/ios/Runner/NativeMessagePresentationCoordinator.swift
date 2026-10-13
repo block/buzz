@@ -25,6 +25,15 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
       result(["supported": true])
       return
     }
+    if call.method == "updateReactions" {
+      if data["requestId"] as? String == requestID,
+        let sheet = presented as? NativeReactionDetailsViewController,
+        let reactions = data["reactions"] as? [[String: Any]] {
+        sheet.updateReactions(reactions)
+      }
+      result([:])
+      return
+    }
     if call.method == "updateProfiles" {
       if data["requestId"] as? String == requestID,
         let sheet = presented as? NativeReactionDetailsViewController,
@@ -66,8 +75,12 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
       let sheet = NativeReactionDetailsViewController(data: data)
       sheet.onClose = { [weak self] in self?.dismiss([:]) }
       sheet.onAddReaction = { [weak self] in
-        guard let self, let requestID = self.requestID else { return }
-        self.channel.invokeMethod("reactionAddTapped", arguments: requestID)
+        self?.dismiss(["action": "addReaction"])
+      }
+      sheet.onToggle = { [weak self] emoji in
+        self?.channel.invokeMethod("toggleReaction", arguments: [
+          "requestId": data["requestId"] as? String ?? "", "emoji": emoji,
+        ])
       }
       sheet.modalPresentationStyle = .pageSheet
       if let presentation = sheet.sheetPresentationController {

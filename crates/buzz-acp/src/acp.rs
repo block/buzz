@@ -3198,10 +3198,30 @@ mod tests {
         );
     }
 
+    /// Spawn `script` under bash and return once it is running.
+    ///
+    /// Process startup can take hundreds of milliseconds on a loaded host,
+    /// which would otherwise eat into the idle and timing windows the tests
+    /// measure. The script prints a ready line first, consumed here, so each
+    /// test's clock starts only after the child is actually executing.
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        const READY: &str = "buzz-acp-test-script-ready";
+        let mut client = AcpClient::spawn(
+            "bash",
+            &["-c".into(), format!("echo {READY}; {script}")],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test script");
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), client.reader.next())
             .await
-            .expect("failed to spawn test script")
+            .expect("test script should start within 10s");
+        assert!(
+            matches!(&ready, Some(Ok(line)) if line == READY),
+            "expected ready line, got {ready:?}"
+        );
+        client
     }
 
     #[cfg(unix)]
@@ -3367,7 +3387,7 @@ mod tests {
         // Send valid JSON (session/update notifications) to reset the idle timer.
         // Non-JSON lines no longer reset idle — only valid JSON notifications do.
         let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
+            r#"for i in {1..10}; do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
         let max_dur = std::time::Duration::from_secs(10);
@@ -3561,10 +3581,10 @@ mod tests {
 
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
+        // Keepalive session/update lines every 50ms against a 250ms idle deadline.
+        // The turn should survive well past the idle deadline (proves the fix).
         let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
+            r#"for i in {1..20}; do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
         let max_dur = std::time::Duration::from_secs(10);
@@ -3574,16 +3594,16 @@ mod tests {
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(250),
                 hard_deadline,
                 max_dur,
             )
             .await;
         let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
+        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 250ms more.
+        // Must survive well past the 250ms deadline.
         assert!(
-            elapsed >= std::time::Duration::from_millis(500),
+            elapsed >= std::time::Duration::from_millis(750),
             "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
         );
         assert!(elapsed < std::time::Duration::from_secs(5));

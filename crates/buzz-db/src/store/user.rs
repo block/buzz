@@ -404,6 +404,24 @@ pub async fn list_agents_for_owner(
     .await?)
 }
 
+/// Of `candidates`, the agents whose `agent_owner_pubkey` is `owner_pubkey` in
+/// one community.
+pub async fn owned_agents_among(
+    pool: &PgPool,
+    community_id: CommunityId,
+    owner_pubkey: &[u8],
+    candidates: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>> {
+    Ok(sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT pubkey FROM users WHERE community_id = $1 AND agent_owner_pubkey = $2 AND pubkey = ANY($3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(owner_pubkey)
+    .bind(candidates)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Check whether `actor_pubkey` is the `agent_owner_pubkey` of `target_pubkey`.
 /// Queries `agent_owner_pubkey` directly rather than going through
 /// `get_agent_channel_policy`, which would fetch unrelated fields.
@@ -591,6 +609,17 @@ impl Db {
         owner_pubkey: &[u8],
     ) -> Result<Vec<Vec<u8>>> {
         crate::user::list_agents_for_owner(&self.pool, community_id, owner_pubkey).await
+    }
+
+    /// Of `candidates`, the agents owned by `owner_pubkey` in one community.
+    #[datastore_span(name = "owned_agents_among", system = "postgresql")]
+    pub async fn owned_agents_among(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+        candidates: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>> {
+        crate::user::owned_agents_among(&self.pool, community_id, owner_pubkey, candidates).await
     }
 
     /// Check whether `actor_pubkey` is the agent owner of `target_pubkey`.

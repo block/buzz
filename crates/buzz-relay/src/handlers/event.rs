@@ -8,7 +8,8 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
+    KIND_AGENT_OBSERVER_FRAME, KIND_AGENT_PRESENCE, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -926,6 +927,10 @@ async fn handle_ephemeral_event(
         Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
     }
 
+    if event_kind_u32(&event) == KIND_AGENT_PRESENCE {
+        return set_agent_presence(&state, &conn.tenant, &event, &auth_pubkey).await;
+    }
+
     // Special handling for presence events (kind:20001).
     if event_kind_u32(&event) == KIND_PRESENCE_UPDATE {
         // Accept both bare strings ("online") and legacy JSON ({"status":"online"}).
@@ -1024,6 +1029,89 @@ async fn handle_ephemeral_event(
     }
 
     Ok(())
+}
+
+/// Most agents one agent presence event (kind:20003) may name.
+const MAX_AGENT_PRESENCE: usize = 256;
+
+/// The status and distinct agents an agent presence event names.
+fn agent_presence_request(event: &Event) -> Result<(&str, Vec<PublicKey>), IngestError> {
+    let status = event.content.as_str();
+    if !matches!(status, "online" | "away" | "offline") {
+        return Err(IngestError::Rejected(
+            "invalid: agent presence must be online, away or offline".into(),
+        ));
+    }
+    let mut agents = Vec::new();
+    for tag in event.tags.iter() {
+        let values = tag.as_slice();
+        if values.first().map(String::as_str) != Some("p") {
+            continue;
+        }
+        let agent = values
+            .get(1)
+            .and_then(|hex| PublicKey::from_hex(hex).ok())
+            .ok_or_else(|| IngestError::Rejected("invalid: agent presence p tag".into()))?;
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    if agents.is_empty() || agents.len() > MAX_AGENT_PRESENCE {
+        return Err(IngestError::Rejected(format!(
+            "invalid: agent presence must name 1 to {MAX_AGENT_PRESENCE} agents"
+        )));
+    }
+    Ok((status, agents))
+}
+
+/// Stores an owner's presence for its agents (kind:20003), the way each
+/// agent's own kind:20001 would be stored, so the presence snapshot reads it
+/// back unchanged. Agents the signer does not own are skipped rather than
+/// failing the rest, as an owner's list can be briefly stale. Not fanned out:
+/// live presence is matched by author, and the author here is the owner.
+async fn set_agent_presence(
+    state: &AppState,
+    tenant: &TenantContext,
+    event: &Event,
+    owner: &PublicKey,
+) -> Result<(), IngestError> {
+    let (status, agents) = agent_presence_request(event)?;
+    let community = tenant.community();
+    let owner_bytes = owner.to_bytes().to_vec();
+    let key = |agent: &PublicKey| (community, agent.to_bytes().to_vec(), owner_bytes.clone());
+    // An owner link never changes once made, so a cached `true` is final. A
+    // missing one may just not be made yet (an agent that has not signed in),
+    // so only `true` is cached here and the rest are asked again, in one query
+    // bounded by the event's own agents.
+    let (mut owned, unknown): (Vec<_>, Vec<_>) = agents
+        .into_iter()
+        .partition(|agent| state.observer_owner_cache.get(&key(agent)) == Some(true));
+    if !unknown.is_empty() {
+        let candidates: Vec<Vec<u8>> = unknown.iter().map(|a| a.to_bytes().to_vec()).collect();
+        let linked = state
+            .db
+            .owned_agents_among(community, &owner_bytes, &candidates)
+            .await
+            .map_err(|e| {
+                warn!(event_id = %event.id.to_hex(), "agent presence owner lookup failed: {e}");
+                IngestError::Internal("error: agent ownership unavailable".into())
+            })?;
+        for agent in unknown {
+            if linked.iter().any(|pubkey| pubkey[..] == agent.to_bytes()) {
+                state.observer_owner_cache.insert(key(&agent), true);
+                owned.push(agent);
+            }
+        }
+    }
+    let stored = if status == "offline" {
+        state.pubsub.clear_presence_many(tenant, &owned).await
+    } else {
+        state.pubsub.set_presence_many(tenant, &owned, status).await
+    };
+    stored.map_err(|e| {
+        warn!(event_id = %event.id.to_hex(), "agent presence storage failed: {e}");
+        IngestError::Internal("error: presence storage unavailable".into())
+    })
 }
 
 /// Publishes a verified channel-scoped ephemeral event to the channel's live
@@ -1461,6 +1549,48 @@ mod tests {
     }
 
     #[test]
+    fn agent_presence_request_names_distinct_agents_with_a_known_status() {
+        let owner = Keys::generate();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = |status: &str, tags: Vec<Vec<String>>| {
+            EventBuilder::new(Kind::Custom(super::KIND_AGENT_PRESENCE as u16), status)
+                .tags(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()))
+                .sign_with_keys(&owner)
+                .unwrap()
+        };
+        let p = |hex: &str| vec!["p".to_string(), hex.to_string()];
+
+        let ok = event(
+            "away",
+            vec![p(&agent), p(&agent), vec!["h".into(), "x".into()]],
+        );
+        let (status, agents) = super::agent_presence_request(&ok).unwrap();
+        assert_eq!(status, "away");
+        assert_eq!(agents.len(), 1, "duplicates collapse, other tags ignored");
+
+        for bad in [
+            event("busy", vec![p(&agent)]),
+            event("online", vec![]),
+            event("online", vec![p("not-a-pubkey")]),
+            event(
+                "online",
+                (0..=super::MAX_AGENT_PRESENCE)
+                    .map(|_| p(&Keys::generate().public_key().to_hex()))
+                    .collect(),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    super::agent_presence_request(&bad),
+                    Err(super::IngestError::Rejected(_))
+                ),
+                "{:?} must be rejected",
+                bad.content
+            );
+        }
+    }
+
+    #[test]
     fn agent_observer_route_accepts_agent_to_owner_telemetry() {
         let agent = Keys::generate();
         let owner = Keys::generate();
@@ -1812,6 +1942,128 @@ mod tests {
         #[ignore = "requires PostgreSQL and Redis"]
         async fn accepts_stores_and_fans_out_online_and_offline() {
             exercise(true, &["online", "offline"]).await;
+        }
+
+        /// An owner's batch (kind:20003) stores presence for the agents it
+        /// owns, skips any it does not, and never touches its own presence.
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn agent_presence_stores_only_owned_agents() {
+            let redis_url = std::env::var("REDIS_URL").expect("test Redis URL required");
+            let state = fanout_access::test_state_with_redis_url(&redis_url).await;
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .unwrap();
+            let community_uuid = Uuid::new_v4();
+            let host = format!("agent-presence-{}.example", community_uuid.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let tenant = TenantContext::resolved(CommunityId::from_uuid(community_uuid), host);
+            let owner = Keys::generate();
+            let other = Keys::generate();
+            let (mine, theirs) = (Keys::generate(), Keys::generate());
+            for (user, user_owner) in [
+                (&owner, None),
+                (&other, None),
+                (&mine, Some(&owner)),
+                (&theirs, Some(&other)),
+            ] {
+                sqlx::query(
+                    "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3)",
+                )
+                .bind(community_uuid)
+                .bind(user.public_key().to_bytes().to_vec())
+                .bind(user_owner.map(|key| key.public_key().to_bytes().to_vec()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            let (send_tx, _send_rx) = mpsc::channel(10);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: tenant.clone(),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: owner.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx: mpsc::channel(1).0,
+                terminal_ctrl_tx: mpsc::channel(1).0,
+                cancel: CancellationToken::new(),
+                backpressure_count: Arc::new(AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+                    CancellationToken::new(),
+                ),
+                community_control: crate::state::CommunityConnectionControl::new(
+                    CancellationToken::new(),
+                ),
+            });
+            let send = |status: &str| {
+                let event = EventBuilder::new(
+                    Kind::Custom(super::super::KIND_AGENT_PRESENCE as u16),
+                    status,
+                )
+                .tags([
+                    Tag::parse(["p", &mine.public_key().to_hex()]).unwrap(),
+                    Tag::parse(["p", &theirs.public_key().to_hex()]).unwrap(),
+                ])
+                .sign_with_keys(&owner)
+                .unwrap();
+                super::super::handle_ephemeral_event(
+                    event,
+                    conn.conn_id,
+                    owner.public_key().to_bytes().to_vec(),
+                    owner.public_key(),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+            };
+            let everyone = [mine.public_key(), theirs.public_key(), owner.public_key()];
+            // A `false` cached before the link existed must not hide it now.
+            for agent in [&mine, &theirs] {
+                state.observer_owner_cache.insert(
+                    (
+                        tenant.community(),
+                        agent.public_key().to_bytes().to_vec(),
+                        owner.public_key().to_bytes().to_vec(),
+                    ),
+                    false,
+                );
+            }
+
+            send("online").await.expect("owner batch accepted");
+            let stored = state
+                .pubsub
+                .get_presence_bulk(&tenant, &everyone)
+                .await
+                .unwrap();
+            assert_eq!(
+                stored.get(&mine.public_key().to_hex()).map(String::as_str),
+                Some("online")
+            );
+            assert_eq!(stored.len(), 1, "only the owned agent: {stored:?}");
+
+            send("offline").await.expect("owner clear accepted");
+            let stored = state
+                .pubsub
+                .get_presence_bulk(&tenant, &everyone)
+                .await
+                .unwrap();
+            assert!(stored.is_empty(), "offline clears it: {stored:?}");
         }
 
         /// Production-seam regression for the rejection classification: a

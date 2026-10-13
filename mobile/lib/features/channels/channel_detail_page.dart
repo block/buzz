@@ -271,6 +271,10 @@ class ChannelDetailPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final stickyDateHeaderState = useValueNotifier(
+      StickyDateHeaderState.hidden,
+      [channel.id],
+    );
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
     final restoreComposerFocus = useRef<VoidCallback?>(null);
@@ -611,6 +615,31 @@ class ChannelDetailPage extends HookConsumerWidget {
     );
 
     return FrostedScaffold(
+      foreground:
+          !resolvedChannel.isForum &&
+              timelineEntries.isNotEmpty &&
+              !showInitialConnectionSkeleton &&
+              !showConnectionSkeleton.value &&
+              !messagesState.isLoading
+          ? Stack(
+              children: [
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top:
+                      frostedAppBarHeight(
+                        context,
+                        titleContentHeight: appBarTitleContentHeight,
+                      ) +
+                      Grid.twelve,
+                  child: StickyDateHeader(
+                    key: const ValueKey('channel-sticky-date-header'),
+                    state: stickyDateHeaderState,
+                  ),
+                ),
+              ],
+            )
+          : null,
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
@@ -747,6 +776,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                           ),
                           data: (events) {
                             return _MessageList(
+                              stickyDateHeaderState: stickyDateHeaderState,
                               entries: timelineEntries,
                               allMessages: timelineMessages,
                               initialMessageId: initialMessageId,

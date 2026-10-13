@@ -839,6 +839,21 @@ class ThreadDetailPage extends HookConsumerWidget {
     });
 
     return FrostedScaffold(
+      foreground: threadViewportVisible
+          ? Stack(
+              children: [
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: frostedAppBarHeight(context) + Grid.twelve,
+                  child: StickyDateHeader(
+                    key: const ValueKey('thread-sticky-date-header'),
+                    state: stickyDateHeaderState,
+                  ),
+                ),
+              ],
+            )
+          : null,
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
       appBar: _threadAppBar(context, ref, channel, currentPubkey),
       body: Stack(
@@ -920,16 +935,6 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
             ],
           ),
-          if (threadViewportVisible)
-            Positioned(
-              left: 0,
-              right: 0,
-              top: frostedAppBarHeight(context) + Grid.twelve,
-              child: StickyDateHeader(
-                key: const ValueKey('thread-sticky-date-header'),
-                state: stickyDateHeaderState,
-              ),
-            ),
           if (isMember && !isArchived)
             AndroidImeLift(
               child: Align(
