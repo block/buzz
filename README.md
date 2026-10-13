@@ -144,7 +144,7 @@ See [here](https://engineering.block.xyz/blog/run-your-own-buzz-relay) for detai
 
 Don't build from source, and don't use the OSS release — use the internal build. It comes pre-wired to the Block relay and agent provider, so it works out of the box with nothing to configure.
 
-Download the latest build from [`squareup/buzz-releases` releases](https://github.com/squareup/buzz-releases/releases/latest) and install it.
+Download the latest build from the [`squareup/buzz-releases`](https://github.com/squareup/buzz-releases/releases/latest) releases page and install it.
 
 ### I want to build & run from source
 
