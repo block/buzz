@@ -1,7 +1,8 @@
 use super::project_git_compare::compare_local_remote_status;
 use super::project_git_exec::{
-    build_git_auth_config, build_git_operation_auth_config, clean_branch, clean_target_ref,
-    run_git, validate_git_operation_url, validate_workspace_clone_url, GitAuthConfig,
+    build_git_auth_config, build_git_operation_auth_config, build_read_git_auth_config,
+    clean_branch, clean_target_ref, run_git, validate_git_operation_url,
+    validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_git_file_content::{checkout_project_repo, read_preview_content};
 use super::project_git_push::push_project_local_repository_blocking;
@@ -421,8 +422,7 @@ pub async fn get_project_repo_snapshot(
     target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoSnapshotInfo, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    let auth = build_read_git_auth_config(&clone_url, &state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
     let target_ref = clean_target_ref(target_ref);

@@ -114,3 +114,18 @@ test("presents access failures without exposing the relay's masked 404", () => {
     title: "Repository access restricted",
   });
 });
+
+test("names the external host when an external repository is missing", () => {
+  assert.deepEqual(
+    projectRepoUnavailablePresentation("missing", "git.oceanlabs.dev"),
+    {
+      description:
+        "The project announcement exists, but its git repository was not found on git.oceanlabs.dev, or you have no access to it.",
+      title: "Repository not found",
+    },
+  );
+  assert.equal(
+    projectRepoUnavailablePresentation("missing").title,
+    "Repository not initialized",
+  );
+});

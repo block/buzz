@@ -1,14 +1,6 @@
-import {
-  BookOpen,
-  DownloadCloud,
-  ExternalLink,
-  Globe,
-  Loader2,
-  MessageCircle,
-} from "lucide-react";
+import { BookOpen, MessageCircle } from "lucide-react";
 
 import type { ProjectRepoFile } from "@/features/projects/hooks";
-import { projectExternalRefUrl } from "@/features/projects/lib/projectExternalUrl";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { formatLastChangedAt } from "@/features/projects/lib/projectsViewHelpers";
 import { Button } from "@/shared/ui/button";
@@ -26,7 +18,6 @@ import {
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
-import { GitHubMark } from "./GitHubMark";
 import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailableState";
 import { ProjectPanelState } from "./ProjectPanelState";
 
@@ -103,7 +94,6 @@ export function ReadmePanel({
   fileContentSource,
   gitDataState,
   externalHost,
-  externalUrl,
   hideHeader,
   ownerAvatarUrl,
   ownerIsAgent,
@@ -116,8 +106,8 @@ export function ReadmePanel({
   file: ProjectRepoFile | null;
   fileContentSource?: RepositoryFileContentSource;
   gitDataState: "checking" | "available" | "empty" | "unavailable";
+  /** Git host name when the repository is not hosted on the relay. */
   externalHost?: string;
-  externalUrl?: string | null;
   /**
    * Skip the header rows entirely — the workspace layout renders the source
    * controls and last-changed timestamp itself.
@@ -131,10 +121,6 @@ export function ReadmePanel({
   sourceControls?: RepoSourceHeaderControls;
 }) {
   const fileContent = useRepositoryFileContent(file, fileContentSource);
-  const externalOpenUrl = projectExternalRefUrl(
-    externalUrl,
-    sourceControls?.selectedTag ?? sourceControls?.branch,
-  );
   // Two header rows, mirroring the files panel: controls on top, then the
   // file identity row.
   const header = hideHeader ? null : (
@@ -195,75 +181,19 @@ export function ReadmePanel({
   }
 
   if (gitDataState === "unavailable") {
-    if (!externalHost) {
-      return (
-        <section className="overflow-hidden">
-          <ProjectRepositoryUnavailableState
-            accessChannelId={accessChannelId}
-            onAskForAccess={sourceControls?.onAskForAccess}
-            onRetry={sourceControls?.onFetch}
-            ownerAvatarUrl={ownerAvatarUrl}
-            ownerIsAgent={ownerIsAgent}
-            ownerName={ownerName}
-            reason={unavailableReason}
-            retryPending={sourceControls?.fetchPending}
-          />
-        </section>
-      );
-    }
-
     return (
       <section className="overflow-hidden">
-        <div className="flex min-h-64 flex-col items-center justify-center p-8 text-center">
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-muted-foreground">
-            {externalHost === "github.com" ? (
-              <GitHubMark className="h-6 w-6" />
-            ) : (
-              <Globe className="h-6 w-6" />
-            )}
-          </div>
-          <h3 className="text-base font-semibold text-foreground">
-            Code hosted on {externalHost}
-          </h3>
-          <p className="mt-1 max-w-lg text-sm text-muted-foreground">
-            Clone this repository locally to explore its files, commits, and
-            contributors in Buzz.
-          </p>
-          {externalOpenUrl ? (
-            <a
-              className="mt-2 max-w-lg truncate font-mono text-xs text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              href={externalOpenUrl}
-              rel="noreferrer"
-              target="_blank"
-            >
-              {externalOpenUrl}
-            </a>
-          ) : null}
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-            {sourceControls?.onCloneLocal ? (
-              <Button
-                disabled={sourceControls.clonePending}
-                onClick={sourceControls.onCloneLocal}
-                size="sm"
-              >
-                {sourceControls.clonePending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <DownloadCloud className="h-4 w-4" />
-                )}
-                {sourceControls.clonePending ? "Cloning…" : "Clone locally"}
-              </Button>
-            ) : null}
-            {externalOpenUrl ? (
-              <Button asChild size="sm" variant="outline">
-                <a href={externalOpenUrl} rel="noreferrer" target="_blank">
-                  <ExternalLink className="h-4 w-4" />
-                  Open on {externalHost}
-                </a>
-              </Button>
-            ) : null}
-          </div>
-        </div>
+        <ProjectRepositoryUnavailableState
+          accessChannelId={accessChannelId}
+          externalHost={externalHost}
+          onAskForAccess={sourceControls?.onAskForAccess}
+          onRetry={sourceControls?.onFetch}
+          ownerAvatarUrl={ownerAvatarUrl}
+          ownerIsAgent={ownerIsAgent}
+          ownerName={ownerName}
+          reason={unavailableReason}
+          retryPending={sourceControls?.fetchPending}
+        />
       </section>
     );
   }

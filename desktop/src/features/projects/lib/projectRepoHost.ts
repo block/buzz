@@ -5,6 +5,17 @@ export type ProjectRepoHost =
   | { kind: "external"; host: string }
   | { kind: "unresolved" };
 
+/** scp-style git remote: `user@host:path`. */
+const SCP_LIKE_CLONE_URL = /^([^@/:\s]+)@([^/:\s]+):(?!\/\/)(.+)$/;
+
+/** Rewrites an scp-style remote as `ssh://user@host/path` so `URL` can parse it. */
+function parsableCloneUrl(cloneUrl: string): string {
+  const match = SCP_LIKE_CLONE_URL.exec(cloneUrl);
+  return match
+    ? `ssh://${match[1]}@${match[2]}/${match[3].replace(/^\/+/, "")}`
+    : cloneUrl;
+}
+
 /**
  * Classifies the canonical git remote using the same origin and path boundary
  * enforced by the Tauri git commands. This is presentation/query gating only;
@@ -17,11 +28,7 @@ export function projectRepoHost(
   if (!cloneUrl || !relayOrigin) return { kind: "unresolved" };
 
   try {
-    const clone = new URL(
-      cloneUrl.startsWith("git@github.com:")
-        ? cloneUrl.replace("git@github.com:", "ssh://git@github.com/")
-        : cloneUrl,
-    );
+    const clone = new URL(parsableCloneUrl(cloneUrl));
     const relay = new URL(relayOrigin);
     const isBuzzPath = /^\/git\/[0-9a-f]{64}\/[^/]+\/?$/i.test(clone.pathname);
 

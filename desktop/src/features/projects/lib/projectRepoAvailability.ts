@@ -54,10 +54,20 @@ const PROJECT_REPO_UNAVAILABLE_PRESENTATIONS: Record<
   },
 };
 
-/** Returns consistent, sanitized copy for repository availability UI. */
+/**
+ * Returns consistent, sanitized copy for repository availability UI.
+ * `externalHost` names the git host when the repository is not on the relay.
+ */
 export function projectRepoUnavailablePresentation(
   reason: ProjectRepoUnavailableReason,
+  externalHost?: string,
 ): ProjectRepoUnavailablePresentation {
+  if (reason === "missing" && externalHost) {
+    return {
+      description: `The project announcement exists, but its git repository was not found on ${externalHost}, or you have no access to it.`,
+      title: "Repository not found",
+    };
+  }
   return PROJECT_REPO_UNAVAILABLE_PRESENTATIONS[reason];
 }
 

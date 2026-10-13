@@ -241,7 +241,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   );
   const snapshotEnabled = githubRemoteSnapshotEnabled({
     cloneUrl: repository?.cloneUrls[0],
-    buzzHost: repoRemote.host.kind === "buzz",
     githubStateReady: repoStateQuery.isSuccess,
   });
   const repositoryPanel = useProjectRepositoryPanel(

@@ -235,23 +235,44 @@ pub(crate) fn build_github_git_auth_config_with<F>(
 where
     F: FnOnce() -> Result<GhRunner, ProjectPullRequestMergeError>,
 {
-    let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
+    let mut auth = credential_free_git_auth_config()?;
     if !clone_url.starts_with("https://github.com/") {
-        return Ok(GitAuthConfig {
-            git_path,
-            credential_helper: None,
-            nsec: String::new(),
-            allow_file_transport: false,
-        });
+        return Ok(auth);
     }
     let gh = discover().map_err(github_command_error_string)?;
     gh.ensure_auth().map_err(github_command_error_string)?;
+    auth.credential_helper = Some(github_credential_helper_config_value(gh.binary_path()));
+    Ok(auth)
+}
+
+/// Git auth with no identity key and no credential helper. Use it for any
+/// remote that is not the active workspace relay.
+fn credential_free_git_auth_config() -> Result<GitAuthConfig, String> {
+    let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
     Ok(GitAuthConfig {
         git_path,
-        credential_helper: Some(github_credential_helper_config_value(gh.binary_path())),
+        credential_helper: None,
         nsec: String::new(),
         allow_file_transport: false,
     })
+}
+
+/// Build git auth for read-only browsing (snapshot, file content, diff).
+///
+/// A remote on the active workspace relay gets the Buzz identity credentials.
+/// Any other https, ssh, or scp-style remote gets no credentials, so the nsec
+/// and the relay credential helper never reach a third-party host. SSH
+/// remotes authenticate through the user's ssh-agent and `~/.ssh/config`.
+pub(crate) fn build_read_git_auth_config(
+    clone_url: &str,
+    state: &AppState,
+) -> Result<GitAuthConfig, String> {
+    let relay_base = crate::relay::relay_api_base_url_with_override(state);
+    if validate_clone_url_against_relay(clone_url, &relay_base).is_ok() {
+        return build_git_auth_config(state);
+    }
+    validate_external_clone_url(clone_url)?;
+    credential_free_git_auth_config()
 }
 
 /// Build host-aware git auth for Buzz remotes or github.com remotes.
@@ -358,6 +379,59 @@ pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Accept an `https://`, `ssh://`, or scp-style (`user@host:path`) git URL
+/// on any host. Git receives the URL as a positional argument, so the URL
+/// must not start with `-`, and no host, user, or path part may start with
+/// `-` either (ssh option injection). Embedded https credentials are refused.
+pub(crate) fn validate_external_clone_url(clone_url: &str) -> Result<(), String> {
+    const INVALID: &str = "clone URL must be an https://, ssh://, or user@host:path git URL";
+    let is_safe_part = |part: &str, extra: &[char]| {
+        !part.is_empty()
+            && !part.starts_with('-')
+            && part.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') || extra.contains(&c)
+            })
+    };
+    if clone_url
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(INVALID.into());
+    }
+    let (user, host, path) = match Url::parse(clone_url) {
+        Ok(parsed) => {
+            let allowed = match parsed.scheme() {
+                "https" => parsed.username().is_empty() && parsed.password().is_none(),
+                "ssh" => parsed.password().is_none(),
+                _ => false,
+            };
+            if !allowed {
+                return Err(INVALID.into());
+            }
+            (
+                parsed.username().to_string(),
+                parsed.host_str().unwrap_or_default().to_string(),
+                parsed.path().trim_start_matches('/').to_string(),
+            )
+        }
+        Err(_) => {
+            let (user_host, path) = clone_url.split_once(':').ok_or(INVALID)?;
+            let (user, host) = user_host.split_once('@').ok_or(INVALID)?;
+            if user.is_empty() {
+                return Err(INVALID.into());
+            }
+            (user.to_string(), host.to_string(), path.to_string())
+        }
+    };
+    if (!user.is_empty() && !is_safe_part(&user, &[]))
+        || !is_safe_part(&host, &[])
+        || !is_safe_part(&path, &['/', '~'])
+    {
+        return Err(INVALID.into());
+    }
+    Ok(())
+}
+
 fn validate_github_clone_url(clone_url: &str) -> Result<(), String> {
     GitHubRepoRef::parse(clone_url).map(|_| ())
 }
@@ -435,11 +509,90 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 mod tests {
     use super::{
         build_github_git_auth_config_with, clean_branch, clean_target_ref, configure_git_auth,
-        credential_helper_config_value, git_needs_credentials, git_subcommand,
-        github_command_error_string, github_credential_helper_config_value, validate_clone_url,
-        validate_clone_url_against_relay, validate_git_operation_url_against_relay,
-        validate_local_clone_url, GhRunner, GitAuthConfig, ProjectPullRequestMergeError,
+        credential_free_git_auth_config, credential_helper_config_value, git_needs_credentials,
+        git_subcommand, github_command_error_string, github_credential_helper_config_value,
+        validate_clone_url, validate_clone_url_against_relay, validate_external_clone_url,
+        validate_git_operation_url_against_relay, validate_local_clone_url, GhRunner,
+        GitAuthConfig, ProjectPullRequestMergeError,
     };
+
+    #[test]
+    fn external_clone_url_accepts_https_ssh_and_scp_style() {
+        for clone_url in [
+            "git@git.oceanlabs.dev:vtc/3q-chess/3q-chess-master.git",
+            "git@gitlab.com:~user/repo.git",
+            "ssh://git@git.example.com:2222/team/app.git",
+            "https://git.example.com/team/app.git",
+            "https://gitlab.com/acme/app",
+        ] {
+            assert!(
+                validate_external_clone_url(clone_url).is_ok(),
+                "{clone_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_clone_url_rejects_unsafe_shapes() {
+        for clone_url in [
+            "-uhost:path",
+            "git@-oProxyCommand=evil:path",
+            "-oProxyCommand=evil@host:path",
+            "git@host:-path",
+            "ssh://-oProxyCommand=evil/repo",
+            "ssh://git@host/-repo",
+            "https://token@git.example.com/team/app.git",
+            "https://user:secret@git.example.com/team/app.git",
+            "http://git.example.com/team/app.git",
+            "file:///etc/passwd",
+            "ext::sh -c evil",
+            "host:path",
+            "@host:path",
+            "git@host:",
+            "git@host:team/app .git",
+            "/local/path",
+        ] {
+            assert!(
+                validate_external_clone_url(clone_url).is_err(),
+                "{clone_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_free_auth_never_exposes_identity_or_helper() {
+        let auth = credential_free_git_auth_config().expect("git on PATH");
+        assert!(auth.nsec.is_empty());
+        assert!(auth.credential_helper.is_none());
+        assert!(!auth.allow_file_transport);
+
+        let mut command = std::process::Command::new(&auth.git_path);
+        command.env("NOSTR_PRIVATE_KEY", "must-not-leak");
+        configure_git_auth(&mut command, &auth, true);
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(envs.contains(&("NOSTR_PRIVATE_KEY".to_string(), None)));
+        let helper_values: Vec<&str> = envs
+            .iter()
+            .filter(|(key, value)| {
+                key.starts_with("GIT_CONFIG_KEY_") && value.as_deref() == Some("credential.helper")
+            })
+            .filter_map(|(key, _)| {
+                let value_key = key.replace("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_");
+                envs.iter()
+                    .find(|(candidate, _)| *candidate == value_key)
+                    .and_then(|(_, value)| value.as_deref())
+            })
+            .collect();
+        assert_eq!(helper_values, vec![""]);
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {

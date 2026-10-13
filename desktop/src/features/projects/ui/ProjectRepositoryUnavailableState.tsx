@@ -121,6 +121,7 @@ function AccessRestrictedDescription({
 
 export function ProjectRepositoryUnavailableState({
   accessChannelId,
+  externalHost,
   onAskForAccess,
   onRetry,
   ownerAvatarUrl,
@@ -130,6 +131,7 @@ export function ProjectRepositoryUnavailableState({
   retryPending = false,
 }: {
   accessChannelId?: string | null;
+  externalHost?: string;
   onAskForAccess?: () => void;
   onRetry?: () => void;
   ownerAvatarUrl?: string | null;
@@ -138,7 +140,7 @@ export function ProjectRepositoryUnavailableState({
   reason?: ProjectRepoUnavailableReason;
   retryPending?: boolean;
 }) {
-  const unavailable = projectRepoUnavailablePresentation(reason);
+  const unavailable = projectRepoUnavailablePresentation(reason, externalHost);
   const UnavailableIcon = UNAVAILABLE_ICONS[reason];
 
   return (

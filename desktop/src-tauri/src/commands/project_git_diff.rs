@@ -1,5 +1,5 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
+    build_git_auth_config, build_read_git_auth_config, clean_branch, run_git, GitAuthConfig,
 };
 use super::project_repo_paths::find_local_repo_dir;
 use crate::app_state::AppState;
@@ -408,8 +408,7 @@ pub async fn get_project_repo_diff(
     target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoDiffInfo, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    let auth = build_read_git_auth_config(&clone_url, &state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
     let target_ref = clean_target_ref(target_ref);

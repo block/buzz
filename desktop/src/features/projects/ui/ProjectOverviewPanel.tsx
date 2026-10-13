@@ -10,7 +10,6 @@ type ProjectOverviewPanelProps = {
   /** `buzz-channel` binding of the repository, for access-restricted copy. */
   accessChannelId?: string | null;
   externalHost?: string;
-  externalUrl?: string | null;
   fileContentSource?: RepositoryFileContentSource;
   gitDataState: GitDataState;
   /** Hide the readme header rows when the workspace renders them itself. */
@@ -50,7 +49,6 @@ export function OverviewRailSection({
 export function ProjectOverviewPanel({
   accessChannelId,
   externalHost,
-  externalUrl,
   fileContentSource,
   gitDataState,
   hideReadmeHeader,
@@ -68,7 +66,6 @@ export function ProjectOverviewPanel({
       <ReadmePanel
         accessChannelId={accessChannelId}
         externalHost={externalHost}
-        externalUrl={externalUrl}
         file={readmeFile}
         fileContentSource={fileContentSource}
         gitDataState={gitDataState}

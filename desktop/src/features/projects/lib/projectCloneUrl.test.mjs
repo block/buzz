@@ -86,6 +86,20 @@ test("projectRepoHost identifies an external repository by host", () => {
   );
 });
 
+test("projectRepoHost parses scp-style SSH remotes on any host", () => {
+  assert.deepEqual(
+    projectRepoHost(
+      "git@git.oceanlabs.dev:vtc/3q-chess/3q-chess-master.git",
+      ORIGIN,
+    ),
+    { kind: "external", host: "git.oceanlabs.dev" },
+  );
+  assert.deepEqual(projectRepoHost("git@github.com:block/buzz.git", ORIGIN), {
+    kind: "external",
+    host: "github.com",
+  });
+});
+
 test("projectRepoHost treats a non-repository relay path as external", () => {
   assert.deepEqual(projectRepoHost(`${ORIGIN}/other/path`, ORIGIN), {
     kind: "external",

@@ -3,18 +3,16 @@ import type { Repository } from "@/features/projects/projectModels";
 import type { ProjectPullRequest } from "@/features/projects/projectPullRequests.mjs";
 import type { ProjectRepoSnapshot } from "@/shared/api/types";
 
-/** True when the remote snapshot query can run for the selected repository host. */
+/**
+ * True when the remote snapshot query can run for the repository. GitHub
+ * waits for its repository state; Buzz and other git hosts load through git.
+ */
 export function githubRemoteSnapshotEnabled(input: {
   cloneUrl?: string | null;
-  buzzHost: boolean;
   githubStateReady: boolean;
 }) {
-  if (input.buzzHost) return Boolean(input.cloneUrl);
-  return (
-    Boolean(input.cloneUrl) &&
-    isGitHubCloneUrl(input.cloneUrl) &&
-    input.githubStateReady
-  );
+  if (!input.cloneUrl) return false;
+  return !isGitHubCloneUrl(input.cloneUrl) || input.githubStateReady;
 }
 
 /** Route project-detail remote snapshots by the project clone URL host. */

@@ -30,7 +30,6 @@ import { repositoryDiscussionQuery } from "@/features/projects/lib/discussionCha
 import type { ProjectDiscussionChannel } from "@/features/projects/lib/projectDiscussionChannel";
 import { isGitHubCloneUrl } from "@/features/projects/lib/projectGitError";
 import type { GithubIssueListState } from "@/features/projects/lib/projectGithubIssues";
-import { githubSplashHost } from "@/features/projects/lib/projectGithubRemoteView";
 import type { ProjectRepoHost } from "@/features/projects/lib/projectRepoHost";
 import {
   projectRepoUnavailableReason,
@@ -220,15 +219,10 @@ export function WorkspaceTabs({
     ownerProfile?.displayName?.trim() ||
     ownerProfile?.nip05Handle?.trim() ||
     undefined;
-  const externalHost = githubSplashHost({
-    repoSource,
-    hostKind: repoHost.kind,
-    host: repoHost.kind === "external" ? repoHost.host : undefined,
-    cloneUrl: project.cloneUrls[0],
-  });
+  const externalHost = repoHost.kind === "external" ? repoHost.host : undefined;
   const gitDataState: GitDataState = displayedSnapshotLoading
     ? "checking"
-    : externalHost || displayedSnapshotError || !displayedSnapshot
+    : displayedSnapshotError || !displayedSnapshot
       ? "unavailable"
       : files.length === 0
         ? "empty"
@@ -242,9 +236,10 @@ export function WorkspaceTabs({
       : displayedSnapshotError
         ? projectRepoUnavailableReason(displayedSnapshotError)
         : undefined;
+  // Channel-ACL refinement only applies to repositories hosted on the relay.
   const unavailableReason =
-    gitDataState === "unavailable" && !externalHost
-      ? githubHosted
+    gitDataState === "unavailable"
+      ? githubHosted || externalHost
         ? rawUnavailableReason
         : rawUnavailableReason && repoSource === "remote"
           ? refineRepoUnavailableReason({
@@ -254,19 +249,19 @@ export function WorkspaceTabs({
             })
           : rawUnavailableReason
       : undefined;
-  const repositoryUnavailableState =
-    unavailableReason && !externalHost ? (
-      <ProjectRepositoryUnavailableState
-        accessChannelId={project.channelId}
-        onAskForAccess={sourceControls?.onAskForAccess}
-        onRetry={sourceControls?.onFetch}
-        ownerAvatarUrl={ownerProfile?.avatarUrl}
-        ownerIsAgent={ownerProfile?.isAgent}
-        ownerName={ownerName}
-        reason={unavailableReason}
-        retryPending={sourceControls?.fetchPending}
-      />
-    ) : null;
+  const repositoryUnavailableState = unavailableReason ? (
+    <ProjectRepositoryUnavailableState
+      accessChannelId={project.channelId}
+      externalHost={externalHost}
+      onAskForAccess={sourceControls?.onAskForAccess}
+      onRetry={sourceControls?.onFetch}
+      ownerAvatarUrl={ownerProfile?.avatarUrl}
+      ownerIsAgent={ownerProfile?.isAgent}
+      ownerName={ownerName}
+      reason={unavailableReason}
+      retryPending={sourceControls?.fetchPending}
+    />
+  ) : null;
   const commitAuthorPubkeys = React.useMemo(
     () => commitAuthorPubkeysFromPullRequests(pullRequests),
     [pullRequests],
@@ -449,7 +444,6 @@ export function WorkspaceTabs({
           <ProjectOverviewPanel
             accessChannelId={project.channelId}
             externalHost={externalHost}
-            externalUrl={externalHost ? sourceControls?.externalUrl : null}
             fileContentSource={fileContentSource}
             gitDataState={gitDataState}
             hideReadmeHeader
@@ -591,11 +585,6 @@ export function WorkspaceTabs({
                 onContextChange={onFilesContextChange}
                 profiles={profiles}
                 snapshot={displayedSnapshot}
-                unavailableMessage={
-                  externalHost
-                    ? `Not mirrored on Buzz. Repository files are hosted on ${externalHost}.`
-                    : undefined
-                }
               />
             ))}
         </TabsContent>

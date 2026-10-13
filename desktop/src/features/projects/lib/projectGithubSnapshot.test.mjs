@@ -99,11 +99,10 @@ test("GitHub snapshot ignores Buzz tag, nostr refs, and PR source clone URLs", a
   assert.equal(seenRef, "develop");
 });
 
-test("snapshot query enablement requires G1 success on GitHub", () => {
+test("snapshot query enablement waits for repository state only on GitHub", () => {
   assert.equal(
     githubRemoteSnapshotEnabled({
       cloneUrl: "https://github.com/acme/app",
-      buzzHost: false,
       githubStateReady: false,
     }),
     false,
@@ -111,7 +110,6 @@ test("snapshot query enablement requires G1 success on GitHub", () => {
   assert.equal(
     githubRemoteSnapshotEnabled({
       cloneUrl: "https://github.com/acme/app",
-      buzzHost: false,
       githubStateReady: true,
     }),
     true,
@@ -119,9 +117,22 @@ test("snapshot query enablement requires G1 success on GitHub", () => {
   assert.equal(
     githubRemoteSnapshotEnabled({
       cloneUrl: `https://relay.example/git/${"ab".repeat(32)}/app`,
-      buzzHost: true,
       githubStateReady: false,
     }),
     true,
+  );
+});
+
+test("snapshot query runs for external git hosts and never without a clone URL", () => {
+  assert.equal(
+    githubRemoteSnapshotEnabled({
+      cloneUrl: "git@git.oceanlabs.dev:vtc/3q-chess/3q-chess-master.git",
+      githubStateReady: false,
+    }),
+    true,
+  );
+  assert.equal(
+    githubRemoteSnapshotEnabled({ cloneUrl: null, githubStateReady: true }),
+    false,
   );
 });
