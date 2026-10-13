@@ -56,14 +56,17 @@ metrics exporter starts, so `increase()` counts the first failure and the first
 run with a new outcome:
 
 - `buzz_partition_audit_runs_total{table, outcome}` increments once per table
-  per audit. The outcome is `ok`, `degraded`, or `error`, including audits run
-  inside startup partition creation.
+  per audit. The outcome is `ok`, `degraded`, or `error`, including the opening
+  audit of each partition maintenance pass.
 - `buzz_partition_audit_failures_total` counts failed explicit audit attempts:
-  the startup fallback audit that runs when startup partition creation fails, and
-  each periodic audit. A startup creation failure is not counted by itself. If
-  the fallback audit then fails, that attempt counts once.
-- `buzz_partition_create_attempts_total{table, outcome}` counts startup creation
-  decisions.
+  the fallback audit that runs when a maintenance pass fails, and each periodic
+  audit when maintenance does not run. A maintenance failure is not counted by
+  itself. If the fallback audit then fails, that attempt counts once.
+- `buzz_partition_create_attempts_total{table, outcome}` counts per-month
+  decisions in each maintenance pass: `created`, `error`, or `skipped_covered`
+  for a month that was already covered. Maintenance runs at startup, and on
+  every periodic audit when `BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED` is on, so
+  `skipped_covered` then grows on every pass in steady state.
 
 ## Alerts
 
