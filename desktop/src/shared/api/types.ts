@@ -235,6 +235,8 @@ export type HomeFeedResponse = {
 
 export type GetHomeFeedInput = {
   since?: number;
+  /** Web only: return items created strictly before this unix second (inbox paging). */
+  until?: number;
   limit?: number;
   types?: string;
 };
@@ -348,6 +350,8 @@ export type ManagedAgent = {
   restartDiff: RestartDiffEntry[];
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
+  /** True when the agent asks before tool use (env BUZZ_ACP_PERMISSION_MODE=ask). Applies on next start. */
+  permissionAsk?: boolean;
   status: "running" | "stopped" | "deployed" | "not_deployed";
   pid: number | null;
   createdAt: string;
@@ -687,6 +691,8 @@ export type RuntimeConfigSurface = {
 
 export type UpdateManagedAgentInput = {
   pubkey: string;
+  /** Web → Direct only: desktop maps this to the agent's BUZZ_ACP_PERMISSION_MODE env var. */
+  permissionAsk?: boolean;
   name?: string;
   model?: string | null;
   provider?: string | null;

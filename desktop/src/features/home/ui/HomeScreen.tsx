@@ -4,6 +4,7 @@ import { useAppShell } from "@/app/AppShellContext";
 import { markHiddenDmFeedItems } from "@/features/channels/dmResurface";
 import { useHiddenDmIds } from "@/features/channels/useHiddenDmIds";
 import { useHomeFeedQuery } from "@/features/home/hooks";
+import { useInboxPaging } from "@/features/home/useInboxPaging";
 import { HomeView } from "@/features/home/ui/HomeView";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import {
@@ -27,26 +28,28 @@ export function HomeScreen({
   onOpenContext,
 }: HomeScreenProps) {
   const homeFeedQuery = useHomeFeedQuery();
+  const paging = useInboxPaging(homeFeedQuery.data);
+  const pagedFeed = paging.feed;
   const { threadActivityFeedItems } = useAppShell();
   const hiddenDmIds = useHiddenDmIds(currentPubkey);
 
   const augmentedFeed = React.useMemo((): HomeFeedResponse | undefined => {
-    if (!homeFeedQuery.data) return undefined;
+    if (!pagedFeed) return undefined;
     const withThreadActivity =
       threadActivityFeedItems.length === 0
-        ? homeFeedQuery.data
+        ? pagedFeed
         : {
-            ...homeFeedQuery.data,
+            ...pagedFeed,
             feed: {
-              ...homeFeedQuery.data.feed,
+              ...pagedFeed.feed,
               activity: [
-                ...homeFeedQuery.data.feed.activity,
+                ...pagedFeed.feed.activity,
                 ...threadActivityFeedItems,
               ],
             },
           };
     return markHiddenDmFeedItems(withThreadActivity, hiddenDmIds);
-  }, [hiddenDmIds, homeFeedQuery.data, threadActivityFeedItems]);
+  }, [hiddenDmIds, pagedFeed, threadActivityFeedItems]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -63,6 +66,14 @@ export function HomeScreen({
             : undefined
         }
         feed={augmentedFeed}
+        inboxPaging={{
+          hasMore: paging.hasMore,
+          isLoading: paging.isLoadingOlder,
+          error: paging.loadOlderError,
+          onLoadOlder: () => {
+            void paging.loadOlder();
+          },
+        }}
         isLoading={homeFeedQuery.isLoading}
         onOpenContext={onOpenContext}
         onRefresh={() => {

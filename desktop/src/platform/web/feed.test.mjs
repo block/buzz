@@ -45,3 +45,10 @@ test("get_feed: types filter and default limit; no edit query without mentions",
   await getFeed(undefined, ME, async (f) => (calls2.push(f), []));
   assert.equal(calls2[0][0].limit, 50);
 });
+
+test("get_feed: until pages backwards (exclusive) on both filters", async () => {
+  const calls = [];
+  await getFeed({ until: 500, limit: 50 }, ME, async (f) => (calls.push(f), []));
+  assert.equal(calls[0][0].until, 499);
+  assert.equal(calls[0][1].until, 499);
+});

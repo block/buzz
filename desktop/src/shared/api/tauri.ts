@@ -138,6 +138,8 @@ export type RawManagedAgent = {
   needs_restart: boolean;
   restart_diff?: RawRestartDiffEntry[];
   env_vars?: Record<string, string>;
+  /** Set by the desktop's Direct bridge (env values are blanked over Direct). */
+  permission_ask?: boolean;
   status: ManagedAgent["status"];
   pid: number | null;
   created_at: string;
@@ -629,6 +631,12 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     needsRestart: agent.needs_restart ?? false,
     restartDiff: agent.restart_diff ?? [],
     envVars: agent.env_vars ?? {},
+    // Over Direct env values are blanked, so web relies on the desktop's permission_ask (absent on older desktops → unknown).
+    permissionAsk:
+      agent.permission_ask ??
+      (import.meta.env?.VITE_BUZZ_PLATFORM === "web"
+        ? undefined
+        : agent.env_vars?.BUZZ_ACP_PERMISSION_MODE?.trim() === "ask"),
     status: agent.status,
     pid: agent.pid,
     createdAt: agent.created_at,

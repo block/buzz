@@ -211,6 +211,7 @@ function PersonalItemRow({
 }
 
 type InboxListPaneProps = {
+  paging?: import("@/features/home/ui/HomeView").InboxPagingProps;
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
   activeDraftCount: number;
@@ -241,6 +242,7 @@ type InboxListPaneProps = {
 };
 
 export function InboxListPane({
+  paging,
   activeReminderEventIds,
   agentPubkeys,
   activeDraftCount,
@@ -746,7 +748,11 @@ export function InboxListPane({
               }}
               scrollRef={scrollRef}
             />
-          ) : (
+          ) : null}
+          {visibleInboxRows.length > 0 && paging?.hasMore ? (
+            <InboxLoadOlderFooter paging={paging} scrollRef={scrollRef} />
+          ) : null}
+          {visibleInboxRows.length > 0 ? null : (
             <div className="flex h-full min-h-64 items-center justify-center px-6 text-center">
               <div>
                 <p className="text-sm font-medium text-foreground">
@@ -811,5 +817,60 @@ function InboxRowActionButton({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+/** Auto-loads the next inbox page when the footer scrolls into view; the button is a manual fallback. */
+function InboxLoadOlderFooter({
+  paging,
+  scrollRef,
+}: {
+  paging: import("@/features/home/ui/HomeView").InboxPagingProps;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const footerRef = React.useRef<HTMLDivElement | null>(null);
+  const { isLoading, error, onLoadOlder } = paging;
+  React.useEffect(() => {
+    const el = footerRef.current;
+    if (
+      !el ||
+      isLoading ||
+      error ||
+      typeof IntersectionObserver === "undefined"
+    )
+      return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadOlder();
+      },
+      { root: scrollRef.current, rootMargin: "300px 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [error, isLoading, onLoadOlder, scrollRef]);
+  return (
+    <div
+      className="flex items-center justify-center gap-2 px-4 py-4 text-xs text-muted-foreground"
+      data-testid="home-inbox-load-older"
+      ref={footerRef}
+    >
+      {isLoading ? (
+        <>
+          <span
+            aria-hidden
+            className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"
+          />
+          <span>Loading older messages…</span>
+        </>
+      ) : (
+        <button
+          className="rounded-full border border-border/70 px-3 py-1 hover:bg-muted"
+          onClick={onLoadOlder}
+          type="button"
+        >
+          {error ? "Try loading older messages again" : "Load older messages"}
+        </button>
+      )}
+    </div>
   );
 }

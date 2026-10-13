@@ -6,7 +6,7 @@
 
 type Ev = { id: string; kind: number; pubkey: string; content: string; created_at: number; tags: string[][] };
 type Filter = Record<string, unknown>;
-export type FeedArgs = { since?: number; limit?: number; types?: string } | undefined;
+export type FeedArgs = { since?: number; until?: number; limit?: number; types?: string } | undefined;
 
 export const MENTION_KINDS = [9, 40002, 1, 45001, 45003, 1618, 1619, 1621, 1630, 1631, 1632, 1633];
 export const APPROVAL_KINDS = [46010, 46011, 46012];
@@ -42,7 +42,13 @@ export async function getFeed(
   const wants = (t: string) => (types == null ? true : types.split(",").some((s) => s.trim() === t));
   const wantMentions = wants("mentions");
   const wantNeedsAction = wants("needs_action");
-  const withSince = (f: Filter) => (since != null ? { ...f, since } : f);
+  // `until` pages backwards (inbox paging): NIP-01 `until` is inclusive, so ask for until-1.
+  const until = args?.until;
+  const withSince = (f: Filter) => {
+    const g: Filter = since != null ? { ...f, since } : { ...f };
+    if (until != null) g.until = until - 1;
+    return g;
+  };
 
   const filters: Filter[] = [];
   if (wantMentions) filters.push(withSince({ kinds: MENTION_KINDS, "#p": [myPubkey], limit: cap }));

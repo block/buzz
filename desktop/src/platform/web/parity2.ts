@@ -334,6 +334,23 @@ async function publishNote(a: Args) {
   }
   return publishNow(1, tags, content);
 }
+// Web set_contact_list: port of desktop events.rs build_contact_list (kind 3, NIP-02, full replace).
+const MAX_CONTACTS = 10_000;
+async function setContactList(a: Args) {
+  const contacts: Array<{ pubkey?: string; relay_url?: string | null; petname?: string | null }> = a?.contacts ?? [];
+  if (contacts.length > MAX_CONTACTS) throw new Error(`too many contacts (max ${MAX_CONTACTS}, got ${contacts.length})`);
+  const seen = new Set<string>();
+  const tags: string[][] = [];
+  for (const c of contacts) {
+    const pk = String(c?.pubkey ?? "");
+    if (!HEX64.test(pk)) throw new Error("pubkey must be a 64-character hex string");
+    const l = pk.toLowerCase();
+    if (seen.has(l)) continue;
+    seen.add(l);
+    tags.push(["p", l, c?.relay_url ?? "", c?.petname ?? ""]);
+  }
+  return publishNow(3, tags, "");
+}
 async function getNoteReactions(a: Args) {
   const ids: string[] = (a?.noteIds ?? []).map(noteId);
   if (!ids.length) return [];
@@ -518,6 +535,7 @@ export const parity2Handlers: Record<string, (a: Args) => unknown> = {
   get_note_reactions: getNoteReactions,
   get_liked_notes: getLikedNotes,
   get_notes_timeline: getNotesTimeline,
+  set_contact_list: setContactList,
   get_contact_list: async (a) => {
     const ev = (await queryRelay([{ kinds: [3], authors: [a?.pubkey], limit: 1 }]))[0];
     return ev

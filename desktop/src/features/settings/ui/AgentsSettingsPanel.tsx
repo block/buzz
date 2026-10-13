@@ -1,7 +1,12 @@
 import { ProtectedOpenClawWorkspaceSettingsCard } from "@protected-feature-components";
 import { useDirectSession } from "@/features/bridge/ui/WebRemoteSettings";
-import { DesktopDataNotice, isWebBuild, WebOpenClawStatusNote } from "@/features/bridge/ui/DesktopData";
+import {
+  DesktopDataNotice,
+  isWebBuild,
+  WebOpenClawStatusNote,
+} from "@/features/bridge/ui/DesktopData";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { AgentPermissionPromptsCard } from "./AgentPermissionPromptsCard";
 import {
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
@@ -96,6 +101,7 @@ export function AgentsSettingsPanel() {
         <RemoteAgentManagementCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
+        <AgentPermissionPromptsCard />
       </SettingsOptionGroupList>
     </section>
   );

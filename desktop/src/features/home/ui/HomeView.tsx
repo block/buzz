@@ -92,8 +92,16 @@ const INBOX_SEARCH_KEYS = [
 
 const INBOX_UNREAD_ONLY_STORAGE_KEY = "buzz.desktop.inbox-unread-only";
 
+export type InboxPagingProps = {
+  hasMore: boolean;
+  isLoading: boolean;
+  error: string | null;
+  onLoadOlder: () => void;
+};
+
 type HomeViewProps = {
   feed?: HomeFeedResponse;
+  inboxPaging?: InboxPagingProps;
   isLoading?: boolean;
   errorMessage?: string;
   currentPubkey?: string;
@@ -108,6 +116,7 @@ type HomeViewProps = {
 
 export function HomeView({
   feed,
+  inboxPaging,
   isLoading = false,
   errorMessage,
   currentPubkey,
@@ -724,6 +733,7 @@ export function HomeView({
 
           {showListPane ? (
             <InboxListPane
+              paging={inboxPaging}
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
