@@ -33,6 +33,7 @@ import {
   parsePushDescriptor,
   type PushDescriptor,
 } from "./lease";
+import { errMsg, setDiag } from "./diag";
 
 const NOTIFICATION_SETTINGS_KEY = "buzz-notification-settings.v2";
 const STATE_KEY = "buzz-web-push-state.v2";
@@ -145,12 +146,36 @@ async function publishLease(
  * that no longer exists is re-enrolled.
  */
 export async function ensurePushSubscribed(): Promise<boolean> {
-  if (!WEB_PUSH_FLAG || !readPushEnabled() || pushUiState() !== "ready")
+  try {
+    return await ensurePushSubscribedInner();
+  } catch (e) {
+    setDiag(
+      { lease: `error: ${errMsg(e)}`, leaseAt: Date.now() },
+      `FAILED ${errMsg(e)}`,
+    );
+    throw e;
+  }
+}
+
+async function ensurePushSubscribedInner(): Promise<boolean> {
+  if (!WEB_PUSH_FLAG || !readPushEnabled() || pushUiState() !== "ready") {
+    setDiag(
+      {},
+      `skip: flag=${WEB_PUSH_FLAG} on=${readPushEnabled()} state=${pushUiState()}`,
+    );
     return false;
+  }
   const me = signerPubkey();
   const reg = await registration();
-  if (!me || !reg) return false;
+  if (!me || !reg) {
+    setDiag({}, `skip: signer=${!!me} sw=${!!reg}`);
+    return false;
+  }
   const d = await relayDescriptor();
+  setDiag(
+    { relayInfo: d ? "ok" : "failed or no buzz-web push" },
+    `relay info ${d ? "ok" : "FAILED"}`,
+  );
   if (!d) return false; // relay doesn't offer buzz-web push: stay quiet
   let sub = await reg.pushManager.getSubscription();
   if (!sub) {
@@ -176,8 +201,10 @@ export async function ensurePushSubscribed(): Promise<boolean> {
     prev.leaseExpires - nowSecs() > RENEW_BEFORE_SECS &&
     lastSentAt &&
     Date.now() - lastSentAt < RESEND_MIN_GAP_MS
-  )
+  ) {
+    setDiag({}, "lease fresh (sent <30s ago)");
     return true;
+  }
 
   const json = sub.toJSON() as {
     endpoint: string;
@@ -214,10 +241,18 @@ export async function ensurePushSubscribed(): Promise<boolean> {
       ? prev.handle
       : "";
   let delegation: { endpoint_grant: string };
+  setDiag(
+    {},
+    handle ? "gateway delegate (stored installation)" : "gateway enroll",
+  );
   if (handle) {
     try {
       delegation = await delegate(handle);
-    } catch {
+    } catch (e) {
+      setDiag(
+        { gateway: `delegation failed (${errMsg(e)}), re-enrolling` },
+        `delegate failed ${errMsg(e)}`,
+      );
       // stored installation is gone/expired/revoked at the gateway: re-enroll this subscription and retry once
       handle = await enroll();
       delegation = await delegate(handle);
@@ -227,8 +262,10 @@ export async function ensurePushSubscribed(): Promise<boolean> {
     delegation = await delegate(handle);
   }
   const { endpoint_grant } = delegation;
+  setDiag({ gateway: "enrolled + delegated" }, "gateway ok");
   await publishLease(d, handle, generation, endpoint_grant, me, expiration);
   lastSentAt = Date.now();
+  setDiag({ lease: "accepted by relay", leaseAt: lastSentAt }, "lease sent ok");
   save({
     pubkey: me,
     endpoint: sub.endpoint,

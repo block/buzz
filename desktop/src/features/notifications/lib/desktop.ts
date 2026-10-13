@@ -325,6 +325,11 @@ export async function setDesktopAppBadge(state: AppBadgeState): Promise<void> {
   }
 
   if (!isTauri()) {
+    // Web/PWA: Home Screen badge from the real unread total (the SW bumps it per push while the app is closed).
+    if (typeof navigator !== "undefined" && "setAppBadge" in navigator) {
+      const { syncWebAppBadge } = await import("@/platform/web/push/seen");
+      syncWebAppBadge(state.kind === "count" ? state.count : 0);
+    }
     return;
   }
 
@@ -448,6 +453,13 @@ export async function sendDesktopNotification(
   // discard the returned promise without a rejection handler, so an
   // un-guarded throw becomes an unhandled rejection. Treat constructor failure
   // as a delivery miss (return false) and log the failed delivery.
+  // Web with live push on this device: the push notification (which iOS requires us to show) is the one OS
+  // notification per message, so the in-app local one stands down entirely for message events.
+  if (!isTauri() && payload.target?.eventId) {
+    const { webPushActive } = await import("@/platform/web/push/seen");
+    if (webPushActive()) return true;
+  }
+
   try {
     const notification = new window.Notification(payload.title, {
       body: payload.body,

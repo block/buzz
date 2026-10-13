@@ -30,7 +30,7 @@ export function setKbDebug(on: boolean): void {
   }
   if (on) show();
   else hide();
-  listeners.forEach((f) => f());
+  for (const f of listeners) f();
 }
 export function subscribeKbDebug(f: () => void): () => void {
   listeners.add(f);
@@ -42,7 +42,8 @@ export function kbDebugFromUrl(href: string): boolean | null {
   return m ? m[1] === "1" : null;
 }
 
-const r = (n: number | undefined | null) => (n == null || Number.isNaN(n) ? "–" : String(Math.round(n * 10) / 10));
+const r = (n: number | undefined | null) =>
+  n == null || Number.isNaN(n) ? "–" : String(Math.round(n * 10) / 10);
 const rect = (sel: string) => {
   const e = document.querySelector(sel);
   if (!e) return null;
@@ -56,10 +57,20 @@ function safeAreas(): string {
   return `t${r(parseFloat(cs.paddingTop))} b${r(parseFloat(cs.paddingBottom))} l${r(parseFloat(cs.paddingLeft))} r${r(parseFloat(cs.paddingRight))}`;
 }
 
+/** Free-form line in the overlay's event log (e.g. push diagnostics). No-op cost when the overlay is off. */
+export function kbNote(msg: string) {
+  const t = ((performance.now() - t0) / 1000).toFixed(2);
+  log.push(`${t} ${msg}`.slice(0, 120));
+  if (log.length > 14) log.shift();
+  if (el) render();
+}
+
 function note(type: string) {
   const vv = window.visualViewport;
   const t = ((performance.now() - t0) / 1000).toFixed(2);
-  log.push(`${t} ${type} vv${r(vv?.height)}@${r(vv?.offsetTop)} ih${innerHeight} sy${r(scrollY)}`);
+  log.push(
+    `${t} ${type} vv${r(vv?.height)}@${r(vv?.offsetTop)} ih${innerHeight} sy${r(scrollY)}`,
+  );
   if (log.length > 14) log.shift();
   if (el) render();
 }
@@ -74,10 +85,13 @@ function render() {
   const rcs = root ? getComputedStyle(root) : null;
   const comp = rect('[data-testid="message-composer"]');
   const dock = document.querySelector(".composer-dock");
-  const tab = document.querySelector('[data-testid="phone-tabbar"]') as HTMLElement | null;
+  const tab = document.querySelector(
+    '[data-testid="phone-tabbar"]',
+  ) as HTMLElement | null;
   const nav = navigator as Navigator & { standalone?: boolean };
   const p = termProbe.snapshot();
-  const s = (x: { n: number; avg: number; p95: number; last: number }) => (x.n ? `avg ${r(x.avg)} p95 ${r(x.p95)} last ${r(x.last)} (n${x.n})` : "–");
+  const s = (x: { n: number; avg: number; p95: number; last: number }) =>
+    x.n ? `avg ${r(x.avg)} p95 ${r(x.p95)} last ${r(x.last)} (n${x.n})` : "–";
   const active = document.activeElement as HTMLElement | null;
   body.textContent = [
     `inner ${innerWidth}x${innerHeight} outer ${outerWidth}x${outerHeight} screen ${screen.width}x${screen.height}`,
@@ -107,20 +121,39 @@ function show() {
   el.style.cssText =
     "position:fixed;left:4px;right:4px;top:calc(env(safe-area-inset-top) + 2px);z-index:2147483646;pointer-events:none;background:rgba(0,0,0,.78);color:#9f9;border-radius:8px;padding:4px 6px;font:10px/1.25 ui-monospace,Menlo,monospace";
   const bar = document.createElement("div");
-  bar.style.cssText = "display:flex;gap:6px;justify-content:flex-end;margin-bottom:2px";
+  bar.style.cssText =
+    "display:flex;gap:6px;justify-content:flex-end;margin-bottom:2px";
   const btn = (label: string, fn: () => void, id: string) => {
     const b = document.createElement("button");
     b.type = "button";
     b.textContent = label;
     b.setAttribute("data-testid", id);
-    b.style.cssText = "pointer-events:auto;font:inherit;color:#fff;background:#333;border:1px solid #666;border-radius:4px;padding:1px 6px";
+    b.style.cssText =
+      "pointer-events:auto;font:inherit;color:#fff;background:#333;border:1px solid #666;border-radius:4px;padding:1px 6px";
     // don't steal focus from the composer / terminal while the keyboard is up
     b.addEventListener("pointerdown", (e) => e.preventDefault());
     b.addEventListener("click", fn);
     bar.appendChild(b);
   };
-  btn("Reset", () => { log.length = 0; termProbe.reset(); render(); }, "kbdebug-reset");
-  btn("Top/Bottom", () => { if (!el) return; const top = el.style.top !== "auto"; el.style.top = top ? "auto" : "calc(env(safe-area-inset-top) + 2px)"; el.style.bottom = top ? "4px" : "auto"; }, "kbdebug-move");
+  btn(
+    "Reset",
+    () => {
+      log.length = 0;
+      termProbe.reset();
+      render();
+    },
+    "kbdebug-reset",
+  );
+  btn(
+    "Top/Bottom",
+    () => {
+      if (!el) return;
+      const top = el.style.top !== "auto";
+      el.style.top = top ? "auto" : "calc(env(safe-area-inset-top) + 2px)";
+      el.style.bottom = top ? "4px" : "auto";
+    },
+    "kbdebug-move",
+  );
   btn("Off", () => setKbDebug(false), "kbdebug-off");
   body = document.createElement("pre");
   body.style.cssText = "margin:0;white-space:pre-wrap;word-break:break-all";
@@ -128,7 +161,10 @@ function show() {
   document.documentElement.append(probe, el);
   render();
   timer = window.setInterval(render, 250);
-  pingTimer = window.setInterval(() => void termProbe.pingOnce().then(render), 2000);
+  pingTimer = window.setInterval(
+    () => void termProbe.pingOnce().then(render),
+    2000,
+  );
 }
 function hide() {
   window.clearInterval(timer);
@@ -152,8 +188,17 @@ export function installKbDebug(): void {
   vv?.addEventListener("resize", () => note("vv.resize"));
   vv?.addEventListener("scroll", () => note("vv.scroll"));
   window.addEventListener("resize", () => note("win.resize"));
-  window.addEventListener("scroll", () => note("win.scroll"), { passive: true });
-  document.addEventListener("focusin", (e) => note(`focusin ${(e.target as HTMLElement)?.getAttribute?.("data-testid") || (e.target as HTMLElement)?.tagName}`), true);
+  window.addEventListener("scroll", () => note("win.scroll"), {
+    passive: true,
+  });
+  document.addEventListener(
+    "focusin",
+    (e) =>
+      note(
+        `focusin ${(e.target as HTMLElement)?.getAttribute?.("data-testid") || (e.target as HTMLElement)?.tagName}`,
+      ),
+    true,
+  );
   document.addEventListener("focusout", () => note("focusout"), true);
   window.addEventListener("orientationchange", () => note("orientation"));
 }

@@ -2,7 +2,7 @@
 // Caches ONLY the static shell (hashed /assets/*, fonts/icons/css, and the navigation document).
 // Never touches: cross-origin requests, non-GET, the relay API paths (/query /events /count /media /upload /api /info /health ...),
 // or WebSocket upgrades (the SW cannot intercept those anyway).
-const VERSION = "buzz-web-v4";
+const VERSION = "buzz-web-v5";
 const PREFETCH_CACHE = "buzz-push-prefetch-v1"; // kept across shell versions; entries are short-lived
 const SHELL = ["/", "/manifest.webmanifest", "/buzz.svg", "/boot.css", "/pwa/icon-192.png", "/pwa/icon-512.png"];
 const API = /^\/(query|events|count|media|upload|api|info|health|_liveness|_readiness|workflows|hooks|huddle|operator|invite|\.well-known)(\/|$)/;
@@ -70,6 +70,13 @@ async function prefetch(data) {
   await cache.put(key, new Response(await res.text(), { headers: { "Content-Type": "application/json", "X-Fetched-At": String(Date.now()) } }));
 }
 
+// Home Screen badge: the page writes the real unread total to IDB "badge" whenever it runs; each push while closed adds one.
+async function bumpBadge() {
+  const n = ((await kvGet("badge")) || 0) + 1;
+  await kvSet("badge", n);
+  if (self.navigator && self.navigator.setAppBadge) await self.navigator.setAppBadge(n).catch(() => undefined);
+}
+
 self.addEventListener("push", (e) => {
   let data = {};
   try {
@@ -90,7 +97,9 @@ self.addEventListener("push", (e) => {
       }),
       target ? kvSet("pending", { target, at: Date.now() }) : null,
       prefetch(data).catch(() => undefined),
-      // an open (frozen) page learns about it as soon as it runs again
+      bumpBadge().catch(() => undefined),
+      // Always show the notification above (iOS userVisibleOnly: a push without one risks revocation). An open page
+      // hears about it here and its in-app OS notification for the same event stands down (platform/web/push/seen.ts).
       self.clients.matchAll({ type: "window" }).then((list) => list.forEach((c) => c.postMessage({ type: "buzz-push-arrived", target }))),
     ]),
   );

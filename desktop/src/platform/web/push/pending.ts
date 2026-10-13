@@ -4,6 +4,8 @@
 import { relayClient } from "@/shared/api/relayClient";
 import { onResume } from "@/shared/lib/resumeSignals";
 import { probeAllSockets } from "../websocket";
+import { setDiag } from "./diag";
+import { notePushArrived, pushStats } from "./seen";
 
 export type PushTarget = {
   channelId?: string | null;
@@ -72,7 +74,15 @@ export function installPushResume(open: (t: PushTarget) => void) {
   };
   onResume(check);
   navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
-    if (e.data?.type === "buzz-push-arrived") reconnectNow();
+    if (e.data?.type === "buzz-push-arrived") {
+      notePushArrived(e.data.target?.eventId ?? null);
+      const { pushCount, lastPushAt } = pushStats();
+      setDiag(
+        { pushes: pushCount, lastPushAt },
+        `arrived ${String(e.data.target?.eventId ?? "").slice(0, 8)}`,
+      );
+      reconnectNow();
+    }
     if (e.data?.type === "buzz-push-open" && e.data.target) {
       void takePendingPush();
       reconnectNow();
