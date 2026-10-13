@@ -1,0 +1,149 @@
+[
+  {
+    "blocked_field": null,
+    "dropped_field_count": 0,
+    "invalid_fields": [],
+    "line": {
+      "cost": {
+        "cumulative_cost_usd": 0.04,
+        "note": "harness estimate, never a billed charge",
+        "turn_cost_usd": 0.01
+      },
+      "event_id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "harness": "claude-code",
+      "kind": "record",
+      "model": "claude-sonnet-5",
+      "observe_outcome_code": "accepted",
+      "result": "verified",
+      "scenario": "valid_full",
+      "session_id": "sess-1",
+      "signer": "2222222222222222222222222222222222222222222222222222222222222222",
+      "stop_reason": "end_turn",
+      "tokens": {
+        "cumulative_input_tokens": 400,
+        "cumulative_output_tokens": 200,
+        "cumulative_total_tokens": 600,
+        "delta_reliable": true,
+        "turn_input_tokens": 100,
+        "turn_output_tokens": 50,
+        "turn_total_tokens": 150
+      },
+      "turn_id": "turn-1",
+      "turn_seq": 3,
+      "verify_error_code": null
+    },
+    "scenario": "valid_full",
+    "status": "emitted"
+  },
+  {
+    "blocked_field": null,
+    "dropped_field_count": 0,
+    "invalid_fields": ["verify_error_code"],
+    "line": {
+      "kind": "record",
+      "result": "verify_error",
+      "scenario": "invalid_verify_error_code",
+      "verify_error_code": "unknown"
+    },
+    "scenario": "invalid_verify_error_code",
+    "status": "emitted"
+  },
+  {
+    "blocked_field": null,
+    "dropped_field_count": 0,
+    "invalid_fields": ["observe_outcome_code"],
+    "line": {
+      "kind": "record",
+      "observe_outcome_code": "unknown",
+      "result": "verified",
+      "scenario": "invalid_observe_outcome_code"
+    },
+    "scenario": "invalid_observe_outcome_code",
+    "status": "emitted"
+  },
+  {
+    "blocked_field": null,
+    "dropped_field_count": 0,
+    "invalid_fields": ["tokens.turn_input_tokens"],
+    "line": {
+      "kind": "record",
+      "result": "verified",
+      "scenario": "invalid_nested_token_type",
+      "tokens": {
+        "turn_input_tokens": "unknown"
+      }
+    },
+    "scenario": "invalid_nested_token_type",
+    "status": "emitted"
+  },
+  {
+    "blocked_field": null,
+    "dropped_field_count": 0,
+    "invalid_fields": ["cost.note"],
+    "line": {
+      "cost": {
+        "note": "unknown",
+        "turn_cost_usd": 0.01
+      },
+      "kind": "record",
+      "result": "verified",
+      "scenario": "invalid_nested_cost_note"
+    },
+    "scenario": "invalid_nested_cost_note",
+    "status": "emitted"
+  },
+  {
+    "blocked_field": "session_id",
+    "dropped_field_count": 0,
+    "invalid_fields": [],
+    "line": null,
+    "scenario": "credential_in_session_id",
+    "status": "blocked"
+  },
+  {
+    "blocked_field": "cost.note",
+    "dropped_field_count": 0,
+    "invalid_fields": [],
+    "line": null,
+    "scenario": "credential_nested_in_cost_note",
+    "status": "blocked"
+  },
+  {
+    "blocked_field": null,
+    "dropped_field_count": 1,
+    "invalid_fields": [],
+    "line": {
+      "kind": "record",
+      "result": "verified",
+      "scenario": "unrecognized_field_dropped"
+    },
+    "scenario": "unrecognized_field_dropped",
+    "status": "emitted"
+  },
+  {
+    "blocked_field": null,
+    "dropped_field_count": 0,
+    "invalid_fields": [],
+    "line": {
+      "kind": "record",
+      "related_event_id": "4444444444444444444444444444444444444444444444444444444444444444",
+      "result": "verified",
+      "scenario": "related_event_id_present"
+    },
+    "scenario": "related_event_id_present",
+    "status": "emitted"
+  },
+  {
+    "blocked_field": null,
+    "dropped_field_count": 0,
+    "invalid_fields": ["event_id"],
+    "line": {
+      "event_id": "unknown",
+      "kind": "record",
+      "result": "verified",
+      "scenario": "malformed_event_id"
+    },
+    "scenario": "malformed_event_id",
+    "status": "emitted"
+  }
+]
