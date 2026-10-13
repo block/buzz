@@ -591,7 +591,10 @@ pub(crate) async fn query_events_on(
     let rows = if q.e_tags.is_some() {
         fetch_with_e_tag_deadline(conn, &mut qb).await?
     } else {
-        qb.build().fetch_all(&mut *conn).await?
+        qb.build()
+            .persistent(!has_tag_values(q))
+            .fetch_all(&mut *conn)
+            .await?
     };
 
     let mut out = Vec::with_capacity(rows.len());
@@ -878,6 +881,14 @@ fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_
         .push("::jsonb[])");
 }
 
+/// Whether `q` carries a [`EventQuery::tag_values`] match. Such a query runs
+/// as an unnamed statement, so Postgres plans it with the bound values. After
+/// a few runs, a cached generic plan ignores the value and can scan every
+/// group-state row in the community instead of using the `tags` GIN index.
+fn has_tag_values(q: &EventQuery) -> bool {
+    q.tag_values.iter().any(|(_, values)| !values.is_empty())
+}
+
 /// One `tags @> ANY(...)` containment test per [`EventQuery::tag_values`]
 /// entry, so each entry is an OR over its values and entries are ANDed.
 fn push_tag_value_filters(
@@ -1130,7 +1141,10 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
             .next()
             .ok_or_else(|| DbError::InvalidData("COUNT returned no rows".to_string()))?
     } else {
-        qb.build().fetch_one(&mut *conn).await?
+        qb.build()
+            .persistent(!has_tag_values(q))
+            .fetch_one(&mut *conn)
+            .await?
     };
     let cnt: i64 = row.try_get("cnt")?;
 
@@ -2856,6 +2870,44 @@ mod postgres_tests {
         .await
         .expect("insert test channel");
         id
+    }
+
+    /// Statements on `conn` that Postgres holds as prepared, matching `like`.
+    async fn prepared_like(conn: &mut sqlx::PgConnection, like: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM pg_prepared_statements WHERE statement LIKE $1")
+            .bind(like)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read prepared statements")
+    }
+
+    /// A label or creator match must keep parameter-aware planning. A cached
+    /// generic plan ignores the label value and scans every group-state row in
+    /// the community instead of using the `tags` GIN index.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn tag_value_queries_are_not_cached_as_prepared_statements() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("DEALLOCATE ALL")
+            .execute(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let mut q = EventQuery::for_community(community);
+        q.kinds = Some(vec![39000]);
+        q.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
+        for _ in 0..6 {
+            query_events_on(&mut conn, &q).await.expect("label query");
+            count_events_on(&mut conn, &q).await.expect("label count");
+        }
+        assert_eq!(prepared_like(&mut conn, "%tags @> ANY(%").await, 0);
+
+        // Control: the same query without a tag match stays a cached statement,
+        // so the check above can see one.
+        q.tag_values.clear();
+        query_events_on(&mut conn, &q).await.expect("plain query");
+        assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
     }
 
     /// Effective `statement_timeout` observed *inside* the e-tag deadline, and
