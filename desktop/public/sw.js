@@ -2,9 +2,9 @@
 // Caches ONLY the static shell (hashed /assets/*, fonts/icons/css, and the navigation document).
 // Never touches: cross-origin requests, non-GET, the relay API paths (/query /events /count /media /upload /api /info /health ...),
 // or WebSocket upgrades (the SW cannot intercept those anyway).
-const VERSION = "buzz-web-v8";
+const VERSION = "buzz-web-v9"; // v9: manifest/index network-first (v8 served a stale "Buzz" manifest cache-first)
 const PREFETCH_CACHE = "buzz-push-prefetch-v1"; // kept across shell versions; entries are short-lived
-const SHELL = ["/", "/manifest.webmanifest", "/buzz.svg", "/boot.css", "/pwa/icon-192.png", "/pwa/icon-512.png"];
+const SHELL = ["/", "/buzz.svg", "/boot.css", "/pwa/icon-192.png", "/pwa/icon-512.png"];
 const API = /^\/(query|events|count|media|upload|api|info|health|_liveness|_readiness|workflows|hooks|huddle|operator|invite|\.well-known)(\/|$)/;
 
 self.addEventListener("install", (e) => {
@@ -19,10 +19,15 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET" || url.origin !== self.location.origin || API.test(url.pathname)) return;
   if (req.mode === "navigate") {
     // network-first so a new deploy is picked up; fall back to the cached shell offline
-    e.respondWith(fetch(req).then((r) => { if (r.ok) { const cp = r.clone(); caches.open(VERSION).then((c) => c.put("/", cp)); } return r; }).catch(() => caches.match("/")));
+    e.respondWith(fetch(req, { cache: "no-cache" }).then((r) => { if (r.ok) { const cp = r.clone(); caches.open(VERSION).then((c) => c.put("/", cp)); } return r; }).catch(() => caches.match("/")));
     return;
   }
-  if (url.pathname.startsWith("/assets/") || /\.(woff2?|png|svg|css|webmanifest|ico)$/.test(url.pathname)) {
+  // Install metadata (manifest, index, sw) must never be served stale: network-first, revalidating the HTTP cache.
+  if (url.pathname === "/manifest.webmanifest" || url.pathname === "/index.html") {
+    e.respondWith(fetch(req, { cache: "no-cache" }).then((r) => { if (r.ok) { const cp = r.clone(); caches.open(VERSION).then((c) => c.put(req, cp)); } return r; }).catch(() => caches.match(req)));
+    return;
+  }
+  if (url.pathname.startsWith("/assets/") || /\.(woff2?|png|svg|css|ico)$/.test(url.pathname)) {
     e.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((r) => { if (r.ok) { const cp = r.clone(); caches.open(VERSION).then((c) => c.put(req, cp)); } return r; })));
   }
 });

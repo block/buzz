@@ -18,7 +18,7 @@ window.addEventListener("vite:preloadError", (e) => {
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   window.addEventListener("load", () => {
     navigator.serviceWorker
-      .register("/sw.js")
+      .register("/sw.js", { updateViaCache: "none" })
       .catch((e) => console.warn("sw register failed", e));
   });
 }
