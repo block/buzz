@@ -38,6 +38,9 @@ const NOTIFICATION_SETTINGS_KEY = "buzz-notification-settings.v2";
 const STATE_KEY = "buzz-web-push-state.v2";
 const ACTIVATION_EVENT = "buzz:desktop-notification-action";
 const RENEW_BEFORE_SECS = 3 * 24 * 3600;
+/** Re-send the lease on every app open/resume, but coalesce the burst of visible/pageshow/focus events. */
+const RESEND_MIN_GAP_MS = 30_000;
+let lastSentAt = 0; // in-memory: every page load re-sends, so a lease the relay dropped heals on the next open
 
 type Stored = {
   pubkey: string;
@@ -135,7 +138,12 @@ async function publishLease(
   await submitSignedEvent(ev as never);
 }
 
-/** Subscribe + enroll + delegate + lease. Re-signs only when account, endpoint, prefs or lease age change. */
+/**
+ * Subscribe + enroll + delegate + lease. Local "subscribed" state is not trusted: the relay can accept the
+ * kind:30350 event yet fail to store the lease (that is how pre-0052 leases were lost while the client kept
+ * skipping), so the lease is re-sent on every app open/resume (coalesced to one per 30s). A gateway installation
+ * that no longer exists is re-enrolled.
+ */
 export async function ensurePushSubscribed(): Promise<boolean> {
   if (!WEB_PUSH_FLAG || !readPushEnabled() || pushUiState() !== "ready")
     return false;
@@ -165,7 +173,9 @@ export async function ensurePushSubscribed(): Promise<boolean> {
   if (
     prev &&
     prev.fingerprint === fingerprint &&
-    prev.leaseExpires - nowSecs() > RENEW_BEFORE_SECS
+    prev.leaseExpires - nowSecs() > RENEW_BEFORE_SECS &&
+    lastSentAt &&
+    Date.now() - lastSentAt < RESEND_MIN_GAP_MS
   )
     return true;
 
@@ -175,37 +185,50 @@ export async function ensurePushSubscribed(): Promise<boolean> {
   };
   const ttl = Math.min(d.maxLeaseTtl, 30 * 24 * 3600);
   const expiration = nowSecs() + ttl;
-  let handle =
-    prev && prev.pubkey === me && prev.endpoint === sub.endpoint
-      ? prev.handle
-      : "";
-  if (!handle) {
-    const r = await gatewayPost<{ installation_handle: string }>(
-      "/v1/web/installations",
-      {
-        v: 1,
-        subscription: {
-          endpoint: json.endpoint,
-          keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+  const enroll = async () =>
+    (
+      await gatewayPost<{ installation_handle: string }>(
+        "/v1/web/installations",
+        {
+          v: 1,
+          subscription: {
+            endpoint: json.endpoint,
+            keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+          },
+          expires_at: expiration + 3600,
         },
-        expires_at: expiration + 3600,
-      },
-    );
-    handle = r.installation_handle;
-  }
-  const generation = Math.max(nowSecs(), (prev?.generation ?? 0) + 1);
-  const { endpoint_grant } = await gatewayPost<{ endpoint_grant: string }>(
-    "/v1/web/delegations",
-    {
+      )
+    ).installation_handle;
+  const delegate = (h: string) =>
+    gatewayPost<{ endpoint_grant: string }>("/v1/web/delegations", {
       v: 1,
-      installation_handle: handle,
+      installation_handle: h,
       generation,
       relay_pubkey: d.executorPubkey,
       not_before: nowSecs() - 60,
       expires_at: expiration,
-    },
-  );
+    });
+  const generation = Math.max(nowSecs(), (prev?.generation ?? 0) + 1);
+  let handle =
+    prev && prev.pubkey === me && prev.endpoint === sub.endpoint
+      ? prev.handle
+      : "";
+  let delegation: { endpoint_grant: string };
+  if (handle) {
+    try {
+      delegation = await delegate(handle);
+    } catch {
+      // stored installation is gone/expired/revoked at the gateway: re-enroll this subscription and retry once
+      handle = await enroll();
+      delegation = await delegate(handle);
+    }
+  } else {
+    handle = await enroll();
+    delegation = await delegate(handle);
+  }
+  const { endpoint_grant } = delegation;
   await publishLease(d, handle, generation, endpoint_grant, me, expiration);
+  lastSentAt = Date.now();
   save({
     pubkey: me,
     endpoint: sub.endpoint,

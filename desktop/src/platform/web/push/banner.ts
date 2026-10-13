@@ -80,8 +80,8 @@ function render() {
 export function startWebPush() {
   if (!WEB_PUSH_FLAG) return;
   installPushClickRouting();
-  // Refresh the subscription + lease whenever the app comes back (it only re-signs when something changed or the lease is
-  // due). After a failure, wait 10 minutes before asking the signer again so a rejecting relay can't prompt on every resume.
+  // Re-send the subscription + lease whenever the app opens or comes back (the relay may have dropped it).
+  // After a failure, wait 10 minutes before asking the signer again so a rejecting relay can't prompt on every resume.
   let failedAt = 0;
   const sync = () => {
     if (failedAt && Date.now() - failedAt < 10 * 60_000) return;
@@ -99,7 +99,7 @@ export function startWebPush() {
     render();
     sync();
   });
-  // visible / pageshow / focus / online: picks up permission granted in OS settings and pref changes (only re-signs on change)
+  // visible / pageshow / focus / online: re-sends the lease on every resume (coalesced in ensurePushSubscribed) and picks up OS permission/pref changes
   onResume(() => {
     render();
     sync();
