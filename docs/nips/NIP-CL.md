@@ -214,6 +214,17 @@ mean "a system channel with this label". Use `#P` and the label instead.
 Private system channels stay hidden from non-members, as for every private
 channel.
 
+## Advertising support
+
+Until this draft has an upstream integer NIP number, relays MUST NOT advertise
+it in NIP-11 `supported_nips`. A relay that supports this NIP adds `"nip-cl"`
+to its NIP-11 `supported_extensions` string array.
+
+A relay without this NIP drops label tags on create and refuses
+`channel_type=system`. So a client SHOULD NOT create a channel with labels or
+a system channel on a relay whose NIP-11 document does not contain `"nip-cl"`.
+Lookups by label on such a relay find nothing, which is safe.
+
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the

@@ -242,7 +242,12 @@ impl RelayInfo {
             supported_nips.push(NIP_RELAY_MEMBERSHIP);
         }
 
-        let mut supported_extensions = vec!["nip-er".to_string(), "nip-ar".to_string()];
+        let mut supported_extensions = vec![
+            "nip-er".to_string(),
+            "nip-ar".to_string(),
+            // NIP-CL: identity tags, labels and system channels.
+            "nip-cl".to_string(),
+        ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
             GifDescriptor {
@@ -659,6 +664,25 @@ mod tests {
             .supported_extensions
             .expect("extensions")
             .contains(&"buzz-gif".to_string()));
+    }
+
+    /// NIP-CL: clients refuse labels and system channels unless the relay
+    /// says it supports them, so every document must advertise it.
+    #[test]
+    fn advertises_nip_cl_extension() {
+        let info = RelayInfo::build(
+            None,
+            None,
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        assert!(info
+            .supported_extensions
+            .expect("extensions")
+            .contains(&"nip-cl".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
