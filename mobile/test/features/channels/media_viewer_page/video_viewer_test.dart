@@ -77,6 +77,8 @@ class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
   // _creatingCompleter is never completed and dispose() deadlocks waiting
   // on it.  This flag exercises the F2r(d) production fix.
   final bool forceCreateError;
+  final created = Completer<void>();
+  final disposed = Completer<void>();
   int disposeCallCount = 0;
   int nextPlayerId = 0;
   final Map<int, StreamController<VideoEvent>> _streams = {};
@@ -106,6 +108,7 @@ class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
     final id = nextPlayerId++;
     final controller = StreamController<VideoEvent>(
       onListen: () {
+        if (!created.isCompleted) created.complete();
         // Emit the event/error only when the stream is first subscribed so that
         // VideoPlayerController.initialize() is already listening.  Emitting
         // before the subscription means the event is dropped and initialize()
@@ -136,6 +139,7 @@ class _FakeVideoPlayerPlatform extends VideoPlayerPlatform {
   @override
   Future<void> dispose(int playerId) async {
     disposeCallCount++;
+    if (!disposed.isCompleted) disposed.complete();
     // Record the dispose call and close the event stream.
     //
     // Note: an error injected here does NOT reach initialize()'s pending
@@ -604,8 +608,7 @@ void main() {
   testWidgets(
     'F2r(c): controller created but never initialized is disposed on unmount',
     (tester) async {
-      final fakePlayer = _FakeVideoPlayerPlatform(neverInitialize: true);
-      VideoPlayerPlatform.instance = fakePlayer;
+      late _FakeVideoPlayerPlatform fakePlayer;
 
       final fakeClient = _FinalizingFakeClient(
         responseBuilder: () =>
@@ -614,6 +617,9 @@ void main() {
       addTearDown(fakeClient.close);
 
       await tester.runAsync(() async {
+        // Create completion signals in the real async zone used by file I/O.
+        fakePlayer = _FakeVideoPlayerPlatform(neverInitialize: true);
+        VideoPlayerPlatform.instance = fakePlayer;
         await tester.pumpWidget(
           WidgetHelpers.testable(
             disableAnimations: true,
@@ -626,10 +632,9 @@ void main() {
             ),
           ),
         );
-        // Allow enough time for the download to complete and for
-        // VideoPlayerController.file() to be constructed, but NOT long
-        // enough for initialize() to complete (it never will).
-        await Future<void>.delayed(const Duration(milliseconds: 300));
+        // Wait for the pending controller to exist, regardless of download
+        // scheduling under concurrent suite load. Initialization never completes.
+        await fakePlayer.created.future.timeout(const Duration(seconds: 10));
 
         // Now unmount — this triggers the effect cleanup with the pending
         // controller still in pendingController.value (never reached play()).
@@ -645,7 +650,7 @@ void main() {
             child: const SizedBox.shrink(),
           ),
         );
-        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await fakePlayer.disposed.future.timeout(const Duration(seconds: 10));
       });
       await tester.pump();
 
