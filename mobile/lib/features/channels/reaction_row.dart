@@ -449,10 +449,25 @@ class _ReactionEmoji extends StatelessWidget {
   Widget build(BuildContext context) {
     final emojiUrl = reaction.emojiUrl;
     if (emojiUrl == null || emojiUrl.isEmpty) {
-      return NativeEmojiGlyph(emoji: reaction.emoji, size: size);
+      return NativeEmojiGlyph(
+        emoji: reaction.emoji,
+        size: size,
+        opticalBoxSize: size,
+        centerInOpticalBox: true,
+      );
     }
     final shortcode = reaction.emoji.substring(1, reaction.emoji.length - 1);
-    return CustomEmojiImage(shortcode: shortcode, url: emojiUrl, size: size);
+    return SizedBox.square(
+      dimension: size,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: CustomEmojiImage(
+          shortcode: shortcode,
+          url: emojiUrl,
+          size: size,
+        ),
+      ),
+    );
   }
 }
 

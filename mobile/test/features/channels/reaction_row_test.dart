@@ -1,3 +1,8 @@
+import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
+import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
+import 'package:buzz/shared/relay/media_image.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'dart:async';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -115,6 +120,107 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 }
 
 void main() {
+  for (final loadCustom in [false, true]) {
+    for (final scale in [1.0, 3.0]) {
+      testWidgets(
+        'mixed reaction glyphs stay centered, image=$loadCustom scale=$scale',
+        (tester) async {
+          final imageBytes = (await rootBundle.load(
+            'assets/images/buzz-icon.png',
+          )).buffer.asUint8List();
+          final client = MockClient(
+            (_) async => loadCustom
+                ? http.Response.bytes(
+                    imageBytes,
+                    200,
+                    headers: {'content-type': 'image/png'},
+                  )
+                : http.Response('missing', 404),
+          );
+          addTearDown(client.close);
+          await tester.pumpWidget(
+            WidgetHelpers.testable(
+              overrides: [mediaHttpClientProvider.overrideWithValue(client)],
+              child: MediaQuery(
+                data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+                child: ReactionRow(
+                  combined: true,
+                  messageId: 'alignment',
+                  channelId: 'channel',
+                  onToggle: (_) {},
+                  reactions: [
+                    for (final emoji in [
+                      '🙂',
+                      '👀',
+                      '❤️',
+                      '👩‍👩‍👧‍👦',
+                      '🇺🇸',
+                    ])
+                      _reaction(emoji: emoji),
+                    TimelineReaction(
+                      emoji: ':custom:',
+                      emojiUrl:
+                          'https://example.com/align-$loadCustom-$scale.png',
+                      count: 1,
+                      reactedByCurrentUser: false,
+                      userPubkeys: const [_alice],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          if (loadCustom) {
+            final source = tester.widget<Image>(
+              find.descendant(
+                of: find.byType(CustomEmojiImage),
+                matching: find.byType(Image),
+              ),
+            );
+            await tester.runAsync(
+              () => precacheImage(
+                source.image,
+                tester.element(find.byType(CustomEmojiImage)),
+              ),
+            );
+            await tester.pumpAndSettle();
+            final image = tester.widget<RawImage>(
+              find.descendant(
+                of: find.byType(CustomEmojiImage),
+                matching: find.byType(RawImage),
+              ),
+            );
+            expect(image.image, isNotNull);
+          } else {
+            expect(find.text(':custom:'), findsOneWidget);
+          }
+          final tray = find.byKey(const ValueKey('combined-reaction-tray'));
+          final center = tester.getCenter(tray).dy;
+          for (final glyph in find.byType(NativeEmojiGlyph).evaluate()) {
+            final finder = find.byWidget(glyph.widget);
+            expect(tester.getSize(finder), const Size.square(20));
+            expect(tester.getCenter(finder).dy, closeTo(center, 0.01));
+          }
+          final customBox = find
+              .ancestor(
+                of: find.byType(CustomEmojiImage),
+                matching: find.byType(SizedBox),
+              )
+              .first;
+          expect(tester.getSize(customBox), const Size.square(20));
+          expect(tester.getCenter(customBox).dy, closeTo(center, 0.01));
+          expect(tester.getCenter(find.text('6')).dy, closeTo(center, 0.01));
+          expect(tester.takeException(), isNull);
+        },
+        variant: TargetPlatformVariant({
+          TargetPlatform.iOS,
+          TargetPlatform.android,
+        }),
+      );
+    }
+  }
+
   testWidgets(
     'combined capsule shows total count and opens details without toggling',
     (tester) async {

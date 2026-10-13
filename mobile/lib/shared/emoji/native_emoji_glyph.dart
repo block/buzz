@@ -3,9 +3,9 @@ import 'package:flutter/material.dart';
 
 /// A standalone system emoji whose visual centre matches its surrounding UI.
 ///
-/// Apple's emoji glyphs sit slightly low inside Flutter's text box. Keep the
-/// layout box unchanged and lift only the painted glyph on iOS; Android's
-/// system emoji metrics are already visually centred.
+/// Inline glyphs retain their platform baseline adjustment. Fixed reaction
+/// boxes can opt into emoji-font metrics and optical centering independently
+/// of the surrounding text font.
 class NativeEmojiGlyph extends StatelessWidget {
   /// Creates a system emoji with optional optical bounds.
   const NativeEmojiGlyph({
@@ -13,6 +13,7 @@ class NativeEmojiGlyph extends StatelessWidget {
     required this.emoji,
     required this.size,
     this.opticalBoxSize,
+    this.centerInOpticalBox = false,
   });
 
   /// Emoji text rendered by the platform font.
@@ -24,6 +25,9 @@ class NativeEmojiGlyph extends StatelessWidget {
   /// Optional square that normalizes the apparent bounds of wide emoji.
   final double? opticalBoxSize;
 
+  /// Centers reaction artwork in its fixed box instead of a surrounding line.
+  final bool centerInOpticalBox;
+
   @override
   Widget build(BuildContext context) {
     Widget glyph = Text(
@@ -31,10 +35,26 @@ class NativeEmojiGlyph extends StatelessWidget {
       maxLines: 1,
       softWrap: false,
       textScaler: TextScaler.noScaling,
-      style: TextStyle(fontSize: size, height: 1),
+      style: TextStyle(
+        fontSize: size,
+        height: 1,
+        leadingDistribution: centerInOpticalBox
+            ? TextLeadingDistribution.even
+            : null,
+        fontFamily:
+            centerInOpticalBox && defaultTargetPlatform == TargetPlatform.iOS
+            ? 'Apple Color Emoji'
+            : null,
+      ),
     );
     if (defaultTargetPlatform == TargetPlatform.iOS) {
-      glyph = Transform.translate(offset: const Offset(0, -1), child: glyph);
+      // Apple Color Emoji's painted center sits above its typographic center.
+      // Reaction boxes use the emoji font directly and compensate proportionally;
+      // inline glyphs retain their existing baseline adjustment.
+      glyph = Transform.translate(
+        offset: Offset(0, centerInOpticalBox ? size * 0.15 : -1),
+        child: glyph,
+      );
     }
     final boxSize = opticalBoxSize;
     if (boxSize == null) return glyph;
