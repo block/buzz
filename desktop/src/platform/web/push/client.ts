@@ -21,6 +21,7 @@ import {
 } from "./pending";
 import {
   classifyPushEnv,
+  markPermissionGranted,
   pushPrefsFromSettings,
   readPushEnv,
   type PushUiState,
@@ -146,16 +147,23 @@ async function publishLease(
  * skipping), so the lease is re-sent on every app open/resume (coalesced to one per 30s). A gateway installation
  * that no longer exists is re-enrolled.
  */
-export async function ensurePushSubscribed(): Promise<boolean> {
-  try {
-    return await ensurePushSubscribedInner();
-  } catch (e) {
-    setDiag(
-      { lease: `error: ${errMsg(e)}`, leaseAt: Date.now() },
-      `FAILED ${errMsg(e)}`,
-    );
-    throw e;
-  }
+let inflight: Promise<boolean> | null = null;
+export function ensurePushSubscribed(): Promise<boolean> {
+  // One chain at a time: the Enable tap, the change event and resume can all ask at once; the signer is asked once.
+  inflight ??= (async () => {
+    try {
+      return await ensurePushSubscribedInner();
+    } catch (e) {
+      setDiag(
+        { lease: `error: ${errMsg(e)}`, leaseAt: Date.now() },
+        `FAILED ${errMsg(e)}`,
+      );
+      throw e;
+    } finally {
+      inflight = null;
+    }
+  })();
+  return inflight;
 }
 
 async function ensurePushSubscribedInner(): Promise<boolean> {
@@ -280,20 +288,27 @@ async function ensurePushSubscribedInner(): Promise<boolean> {
 }
 
 /** User-gesture path: ask permission, then subscribe. Returns the post-prompt UI state. */
+/**
+ * The Enable tap: ask the OS, and report the answer as soon as it comes back. The subscribe + gateway enroll + signed
+ * lease chain is NOT awaited here: it can wait a long time on a remote signer (Clave/Primal approval, the NIP-98 header,
+ * the NIP-44 lease) and the banner must not hang on it. It runs in the background and re-runs on every open/resume.
+ * `onGranted` also covers iOS standalone, where `Notification.permission` can keep reading "default" for a while after
+ * the user tapped Allow: the requestPermission() result is the source of truth and is remembered (see config.ts).
+ */
 export async function enablePushFromTap(): Promise<PushUiState> {
+  let answer: NotificationPermission | null = null;
   if (
     typeof Notification !== "undefined" &&
     Notification.permission === "default"
   ) {
-    await Notification.requestPermission();
+    answer = await Notification.requestPermission();
   }
-  // Re-read after the OS dialog — Notification.permission may have flipped.
-  let state = pushUiState();
-  if (state === "ready") {
-    await ensurePushSubscribed().catch(() => false);
-    state = pushUiState();
+  if (answer === "granted" || pushUiState() === "ready") {
+    markPermissionGranted();
+    void ensurePushSubscribed().catch(() => false);
+    return "ready";
   }
-  return state;
+  return pushUiState();
 }
 
 /** Turn off: deactivate the lease at the relay, revoke at the gateway, drop the browser subscription. */

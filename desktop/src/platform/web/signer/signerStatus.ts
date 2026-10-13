@@ -1,3 +1,4 @@
+import { ensureStatusStyles } from "@/shared/ui/statusPills";
 import { bottomClearancePx, getSignerToastPrefs, signerToastDelayMs, subscribeSignerToastPrefs } from "./signerToastPrefs";
 import { ESCALATE_WAIT_MS, nip07EscalateWaitMs, signerHealth } from "./signerHealth";
 // Tiny vanilla-DOM "Waiting for your signer…" indicator, independent of the React app tree.
@@ -61,9 +62,10 @@ function place() {
   const phone = window.matchMedia?.("(max-width: 599px)").matches;
   const { position } = getSignerToastPrefs();
   el.setAttribute("data-position", position);
-  const look = phone
-    ? "max-width:calc(100vw - 16px);background:#111d;color:#f5f5f5;border:1px solid #444;border-radius:10px;padding:5px 10px;font:12px/1.3 Inter,system-ui,sans-serif;box-shadow:0 2px 10px #0006;gap:8px"
-    : "max-width:calc(100vw - 32px);background:#111;color:#f5f5f5;border:1px solid #444;border-radius:12px;padding:10px 14px;font:14px/1.4 Inter,system-ui,sans-serif;box-shadow:0 4px 20px #0008;gap:10px";
+  // Same look as the shared status pills (statusPills.ts): solid themed card, border, 14px radius.
+  const look =
+    "max-width:calc(100vw - 16px);background:hsl(var(--card));color:hsl(var(--card-foreground));border:1px solid hsl(var(--border));" +
+    `border-radius:14px;padding:8px 12px;font:${phone ? 13 : 14}px/1.35 Inter,system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.16);gap:10px`;
   const fixedCss = "position:fixed;left:50%;right:auto;bottom:auto;margin:0;transform:translateX(-50%);z-index:2147483647;display:flex;align-items:center;pointer-events:auto;box-sizing:border-box;";
   // Style first (off-screen) so its real height is known before placing it.
   el.style.cssText = `${fixedCss}top:-9999px;${look}`;
@@ -74,7 +76,10 @@ function place() {
   if (position === "top") {
     const rootEl = document.getElementById("root");
     const safeTop = phone && rootEl ? parseFloat(getComputedStyle(rootEl).paddingTop) || 0 : 0; // = --phone-safe-top, resolved
-    top = vTop + safeTop + (phone ? 6 : 12);
+    // Under the nav row / tab pill like every other popup, and under any pills already in the shared host.
+    top = vTop + safeTop + 48;
+    const hostBox = document.querySelector(".buzz-status-host")?.getBoundingClientRect();
+    if (hostBox && hostBox.height > 0) top = Math.max(top, hostBox.bottom + 8);
   } else {
     const tops = [...document.querySelectorAll(DOCKED)]
       .map((n) => n.getBoundingClientRect())
@@ -101,6 +106,11 @@ if (typeof window !== "undefined") {
 function update() {
   if (!el) return;
   el.textContent = "";
+  ensureStatusStyles();
+  const spin = document.createElement("span");
+  spin.className = "buzz-status-spin";
+  spin.style.flexShrink = "0";
+  el.appendChild(spin);
   const t = document.createElement("span");
   const n = Math.max(st.pending, st.queued);
   const what = st.labels.slice(0, 2).join(", ");
@@ -113,14 +123,14 @@ function update() {
     a.rel = "noopener";
     a.textContent = "Open signer to approve";
     a.setAttribute("data-testid", "signer-auth-url");
-    a.style.cssText = "color:#fff;font-weight:600;text-decoration:underline";
+    a.style.cssText = "color:hsl(var(--primary));font-weight:600;text-decoration:underline";
     el.appendChild(a);
   }
   const x = document.createElement("button");
   x.type = "button";
   x.textContent = "Hide";
   x.setAttribute("data-testid", "signer-waiting-hide");
-  x.style.cssText = "background:none;border:0;color:#bbb;font:inherit;cursor:pointer;text-decoration:underline;padding:0";
+  x.style.cssText = "background:none;border:0;color:hsl(var(--muted-foreground));font:inherit;cursor:pointer;padding:0";
   x.onclick = () => {
     dismissed = true;
     el?.remove();

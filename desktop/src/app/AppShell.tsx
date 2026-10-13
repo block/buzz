@@ -1,7 +1,7 @@
 import * as React from "react";
 import { ProtectedGlobalOverlay } from "@protected-feature-components";
 import { useQueryClient } from "@tanstack/react-query";
-import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
+import { Outlet, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 import {
   deriveShellRoute,
   markAllReadSources,
@@ -123,18 +123,19 @@ import { SidebarProvider } from "@/shared/ui/sidebar";
 import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 import { PhoneMeScreen } from "@/app/phone/PhoneMeScreen";
 import { PhoneTabBar } from "@/app/phone/PhoneTabBar";
-import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
 import { PhoneTabSwitcher } from "@/app/phone/PhoneTabSwitcher";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import {
   type PhoneTab,
-  phoneBackLabelForPath,
+  overlayFromHistoryState,
   phoneHidesTabBar,
   phoneTabForPath,
+  registerPhoneOverlayNavigator,
   setPhoneOverlay,
-  setPhoneSettingsReturnLabel,
+  syncPhoneOverlayFromHistory,
   usePhoneOverlay,
 } from "@/app/phone/phoneTabs";
+import { PhoneNavRow } from "@/app/phone/PhoneNavRow";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
@@ -226,13 +227,13 @@ export function AppShell() {
   const showPhoneTabBar =
     isPhone && !phoneHidesTabBar(location.pathname, phoneOverlay);
   const navigate = useNavigate();
-  const isPhoneThread = location.pathname.includes("/posts/");
-  // A thread opened inside a channel (?thread=…) is its own phone screen: back closes it via the panel's own handler.
+  const router = useRouter();
+  // A thread opened inside a channel (?thread=…) is its own phone screen: Back closes it via the panel's own handler.
   const isPhoneInlineThread =
-    !isPhoneThread &&
     location.pathname.startsWith("/channels/") &&
+    !location.pathname.includes("/posts/") &&
     Boolean((location.search as { thread?: unknown }).thread);
-  const handlePhoneBack = React.useCallback(() => {
+  const handlePhoneNavBack = React.useCallback(() => {
     if (isPhoneInlineThread) {
       const close = document.querySelector<HTMLElement>(
         '[data-testid="message-thread-back"], [data-testid="message-thread-panel"] [data-testid="auxiliary-panel-close"]',
@@ -242,28 +243,58 @@ export function AppShell() {
         return;
       }
     }
-    if (isPhoneThread) goBack();
-    else if (phoneTab === "me") setPhoneOverlay("me"); // Agents, Bots, Projects… return to the Me list
-    else setPhoneOverlay("channels");
-  }, [goBack, isPhoneInlineThread, isPhoneThread, phoneTab]);
-  // Previous pathname, so phone back buttons can name where history-back lands.
-  const phonePathRef = React.useRef<{ current: string; previous: string | null }>({
-    current: location.pathname,
-    previous: null,
-  });
-  if (phonePathRef.current.current !== location.pathname) {
-    phonePathRef.current = { current: location.pathname, previous: phonePathRef.current.current };
-  }
+    goBack();
+  }, [goBack, isPhoneInlineThread]);
+  // Phone list screens (Channels / Me / Search) are history entries: the overlay rides in the entry's state, so Back,
+  // Forward and Settings' Back step through them (see phoneTabs.ts). Clearing an overlay is deferred a tick because a
+  // navigation almost always follows (opening a channel from the list); that new entry already has no overlay.
+  const historyOverlay = overlayFromHistoryState(location.state, router.history.location.href);
   React.useEffect(() => {
-    setPhoneOverlay(null); // any navigation leaves the Channels/Me list screens
-  }, [location.pathname]);
+    if (isPhone) syncPhoneOverlayFromHistory(historyOverlay);
+  }, [historyOverlay, isPhone]);
+  React.useEffect(() => {
+    if (!isPhone) return;
+    const write = (next: ReturnType<typeof overlayFromHistoryState>, replace: boolean) => {
+      const loc = router.history.location;
+      const { __TSR_index: _i, __TSR_key: _k, key: _key, ...rest } = (loc.state ?? {}) as unknown as Record<string, unknown>;
+      const state = { ...rest, phoneOverlay: next, phoneOverlayHref: loc.href } as never;
+      if (replace) router.history.replace(loc.href, state);
+      else router.history.push(loc.href, state);
+    };
+    return registerPhoneOverlayNavigator((next, opts) => {
+      const loc = router.history.location;
+      if (overlayFromHistoryState(loc.state, loc.href) === next) return;
+      if (next === null && !opts?.replace) {
+        // Usually a navigation follows (a channel tapped in the list) and its new entry has no overlay, so nothing
+        // needs writing. Only when no navigation lands (and none is still loading) does the list close in place.
+        const href = loc.href;
+        const settle = (tries: number) =>
+          window.setTimeout(() => {
+            const now = router.history.location;
+            if (now.href !== href || overlayFromHistoryState(now.state, now.href) === null) return;
+            if (router.state.isLoading && tries > 0) return settle(tries - 1);
+            write(null, false);
+          }, 250);
+        settle(8);
+        return;
+      }
+      write(next, Boolean(opts?.replace));
+    });
+  }, [isPhone, router]);
+  const handlePhoneNavHome = React.useCallback(() => {
+    if (location.pathname === "/settings") {
+      router.history.push("/", { phoneOverlay: "channels", phoneOverlayHref: "/" } as never);
+      return;
+    }
+    setPhoneOverlay("channels");
+  }, [location.pathname, router]);
   // Phone opens on the Channels tab (the root route is Inbox on iPad/desktop).
   const phoneStartedRef = React.useRef(false);
   React.useEffect(() => {
     if (!isPhone || phoneStartedRef.current) return;
     phoneStartedRef.current = true;
-    if (location.pathname === "/") setPhoneOverlay("channels");
-  }, [isPhone, location.pathname]);
+    if (location.pathname === "/" && !historyOverlay) setPhoneOverlay("channels", { replace: true });
+  }, [historyOverlay, isPhone, location.pathname]);
   React.useEffect(() => {
     const root = document.documentElement;
     if (showPhoneTabBar) root.setAttribute("data-phone-tabbar", "");
@@ -364,31 +395,6 @@ export function AppShell() {
     (id) => channels.find((c) => c.id === id)?.name,
     channelsQuery.data,
   );
-  const phoneChannelLabel = React.useCallback(
-    (id: string) => {
-      const channel = channels.find((c) => c.id === id);
-      if (!channel) return undefined;
-      const label = resolveChannelDisplayLabel(channel, identityQuery.data?.pubkey, undefined);
-      return channel.channelType === "dm" ? label : `#${label}`;
-    },
-    [channels, identityQuery.data?.pubkey],
-  );
-  const phonePreviousPath = phonePathRef.current.previous;
-  const phonePreviousLabel = phoneBackLabelForPath(phonePreviousPath, phoneChannelLabel);
-  let phoneBackLabel: string;
-  if (isPhoneThread) {
-    const threadChannelId = /^\/channels\/([^/]+)/.exec(location.pathname)?.[1];
-    const channelLabel = threadChannelId ? phoneChannelLabel(decodeURIComponent(threadChannelId)) : undefined;
-    phoneBackLabel =
-      phonePreviousLabel && phonePreviousLabel !== "Thread" && phonePreviousPath !== location.pathname
-        ? phonePreviousLabel
-        : (channelLabel ?? "Back");
-  } else if (isPhoneInlineThread) {
-    const channelId = /^\/channels\/([^/?]+)/.exec(location.pathname)?.[1];
-    phoneBackLabel = (channelId ? phoneChannelLabel(decodeURIComponent(channelId)) : undefined) ?? "Channel";
-  } else if (phoneTab === "me") phoneBackLabel = "Me";
-  else phoneBackLabel = "Channels";
-  setPhoneSettingsReturnLabel(settingsOpen ? (phonePreviousLabel ?? "Back") : null);
   const dmChannelIds = React.useMemo(() => {
     const ids = new Set<string>();
     for (const channel of channelsQuery.data ?? []) {
@@ -959,17 +965,17 @@ export function AppShell() {
               >
                 <AppProfilePanelProvider>
                   <AppWorkflowEditorOverlayProvider>
+                    {isPhone && !hideAppChrome ? (
+                      <PhoneNavRow
+                        canGoBack={canGoBack}
+                        canGoForward={canGoForward}
+                        onGoBack={handlePhoneNavBack}
+                        onGoForward={goForward}
+                        onHome={handlePhoneNavHome}
+                      />
+                    ) : null}
                     {!settingsOpen && !hideAppChrome ? (
                       <AppTopChrome
-                        onPhoneBack={
-                          isPhone &&
-                          !settingsOpen &&
-                          (!showPhoneTabBar ||
-                            (phoneTab === "me" && phoneOverlay === null))
-                            ? handlePhoneBack
-                            : undefined
-                        }
-                        phoneBackLabel={phoneBackLabel}
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
                         hasCommunityRail={hasCommunityRail}

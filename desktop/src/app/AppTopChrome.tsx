@@ -16,10 +16,6 @@ import { useOptionalSidebar } from "@/shared/ui/sidebar";
 
 type AppTopChromeProps = {
   canGoBack: boolean;
-  /** Phone layout only: header back button for full-screen conversation views. */
-  onPhoneBack?: () => void;
-  /** Phone: name of the screen back lands on, shown beside the arrow. */
-  phoneBackLabel?: string;
   canGoForward: boolean;
   onGoBack: () => void;
   onGoForward: () => void;
@@ -80,8 +76,6 @@ export function AppTopChrome({
   onGoBack,
   onGoForward,
   hasCommunityRail = false,
-  onPhoneBack,
-  phoneBackLabel,
 }: AppTopChromeProps) {
   const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
@@ -160,18 +154,6 @@ export function AppTopChrome({
           navRowAlignmentClass,
         )}
       >
-        {onPhoneBack ? (
-          <button
-            aria-label={phoneBackLabel ? `Back to ${phoneBackLabel}` : "Back"}
-            className="phone-back-button"
-            data-testid="phone-back"
-            onClick={onPhoneBack}
-            type="button"
-          >
-            <ChevronLeft aria-hidden="true" className="phone-back-chevron" />
-            {phoneBackLabel ? <span className="phone-back-label">{phoneBackLabel}</span> : null}
-          </button>
-        ) : null}
         <span className="contents" data-phone-hide="">
         <TopChromeSidebarTrigger />
         <Button

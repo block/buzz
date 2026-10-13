@@ -6,9 +6,12 @@ import { Check } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { Spinner } from "@/shared/ui/spinner";
+import { STATUS_TIMING } from "@/shared/ui/statusPills";
 
 export const RECONNECT_NOW_AFTER_MS = 20_000;
-const BACK_ONLINE_MS = 2_200;
+// Shared timing policy (statusPills.ts): appear only after GRACE_MS of reconnecting, "Back online" for SUCCESS_MS and only
+// if the reconnecting card was actually visible.
+const BACK_ONLINE_MS = STATUS_TIMING.SUCCESS_MS;
 
 type Props = {
   /** true while the connection is down and being retried */
@@ -36,23 +39,31 @@ export function ReconnectCard({
 }: Props) {
   const [showBack, setShowBack] = React.useState(false);
   const [fading, setFading] = React.useState(false);
-  const was = React.useRef(reconnecting);
+  const [graceDone, setGraceDone] = React.useState(false);
+  const visibleRef = React.useRef(false);
   const [, tick] = React.useReducer((x: number) => x + 1, 0);
 
   React.useEffect(() => {
-    if (was.current && !reconnecting) {
-      setShowBack(true);
-      setFading(false);
-      const f = window.setTimeout(() => setFading(true), BACK_ONLINE_MS - 500);
-      const t = window.setTimeout(() => setShowBack(false), BACK_ONLINE_MS);
-      was.current = reconnecting;
-      return () => {
-        window.clearTimeout(f);
-        window.clearTimeout(t);
-      };
+    if (reconnecting) {
+      setShowBack(false);
+      if (visibleRef.current) return;
+      const g = window.setTimeout(() => {
+        visibleRef.current = true;
+        setGraceDone(true);
+      }, STATUS_TIMING.GRACE_MS);
+      return () => window.clearTimeout(g);
     }
-    if (reconnecting) setShowBack(false);
-    was.current = reconnecting;
+    setGraceDone(false);
+    if (!visibleRef.current) return; // a blip that never showed: no "Back online" either
+    visibleRef.current = false;
+    setShowBack(true);
+    setFading(false);
+    const f = window.setTimeout(() => setFading(true), BACK_ONLINE_MS - STATUS_TIMING.FADE_MS);
+    const t = window.setTimeout(() => setShowBack(false), BACK_ONLINE_MS);
+    return () => {
+      window.clearTimeout(f);
+      window.clearTimeout(t);
+    };
   }, [reconnecting]);
 
   // re-render once the "Reconnect now" threshold passes
@@ -64,7 +75,7 @@ export function ReconnectCard({
     return () => window.clearTimeout(t);
   }, [reconnecting, failingSince]);
 
-  if (!reconnecting && !showBack) return null;
+  if (reconnecting ? !graceDone : !showBack) return null;
   const offerNow =
     reconnecting &&
     !!onReconnectNow &&
@@ -78,7 +89,7 @@ export function ReconnectCard({
       data-testid={testId}
       data-state={reconnecting ? "reconnecting" : "online"}
       className={cn(
-        "buzz-reconnect-card flex items-center gap-3 rounded-2xl border border-border/60 bg-card/95 px-3.5 py-2.5 text-sm text-foreground shadow-sm backdrop-blur transition-opacity duration-500",
+        "buzz-reconnect-card flex items-center gap-3 rounded-[14px] border border-border bg-card px-3.5 py-2.5 text-sm text-card-foreground shadow-sm transition-opacity duration-200",
         fading ? "opacity-0" : "opacity-100",
         className,
       )}

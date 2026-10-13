@@ -3,6 +3,9 @@ import * as React from "react";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
+import { resetProgress, trackProgress } from "@/shared/ui/statusPills";
+
+const IS_WEB = import.meta.env?.VITE_BUZZ_PLATFORM === "web";
 
 const SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 6_000;
 const DEFAULT_RELAY_SUCCESS_KEY = "__default-relay__";
@@ -232,6 +235,24 @@ export function useSidebarRelayConnectionCard(
     });
   }, [reconnect, relayUrl, startConnectivityAction]);
 
+  // Web: the relay status is one pill in the shared status host with the shared timing policy (statusPills.ts):
+  // "Reconnecting to relay…" only after a 1.5s grace, "Connected" for 2s only if that pill showed. The sidebar card and
+  // its bottom-left overlay stay hidden on web, so there is exactly one relay popup and nothing to dismiss.
+  const relayDown = relayConnectionState !== "idle" && isRelayConnectionActuallyDegraded;
+  React.useEffect(() => {
+    if (!IS_WEB) return;
+    trackProgress("relay", relayDown, {
+      title: isWaitingOnReconnectHook ? "Waiting to reconnect" : "Reconnecting to relay…",
+      description: "Your messages will catch up automatically",
+      successTitle: "Connected",
+      testId: "relay-status-pill",
+    });
+  }, [relayDown, isWaitingOnReconnectHook]);
+  React.useEffect(() => {
+    if (!IS_WEB) return;
+    return () => resetProgress("relay");
+  }, [relayLifecycleKey]);
+
   return {
     hasRelayUnreachableError,
     isRelayConnectionSuccess,
@@ -242,6 +263,6 @@ export function useSidebarRelayConnectionCard(
       setIsDismissed(true);
     },
     onReconnectRelay: handleReconnectRelay,
-    showSidebarRelayConnectionCard: show,
+    showSidebarRelayConnectionCard: IS_WEB ? false : show,
   };
 }

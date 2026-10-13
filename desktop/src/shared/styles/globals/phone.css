@@ -84,7 +84,7 @@
 [data-phone] .phone-fullscreen {
   position: fixed;
   inset: 0;
-  padding-top: var(--phone-safe-top);
+  padding-top: calc(var(--phone-safe-top) + var(--phone-nav-row-h));
   padding-bottom: var(--phone-tabbar-h);
   z-index: 110;
   background: hsl(var(--sidebar-background, var(--background)));
@@ -132,17 +132,64 @@
   padding: 0 !important;
   margin: 0 !important;
 }
-/* The top chrome is just the back button on phone, at the left edge; the channel header stays pinned below it. */
+/* The in-flow top chrome is a 40px band on phone; the fixed nav row (Back / Forward / Home) and the tab pill sit over it.
+   The channel header stays pinned below it. */
 [data-phone] [data-testid="app-top-chrome"] {
   padding-left: 4px !important;
   padding-right: 4px !important;
   overflow: hidden;
 }
-[data-phone] [data-testid="app-top-chrome"] [data-testid="phone-back"] {
+/* Phone nav row: the desktop/iPad history controls (AppTopChrome's back/forward + home), one fixed row on every phone
+   screen. Transparent and click-through except for its buttons, so the chrome band (or the list/Settings screen
+   background) shows behind it. Above full-screen list screens (110), below the tab pill (130) and popups. */
+[data-phone] {
+  --phone-nav-row-h: 40px;
+}
+[data-phone] .phone-nav-row {
+  position: fixed;
+  top: var(--phone-safe-top);
+  left: 0;
+  height: var(--phone-nav-row-h);
+  z-index: 125;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  pointer-events: none;
+}
+[data-phone] .phone-nav-button {
+  pointer-events: auto;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: hsl(var(--sidebar-foreground, var(--foreground)) / 0.75);
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+[data-phone] .phone-nav-button::after {
+  content: "";
   position: absolute;
-  left: 6px;
-  top: 50%;
-  transform: translateY(-50%);
+  inset: -6px -2px;
+}
+[data-phone] .phone-nav-button svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 2.25;
+}
+[data-phone] .phone-nav-button:active:not(:disabled) {
+  background: hsl(var(--sidebar-accent, var(--muted)));
+}
+[data-phone] .phone-nav-button:disabled {
+  opacity: 0.32;
+}
+[data-phone] .phone-nav-button:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
 }
 /* The channel header is already pinned over the timeline; keep it inside the screen width. */
 [data-phone] [data-testid="chat-header"] {
@@ -204,7 +251,7 @@
 [data-phone] .phone-settings {
   position: fixed;
   inset: 0;
-  padding-top: var(--phone-safe-top);
+  padding-top: calc(var(--phone-safe-top) + var(--phone-nav-row-h));
   padding-bottom: var(--phone-tabbar-h);
   z-index: 110;
   display: flex;
@@ -215,77 +262,26 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 56px;
+  height: 44px;
   padding: 0 8px 0 6px;
   border-bottom: 1px solid hsl(var(--border));
   flex-shrink: 0;
 }
-/* Phone back control (one pattern app-wide): iOS-style chevron + destination label in the theme accent, no fill or
-   border, so "go back" reads as navigation and never looks like a #channel chip, tab, or thread link. Compact 32px
-   control centered in the header with margin above/below; the invisible ::after keeps a 44px tap target. */
-[data-phone] .phone-back-button {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  height: 32px;
-  min-width: 32px;
-  max-width: min(46vw, 220px);
-  margin: 0;
-  padding: 0 8px 0 2px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: hsl(var(--primary));
-  font-size: 15px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  line-height: 1;
-  flex-shrink: 0;
-  -webkit-tap-highlight-color: transparent;
-  transition: opacity 120ms ease, background-color 120ms ease;
-}
-[data-phone] .phone-back-button::after {
-  content: "";
-  position: absolute;
-  inset: -6px -4px;
-}
-[data-phone] .phone-back-button:active {
-  opacity: 0.55;
-  background: hsl(var(--primary) / 0.1);
-}
-[data-phone] .phone-back-button:focus-visible {
-  outline: 2px solid hsl(var(--ring));
-  outline-offset: 1px;
-}
-[data-phone] .phone-back-button .phone-back-chevron {
-  width: 22px;
-  height: 22px;
-  margin-right: -1px;
-  stroke-width: 2.25;
-  flex-shrink: 0;
-}
-[data-phone] .phone-back-button .phone-back-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 /* In-page backs (reminder detail, inbox detail, project inbox, repo/link panels, channel browser): same accent chevron,
    no outline box, so every back on phone looks the same. The arrow icon is swapped for the chevron via a mask. */
-[data-phone] button[aria-label^="Back"]:not(.phone-back-button) {
+[data-phone] button[aria-label^="Back"] {
   border-color: transparent !important;
   background: transparent !important;
   box-shadow: none !important;
   color: hsl(var(--primary)) !important;
 }
-[data-phone] button[aria-label^="Back"]:not(.phone-back-button):active {
+[data-phone] button[aria-label^="Back"]:active {
   opacity: 0.55;
 }
-[data-phone] button[aria-label^="Back"]:not(.phone-back-button) svg.lucide-arrow-left {
+[data-phone] button[aria-label^="Back"] svg.lucide-arrow-left {
   display: none;
 }
-[data-phone] button[aria-label^="Back"]:not(.phone-back-button):has(svg.lucide-arrow-left)::before {
+[data-phone] button[aria-label^="Back"]:has(svg.lucide-arrow-left)::before {
   content: "";
   display: inline-block;
   width: 22px;
@@ -417,14 +413,10 @@
 }
 /* Phone tab switcher: a compact themed pill that always floats top-right (the mirror of the top-left back control):
    32px tall, centered in the 40px top bar with 4px above/below, invisible ::after for a ~44px tap target. The list
-   fans out from the top-right corner. Back stays top-left, so the two never meet. */
+   fans out from the top-right corner. It sits at the right end of the nav row (Back / Forward / Home on the left), so it never takes a row of its own. */
 [data-phone] {
   --phone-tab-pill-top: calc(var(--phone-safe-top) + 4px);
   --phone-tab-pill-reserve: 72px;
-}
-/* Full-screen list screens (Search, Settings) have a 56px header: center the pill in that instead. */
-[data-phone]:has(.phone-search-screen, .phone-settings) {
-  --phone-tab-pill-top: calc(var(--phone-safe-top) + 12px);
 }
 [data-phone] .phone-tab-switcher-button {
   position: fixed;
@@ -509,19 +501,8 @@
 [data-phone][data-phone-tab-switcher] [data-testid="app-top-chrome"] {
   padding-right: var(--phone-tab-pill-reserve) !important;
 }
-[data-phone][data-phone-tab-switcher] [data-testid="app-top-chrome"] [data-testid="phone-back"] {
-  max-width: calc(100vw - var(--phone-tab-pill-reserve) - 16px);
-}
-[data-phone][data-phone-tab-switcher] .phone-settings .phone-settings-header,
-[data-phone][data-phone-tab-switcher] .phone-search-screen .phone-settings-header {
-  padding-right: var(--phone-tab-pill-reserve);
-}
 [data-phone][data-phone-tab-switcher] .buzz-terminal-substrate[data-terminal-mode="maximized"] .buzz-terminal-tabs {
   padding-right: var(--phone-tab-pill-reserve);
-}
-/* Channels list has no top bar: give it the same 40px band so section actions (Projects +/⚙) sit below the pill. */
-[data-phone][data-phone-tab-switcher] .phone-fullscreen [data-testid="app-sidebar"] {
-  padding-top: 40px;
 }
 /* Keyboard up: composer sits right on the keyboard (the 20px quiet inset is for the home-indicator area). */
 [data-phone][data-phone-keyboard] .composer-dock {

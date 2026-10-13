@@ -7,6 +7,10 @@ import { cn } from "@/shared/lib/cn";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { useSidebar } from "@/shared/ui/sidebar";
+import { clearStatus, showStatus } from "@/shared/ui/statusPills";
+import * as React from "react";
+
+const IS_WEB = import.meta.env?.VITE_BUZZ_PLATFORM === "web";
 
 type RelayConnectionOverlayProps = {
   card: ReturnType<typeof useSidebarRelayConnectionCard>;
@@ -52,6 +56,16 @@ export function RelayConnectionOverlay({
     hasNonUnreachableError &&
     isSidebarSurfaceHidden &&
     !shouldShowReconnectCard;
+
+  // Web: a non-reachability relay error is a calm note in the shared status host (no red text), shown while it lasts.
+  const webError = IS_WEB && hasNonUnreachableError ? errorMessage : undefined;
+  React.useEffect(() => {
+    if (!IS_WEB) return;
+    if (webError) showStatus("relay-error", { tone: "info", title: "Relay connection issue", description: webError, testId: "relay-error-overlay" });
+    else clearStatus("relay-error");
+    return () => clearStatus("relay-error");
+  }, [webError]);
+  if (IS_WEB) return null;
 
   return (
     <AnimatePresence>

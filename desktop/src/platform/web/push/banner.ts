@@ -1,5 +1,5 @@
 import { onResume } from "@/shared/lib/resumeSignals";
-// Dismissible top banner nudging the user to turn on push (vanilla DOM, like the signer overlay; no AppShell edits).
+// Top nudge to turn on push, shown in the shared status host (statusPills.ts: one look, placement and timing).
 import {
   bannerDismissed,
   dismissBanner,
@@ -13,128 +13,102 @@ import {
   installPushClickRouting,
   pushUiState,
 } from "./client";
-import type { PushUiState } from "./env";
+import { effectivePermission, type PushUiState } from "./env";
+import { clearStatus, showStatus } from "@/shared/ui/statusPills";
 
 const COPY = {
-  "ios-install":
-    "Get notifications when Hula Buzz is closed: tap Share, then Add to Home Screen, open the app from your Home Screen and tap Enable.",
-  "needs-tap":
-    "Turn on notifications so mentions, DMs and approvals reach you even when the app is closed.",
-  denied:
-    "Notifications are blocked for HulaBuzz. On iPhone: Settings → Notifications → HulaBuzz → Allow Notifications.",
+  "ios-install": {
+    title: "Get notifications",
+    description:
+      "Tap Share, then Add to Home Screen, open HulaBuzz from your Home Screen and tap Enable.",
+  },
+  "needs-tap": {
+    title: "Turn on notifications",
+    description: "Mentions, DMs and approvals reach you even when the app is closed.",
+  },
+  denied: {
+    title: "Notifications are off",
+    description: "On iPhone: Settings → Notifications → HulaBuzz → Allow Notifications.",
+  },
 } as const;
 
 type BannerState = keyof typeof COPY;
-
-let el: HTMLDivElement | null = null;
-let renderGen = 0;
+const ID = "web-push-banner";
 
 function hide() {
-  el?.remove();
-  el = null;
+  clearStatus(ID);
 }
 
+/**
+ * Root cause of the banner staying up after Allow (iPhone, installed PWA): the Enable handler hid the banner only after
+ * `enablePushFromTap()` resolved, and that awaited the whole subscribe chain (relay info, pushManager.subscribe, NIP-98
+ * gateway enroll and the NIP-44 + signed kind:30350 lease), which waits on the remote signer and can take minutes or
+ * never settle. iOS standalone also doesn't fire Permissions-API change events, and `Notification.permission` can lag
+ * at "default" right after the grant, so no recheck caught it either. Now the OS answer alone decides: granted (live or
+ * remembered from requestPermission) hides at once, and the subscription is created and synced in the background.
+ */
 function permissionGranted(): boolean {
   return (
-    typeof Notification !== "undefined" && Notification.permission === "granted"
+    typeof Notification !== "undefined" &&
+    effectivePermission(Notification.permission) === "granted"
   );
 }
 
-/** True when OS permission is granted and the browser has an active push subscription. */
-async function grantedAndSubscribed(): Promise<boolean> {
-  if (!permissionGranted()) return false;
-  try {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window))
-      return true; // granted is enough to hide the nudge
-    const reg =
-      (await navigator.serviceWorker.getRegistration()) ??
-      (await navigator.serviceWorker.ready.catch(() => null));
-    const sub = await reg?.pushManager.getSubscription();
-    return !!sub;
-  } catch {
-    return true;
-  }
-}
+let shownState: BannerState | null = null;
 
-function bannerShell(): HTMLDivElement {
-  const node = document.createElement("div");
-  node.setAttribute("role", "status");
-  // Theme tokens are HSL components (see ThemeProvider); wrap with hsl() so the
-  // banner paints a solid themed surface instead of an invalid/transparent color.
-  node.style.cssText =
-    "position:fixed;left:8px;right:8px;top:calc(env(safe-area-inset-top,0px) + 8px);z-index:2147483000;display:flex;gap:10px;align-items:center;" +
-    "padding:10px 12px;border-radius:14px;background:hsl(var(--card));color:hsl(var(--card-foreground));" +
-    "border:1px solid hsl(var(--border));box-shadow:0 6px 24px rgba(0,0,0,.18);" +
-    "font:14px/1.35 system-ui,-apple-system,sans-serif;max-width:640px;margin:0 auto";
-  return node;
-}
-
-function appendDismiss(node: HTMLDivElement) {
-  const close = document.createElement("button");
-  close.type = "button";
-  close.setAttribute("aria-label", "Dismiss");
-  close.setAttribute("data-web-push-dismiss", "");
-  close.textContent = "×";
-  close.style.cssText =
-    "border:0;background:transparent;color:inherit;font-size:20px;line-height:1;padding:0 4px";
-  close.onclick = () => {
-    dismissBanner();
+function render() {
+  // Hidden whenever notifications are on (OS permission granted), push is turned off, or the user hid the nudge.
+  if (!readPushEnabled() || bannerDismissed() || permissionGranted()) {
+    shownState = null;
     hide();
-  };
-  node.append(close);
-}
-
-async function render() {
-  const gen = ++renderGen;
-  // Hide immediately once the OS has granted notifications (and when already subscribed).
-  if (
-    !readPushEnabled() ||
-    bannerDismissed() ||
-    permissionGranted() ||
-    (await grantedAndSubscribed())
-  ) {
-    if (gen === renderGen) hide();
     return;
   }
-  if (gen !== renderGen) return;
-
   const state = pushUiState() as PushUiState;
   const show: BannerState | null =
     state === "ios-install" || state === "needs-tap" || state === "denied"
       ? state
       : null;
-  if (!show) return hide();
-
-  hide();
-  el = bannerShell();
-  el.setAttribute("data-web-push-banner", show);
-  const text = document.createElement("span");
-  text.style.flex = "1";
-  text.textContent = COPY[show];
-  el.append(text);
-
-  if (show === "needs-tap") {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = "Enable";
-    btn.setAttribute("data-web-push-enable", "");
-    // Outlined Enable (matches Button variant="outline" + primary accent).
-    btn.style.cssText =
-      "border:1px solid hsl(var(--primary));border-radius:10px;padding:6px 12px;font-weight:600;" +
-      "background:transparent;color:hsl(var(--primary))";
-    btn.onclick = async () => {
-      btn.disabled = true;
-      const next = await enablePushFromTap();
-      // Hide the moment the OS returns "granted" (subscribe already attempted).
-      if (next === "ready" || permissionGranted()) hide();
-      window.dispatchEvent(new CustomEvent(WEB_PUSH_CHANGE_EVENT));
-      void render();
-    };
-    el.append(btn);
+  if (!show) {
+    shownState = null;
+    hide();
+    return;
   }
+  if (shownState === show) return;
+  shownState = show;
+  const node = showStatus(ID, {
+    tone: "action",
+    title: COPY[show].title,
+    description: COPY[show].description,
+    testId: "web-push-banner",
+    action:
+      show === "needs-tap"
+        ? {
+            label: "Enable",
+            testId: "web-push-enable",
+            onClick: () => void onEnable(),
+          }
+        : undefined,
+    onHide: () => {
+      dismissBanner();
+      shownState = null;
+      hide();
+    },
+  });
+  node?.setAttribute("data-web-push-banner", show);
+}
 
-  appendDismiss(el);
-  document.body.append(el);
+async function onEnable() {
+  const btn = document.querySelector<HTMLButtonElement>('[data-testid="web-push-enable"]');
+  if (btn) btn.disabled = true;
+  const next = await enablePushFromTap().catch(() => pushUiState());
+  if (next === "ready" || permissionGranted()) {
+    shownState = null;
+    hide(); // the OS said yes: hide now; the subscription syncs in the background (enablePushFromTap)
+  } else if (btn) btn.disabled = false;
+  window.dispatchEvent(new CustomEvent(WEB_PUSH_CHANGE_EVENT));
+  // iOS can flip Notification.permission a moment after the dialog closes: recheck for a few seconds.
+  for (const ms of [500, 1500, 4000]) setTimeout(render, ms);
+  render();
 }
 
 function watchPermissionChanges() {
@@ -145,7 +119,7 @@ function watchPermissionChanges() {
       .query({ name: "notifications" as PermissionName })
       .then((status) => {
         status.onchange = () => {
-          void render();
+          render();
           if (permissionGranted()) {
             void ensurePushSubscribed().catch(() => false);
           }
@@ -170,22 +144,25 @@ export function startWebPush() {
     void ensurePushSubscribed()
       .then(() => {
         failedAt = 0;
-        void render(); // hide once subscribe succeeds after a grant
+        render(); // hide once subscribe succeeds after a grant
       })
       .catch(() => {
         failedAt = Date.now();
       });
   };
   sync();
-  void render();
-  setTimeout(() => void render(), 1500);
+  render();
+  setTimeout(render, 1500);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") render();
+  });
   window.addEventListener(WEB_PUSH_CHANGE_EVENT, () => {
-    void render();
+    render();
     sync();
   });
   // visible / pageshow / focus / online: re-check permission + subscription and refresh the lease
   onResume(() => {
-    void render();
+    render();
     sync();
   });
 }

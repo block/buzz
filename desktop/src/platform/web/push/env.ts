@@ -29,6 +29,31 @@ export function classifyPushEnv(env: PushEnv): PushUiState {
   return "needs-tap";
 }
 
+const GRANTED_KEY = "buzz-web-push-granted.v1";
+
+/** Remember the OS answer from requestPermission(): iOS standalone can keep `Notification.permission` at "default" for a
+ *  while after the user tapped Allow, which kept the "Turn on notifications" banner up and skipped the subscribe. */
+export function markPermissionGranted(): void {
+  try {
+    localStorage.setItem(GRANTED_KEY, "1");
+  } catch {
+    /* storage denied */
+  }
+}
+
+/** The live permission, except a stale "default" after a remembered grant reads as "granted". "denied" always wins
+ *  (and forgets the grant), so turning notifications off in iOS Settings shows the blocked hint again. */
+export function effectivePermission(live: NotificationPermission): NotificationPermission {
+  try {
+    if (live === "granted") localStorage.setItem(GRANTED_KEY, "1");
+    else if (live === "denied") localStorage.removeItem(GRANTED_KEY);
+    else if (localStorage.getItem(GRANTED_KEY) === "1") return "granted";
+  } catch {
+    /* storage denied or not in a browser */
+  }
+  return live;
+}
+
 export function readPushEnv(): PushEnv {
   const nav = navigator as Navigator & { standalone?: boolean };
   const ua = nav.userAgent || "";
@@ -45,7 +70,7 @@ export function readPushEnv(): PushEnv {
     hasNotification,
     ios,
     standalone,
-    permission: hasNotification ? Notification.permission : "unsupported",
+    permission: hasNotification ? effectivePermission(Notification.permission) : "unsupported",
   };
 }
 

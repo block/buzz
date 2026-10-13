@@ -1,8 +1,8 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { getPhoneSettingsReturnLabel } from "@/app/phone/phoneTabs";
+import { useRouter, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, LoaderCircle, RefreshCw } from "lucide-react";
+import { AlertCircle, ArrowLeft, ChevronRight, LoaderCircle, RefreshCw } from "lucide-react";
 import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 
 import { isAdminOnlySettingsSection } from "@/features/community-bots/lib/settingsVisibility";
@@ -222,8 +222,23 @@ export function SettingsView({
   }, [myMembershipQuery.data, featureState]);
 
   const isPhone = usePhoneLayout();
-  // Phone: Settings opens on the section list; a section opens full screen with a back button to the list.
-  const [phoneShowList, setPhoneShowList] = React.useState(true);
+  // Phone: Settings opens on the section list; a section opens full screen as its own history entry, so the shared
+  // nav row's Back returns to the list, and Back from the list returns to wherever Settings was opened from (e.g. Me).
+  const router = useRouter();
+  // Keyed to the href it was pushed on (router navigations copy state forward; see phoneTabs.ts).
+  const phoneDetail = useRouterState({
+    select: (state) =>
+      (state.location.state as { phoneSettingsDetail?: unknown } | undefined)?.phoneSettingsDetail ===
+      router.history.location.href,
+  });
+  const phoneShowList = !phoneDetail;
+  const openPhoneSection = React.useCallback(
+    (value: SettingsSection) => {
+      const href = `/settings?section=${encodeURIComponent(value)}`;
+      router.history.push(href, { phoneSettingsDetail: href } as never);
+    },
+    [router],
+  );
   const [isLoaded, setIsLoaded] = React.useState(false);
   const [appVersion, setAppVersion] = React.useState<string | null>(null);
 
@@ -280,21 +295,10 @@ export function SettingsView({
   );
 
   if (isPhone) {
-    const phoneBackLabel = phoneShowList ? (getPhoneSettingsReturnLabel() ?? "Back") : "Settings";
     const activeEntry = visibleSectionByValue.get(section);
     return (
       <div className="phone-settings" data-testid="phone-settings">
         <div className="phone-settings-header">
-          <button
-            aria-label={`Back to ${phoneBackLabel}`}
-            className="phone-back-button"
-            data-testid={phoneShowList ? "settings-back-to-app" : "phone-settings-back"}
-            onClick={() => (phoneShowList ? onClose() : setPhoneShowList(true))}
-            type="button"
-          >
-            <ChevronLeft aria-hidden="true" className="phone-back-chevron" />
-            <span className="phone-back-label">{phoneBackLabel}</span>
-          </button>
           <h1 className="truncate text-base font-semibold">
             {phoneShowList ? "Settings" : (activeEntry?.label ?? "Settings")}
           </h1>
@@ -314,10 +318,7 @@ export function SettingsView({
                         <button
                           className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm active:bg-muted"
                           data-testid={`settings-nav-${entry.value}`}
-                          onClick={() => {
-                            onSectionChange(entry.value);
-                            setPhoneShowList(false);
-                          }}
+                          onClick={() => openPhoneSection(entry.value)}
                           type="button"
                         >
                           <Icon className="h-5 w-5 text-muted-foreground" />

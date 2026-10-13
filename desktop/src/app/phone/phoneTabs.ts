@@ -8,10 +8,44 @@ export type PhoneOverlay = "channels" | "search" | "me" | null;
 let overlay: PhoneOverlay = null;
 const listeners = new Set<() => void>();
 
-export function setPhoneOverlay(next: PhoneOverlay): void {
+function setOverlayValue(next: PhoneOverlay): void {
   if (next === overlay) return;
   overlay = next;
   for (const l of listeners) l();
+}
+
+/**
+ * Phone: the list screens (Channels, Me, Search) live in browser history (as `phoneOverlay` in the entry's state), so
+ * the shared Back / Forward controls step through them like any other screen. Settings opened from Me goes back to Me,
+ * never to the channel underneath. AppShell registers the navigator while the phone layout is active; elsewhere this
+ * stays a plain in-memory flag.
+ */
+type OverlayNavigator = (next: PhoneOverlay, opts?: { replace?: boolean }) => void;
+let navigator: OverlayNavigator | null = null;
+export function registerPhoneOverlayNavigator(fn: OverlayNavigator): () => void {
+  navigator = fn;
+  return () => {
+    if (navigator === fn) navigator = null;
+  };
+}
+export function setPhoneOverlay(next: PhoneOverlay, opts?: { replace?: boolean }): void {
+  if (navigator) navigator(next, opts);
+  else setOverlayValue(next);
+}
+/** AppShell mirrors the current history entry's overlay into the store. */
+export function syncPhoneOverlayFromHistory(next: PhoneOverlay): void {
+  setOverlayValue(next);
+}
+/**
+ * The overlay of a history entry. Router navigations copy the current entry's state into the next one, so the overlay is
+ * stored with the href it was opened on and only counts on that same href (a channel opened from the list is not "the
+ * list" just because it inherited the state).
+ */
+export function overlayFromHistoryState(state: unknown, href: string): PhoneOverlay {
+  const st = state as { phoneOverlay?: unknown; phoneOverlayHref?: unknown } | null | undefined;
+  if (st?.phoneOverlayHref !== href) return null;
+  const v = st?.phoneOverlay;
+  return v === "channels" || v === "me" || v === "search" ? v : null;
 }
 
 export function usePhoneOverlay(): PhoneOverlay {
@@ -42,31 +76,4 @@ export function phoneTabForPath(pathname: string, current: PhoneOverlay): PhoneT
 export function phoneHidesTabBar(pathname: string, current: PhoneOverlay): boolean {
   if (current) return false;
   return pathname.startsWith("/channels/") || pathname === "/messages/new" || pathname === "/settings";
-}
-
-/** Phone header back-button label: the name of the screen a path shows (where "back" lands). */
-export function phoneBackLabelForPath(
-  pathname: string | null | undefined,
-  channelLabel: (channelId: string) => string | undefined,
-): string | null {
-  if (!pathname) return null;
-  if (pathname === "/" || pathname.startsWith("/inbox")) return "Inbox";
-  if (pathname === "/settings") return "Settings";
-  if (pathname.startsWith("/buzz-term")) return "Buzz Term";
-  const channelMatch = /^\/channels\/([^/]+)(\/posts\/)?/.exec(pathname);
-  if (channelMatch) {
-    if (channelMatch[2]) return "Thread";
-    return channelLabel(decodeURIComponent(channelMatch[1])) ?? "Channel";
-  }
-  if (ME_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) return "Me";
-  return null;
-}
-
-// Where Settings' "close" lands (the previous app screen), set by AppShell each render.
-let settingsReturnLabel: string | null = null;
-export function setPhoneSettingsReturnLabel(label: string | null): void {
-  settingsReturnLabel = label;
-}
-export function getPhoneSettingsReturnLabel(): string | null {
-  return settingsReturnLabel;
 }
