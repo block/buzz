@@ -195,6 +195,34 @@ pub struct PinWebviewManager {
     /// Webview labels parked off-screen but still "visible" to WebKit, most
     /// recently parked last. See [`park_pin_webview`].
     parked: Mutex<Vec<String>>,
+    /// Labels whose `add_child` is in flight (single creator per label).
+    creating: Mutex<std::collections::HashSet<String>>,
+}
+
+struct CreateGuard<'a> {
+    manager: &'a PinWebviewManager,
+    label: Option<String>,
+}
+
+impl Drop for CreateGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(label) = self.label.take() {
+            if let Ok(mut creating) = self.manager.creating.lock() {
+                creating.remove(&label);
+            }
+        }
+    }
+}
+
+/// Wait (bounded, ~2s) for a webview another show is creating.
+async fn wait_for_webview(app: &AppHandle, label: &str) -> Option<Webview> {
+    for _ in 0..80 {
+        if let Some(webview) = app.get_webview(label) {
+            return Some(webview);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    app.get_webview(label)
 }
 
 /// How many hidden pin webviews stay live (parked off-screen, page visibility
@@ -660,7 +688,28 @@ pub async fn pin_webview_show(
     let initial_url = session.current_url().clone();
 
     let label = pin_webview_label(&pin_id, &window_label);
-    if let Some(webview) = app.get_webview(&label) {
+    // Open is idempotent. Concurrent shows (fresh screen per pin, Strict
+    // Mode, ResizeObserver, restore events) can all miss get_webview before
+    // the first add_child lands, and the losers used to fail with "a webview
+    // with label `pin-…` already exists". Only one caller creates; the rest
+    // wait for that webview and take the reuse path.
+    let mut existing = app.get_webview(&label);
+    let mut we_create = false;
+    if existing.is_none() {
+        we_create = manager
+            .creating
+            .lock()
+            .map(|mut creating| creating.insert(label.clone()))
+            .unwrap_or(true);
+        if !we_create {
+            existing = wait_for_webview(&app, &label).await;
+        }
+    }
+    let _create_guard = CreateGuard {
+        manager: &manager,
+        label: if we_create { Some(label.clone()) } else { None },
+    };
+    if let Some(webview) = existing {
         // Never close() + add_child on the show path. A tiny first layout only
         // gets set_size here; creation waits for a usable host below.
         let nav = reuse_existing_webview(
@@ -693,7 +742,7 @@ pub async fn pin_webview_show(
     let load_app = app.clone();
     let load_pin = pin_id.clone();
     let load_label = label.clone();
-    let builder = WebviewBuilder::new(label, WebviewUrl::External(initial_url))
+    let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(initial_url))
         .data_directory(profile_dir.clone())
         .data_store_identifier(pin_data_store_identifier(&pin_id))
         // Pinned sites stay live while you are elsewhere (forms, scroll,
@@ -733,13 +782,34 @@ pub async fn pin_webview_show(
         });
 
     let origin = window_content_origin(&window);
-    window
-        .add_child(
-            builder,
-            pin_webview_position(&bounds, origin),
-            LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)),
-        )
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = window.add_child(
+        builder,
+        pin_webview_position(&bounds, origin),
+        LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)),
+    ) {
+        let message = error.to_string();
+        if !policy::is_label_exists_error(&message) {
+            return Err(message);
+        }
+        // Someone else created it first: reattach / reposition / show it.
+        let webview = wait_for_webview(&app, &label)
+            .await
+            .ok_or(message)?;
+        let nav = reuse_existing_webview(
+            &app,
+            &manager,
+            &pin_id,
+            &window_label,
+            &start_url,
+            previous_start.as_ref(),
+            &mut session,
+            &webview,
+            &bounds,
+        )?;
+        persist_session(&app, &pin_id, &session);
+        store_session(&manager, pin_id, session);
+        return Ok(nav);
+    }
 
     session.last_load_failed = false;
     if session.pre_inspect_bounds.is_none() {

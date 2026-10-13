@@ -71,6 +71,12 @@ pub fn should_navigate_existing(
     current.is_none()
 }
 
+/// True for Tauri's duplicate-label error from `add_child`; the show path
+/// then reuses the existing webview instead of failing the open.
+pub fn is_label_exists_error(message: &str) -> bool {
+    message.contains("already exists") && message.contains("label")
+}
+
 pub fn bounds_are_usable(width: f64, height: f64) -> bool {
     width >= MIN_PIN_WEBVIEW_EDGE && height >= MIN_PIN_WEBVIEW_EDGE
 }
@@ -169,6 +175,14 @@ mod tests {
             None,
             false,
         ));
+    }
+
+    #[test]
+    fn duplicate_label_error_is_recognised_for_reuse() {
+        assert!(is_label_exists_error(
+            "a webview with label `pin-wayfinder` already exists"
+        ));
+        assert!(!is_label_exists_error("window not found"));
     }
 
     #[test]
