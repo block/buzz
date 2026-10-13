@@ -424,3 +424,16 @@
     font-size: 16px !important;
   }
 }
+
+/* Thread "New" treatment (web phone): divider above the first unread reply even
+   when it is the first reply, plus a brief fading tint on replies unread at open. */
+[data-web-first-unread-divider] { display: none; }
+[data-phone] [data-web-first-unread-divider] { display: block; }
+@keyframes buzz-new-reply-fade {
+  0%, 60% { background-color: hsl(var(--primary) / 0.14); }
+  100% { background-color: transparent; }
+}
+[data-phone] [data-new-reply="true"] {
+  border-radius: 0.75rem;
+  animation: buzz-new-reply-fade 4s ease-out 1 both;
+}

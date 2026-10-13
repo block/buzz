@@ -1,4 +1,5 @@
 import * as React from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { ArrowDown } from "lucide-react";
 
 import { usePopoutThreadOnlyLayout } from "@/features/popout/lib/popoutLayout";
@@ -316,6 +317,25 @@ export function MessageThreadPanel({
     EMPTY_THREAD_REPLIES,
   );
   const isRepliesPending = deferredThreadReplies !== threadReplies;
+  // Web: replies that were unread when the thread opened (at/after the
+  // snapshot-anchored first unread reply, not authored by me). Drives a brief
+  // highlight so it's clear WHICH replies are new; styled under [data-phone].
+  const isWebBuild = !isTauri();
+  const newOnOpenReplyIds = React.useMemo(() => {
+    const ids = new Set<string>();
+    if (!isWebBuild || !firstUnreadReplyId) return ids;
+    const first = threadReplies.find(
+      (e) => e.message.id === firstUnreadReplyId,
+    );
+    if (!first) return ids;
+    const me = currentPubkey?.toLowerCase();
+    for (const e of threadReplies) {
+      if (e.message.createdAt < first.message.createdAt) continue;
+      if (me && e.message.pubkey?.toLowerCase() === me) continue;
+      ids.add(e.message.id);
+    }
+    return ids;
+  }, [currentPubkey, firstUnreadReplyId, isWebBuild, threadReplies]);
   const scrollTargetIsVisibleReply = React.useMemo(
     () =>
       scrollTargetId !== null &&
@@ -670,8 +690,11 @@ export function MessageThreadPanel({
                       index,
                       isContinuation,
                     } = item;
+                    const isFirstUnread =
+                      entry.message.id === firstUnreadReplyId;
                     const showUnreadDivider =
-                      index > 0 && entry.message.id === firstUnreadReplyId;
+                      isFirstUnread && (index > 0 || isWebBuild);
+                    const isNewOnOpen = newOnOpenReplyIds.has(entry.message.id);
                     const highlight = selectThreadRowHighlight({
                       branch: highlightedBranch,
                       index,
@@ -686,9 +709,18 @@ export function MessageThreadPanel({
                           entry.summary &&
                             "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                         )}
+                        data-new-reply={isNewOnOpen ? "true" : undefined}
                         key={entry.message.renderKey ?? entry.message.id}
                       >
-                        {showUnreadDivider ? <UnreadDivider /> : null}
+                        {showUnreadDivider ? (
+                          index > 0 ? (
+                            <UnreadDivider />
+                          ) : (
+                            <div data-web-first-unread-divider="">
+                              <UnreadDivider />
+                            </div>
+                          )
+                        ) : null}
                         <MessageThreadRow
                           channelId={channelId}
                           currentPubkey={currentPubkey}
