@@ -191,6 +191,7 @@ class MessageContent extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final markdownTheme = GptMarkdownTheme.of(context);
     final ownTextColor = context.colors.brightness == Brightness.dark
         ? Colors.black
         : Colors.white;
@@ -435,7 +436,29 @@ class MessageContent extends HookConsumerWidget {
                                     primary: ownTextColor,
                                   ),
                                 ),
-                                child: renderMarkdown(segment.text),
+                                child: GptMarkdownTheme(
+                                  gptThemeData: markdownTheme.copyWith(
+                                    h1: markdownTheme.h1?.copyWith(
+                                      color: ownTextColor,
+                                    ),
+                                    h2: markdownTheme.h2?.copyWith(
+                                      color: ownTextColor,
+                                    ),
+                                    h3: markdownTheme.h3?.copyWith(
+                                      color: ownTextColor,
+                                    ),
+                                    h4: markdownTheme.h4?.copyWith(
+                                      color: ownTextColor,
+                                    ),
+                                    h5: markdownTheme.h5?.copyWith(
+                                      color: ownTextColor,
+                                    ),
+                                    h6: markdownTheme.h6?.copyWith(
+                                      color: ownTextColor,
+                                    ),
+                                  ),
+                                  child: renderMarkdown(segment.text),
+                                ),
                               )
                             : renderMarkdown(segment.text),
                       ),

@@ -1,30 +1,23 @@
-import 'package:flutter/widgets.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'dart:async';
 
-/// Ephemeral geometry owned by one channel or thread composer.
+import 'package:flutter/widgets.dart';
+
+/// Carries submitted composer geometry through asynchronous send preparation.
 class ComposerSendOrigin {
-  Rect? _rect;
-  DateTime? _capturedAt;
+  static final _zoneKey = Object();
 
   /// Captures only geometry; no draft or identity data is retained.
-  void capture(GlobalKey key) {
+  static Rect? capture(GlobalKey key) {
     final box = key.currentContext?.findRenderObject();
-    if (box is RenderBox && box.hasSize && box.attached) {
-      _rect = box.localToGlobal(Offset.zero) & box.size;
-      _capturedAt = DateTime.now();
-    }
+    return box is RenderBox && box.hasSize && box.attached
+        ? box.localToGlobal(Offset.zero) & box.size
+        : null;
   }
 
-  /// Stale captures cannot animate a message opened on later navigation.
-  Rect? get recentRect =>
-      _capturedAt != null &&
-          DateTime.now().difference(_capturedAt!) < const Duration(seconds: 2)
-      ? _rect
-      : null;
-}
+  /// Geometry for this send, isolated from other concurrent submissions.
+  static Rect? get current => Zone.current[_zoneKey] as Rect?;
 
-/// Scope geometry independently for channel and thread composers.
-final composerSendOriginProvider = Provider.autoDispose
-    .family<ComposerSendOrigin, (String, String?)>(
-      (ref, scope) => ComposerSendOrigin(),
-    );
+  /// Retains the submitted surface until this send creates its local claim.
+  static Future<void> run(Rect? origin, Future<void> Function() send) =>
+      runZoned(send, zoneValues: {_zoneKey: origin});
+}

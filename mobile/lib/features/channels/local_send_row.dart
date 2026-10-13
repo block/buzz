@@ -27,6 +27,7 @@ class _RenderSendRow extends RenderProxyBox {
     if (progress == value) return;
     progress = value;
     markNeedsLayout();
+    markNeedsSemanticsUpdate();
   }
 
   Offset get childOffset => Offset(0, size.height - (child?.size.height ?? 0));
@@ -58,6 +59,14 @@ class _RenderSendRow extends RenderProxyBox {
   @override
   void applyPaintTransform(RenderBox child, Matrix4 transform) {
     transform.translateByDouble(childOffset.dx, childOffset.dy, 0, 1);
+  }
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    if (!paintBounds.contains(position)) return false;
+    if (!hitTestChildren(result, position: position)) return false;
+    result.add(BoxHitTestEntry(this, position));
+    return true;
   }
 
   @override

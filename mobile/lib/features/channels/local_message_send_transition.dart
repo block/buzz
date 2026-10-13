@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'composer_send_origin.dart';
+import 'local_message_send_animation_provider.dart';
 import 'local_send_row.dart';
 
 /// Duration of a local message's entrance transition.
@@ -44,6 +44,7 @@ class LocalMessageSendTransition extends HookConsumerWidget {
     super.key,
     required this.animate,
     this.channelId,
+    this.messageId,
     this.threadHeadId,
     this.startOffsetFactor = localMessageSendTransitionStartOffset,
     required this.child,
@@ -51,6 +52,9 @@ class LocalMessageSendTransition extends HookConsumerWidget {
 
   /// Composer scope used to retrieve the captured sending surface.
   final String? channelId;
+
+  /// Event whose local claim owns the submitted composer geometry.
+  final String? messageId;
   final String? threadHeadId;
 
   /// Whether to play the entrance transition.
@@ -65,11 +69,11 @@ class LocalMessageSendTransition extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final origin = useMemoized(
-      () => channelId == null
+      () => !animate || channelId == null || messageId == null
           ? null
           : ref
-                .read(composerSendOriginProvider((channelId!, threadHeadId)))
-                .recentRect,
+                .read(localMessageSendAnimationProvider(channelId!).notifier)
+                .originFor(messageId!),
       const [],
     );
     final reduceMotion = MediaQuery.disableAnimationsOf(context);

@@ -57,6 +57,7 @@ class _RenderSendBubble extends RenderProxyBox {
     shape = nextShape;
     motion = nextMotion;
     markNeedsPaint();
+    markNeedsSemanticsUpdate();
   }
 
   @override
@@ -68,14 +69,12 @@ class _RenderSendBubble extends RenderProxyBox {
         .getOuterPath(Offset.zero & Size(width, size.height))
         .getBounds()
         .expandToInclude(super.paintBounds);
-    final origin = motion?.origin;
-    return progress < 1 && origin != null
-        ? bounds.expandToInclude(origin.shift(-localToGlobal(Offset.zero)))
-        : bounds;
+    return bounds
+        .expandToInclude(animatedRect)
+        .expandToInclude(child?.paintBounds.shift(childOffset) ?? Rect.zero);
   }
 
-  @override
-  void paint(PaintingContext context, Offset offset) {
+  Rect get animatedRect {
     final end = Offset.zero & size;
     final origin = motion?.origin;
     final start = origin == null
@@ -94,12 +93,42 @@ class _RenderSendBubble extends RenderProxyBox {
       motion?.widthProgress ?? progress,
     )!;
     final vertical = Rect.lerp(start, end, progress)!;
-    final rect = Rect.fromLTWH(
+    return Rect.fromLTWH(
       horizontal.left,
       vertical.top,
       horizontal.width,
       vertical.height,
     );
+  }
+
+  Offset get childOffset => progress < 1 ? animatedRect.topLeft : Offset.zero;
+
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    transform.translateByDouble(childOffset.dx, childOffset.dy, 0, 1);
+  }
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    final rect = animatedRect;
+    if (!shape.getOuterPath(rect).contains(position)) return false;
+    if (!hitTestChildren(result, position: position)) return false;
+    result.add(BoxHitTestEntry(this, position));
+    return true;
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      result.addWithPaintOffset(
+        offset: childOffset,
+        position: position,
+        hitTest: (result, position) =>
+            child?.hitTest(result, position: position) ?? false,
+      );
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final rect = animatedRect;
     final path = shape.getOuterPath(rect.shift(offset));
     context.canvas.drawPath(path, Paint()..color = color);
     if (child case final child?) {

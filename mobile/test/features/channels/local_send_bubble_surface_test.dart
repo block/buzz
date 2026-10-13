@@ -1,11 +1,89 @@
 import 'dart:ui' as ui;
 import 'package:buzz/features/channels/local_message_send_transition.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
+import 'package:buzz/features/channels/local_send_row.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final progress in [0.25, 0.5, 1.0]) {
+    testWidgets(
+      'flight transforms, hit bounds and semantics agree at $progress',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Center(
+              child: SizedBox(
+                width: 300,
+                height: 300,
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  child: LocalSendProgress(
+                    progress: progress,
+                    startOffset: 100,
+                    child: LocalSendRow(
+                      progress: progress,
+                      child: LocalSendBubbleSurface(
+                        color: Colors.black,
+                        shape: const RoundedRectangleBorder(),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {},
+                          child: Semantics(
+                            label: 'Flying link',
+                            child: const SizedBox(width: 100, height: 100),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        final surface = tester.renderObject<RenderBox>(
+          find.byType(LocalSendBubbleSurface),
+        );
+        final row = tester.renderObject<RenderBox>(find.byType(LocalSendRow));
+        final target = tester.renderObject<RenderBox>(
+          find.byType(GestureDetector),
+        );
+        final rowOffset = Offset(0, row.size.height - 100);
+        final bubbleOffset = Offset(0, 100 * (1 - progress));
+        final visibleCenter = rowOffset + bubbleOffset + const Offset(50, 50);
+        expect(
+          target.localToGlobal(Offset.zero),
+          row.localToGlobal(rowOffset + bubbleOffset),
+        );
+        final rowHits = BoxHitTestResult();
+        expect(row.hitTest(rowHits, position: visibleCenter), isTrue);
+        expect(
+          rowHits.path.any((entry) => identical(entry.target, target)),
+          isTrue,
+        );
+        final bubbleHits = BoxHitTestResult();
+        expect(
+          surface.hitTest(
+            bubbleHits,
+            position: bubbleOffset + const Offset(50, 50),
+          ),
+          isTrue,
+        );
+        expect(
+          surface.hitTest(BoxHitTestResult(), position: const Offset(-10, -10)),
+          isFalse,
+        );
+        final node = tester.getSemantics(find.bySemanticsLabel('Flying link'));
+        expect(node.rect.size, const Size(100, 100));
+        expect(tester.takeException(), isNull);
+        semantics.dispose();
+      },
+    );
+  }
+
   for (final text in [
     'Hello',
     'A longer message\nwith several lines\nof text',

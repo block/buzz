@@ -268,6 +268,7 @@ class _ThreadMessageList extends HookWidget {
 
                         return trackActiveScrollPosition(
                           LocalMessageSendTransition(
+                            messageId: reply.id,
                             channelId: channelId,
                             threadHeadId: head.id,
                             key: ValueKey('thread-message-send-${reply.id}'),

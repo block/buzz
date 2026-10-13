@@ -33,14 +33,15 @@ void bubbleContentTests() {
   });
 
   for (final dark in [false, true]) {
-    testWidgets('outgoing mentions and links contrast in dark=$dark', (
+    testWidgets('outgoing headings, mentions and links contrast in dark=$dark', (
       tester,
     ) async {
       String? tapped;
       await tester.pumpWidget(
         _testable(
           MessageContent(
-            content: '@Alice @Helper [Website](https://example.com)',
+            content:
+                '# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6\n\n@Alice @Helper [Website](https://example.com)',
             bubble: true,
             ownMessage: true,
             mentionNames: const {'person': 'Alice', 'agent': 'Helper'},
@@ -52,6 +53,24 @@ void bubbleContentTests() {
       );
       await tester.pumpAndSettle();
       final foreground = dark ? Colors.black : Colors.white;
+      for (final heading in ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']) {
+        final text = tester.widget<RichText>(_findRich(heading).last);
+        final colors = <Color?>[];
+        void inspect(InlineSpan span, TextStyle? inherited) {
+          final effective = inherited?.merge(span.style) ?? span.style;
+          if (span is TextSpan) {
+            if (span.text?.contains(heading) == true) {
+              colors.add(effective?.color);
+            }
+            for (final child in span.children ?? const <InlineSpan>[]) {
+              inspect(child, effective);
+            }
+          }
+        }
+
+        inspect(text.text, null);
+        expect(colors, [foreground]);
+      }
       for (final label in ['Alice', 'Helper']) {
         expect(tester.widget<Text>(find.text(label)).style?.color, foreground);
       }

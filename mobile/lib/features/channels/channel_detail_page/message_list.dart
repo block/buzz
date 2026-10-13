@@ -853,6 +853,7 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage.createdAt - message.createdAt > 300;
 
                 return LocalMessageSendTransition(
+                  messageId: message.id,
                   channelId: channelId,
                   key: ValueKey('channel-message-send-${message.id}'),
                   animate: isRecentLocalMessageSendAnimation(
