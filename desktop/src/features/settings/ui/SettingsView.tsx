@@ -1,4 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
+import { getPhoneSettingsReturnLabel } from "@/app/phone/phoneTabs";
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, LoaderCircle, RefreshCw } from "lucide-react";
@@ -279,18 +280,20 @@ export function SettingsView({
   );
 
   if (isPhone) {
+    const phoneBackLabel = phoneShowList ? (getPhoneSettingsReturnLabel() ?? "Back") : "Settings";
     const activeEntry = visibleSectionByValue.get(section);
     return (
       <div className="phone-settings" data-testid="phone-settings">
         <div className="phone-settings-header">
           <button
-            aria-label={phoneShowList ? "Back to app" : "Back to settings"}
-            className="phone-settings-back"
+            aria-label={`Back to ${phoneBackLabel}`}
+            className="phone-back-button"
             data-testid={phoneShowList ? "settings-back-to-app" : "phone-settings-back"}
             onClick={() => (phoneShowList ? onClose() : setPhoneShowList(true))}
             type="button"
           >
-            <ChevronLeft className="h-6 w-6" />
+            <ChevronLeft aria-hidden="true" className="phone-back-chevron" />
+            <span className="phone-back-label">{phoneBackLabel}</span>
           </button>
           <h1 className="truncate text-base font-semibold">
             {phoneShowList ? "Settings" : (activeEntry?.label ?? "Settings")}

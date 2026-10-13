@@ -43,3 +43,30 @@ export function phoneHidesTabBar(pathname: string, current: PhoneOverlay): boole
   if (current) return false;
   return pathname.startsWith("/channels/") || pathname === "/messages/new" || pathname === "/settings";
 }
+
+/** Phone header back-button label: the name of the screen a path shows (where "back" lands). */
+export function phoneBackLabelForPath(
+  pathname: string | null | undefined,
+  channelLabel: (channelId: string) => string | undefined,
+): string | null {
+  if (!pathname) return null;
+  if (pathname === "/" || pathname.startsWith("/inbox")) return "Inbox";
+  if (pathname === "/settings") return "Settings";
+  if (pathname.startsWith("/buzz-term")) return "Buzz Term";
+  const channelMatch = /^\/channels\/([^/]+)(\/posts\/)?/.exec(pathname);
+  if (channelMatch) {
+    if (channelMatch[2]) return "Thread";
+    return channelLabel(decodeURIComponent(channelMatch[1])) ?? "Channel";
+  }
+  if (ME_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) return "Me";
+  return null;
+}
+
+// Where Settings' "close" lands (the previous app screen), set by AppShell each render.
+let settingsReturnLabel: string | null = null;
+export function setPhoneSettingsReturnLabel(label: string | null): void {
+  settingsReturnLabel = label;
+}
+export function getPhoneSettingsReturnLabel(): string | null {
+  return settingsReturnLabel;
+}

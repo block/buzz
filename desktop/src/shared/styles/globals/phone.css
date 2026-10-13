@@ -213,17 +213,43 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 48px;
-  padding: 0 8px 0 4px;
+  height: 56px;
+  padding: 0 8px 0 6px;
   border-bottom: 1px solid hsl(var(--border));
   flex-shrink: 0;
 }
-[data-phone] .phone-settings-back {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
+/* Phone header back: a labeled pill button ("‹ Channels") instead of a bare arrow. */
+[data-phone] .phone-back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 44px;
+  min-width: 44px;
+  max-width: min(46vw, 220px);
+  padding: 0 12px 0 6px;
   border-radius: 9999px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.6);
+  color: hsl(var(--foreground));
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+[data-phone] .phone-back-button:active {
+  background: hsl(var(--accent));
+}
+[data-phone] .phone-back-button .phone-back-chevron {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+[data-phone] .phone-back-button .phone-back-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 [data-phone] .phone-settings-scroll {
   flex: 1 1 auto;

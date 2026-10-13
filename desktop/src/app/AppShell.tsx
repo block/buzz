@@ -123,13 +123,16 @@ import { SidebarProvider } from "@/shared/ui/sidebar";
 import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 import { PhoneMeScreen } from "@/app/phone/PhoneMeScreen";
 import { PhoneTabBar } from "@/app/phone/PhoneTabBar";
+import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
 import { PhoneTabSwitcher } from "@/app/phone/PhoneTabSwitcher";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import {
   type PhoneTab,
+  phoneBackLabelForPath,
   phoneHidesTabBar,
   phoneTabForPath,
   setPhoneOverlay,
+  setPhoneSettingsReturnLabel,
   usePhoneOverlay,
 } from "@/app/phone/phoneTabs";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
@@ -228,6 +231,14 @@ export function AppShell() {
     else if (phoneTab === "me") setPhoneOverlay("me"); // Agents, Bots, Projects… return to the Me list
     else setPhoneOverlay("channels");
   }, [goBack, isPhoneThread, phoneTab]);
+  // Previous pathname, so phone back buttons can name where history-back lands.
+  const phonePathRef = React.useRef<{ current: string; previous: string | null }>({
+    current: location.pathname,
+    previous: null,
+  });
+  if (phonePathRef.current.current !== location.pathname) {
+    phonePathRef.current = { current: location.pathname, previous: phonePathRef.current.current };
+  }
   React.useEffect(() => {
     setPhoneOverlay(null); // any navigation leaves the Channels/Me list screens
   }, [location.pathname]);
@@ -338,6 +349,28 @@ export function AppShell() {
     (id) => channels.find((c) => c.id === id)?.name,
     channelsQuery.data,
   );
+  const phoneChannelLabel = React.useCallback(
+    (id: string) => {
+      const channel = channels.find((c) => c.id === id);
+      if (!channel) return undefined;
+      const label = resolveChannelDisplayLabel(channel, identityQuery.data?.pubkey, undefined);
+      return channel.channelType === "dm" ? label : `#${label}`;
+    },
+    [channels, identityQuery.data?.pubkey],
+  );
+  const phonePreviousPath = phonePathRef.current.previous;
+  const phonePreviousLabel = phoneBackLabelForPath(phonePreviousPath, phoneChannelLabel);
+  let phoneBackLabel: string;
+  if (isPhoneThread) {
+    const threadChannelId = /^\/channels\/([^/]+)/.exec(location.pathname)?.[1];
+    const channelLabel = threadChannelId ? phoneChannelLabel(decodeURIComponent(threadChannelId)) : undefined;
+    phoneBackLabel =
+      phonePreviousLabel && phonePreviousLabel !== "Thread" && phonePreviousPath !== location.pathname
+        ? phonePreviousLabel
+        : (channelLabel ?? "Back");
+  } else if (phoneTab === "me") phoneBackLabel = "Me";
+  else phoneBackLabel = "Channels";
+  setPhoneSettingsReturnLabel(settingsOpen ? (phonePreviousLabel ?? "Back") : null);
   const dmChannelIds = React.useMemo(() => {
     const ids = new Set<string>();
     for (const channel of channelsQuery.data ?? []) {
@@ -922,6 +955,7 @@ export function AppShell() {
                             ? handlePhoneBack
                             : undefined
                         }
+                        phoneBackLabel={phoneBackLabel}
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
                         hasCommunityRail={hasCommunityRail}
