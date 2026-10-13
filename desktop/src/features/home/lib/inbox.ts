@@ -28,6 +28,7 @@ export type InboxFilter =
   | "all"
   | "project"
   | "mention"
+  | "dm"
   | "thread"
   | "needs_action"
   | "agent_activity"

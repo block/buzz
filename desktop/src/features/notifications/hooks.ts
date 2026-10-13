@@ -12,7 +12,12 @@ import {
 } from "./lib/desktop";
 import {
   COMING_SOON_SLOTS,
+  DEFAULT_EVENT_ALERTS_ENABLED,
   DEFAULT_SLOT_ALERTS_ENABLED,
+  EVENT_ALERT_TYPES,
+  isEventAlertType,
+  type EventAlertType,
+  type NotificationToggleKey,
   DEFAULT_SLOT_SOUNDS,
   SOUND_NAMES,
   SOUND_SLOTS,
@@ -20,6 +25,11 @@ import {
   type SoundName,
   type SoundSlot,
 } from "./lib/sound";
+import {
+  fetchSyncedTypePrefs,
+  publishSyncedTypePrefs,
+  SYNCED_SLOTS,
+} from "./lib/syncedPrefs";
 import {
   readStoredSeenFeedIds,
   useFeedDesktopNotifications,
@@ -51,6 +61,10 @@ export type NotificationSettings = {
    * Cleared by any individual row toggle.
    */
   slotAlertsSnapshot: Record<SoundSlot, boolean> | null;
+  /** Reminders / community joins / remote terminal (desktop-only) on/off. */
+  eventAlertsEnabled: Record<EventAlertType, boolean>;
+  /** Unix seconds of the last per-type switch change; last-writer-wins for relay sync. */
+  typesUpdatedAt: number;
 };
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
@@ -60,7 +74,23 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   sounds: { ...DEFAULT_SLOT_SOUNDS },
   slotAlertsEnabled: { ...DEFAULT_SLOT_ALERTS_ENABLED },
   slotAlertsSnapshot: null,
+  eventAlertsEnabled: { ...DEFAULT_EVENT_ALERTS_ENABLED },
+  typesUpdatedAt: 0,
 };
+
+function sanitizeEventAlertsEnabled(
+  value: unknown,
+): Record<EventAlertType, boolean> {
+  const result = { ...DEFAULT_EVENT_ALERTS_ENABLED };
+  if (!value || typeof value !== "object") return result;
+  const candidate = value as Partial<Record<EventAlertType, unknown>>;
+  for (const key of EVENT_ALERT_TYPES) {
+    if (typeof candidate[key] === "boolean") result[key] = candidate[key];
+  }
+  return result;
+}
+
+const nowSecs = () => Math.floor(Date.now() / 1_000);
 
 const SOUND_NAME_SET = new Set<SoundName>(SOUND_NAMES);
 
@@ -120,10 +150,19 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
       typeof candidate.slotAlertsSnapshot === "object"
         ? sanitizeSlotAlertsEnabled(candidate.slotAlertsSnapshot)
         : null,
+    eventAlertsEnabled: sanitizeEventAlertsEnabled(
+      candidate.eventAlertsEnabled,
+    ),
+    typesUpdatedAt:
+      typeof candidate.typesUpdatedAt === "number"
+        ? candidate.typesUpdatedAt
+        : 0,
   };
 }
 
-function readStoredNotificationSettings(pubkey: string): NotificationSettings {
+export function readStoredNotificationSettings(
+  pubkey: string,
+): NotificationSettings {
   if (typeof window === "undefined" || pubkey.length === 0) {
     return DEFAULT_NOTIFICATION_SETTINGS;
   }
@@ -179,6 +218,79 @@ function mergeSeenFeedIds(current: string[], nextIds: readonly string[]) {
     : values.slice(values.length - HOME_FEED_SEEN_MAX_ITEMS);
 }
 
+/**
+ * Relay sync of the per-type switches (desktop <-> web). Pulls on mount and when
+ * the app becomes visible; a newer remote copy replaces the local switches, and a
+ * newer local change is published (debounced). Failures are silent: local
+ * settings keep working without the relay.
+ */
+function useSyncedNotificationTypes(
+  pubkey: string,
+  settings: NotificationSettings,
+  setSettings: React.Dispatch<React.SetStateAction<NotificationSettings>>,
+) {
+  const syncedAtRef = React.useRef(0);
+  const pulledRef = React.useRef(false);
+
+  const pull = React.useEffectEvent(async () => {
+    if (!pubkey) return;
+    const remote = await fetchSyncedTypePrefs(pubkey).catch(() => null);
+    pulledRef.current = true;
+    if (!remote) return;
+    syncedAtRef.current = Math.max(syncedAtRef.current, remote.updatedAt);
+    setSettings((current) => {
+      if (remote.updatedAt <= current.typesUpdatedAt) return current;
+      const slotAlertsEnabled = { ...current.slotAlertsEnabled };
+      for (const slot of SYNCED_SLOTS)
+        slotAlertsEnabled[slot] = remote.slots[slot];
+      return {
+        ...current,
+        slotAlertsEnabled,
+        eventAlertsEnabled: { ...remote.events },
+        typesUpdatedAt: remote.updatedAt,
+      };
+    });
+  });
+
+  React.useEffect(() => {
+    if (!pubkey) return;
+    pulledRef.current = false;
+    syncedAtRef.current = 0;
+    const timer = window.setTimeout(() => void pull(), 1_500);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void pull();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [pubkey]);
+
+  const { typesUpdatedAt, slotAlertsEnabled, eventAlertsEnabled } = settings;
+  React.useEffect(() => {
+    if (!pubkey || typesUpdatedAt === 0) return;
+    if (typesUpdatedAt <= syncedAtRef.current) return;
+    const timer = window.setTimeout(() => {
+      if (!pulledRef.current || typesUpdatedAt <= syncedAtRef.current) return;
+      const slots = {} as Record<(typeof SYNCED_SLOTS)[number], boolean>;
+      for (const slot of SYNCED_SLOTS) slots[slot] = slotAlertsEnabled[slot];
+      void publishSyncedTypePrefs({
+        updatedAt: typesUpdatedAt,
+        slots,
+        events: eventAlertsEnabled,
+      })
+        .then(() => {
+          syncedAtRef.current = Math.max(syncedAtRef.current, typesUpdatedAt);
+        })
+        .catch((error) =>
+          console.warn("[notifications] settings sync failed:", error),
+        );
+    }, 2_000);
+    return () => window.clearTimeout(timer);
+  }, [pubkey, typesUpdatedAt, slotAlertsEnabled, eventAlertsEnabled]);
+}
+
 export function useNotificationSettings(pubkey?: string) {
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const [settings, setSettings] = React.useState<NotificationSettings>(() =>
@@ -198,6 +310,8 @@ export function useNotificationSettings(pubkey?: string) {
   React.useEffect(() => {
     writeStoredNotificationSettings(normalizedPubkey, settings);
   }, [normalizedPubkey, settings]);
+
+  useSyncedNotificationTypes(normalizedPubkey, settings, setSettings);
 
   const refreshPermission = React.useEffectEvent(async () => {
     const nextPermission = await getDesktopNotificationPermissionState();
@@ -325,6 +439,7 @@ export function useNotificationSettings(pubkey?: string) {
           ...current,
           slotAlertsEnabled: next,
           slotAlertsSnapshot: { ...current.slotAlertsEnabled },
+          typesUpdatedAt: nowSecs(),
         };
       }
       // Super-switch on: restore the snapshot when it has anything on,
@@ -340,18 +455,38 @@ export function useNotificationSettings(pubkey?: string) {
           next[slot] = snapshotHasAlerts ? (snapshot?.[slot] ?? true) : true;
         }
       }
-      return { ...current, slotAlertsEnabled: next, slotAlertsSnapshot: null };
+      return {
+        ...current,
+        slotAlertsEnabled: next,
+        slotAlertsSnapshot: null,
+        typesUpdatedAt: nowSecs(),
+      };
     });
   }, []);
 
   const setSlotAlertsEnabled = React.useCallback(
-    (slot: SoundSlot, enabled: boolean) => {
-      setSettings((current) => ({
-        ...current,
-        slotAlertsEnabled: { ...current.slotAlertsEnabled, [slot]: enabled },
-        // A manual row toggle supersedes any pending super-switch snapshot.
-        slotAlertsSnapshot: null,
-      }));
+    (slot: NotificationToggleKey, enabled: boolean) => {
+      setSettings((current) =>
+        isEventAlertType(slot)
+          ? {
+              ...current,
+              eventAlertsEnabled: {
+                ...current.eventAlertsEnabled,
+                [slot]: enabled,
+              },
+              typesUpdatedAt: nowSecs(),
+            }
+          : {
+              ...current,
+              slotAlertsEnabled: {
+                ...current.slotAlertsEnabled,
+                [slot]: enabled,
+              },
+              // A manual row toggle supersedes any pending super-switch snapshot.
+              slotAlertsSnapshot: null,
+              typesUpdatedAt: nowSecs(),
+            },
+      );
     },
     [],
   );

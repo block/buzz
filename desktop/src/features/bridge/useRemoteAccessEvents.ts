@@ -1,5 +1,6 @@
 // Mounted once in AppShell: keeps the remote-access status fresh and shows a local notification when a remote terminal opens.
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { readStoredNotificationSettings } from "@/features/notifications/hooks";
 import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
@@ -64,6 +65,8 @@ export function useRemoteAccessEvents(pubkey?: string): void {
     void listen("remote-access-changed", () => void refreshRemoteAccess()).then((u) => (cancelled ? u() : unlistens.push(u)));
     void listen<{ session?: string | null }>("remote-terminal-opened", async (e) => {
       void refreshRemoteAccess();
+      const prefs = readStoredNotificationSettings(pubkeyRef.current?.trim().toLowerCase() ?? "");
+      if (!prefs.desktopEnabled || !prefs.eventAlertsEnabled.remote_terminal) return;
       try {
         const { isPermissionGranted, sendNotification } = await import("@tauri-apps/plugin-notification");
         if (await isPermissionGranted())

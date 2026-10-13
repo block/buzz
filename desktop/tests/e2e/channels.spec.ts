@@ -4037,7 +4037,7 @@ test("Inbox filter changes preserve valid detail and directly select a replaceme
     page.getByRole("menuitemradio", { name: "Threads" }),
   ).toHaveCount(0);
   await page.getByTestId("inbox-filter-trigger").click();
-  await page.getByRole("menuitemradio", { name: "Needs action" }).click();
+  await page.getByRole("menuitemradio", { name: "Approvals" }).click();
   await expect(
     page.getByTestId(`home-inbox-item-${actionItemId}`),
   ).toHaveAttribute("aria-current", "true");

@@ -1041,6 +1041,17 @@ export async function nip44EncryptToSelf(plaintext: string): Promise<string> {
   return invokeTauri<string>("nip44_encrypt_to_self", { plaintext });
 }
 
+/** NIP-44 encrypt to another pubkey (relay push executor). Older desktop builds lack the command and throw. */
+export async function nip44EncryptToPeer(
+  peerPubkey: string,
+  plaintext: string,
+): Promise<string> {
+  return invokeTauri<string>("nip44_encrypt_to_peer", {
+    peerPubkey,
+    plaintext,
+  });
+}
+
 export async function nip44DecryptFromSelf(
   ciphertext: string,
 ): Promise<string> {

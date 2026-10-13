@@ -80,7 +80,7 @@ export function useReminderNotifications(
     const current = settingsRef.current;
     if (
       !current.desktopEnabled ||
-      !current.slotAlertsEnabled.needs_action ||
+      !current.eventAlertsEnabled.reminder ||
       due.length === 0
     ) {
       return;

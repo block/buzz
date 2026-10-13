@@ -1666,6 +1666,38 @@ impl Db {
             .collect()
     }
 
+    /// Latest `buzz:push-prefs` app-data event (kind 30078) per author:
+    /// `(author pubkey, NIP-44 content)`. The content is encrypted to the
+    /// relay's push executor key and is decrypted by the matcher.
+    #[datastore_span(name = "push_member_prefs", system = "postgresql")]
+    pub async fn push_member_prefs(
+        &self,
+        community: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, String)>> {
+        if pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (pubkey) pubkey, content FROM events \
+             WHERE community_id = $1 AND kind = 30078 AND d_tag = 'buzz:push-prefs' \
+               AND pubkey = ANY($2) AND deleted_at IS NULL \
+             ORDER BY pubkey, created_at DESC, id ASC",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkeys)
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter()
+            .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .collect()
+    }
+
     /// Channel ids among `channel_ids` that are direct-message channels.
     #[datastore_span(name = "push_dm_channels", system = "postgresql")]
     pub async fn push_dm_channels(

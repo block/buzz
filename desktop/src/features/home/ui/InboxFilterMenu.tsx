@@ -17,9 +17,10 @@ const INBOX_FILTER_OPTIONS: Array<{
 }> = [
   { value: "all", label: "All" },
   { value: "project", label: "Projects" },
+  { value: "dm", label: "Directs" },
+  { value: "thread", label: "Thread replies" },
   { value: "mention", label: "Mentions" },
-  { value: "thread", label: "Threads" },
-  { value: "needs_action", label: "Needs action" },
+  { value: "needs_action", label: "Approvals" },
   { value: "agent_activity", label: "Agents" },
   { value: "reminders", label: "Reminders" },
   { value: "drafts", label: "Drafts" },

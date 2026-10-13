@@ -7,6 +7,9 @@ import type {
 } from "@/features/notifications/hooks";
 import {
   COMING_SOON_SLOTS,
+  EVENT_ALERT_DESCRIPTIONS,
+  EVENT_ALERT_LABELS,
+  type NotificationToggleKey,
   RECOMMENDED_SOUND_BY_SLOT,
   SLOT_DESCRIPTIONS,
   SLOT_LABELS,
@@ -27,6 +30,40 @@ import { SoundPicker } from "./SoundPicker";
 import { lazyWithReload } from "@/shared/lib/lazyWithReload";
 import { playNotificationSound } from "@/features/notifications/lib/sound";
 import { sendTestNotification } from "@/features/notifications/lib/testNotification";
+
+const IS_WEB = import.meta.env?.VITE_BUZZ_PLATFORM === "web";
+
+/** Per-type switches, in display order. Remote terminal alerts exist only on desktop. */
+const NOTIFY_TYPE_ROWS: NotificationToggleKey[] = [
+  "dm",
+  "thread_reply",
+  "mention",
+  "needs_action",
+  "reminder",
+  "community_join",
+  ...(IS_WEB ? [] : (["remote_terminal"] as const)),
+];
+
+function toggleLabel(key: NotificationToggleKey) {
+  return key in EVENT_ALERT_LABELS
+    ? EVENT_ALERT_LABELS[key as keyof typeof EVENT_ALERT_LABELS]
+    : SLOT_LABELS[key as SoundSlot];
+}
+function toggleDescription(key: NotificationToggleKey) {
+  return key in EVENT_ALERT_DESCRIPTIONS
+    ? EVENT_ALERT_DESCRIPTIONS[key as keyof typeof EVENT_ALERT_DESCRIPTIONS]
+    : SLOT_DESCRIPTIONS[key as SoundSlot];
+}
+function toggleEnabled(
+  settings: NotificationSettings,
+  key: NotificationToggleKey,
+) {
+  return key in settings.eventAlertsEnabled
+    ? settings.eventAlertsEnabled[
+        key as keyof NotificationSettings["eventAlertsEnabled"]
+      ]
+    : settings.slotAlertsEnabled[key as SoundSlot];
+}
 
 /** Shown in place of the push row when its code chunk is from a replaced build and an auto-reload already ran. */
 function StalePushRow() {
@@ -119,7 +156,10 @@ export function NotificationSettingsCard({
   onSetDesktopNotificationsEnabled: (enabled: boolean) => Promise<boolean>;
   onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
-  onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
+  onSetSlotAlertsEnabled: (
+    slot: NotificationToggleKey,
+    enabled: boolean,
+  ) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
 }) {
@@ -134,8 +174,10 @@ export function NotificationSettingsCard({
       notificationSettings.slotAlertsEnabled[slot],
   );
   const [showComingSoon, setShowComingSoon] = useState(false);
-  const visibleSlots = SOUND_SLOTS.filter(
-    (slot) => showComingSoon || !COMING_SOON_SLOTS.has(slot),
+  const visibleSlots = SOUND_SLOTS.filter((slot) =>
+    COMING_SOON_SLOTS.has(slot)
+      ? showComingSoon
+      : notificationSettings.slotAlertsEnabled[slot],
   );
 
   return (
@@ -224,6 +266,42 @@ export function NotificationSettingsCard({
           <TestNotificationRow settings={notificationSettings} />
         </SettingsOptionGroup>
 
+        <SettingsOptionGroup title="Notify me about">
+          {NOTIFY_TYPE_ROWS.map((key) => (
+            <SettingsOptionRow key={key}>
+              <div className="min-w-0">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor={`notify-type-${key}-switch`}
+                >
+                  {toggleLabel(key)}
+                </label>
+                <p
+                  className="text-sm font-normal text-muted-foreground/70"
+                  data-settings-subcopy
+                >
+                  {toggleDescription(key)}
+                </p>
+              </div>
+              <Switch
+                checked={toggleEnabled(notificationSettings, key)}
+                data-testid={`notifications-type-enabled-${key}`}
+                id={`notify-type-${key}-switch`}
+                onCheckedChange={(checked) => {
+                  onSetSlotAlertsEnabled(key, checked);
+                }}
+              />
+            </SettingsOptionRow>
+          ))}
+          <p
+            className="px-3 pb-2 text-xs text-muted-foreground/70"
+            data-settings-subcopy
+          >
+            Synced to your other devices and to phone push. Anything you are
+            notified about also shows as unread in the Inbox.
+          </p>
+        </SettingsOptionGroup>
+
         {notificationSettings.desktopEnabled ? (
           <>
             <SettingsOptionGroup title="Sound">
@@ -298,15 +376,14 @@ export function NotificationSettingsCard({
                               value={notificationSettings.sounds[slot]}
                             />
                           </span>
-                          <Switch
-                            checked={alertsOn && !comingSoon}
-                            data-testid={`notifications-alerts-enabled-${slot}`}
-                            disabled={comingSoon}
-                            id={`alerts-enabled-${slot}-switch`}
-                            onCheckedChange={(checked) => {
-                              onSetSlotAlertsEnabled(slot, checked);
-                            }}
-                          />
+                          {comingSoon ? (
+                            <Switch
+                              checked={false}
+                              data-testid={`notifications-alerts-enabled-${slot}`}
+                              disabled
+                              id={`alerts-enabled-${slot}-switch`}
+                            />
+                          ) : null}
                         </span>
                       </SettingsOptionRow>
                     );

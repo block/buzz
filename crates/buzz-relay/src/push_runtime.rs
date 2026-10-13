@@ -143,6 +143,68 @@ struct MatchContext {
     thread_roots: std::collections::HashMap<Vec<u8>, Vec<u8>>,
     /// (thread root id, lease author) participation pairs.
     thread_participants: std::collections::HashSet<(Vec<u8>, Vec<u8>)>,
+    /// Lease author -> synced notification prefs (`buzz:push-prefs`).
+    member_prefs: std::collections::HashMap<Vec<u8>, MemberPushPrefs>,
+}
+
+/// Per-member notification switches + mutes, published by the clients as a
+/// kind-30078 `d=buzz:push-prefs` event NIP-44-encrypted to the relay's push
+/// executor key. Absent or undecodable prefs mean "everything on".
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+struct MemberPushPrefs {
+    /// Push classes the member turned off (`dm`, `thread_reply`, `mention`, `needs_action`).
+    #[serde(default)]
+    off: std::collections::HashSet<String>,
+    /// Muted channel / DM ids (UUID strings). Silences `dm` and `thread_reply`; mentions still notify.
+    #[serde(default)]
+    muted_channels: std::collections::HashSet<String>,
+    /// Muted thread root ids (hex). Silences `thread_reply`.
+    #[serde(default)]
+    muted_threads: std::collections::HashSet<String>,
+}
+
+fn decode_member_prefs(
+    keys: &nostr::Keys,
+    author: &[u8],
+    content: &str,
+) -> Option<MemberPushPrefs> {
+    let pubkey = nostr::PublicKey::from_slice(author).ok()?;
+    let plaintext = nostr::nips::nip44::decrypt(keys.secret_key(), &pubkey, content).ok()?;
+    if plaintext.len() > 65_536 {
+        return None;
+    }
+    serde_json::from_str(&plaintext).ok()
+}
+
+/// True when the member's synced prefs silence this wake.
+fn prefs_silence(
+    prefs: Option<&MemberPushPrefs>,
+    class: &str,
+    job: &buzz_db::push::BatchedMatch,
+    context: &MatchContext,
+) -> bool {
+    let Some(prefs) = prefs else { return false };
+    if prefs.off.contains(class) {
+        return true;
+    }
+    if class == "dm" || class == "thread_reply" {
+        if let Some(channel) = job.event.channel_id {
+            if prefs.muted_channels.contains(&channel.to_string()) {
+                return true;
+            }
+        }
+    }
+    if class == "thread_reply" {
+        if let Some(root) = context
+            .thread_roots
+            .get(job.event.event.id.as_bytes().as_slice())
+        {
+            if prefs.muted_threads.contains(&hex::encode(root)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn load_match_context(
@@ -211,12 +273,27 @@ async fn load_match_context(
     } else {
         Default::default()
     };
+    let member_prefs = state
+        .db
+        .push_member_prefs(batch.community, &authors)
+        .await
+        .unwrap_or_else(|e| {
+            // Prefs are advisory: a failed load must not block delivery.
+            warn!(community=%batch.community, "push member prefs load failed: {e}");
+            Vec::new()
+        })
+        .into_iter()
+        .filter_map(|(author, content)| {
+            decode_member_prefs(&state.relay_keypair, &author, &content).map(|p| (author, p))
+        })
+        .collect();
     Ok(MatchContext {
         leases,
         memberships,
         dm_channels,
         thread_roots,
         thread_participants,
+        member_prefs,
     })
 }
 
@@ -397,6 +474,9 @@ fn match_job(
             }
         }
         let Some(class) = class else { continue };
+        if prefs_silence(context.member_prefs.get(&lease.author), class, job, context) {
+            continue;
+        }
         let event_deadline = job.event.event.created_at.as_secs() as i64 + EVENT_USEFUL_SECS;
         let expires_at = lease.expires_at.min(event_deadline);
         if expires_at <= Utc::now().timestamp() {
@@ -915,6 +995,7 @@ mod tests {
             dm_channels: Default::default(),
             thread_roots: Default::default(),
             thread_participants: Default::default(),
+            member_prefs: Default::default(),
         }
     }
 
@@ -969,6 +1050,50 @@ mod tests {
         // Not a member of that DM -> membership gate still blocks it.
         ctx.memberships.clear();
         assert!(match_job(&msg, &ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn member_prefs_silence_off_classes_and_muted_channels() {
+        let (member, other) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let channel = uuid::Uuid::new_v4();
+        let subs =
+            serde_json::json!([{"filter":{"kinds":[9]},"class":"dm","ignore":[],"scope":"dm"}]);
+        let mut ctx = scoped_context(&member, subs, channel);
+        ctx.dm_channels.insert(channel);
+        let msg = channel_message(&other, channel);
+        assert_eq!(match_job(&msg, &ctx).unwrap().len(), 1);
+        let author = member.public_key().to_bytes().to_vec();
+        ctx.member_prefs.insert(
+            author.clone(),
+            serde_json::from_value(serde_json::json!({"off":["dm"]})).unwrap(),
+        );
+        assert!(match_job(&msg, &ctx).unwrap().is_empty());
+        ctx.member_prefs.insert(
+            author.clone(),
+            serde_json::from_value(serde_json::json!({"muted_channels":[channel.to_string()]}))
+                .unwrap(),
+        );
+        assert!(match_job(&msg, &ctx).unwrap().is_empty());
+        ctx.member_prefs.insert(
+            author,
+            serde_json::from_value(serde_json::json!({"off":["mention"]})).unwrap(),
+        );
+        assert_eq!(match_job(&msg, &ctx).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn member_prefs_decrypt_from_executor_key() {
+        let (relay, member) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let ct = nostr::nips::nip44::encrypt(
+            member.secret_key(),
+            &relay.public_key(),
+            r#"{"v":1,"off":["thread_reply"]}"#,
+            nostr::nips::nip44::Version::V2,
+        )
+        .unwrap();
+        let prefs = decode_member_prefs(&relay, &member.public_key().to_bytes(), &ct).unwrap();
+        assert!(prefs.off.contains("thread_reply"));
+        assert!(decode_member_prefs(&relay, &member.public_key().to_bytes(), "junk").is_none());
     }
 
     #[test]

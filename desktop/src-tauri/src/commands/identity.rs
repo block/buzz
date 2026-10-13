@@ -736,6 +736,25 @@ pub async fn nip44_encrypt_to_self(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+/// Encrypt to another pubkey (used for the relay push executor's `buzz:push-prefs`).
+#[tauri::command]
+pub async fn nip44_encrypt_to_peer(
+    peer_pubkey: String,
+    plaintext: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let keys = state.signing_keys()?;
+    let peer = nostr::PublicKey::from_hex(peer_pubkey.trim())
+        .map_err(|e| format!("invalid peer pubkey: {e}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        nip44::encrypt(keys.secret_key(), &peer, &plaintext, nip44::Version::V2)
+            .map_err(|e| format!("nip44 encrypt failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
 #[tauri::command]
 pub async fn nip44_decrypt_from_self(
     ciphertext: String,

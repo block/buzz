@@ -99,6 +99,12 @@ export function matchesInboxFilter(
       : true;
   }
 
+  if (filter === "dm") {
+    return [item.item, ...(item.groupItems ?? [])].some(
+      (groupItem) => groupItem?.channelType === "dm",
+    );
+  }
+
   if (filter === "thread") {
     return [item.item, ...(item.groupItems ?? [])].some((groupItem) =>
       groupItem ? hasThreadReplyTags(groupItem.tags) : false,

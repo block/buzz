@@ -135,6 +135,11 @@ export const handlers: Record<string, Handler> = {
     if (!n) throw new Error("Your signer does not support NIP-44 encryption.");
     return n.encrypt(signerPubkey() as string, a?.plaintext ?? "");
   },
+  nip44_encrypt_to_peer: async (a) => {
+    const n = getSigner().nip44;
+    if (!n) throw new Error("Your signer does not support NIP-44 encryption.");
+    return n.encrypt(a?.peerPubkey ?? "", a?.plaintext ?? "");
+  },
   nip44_decrypt_from_self: async (a) => {
     const n = getSigner().nip44;
     if (!n) throw new Error("Your signer does not support NIP-44 decryption.");

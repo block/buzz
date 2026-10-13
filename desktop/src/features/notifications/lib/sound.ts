@@ -38,7 +38,7 @@ export const SLOT_LABELS: Record<SoundSlot, string> = {
   dm: "Direct messages",
   mention: "@Mentions",
   thread_reply: "Thread replies",
-  needs_action: "Needs action",
+  needs_action: "Approvals",
   job_accepted: "Agent: job accepted",
   job_progress: "Agent: progress update",
   job_result: "Agent: job result",
@@ -60,7 +60,7 @@ export const SLOT_DESCRIPTIONS: Record<SoundSlot, string> = {
   dm: "When someone messages you directly.",
   mention: "When someone tags you in a channel.",
   thread_reply: "When someone replies in a thread you follow or posted in.",
-  needs_action: "When an approval or reminder is waiting on you.",
+  needs_action: "When an approval request is waiting on you.",
   job_accepted: "When an agent picks up a job.",
   job_progress: "While an agent works through a job.",
   job_result: "When an agent finishes a job.",
@@ -77,6 +77,39 @@ export const RECOMMENDED_SOUND_BY_SLOT: Record<SoundSlot, SoundName> = {
   job_result: "unison",
   job_error: "oh-no",
 };
+
+/** Non-sound notification types with their own on/off switch. */
+export const EVENT_ALERT_TYPES = [
+  "reminder",
+  "community_join",
+  "remote_terminal",
+] as const;
+export type EventAlertType = (typeof EVENT_ALERT_TYPES)[number];
+export type NotificationToggleKey = SoundSlot | EventAlertType;
+
+export const DEFAULT_EVENT_ALERTS_ENABLED: Record<EventAlertType, boolean> = {
+  reminder: true,
+  community_join: true,
+  remote_terminal: true,
+};
+
+export const EVENT_ALERT_LABELS: Record<EventAlertType, string> = {
+  reminder: "Reminders",
+  community_join: "Community joins",
+  remote_terminal: "Remote terminal opened",
+};
+
+export const EVENT_ALERT_DESCRIPTIONS: Record<EventAlertType, string> = {
+  reminder: "When a reminder you set comes due.",
+  community_join: "When someone joins the community (admins only).",
+  remote_terminal: "When a remote terminal session is opened on this computer.",
+};
+
+export function isEventAlertType(
+  key: NotificationToggleKey,
+): key is EventAlertType {
+  return (EVENT_ALERT_TYPES as readonly string[]).includes(key);
+}
 
 export type SlotSounds = Record<SoundSlot, SoundName>;
 

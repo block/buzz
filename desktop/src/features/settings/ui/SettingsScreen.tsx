@@ -1,6 +1,10 @@
 import type { DesktopNotificationPermissionState } from "@/features/notifications/hooks";
 import type { NotificationSettings } from "@/features/notifications/hooks";
-import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
+import type {
+  NotificationToggleKey,
+  SoundName,
+  SoundSlot,
+} from "@/features/notifications/lib/sound";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import { SettingsView } from "@/features/settings/ui/SettingsView";
 
@@ -15,7 +19,10 @@ type SettingsScreenProps = {
   onSectionChange: (section: SettingsSection) => void;
   onSetDesktopNotificationsEnabled: (enabled: boolean) => Promise<boolean>;
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
-  onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
+  onSetSlotAlertsEnabled: (
+    slot: NotificationToggleKey,
+    enabled: boolean,
+  ) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;

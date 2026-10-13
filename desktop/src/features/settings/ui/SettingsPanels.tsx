@@ -32,7 +32,11 @@ import type {
   DesktopNotificationPermissionState,
   NotificationSettings,
 } from "@/features/notifications/hooks";
-import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
+import type {
+  NotificationToggleKey,
+  SoundName,
+  SoundSlot,
+} from "@/features/notifications/lib/sound";
 import { BotsSettingsCard } from "@/features/community-bots/ui/BotsSettingsCard";
 import { CommunityAgentsSettingsCard } from "@/features/identity-archive/ui/CommunityAgentsSettingsCard";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
@@ -172,7 +176,10 @@ export type SettingsPanelProps = {
   notificationSettings: NotificationSettings;
   onSetDesktopNotificationsEnabled: (enabled: boolean) => Promise<boolean>;
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
-  onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
+  onSetSlotAlertsEnabled: (
+    slot: NotificationToggleKey,
+    enabled: boolean,
+  ) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;

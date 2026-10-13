@@ -53,7 +53,10 @@ export function useAppShellDesktopNotifications({
   // it shares this hook's "desktop notifications are on" precondition and
   // AppShell sits at the file-size ratchet ceiling.
   useCommunityJoinAlerts({
-    enabled: enabled && notificationSettings.desktopEnabled,
+    enabled:
+      enabled &&
+      notificationSettings.desktopEnabled &&
+      notificationSettings.eventAlertsEnabled.community_join,
   });
 
   const resolveSenderName = useNotificationSenderName();
