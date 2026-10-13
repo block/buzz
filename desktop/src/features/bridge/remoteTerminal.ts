@@ -12,6 +12,8 @@ import type {
   TerminalViewport,
 } from "../terminal/terminalClient";
 import type { RemoteInfo } from "./protocol";
+import { AutoReconnector } from "./autoReconnect";
+import { onResume } from "@/shared/lib/resumeSignals";
 import { RemoteConnection, RemoteError, type EmuHandle, type EmuMessage, type SignJson } from "./remoteClient";
 
 type OnMessage = (message: Exclude<TerminalMessage, { type: "frame" }>) => void;
@@ -120,19 +122,42 @@ export class RemoteTerminalConnection implements TerminalConnectionApi {
   }
 }
 
-export type HubState = "idle" | "connecting" | "connected" | "lost" | "error";
+export type HubState = "idle" | "connecting" | "connected" | "reconnecting" | "lost" | "error";
 export type HubStatus = { state: HubState; code?: string; detail?: string };
 
 /**
  * Owns the direct connection for the Buzz term page. One connect signature covers the connection; each terminal launch asks
- * the signer again. If the socket drops, new launches are refused until the user presses Reconnect, so a flaky tailnet can't
- * pop signer prompts by itself.
+ * the signer again. If the socket drops (or goes silent, e.g. iOS froze the PWA) the hub reconnects on its own with backoff
+ * (1 s → 30 s, forever, only while the page is visible) and the Buzz Term page reattaches the running terminals.
  */
 export class RemoteTerminalHub implements TerminalBackend {
   private conn: RemoteConnection | null = null;
   private connecting: Promise<RemoteConnection> | null = null;
   private lost = false;
   private status: HubStatus = { state: "idle" };
+  private auto = new AutoReconnector(
+    () =>
+      this.ensure().then(
+        () => true,
+        (e) => {
+          // A declined signature is the user's answer: stop asking until they act.
+          if (e instanceof RemoteError && e.code === "declined") {
+            this.auto.stop();
+            this.set({ state: "error", code: "declined" });
+          }
+          return false;
+        },
+      ),
+    () => {
+      if (this.auto?.active && this.status.state !== "reconnecting") this.set({ state: "reconnecting" });
+    },
+  );
+  /** When the current outage began (ms), 0 while connected; the UI offers "Reconnect now" after a while. */
+  failingSince = (): number => this.auto.failingSince;
+  /** Optional nudge from the UI; never required. */
+  reconnectNow = () => this.auto.now();
+  /** Unsubscribe the resume probe (tests). */
+  readonly stopResumeProbe = onResume(() => this.conn?.probe());
   private listeners = new Set<() => void>();
   private getInfo: () => RemoteInfo | undefined;
   private sign: SignJson;
@@ -172,19 +197,20 @@ export class RemoteTerminalHub implements TerminalBackend {
     if (this.connecting) return this.connecting;
     const info = this.getInfo();
     if (!info) throw new RemoteError("no_desktop");
-    this.set({ state: "connecting" });
+    this.set({ state: this.auto.active ? "reconnecting" : "connecting" });
     const c = this.make(info, this.sign);
     c.onClose = () => {
       if (this.conn === c) {
         this.conn = null;
-        this.lost = true;
-        this.set({ state: "lost", code: "closed" });
+        this.set({ state: "reconnecting" });
+        this.auto.start();
       }
     };
     this.connecting = c
       .connect()
       .then(() => {
         this.conn = c;
+        this.auto.stop();
         termProbe.registerPing(() => c.pingRtt(), c.transportLabel());
         this.set({ state: "connected" });
         return c;
@@ -242,7 +268,10 @@ export class RemoteTerminalHub implements TerminalBackend {
   onError(_error: unknown) {}
 
   dispose() {
-    this.conn?.close();
-    this.conn = null;
+    this.auto.stop();
+    this.stopResumeProbe();
+    const c = this.conn;
+    this.conn = null; // detach first so the deliberate close doesn't start auto-reconnect
+    c?.close();
   }
 }

@@ -94,7 +94,7 @@ test("an old desktop without the emulator is refused clearly", async () => {
   assert.ok(sent.some((f) => f.t === "term.close"));
 });
 
-test("the hub connects once, uses the desktop's host/session, forces a shell for handoffs, and won't reconnect by itself after a drop", async () => {
+test("the hub connects once, uses the desktop's host/session, forces a shell for handoffs, and reconnects by itself after a drop", async () => {
   const servers = [];
   const info = { desktopId: "dsk", url: "ws://127.0.0.1:1/v1/ws", termHost: "herdr", termSession: "buzz" };
   const hub = new RemoteTerminalHub(() => info, async (e) => JSON.stringify(e), (i, s) => {
@@ -113,12 +113,12 @@ test("the hub connects once, uses the desktop's host/session, forces a shell for
   assert.ok(a.sessionId !== b.sessionId);
   assert.equal(hub.getStatus().state, "connected");
   servers[0].ws.close();
-  assert.equal(hub.getStatus().state, "lost");
-  await assert.rejects(hub.attach(req, () => {}, () => {}), (e) => e.code === "lost");
-  assert.equal(servers.length, 1, "no silent reconnect");
-  hub.reset();
+  assert.equal(hub.getStatus().state, "reconnecting");
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(servers.length, 2, "reconnected on its own");
+  assert.equal(hub.getStatus().state, "connected");
   await hub.attach(req, () => {}, () => {});
-  assert.equal(servers.length, 2);
+  assert.equal(servers.length, 2, "reuses the recovered connection");
   assert.ok(states.includes("connecting"));
   hub.dispose();
 });

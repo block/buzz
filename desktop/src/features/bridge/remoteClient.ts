@@ -125,6 +125,11 @@ export class RemoteConnection {
   termSignedUntil = 0;
   termSessionTtlS = 0;
   onClose: (() => void) | null = null;
+  /** Last time any frame arrived (ms). iOS can freeze a socket without closing it; silence is how we notice. */
+  private lastRx = 0;
+  private probeTimer: ReturnType<typeof setTimeout> | null = null;
+  private closedOnce = false;
+  private fireClosed: (() => void) | null = null;
 
   private info: { desktopId: string; url: string };
   private sign: SignJson;
@@ -205,6 +210,7 @@ export class RemoteConnection {
     const ws = this.makeWs(this.info.url);
     this.ws = ws;
     ws.onmessage = (e) => {
+      this.lastRx = Date.now();
       let f: Frame;
       try {
         f = JSON.parse(String(e.data));
@@ -248,6 +254,9 @@ export class RemoteConnection {
       }
     };
     const closed = () => {
+      if (this.closedOnce) return;
+      this.closedOnce = true;
+      if (this.probeTimer) clearTimeout(this.probeTimer);
       this.ready = false;
       if (this.ping) clearInterval(this.ping);
       for (const w of this.waiters.splice(0)) w({ t: "error", code: "closed" });
@@ -262,6 +271,7 @@ export class RemoteConnection {
       this.onClose?.();
     };
     ws.onclose = closed;
+    this.fireClosed = closed;
     await new Promise<void>((resolve, reject) => {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new RemoteError("unreachable"));
@@ -277,7 +287,16 @@ export class RemoteConnection {
     this.expiresAt = this.sessionTtlS ? Date.now() + this.sessionTtlS * 1000 : 0;
     this.termSessionTtlS = typeof ready.termSessionTtlS === "number" ? ready.termSessionTtlS : 0;
     this.termSignedUntil = 0;
-    this.ping = setInterval(() => ws.send(JSON.stringify({ t: "ping" })), 30_000);
+    this.lastRx = Date.now();
+    // Heartbeat: ping every 15 s; a connection that stays silent for 40 s is dead (frozen by iOS, dropped by the network).
+    this.ping = setInterval(() => {
+      if (Date.now() - this.lastRx > 40_000) return this.kill();
+      try {
+        ws.send(JSON.stringify({ t: "ping" }));
+      } catch {
+        this.kill();
+      }
+    }, 15_000);
   }
 
   async listSessions(): Promise<RemoteSession[]> {
@@ -455,5 +474,32 @@ export class RemoteConnection {
 
   close() {
     this.ws?.close();
+  }
+
+  /** Tear down a connection that stopped answering and report it closed right away (a frozen socket may never fire onclose). */
+  kill() {
+    try {
+      this.ws?.close();
+    } catch {
+      /* already closing */
+    }
+    this.fireClosed?.();
+  }
+
+  /** On app resume: ping and give the desktop `ms` to answer with anything, else treat the connection as dead. */
+  probe(ms = 5_000) {
+    const ws = this.ws;
+    if (!ws || !this.ready || this.probeTimer) return;
+    const sentAt = Date.now();
+    try {
+      ws.send(JSON.stringify({ t: "ping" }));
+    } catch {
+      this.kill();
+      return;
+    }
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null;
+      if (this.lastRx < sentAt) this.kill();
+    }, ms);
   }
 }

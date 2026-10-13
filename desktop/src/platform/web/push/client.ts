@@ -7,7 +7,18 @@
 import { nip98Header, submitSignedEvent } from "../relayHttp";
 import { getSigner, signerPubkey } from "../signer";
 import { relayHttpBase } from "../relayConfig";
-import { readPushEnabled, WEB_PUSH_FLAG, WEB_PUSH_URL } from "./config";
+import {
+  readPushEnabled,
+  WEB_PUSH_FLAG,
+  WEB_PUSH_PREFETCH,
+  WEB_PUSH_URL,
+} from "./config";
+import {
+  configurePushPrefetch,
+  installPushResume,
+  reconnectNow,
+  takePendingPush,
+} from "./pending";
 import {
   classifyPushEnv,
   pushPrefsFromSettings,
@@ -250,10 +261,12 @@ export async function disablePush(): Promise<void> {
 export function installPushClickRouting() {
   const dispatch = (target: unknown) =>
     window.dispatchEvent(new CustomEvent(ACTIVATION_EVENT, { detail: target }));
-  navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
-    if (e.data?.type === "buzz-push-open" && e.data.target)
-      dispatch(e.data.target);
-  });
+  // Taps on a notification while the app is open arrive as a SW message: reconnect immediately and open that thread.
+  installPushResume((target) => dispatch(target));
+  void configurePushPrefetch(
+    WEB_PUSH_PREFETCH,
+    relayHttpBase().replace(/\/+$/, ""),
+  );
   const params = new URLSearchParams(location.search);
   const raw = params.get("push");
   if (!raw) return;
@@ -266,6 +279,8 @@ export function installPushClickRouting() {
   );
   try {
     const target = JSON.parse(raw);
+    void takePendingPush();
+    reconnectNow();
     setTimeout(() => dispatch(target), 2000); // the shell's activation listener mounts after boot
   } catch {
     /* malformed */

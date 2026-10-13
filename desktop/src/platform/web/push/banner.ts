@@ -1,3 +1,4 @@
+import { onResume } from "@/shared/lib/resumeSignals";
 // Dismissible top banner nudging the user to turn on push (vanilla DOM, like the signer overlay; no AppShell edits).
 import {
   bannerDismissed,
@@ -79,17 +80,28 @@ function render() {
 export function startWebPush() {
   if (!WEB_PUSH_FLAG) return;
   installPushClickRouting();
-  const sync = () => void ensurePushSubscribed().catch(() => false);
+  // Refresh the subscription + lease whenever the app comes back (it only re-signs when something changed or the lease is
+  // due). After a failure, wait 10 minutes before asking the signer again so a rejecting relay can't prompt on every resume.
+  let failedAt = 0;
+  const sync = () => {
+    if (failedAt && Date.now() - failedAt < 10 * 60_000) return;
+    void ensurePushSubscribed()
+      .then(() => {
+        failedAt = 0;
+      })
+      .catch(() => {
+        failedAt = Date.now();
+      });
+  };
   sync();
   setTimeout(render, 1500);
   window.addEventListener(WEB_PUSH_CHANGE_EVENT, () => {
     render();
     sync();
   });
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
-      render();
-      sync(); // picks up permission granted in OS settings and notification pref changes (only re-signs on change)
-    }
+  // visible / pageshow / focus / online: picks up permission granted in OS settings and pref changes (only re-signs on change)
+  onResume(() => {
+    render();
+    sync();
   });
 }

@@ -97,7 +97,12 @@ export function RelayConnectionOverlay({
           transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
         >
           <div
-            className="pointer-events-auto flex items-center gap-2 rounded-xl bg-background px-3 py-2.5 text-sm text-destructive shadow-md"
+            className={cn(
+              "pointer-events-auto flex items-center gap-2 rounded-xl bg-background px-3 py-2.5 text-sm shadow-md",
+              import.meta.env?.VITE_BUZZ_PLATFORM === "web"
+                ? "rounded-2xl border border-border/60 bg-card/95 text-muted-foreground"
+                : "text-destructive",
+            )}
             data-testid="relay-error-overlay"
             role="alert"
           >

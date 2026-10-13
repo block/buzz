@@ -2,6 +2,7 @@
 import * as React from "react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { ReconnectCard } from "@/shared/ui/reconnect-card";
 import { directAgentsFor } from "../directAgents";
 import { nowS } from "../protocol";
 import { transportFor } from "../remoteHosts";
@@ -75,20 +76,22 @@ export function MyAgentsPanel() {
   if (!LEGACY_RELAY_PANEL) {
     return (
       <div data-testid="my-agents" data-presence={b.presence} data-slim="1" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <ReconnectCard
+          reconnecting={!directLive && !offline}
+          title="Reconnecting to your desktop…"
+          description={`${hasCachedDesktopAgents() ? "Showing your last known agents · " : ""}controls return when it's back`}
+          failingSince={direct?.auto.failingSince || undefined}
+          onReconnectNow={direct ? () => (direct.reconnecting ? direct.auto.now() : connectDirect()) : undefined}
+          testId="agents-reconnect-banner"
+          className="w-full max-w-md"
+        />
         {directLive ? (
           <PathBadge direct={direct} canDirect managementOn={managementOn} onConnect={connectDirect} busy={connecting} unreachable={false} />
-        ) : (
-          <span data-testid="agents-reconnect-banner" className="rounded-md border border-border/60 px-2 py-1">
-            {offline
-              ? `Desktop offline${age !== null ? ` · last seen ${ago(age)}` : ""} · ${hasCachedDesktopAgents() ? "showing your last known agents; " : ""}controls are off until it's back`
-              : `Reconnecting to your desktop… · ${hasCachedDesktopAgents() ? "showing your last known agents; " : ""}controls are off until Direct is back`}
-            {dstate.state === "failed" && !connecting ? (
-              <button type="button" className="ml-2 underline" data-testid="direct-connect" onClick={connectDirect}>
-                Retry
-              </button>
-            ) : null}
+        ) : offline ? (
+          <span data-testid="agents-desktop-offline" className="rounded-full border border-border/60 bg-card/80 px-3 py-1">
+            {`Desktop offline${age !== null ? ` · last seen ${ago(age)}` : ""} · ${hasCachedDesktopAgents() ? "showing your last known agents; " : ""}controls return when it's back`}
           </span>
-        )}
+        ) : null}
       </div>
     );
   }

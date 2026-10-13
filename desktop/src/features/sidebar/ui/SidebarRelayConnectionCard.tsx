@@ -6,6 +6,10 @@ import {
 } from "@/shared/ui/sidebar-action-card";
 import { Spinner } from "@/shared/ui/spinner";
 
+// Web: the relay session retries on its own forever (backoff capped at 30 s), so the card never asks for a click — it just
+// says it is reconnecting, then "Back online"; tapping is an optional nudge.
+const IS_WEB = import.meta.env?.VITE_BUZZ_PLATFORM === "web";
+
 type SidebarRelayConnectionCardProps = {
   isActionDisabled?: boolean;
   actionTestId?: string;
@@ -66,6 +70,35 @@ export function SidebarRelayConnectionCompactCard({
   const reconnectDescription = isWaitingOnReconnectHook
     ? "Complete any prompts opened by the reconnect helper to continue."
     : "Reconnecting";
+
+  if (IS_WEB) {
+    return (
+      <SidebarCompactActionCard
+        actionAriaLabel={isConnected ? "Back online" : "Reconnect now"}
+        actionDisabled={isActionDisabled || isReconnectPending || isConnected}
+        actionTestId={actionTestId}
+        description={isConnected ? undefined : isWaitingOnReconnectHook ? reconnectDescription : "Your messages will catch up automatically"}
+        dismissClassName={dismissClassName}
+        dismissLabel="Hide"
+        iconKey={isConnected ? "connected" : "pending"}
+        icon={
+          isConnected ? (
+            <Check aria-hidden="true" className="h-5 w-5" />
+          ) : (
+            <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
+          )
+        }
+        className={className}
+        onAction={onReconnect}
+        onDismiss={onDismiss}
+        role="status"
+        surface={surface}
+        testId={testId}
+        title={isConnected ? "Back online" : isWaitingOnReconnectHook ? reconnectTitle : "Reconnecting to relay…"}
+        tone={isConnected ? "success" : "neutral"}
+      />
+    );
+  }
 
   return (
     <SidebarCompactActionCard

@@ -1,6 +1,8 @@
 // Web side of agent management over the direct (tailnet) connection. One signed connection is reused for its whole
 // lifetime (the desktop's "Signature lifetime"), so the signer is asked once, not per action. Any failure to reach the
 // desktop directly is reported as a RemoteError so callers can fall back to the relay (create/rename/edit have no relay path).
+import { AutoReconnector } from "./autoReconnect";
+import { onResume } from "@/shared/lib/resumeSignals";
 import { RemoteConnection, RemoteError, type SignJson, type WsFactory } from "./remoteClient";
 
 export type DirectAgent = {
@@ -47,6 +49,33 @@ export class DirectAgents {
     this.now = now;
   }
 
+  /** Retries a dropped connection with backoff (1 s → 30 s, forever while visible); stops on success or a decline. */
+  readonly auto = new AutoReconnector(
+    async () => {
+      if (this.lastError?.code === "declined") {
+        this.auto.stop();
+        return false;
+      }
+      try {
+        await this.connect();
+        return true;
+      } catch (e) {
+        if (e instanceof RemoteError && e.code === "declined") this.auto.stop();
+        return false;
+      }
+    },
+    () => {
+      this.version++;
+      for (const l of this.listeners) l();
+    },
+  );
+  /** Unsubscribe the resume probe (tests). */
+  readonly stopResumeProbe = onResume(() => this.conn?.probe());
+  /** True while a dropped connection is being brought back automatically. */
+  get reconnecting(): boolean {
+    return this.auto.active;
+  }
+
   subscribe(fn: () => void) {
     this.listeners.add(fn);
     return () => void this.listeners.delete(fn);
@@ -77,6 +106,7 @@ export class DirectAgents {
         if (this.conn === c) {
           this.conn = null;
           this.set("idle");
+          this.auto.start(); // dropped or went silent: come back on our own
         }
       };
       try {
@@ -84,6 +114,7 @@ export class DirectAgents {
       } catch (e) {
         const err = e instanceof RemoteError ? e : new RemoteError(/reject|denied|declin/i.test(String(e)) ? "declined" : "failed");
         this.set("failed", err);
+        if (err.code !== "declined") this.auto.start(); // unreachable/failed: keep trying on our own (never after a decline)
         throw err;
       }
       this.conn = c;
@@ -119,8 +150,10 @@ export class DirectAgents {
   }
 
   close() {
-    this.conn?.close();
-    this.conn = null;
+    this.auto.stop();
+    const c = this.conn;
+    this.conn = null; // detach first so the deliberate close doesn't trigger auto-reconnect
+    c?.close();
     this.set("idle");
   }
 

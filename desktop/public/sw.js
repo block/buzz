@@ -2,7 +2,8 @@
 // Caches ONLY the static shell (hashed /assets/*, fonts/icons/css, and the navigation document).
 // Never touches: cross-origin requests, non-GET, the relay API paths (/query /events /count /media /upload /api /info /health ...),
 // or WebSocket upgrades (the SW cannot intercept those anyway).
-const VERSION = "buzz-web-v3";
+const VERSION = "buzz-web-v4";
+const PREFETCH_CACHE = "buzz-push-prefetch-v1"; // kept across shell versions; entries are short-lived
 const SHELL = ["/", "/manifest.webmanifest", "/buzz.svg", "/boot.css", "/pwa/icon-192.png", "/pwa/icon-512.png"];
 const API = /^\/(query|events|count|media|upload|api|info|health|_liveness|_readiness|workflows|hooks|huddle|operator|invite|\.well-known)(\/|$)/;
 
@@ -10,7 +11,7 @@ self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", (e) => {
-  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== VERSION).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
+  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== VERSION && k !== PREFETCH_CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
 });
 self.addEventListener("fetch", (e) => {
   const req = e.request;
@@ -26,7 +27,49 @@ self.addEventListener("fetch", (e) => {
   }
 });
 
-// ---- Web Push (payloads come from the Hula Buzz push sender; they never carry message secrets) ----
+// ---- Web Push (payloads come from the Hula Buzz push gateway; they never carry message content) ----
+// Tiny IndexedDB key/value store shared with the page (platform/web/push/pending.ts): "pending" = the conversation the last
+// push was about (so the app reconnects and opens there first), "prefetch-enabled" = page-set flag for background prefetch.
+function idb() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open("buzz-push", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+function kv(mode, fn) {
+  return idb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction("kv", mode);
+    const req = fn(tx.objectStore("kv"));
+    tx.oncomplete = () => resolve(req && req.result);
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+const kvGet = (k) => kv("readonly", (s) => s.get(k)).catch(() => undefined);
+const kvSet = (k, v) => kv("readwrite", (s) => s.put(v, k)).catch(() => undefined);
+
+// Background prefetch (off until the relay issues scoped read tokens): fetch the new events for exactly the pushed
+// conversation with the short-lived token the push carried, and cache them for instant display. Same-relay HTTPS only.
+async function prefetch(data) {
+  const p = data && data.prefetch;
+  if (!p || typeof p.url !== "string" || typeof p.token !== "string") return;
+  if ((await kvGet("prefetch-enabled")) !== true) return;
+  let url;
+  try {
+    url = new URL(p.url);
+  } catch {
+    return;
+  }
+  const allowed = await kvGet("prefetch-origin");
+  if (url.protocol !== "https:" || url.origin !== allowed) return;
+  const res = await fetch(url.href, { headers: { Authorization: `Bearer ${p.token}` }, credentials: "omit", cache: "no-store" }).catch(() => null);
+  if (!res || !res.ok) return;
+  const key = `/__push_prefetch/${encodeURIComponent((data.target && (data.target.threadRootId || data.target.channelId)) || "x")}`;
+  const cache = await caches.open(PREFETCH_CACHE);
+  await cache.put(key, new Response(await res.text(), { headers: { "Content-Type": "application/json", "X-Fetched-At": String(Date.now()) } }));
+}
+
 self.addEventListener("push", (e) => {
   let data = {};
   try {
@@ -35,14 +78,21 @@ self.addEventListener("push", (e) => {
     data = { title: "Hula Buzz", body: e.data ? e.data.text() : "" };
   }
   const title = typeof data.title === "string" && data.title ? data.title : "Hula Buzz";
+  const target = data.target && typeof data.target === "object" ? data.target : null;
   e.waitUntil(
-    self.registration.showNotification(title, {
-      body: typeof data.body === "string" ? data.body : "",
-      tag: typeof data.tag === "string" ? data.tag : undefined,
-      icon: "/pwa/icon-192.png",
-      badge: "/pwa/icon-192.png",
-      data: { target: data.target || null },
-    }),
+    Promise.all([
+      self.registration.showNotification(title, {
+        body: typeof data.body === "string" ? data.body : "",
+        tag: typeof data.tag === "string" ? data.tag : undefined,
+        icon: "/pwa/icon-192.png",
+        badge: "/pwa/icon-192.png",
+        data: { target },
+      }),
+      target ? kvSet("pending", { target, at: Date.now() }) : null,
+      prefetch(data).catch(() => undefined),
+      // an open (frozen) page learns about it as soon as it runs again
+      self.clients.matchAll({ type: "window" }).then((list) => list.forEach((c) => c.postMessage({ type: "buzz-push-arrived", target }))),
+    ]),
   );
 });
 self.addEventListener("notificationclick", (e) => {

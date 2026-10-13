@@ -6,6 +6,7 @@
 import * as React from "react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { ReconnectCard } from "@/shared/ui/reconnect-card";
 import { openTerminalPanel, setTerminalPanelMode, useTerminalPanel } from "@/features/terminal/terminalPanelStore";
 import { setTerminalBackend } from "@/features/terminal/terminalClient";
 import { requestTermSessionOpen } from "@/features/term-session/lib/openRequestStore";
@@ -88,13 +89,14 @@ export function BuzzTermPage() {
   }, [termsOff]);
   // Unreachable, terminals off, or the terminal connection dropped: fold the panel back to this page (Reconnect lives here),
   // never leave an empty maximized shell with a "+" that can't work.
-  const mustFold = (!!cand && unreachable) || termsOff || status.state === "lost";
+  const reconnecting = status.state === "reconnecting";
+  const mustFold = (!!cand && unreachable) || termsOff || status.state === "lost" || reconnecting;
   React.useEffect(() => {
     if (mustFold && panel.mode !== "closed") setTerminalPanelMode("closed");
   }, [mustFold, panel.mode]);
   const openedRef = React.useRef(false);
   React.useEffect(() => {
-    if (!termReady || status.state === "lost") {
+    if (!termReady || status.state === "lost" || reconnecting) {
       openedRef.current = false; // re-arm: when Direct comes back, auto-open again
       return;
     }
@@ -103,7 +105,7 @@ export function BuzzTermPage() {
     // a pending handoff opens the panel itself with its own session; a second blank one would sit next to it
     if (peekPendingTermHandoff()) return;
     openTerminalPanel("maximized", "all");
-  }, [termReady, status.state]);
+  }, [termReady, status.state, reconnecting]);
 
   // A "Pass thread context to Buzz Term" handoff from the web: start its session in the terminal (a plain shell on the desktop).
   const handoffReady = termReady;
@@ -149,13 +151,21 @@ export function BuzzTermPage() {
                   ? `Buzz Term running on ${deviceName}.`
                   : `Opening Buzz Term on ${deviceName}…`}
             </p>
+            <ReconnectCard
+              reconnecting={reconnecting}
+              title={`Reconnecting to ${deviceName}…`}
+              description="Your terminals keep running there and come back on their own"
+              failingSince={hub.failingSince()}
+              onReconnectNow={hub.reconnectNow}
+              testId="buzz-term-reconnecting"
+            />
             {status.state === "connecting" && <p className="text-sm">Waiting for approval in your signer…</p>}
-            {failure && (
-              <p className="text-sm font-medium text-destructive" data-testid="buzz-term-error">
+            {failure && !reconnecting && (
+              <p className="text-sm text-muted-foreground" data-testid="buzz-term-error">
                 {failure}
               </p>
             )}
-            {(termReady || failure) && <div>
+            {(termReady || failure) && !reconnecting && <div>
               <button
                 type="button"
                 data-testid="buzz-term-open"
