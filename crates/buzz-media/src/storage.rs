@@ -246,8 +246,12 @@ impl MediaStorage {
             }
         }
         .map_err(|e| MediaError::StorageError(e.to_string()))?;
-        let bucket = Bucket::new(&config.s3_bucket, region, creds)
+        let mut bucket = Bucket::new(&config.s3_bucket, region, creds)
             .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        // rust-s3 0.38 enforces the bucket's 60 s default on every request, body
+        // included. Blob streams are paced by the downloading client and can run
+        // longer, so keep requests unbounded as they were before 0.38.
+        bucket.set_request_timeout(None);
         let bucket = match config.s3_addressing_style {
             S3AddressingStyle::Path => bucket.with_path_style(),
             S3AddressingStyle::Virtual => bucket,
@@ -1004,10 +1008,13 @@ mod tests {
         let mut config = storage_config("buzz_dev", "buzz_dev_secret");
         config.s3_endpoint = format!("http://{addr}");
         let storage = MediaStorage::new(&config).expect("static client");
-        let bytes = storage
-            .get_range("blob", 0, 3)
-            .await
-            .expect("ranged read succeeds");
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            storage.get_range("blob", 0, 3),
+        )
+        .await
+        .expect("ranged read completes")
+        .expect("ranged read succeeds");
         assert_eq!(bytes, b"buzz");
 
         let request = server.await.expect("server task");
@@ -1043,6 +1050,18 @@ mod tests {
         match storage.bucket.region {
             Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
             other => panic!("expected Custom region, got {other:?}"),
+        }
+    }
+
+    /// A full-body `/media` download is paced by the client and may outlast any
+    /// fixed deadline; rust-s3 would otherwise cut it off after 60 seconds.
+    #[test]
+    fn client_constructor_leaves_requests_unbounded() {
+        for style in [S3AddressingStyle::Path, S3AddressingStyle::Virtual] {
+            let mut config = storage_config("buzz_dev", "buzz_dev_secret");
+            config.s3_addressing_style = style;
+            let storage = MediaStorage::new(&config).expect("static client");
+            assert_eq!(storage.bucket.request_timeout(), None);
         }
     }
 

@@ -6,7 +6,7 @@
 //!
 //! ## The 412 sharp edge
 //!
-//! `rust-s3 = "0.37"` is shared across the workspace with `buzz-media`. The
+//! `rust-s3 = "0.38"` is shared across the workspace with `buzz-media`. The
 //! `fail-on-err` Cargo feature is unified ON across the build graph, which
 //! means non-2xx responses arrive here as `S3Error::HttpFailWithBody(code,
 //! body)` *before* the caller sees `ResponseData`. The pointer-CAS path treats
@@ -212,7 +212,11 @@ impl GitStore {
             }
         }
         .map_err(|e| StoreError::Backend(S3Error::Credentials(e)))?;
-        let bucket = Bucket::new(bucket_name, region, creds).map_err(StoreError::Backend)?;
+        let mut bucket = Bucket::new(bucket_name, region, creds).map_err(StoreError::Backend)?;
+        // rust-s3 0.38 enforces the bucket's 60 s default on every request, body
+        // included. Pack transfers can run longer, so keep requests unbounded as
+        // they were before 0.38.
+        bucket.set_request_timeout(None);
         let bucket = match addressing_style {
             buzz_media::config::S3AddressingStyle::Path => bucket.with_path_style(),
             buzz_media::config::S3AddressingStyle::Virtual => bucket,
@@ -989,6 +993,8 @@ mod tests {
             .expect("construct git store");
             assert_eq!(store.bucket.url(), expected_url);
             assert_eq!(store.bucket.is_path_style(), path_style);
+            // Pack transfers may outlast rust-s3's 60 second default.
+            assert_eq!(store.bucket.request_timeout(), None);
         }
     }
 
