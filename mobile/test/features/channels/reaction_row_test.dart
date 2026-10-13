@@ -155,6 +155,8 @@ void main() {
                       '❤️',
                       '👩‍👩‍👧‍👦',
                       '🇺🇸',
+                      '✅',
+                      '🎥',
                     ])
                       _reaction(emoji: emoji),
                     TimelineReaction(
@@ -201,6 +203,11 @@ void main() {
             final finder = find.byWidget(glyph.widget);
             expect(tester.getSize(finder), const Size.square(20));
             expect(tester.getCenter(finder).dy, closeTo(center, 0.01));
+            final paintedText = find.descendant(
+              of: finder,
+              matching: find.byType(Text),
+            );
+            expect(tester.getCenter(paintedText).dy, closeTo(center, 0.01));
           }
           final customBox = find
               .ancestor(
@@ -210,7 +217,7 @@ void main() {
               .first;
           expect(tester.getSize(customBox), const Size.square(20));
           expect(tester.getCenter(customBox).dy, closeTo(center, 0.01));
-          expect(tester.getCenter(find.text('6')).dy, closeTo(center, 0.01));
+          expect(tester.getCenter(find.text('8')).dy, closeTo(center, 0.01));
           expect(tester.takeException(), isNull);
         },
         variant: TargetPlatformVariant({

@@ -47,14 +47,10 @@ class NativeEmojiGlyph extends StatelessWidget {
             : null,
       ),
     );
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      // Apple Color Emoji's painted center sits above its typographic center.
-      // Reaction boxes use the emoji font directly and compensate proportionally;
-      // inline glyphs retain their existing baseline adjustment.
-      glyph = Transform.translate(
-        offset: Offset(0, centerInOpticalBox ? size * 0.15 : -1),
-        child: glyph,
-      );
+    if (defaultTargetPlatform == TargetPlatform.iOS && !centerInOpticalBox) {
+      // Fixed reaction boxes already center the emoji-font line. Keep the
+      // existing baseline correction only for inline glyphs.
+      glyph = Transform.translate(offset: const Offset(0, -1), child: glyph);
     }
     final boxSize = opticalBoxSize;
     if (boxSize == null) return glyph;
