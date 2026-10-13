@@ -21,7 +21,7 @@ use crate::usage::{
 
 #[path = "acp_frame_writer.rs"]
 mod frame_writer;
-mod permission_ask;
+pub(crate) mod permission_ask;
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.

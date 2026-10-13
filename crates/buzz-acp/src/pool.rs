@@ -1918,7 +1918,17 @@ async fn create_session_and_apply_model(
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
     // are safely skipped — the harness auto-approves via handle_permission_request.
-    if !ctx.permission_mode.is_default()
+    if crate::acp::permission_ask::ask_enabled() {
+        // "Ask before using tools": force the runtime's prompting mode, otherwise
+        // auto-approving defaults (codex-acp `agent`) never raise permission requests.
+        match crate::acp::permission_ask::ask_session_mode(&resp.raw) {
+            Some(wire) => apply_mode_wire(&mut agent.acp, &resp.session_id, wire).await?,
+            None => tracing::warn!(
+                target: "pool::permission",
+                "ask mode on but agent advertises no prompting session mode; relying on its default"
+            ),
+        }
+    } else if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
         apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
@@ -2324,7 +2334,14 @@ async fn apply_permission_mode(
     session_id: &str,
     mode: &PermissionMode,
 ) -> Result<(), AcpError> {
-    let wire = mode.as_wire_str();
+    apply_mode_wire(acp, session_id, mode.as_wire_str()).await
+}
+
+async fn apply_mode_wire(
+    acp: &mut AcpClient,
+    session_id: &str,
+    wire: &str,
+) -> Result<(), AcpError> {
     let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
         acp.session_set_config_option(session_id, "mode", wire)
             .await

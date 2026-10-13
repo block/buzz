@@ -20,6 +20,30 @@ pub(crate) struct AskConfig {
     pub timeout: Duration,
 }
 
+/// Session mode to force when "Ask before using tools" is on, from the modes the agent
+/// advertised in `session/new`. Runtimes that auto-approve by default never raise
+/// `session/request_permission`, so ask mode would otherwise be a no-op:
+/// - codex-acp defaults to `agent` ("Approve for me", auto-review) → force `read-only` ("Ask for approval").
+/// - Claude Code may inherit `bypassPermissions` from settings.json → force `default`.
+pub(crate) fn ask_session_mode(session_new_result: &Value) -> Option<&'static str> {
+    let ids: Vec<&str> = session_new_result
+        .get("modes")?
+        .get("availableModes")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("id")?.as_str())
+        .collect();
+    ["read-only", "default"]
+        .into_iter()
+        .find(|w| ids.contains(w))
+}
+
+pub(crate) fn ask_enabled() -> bool {
+    std::env::var("BUZZ_ACP_PERMISSION_MODE")
+        .map(|v| v.trim() == "ask")
+        .unwrap_or(false)
+}
+
 pub(crate) fn ask_config() -> Option<AskConfig> {
     if std::env::var("BUZZ_ACP_PERMISSION_MODE").ok()?.trim() != "ask" {
         return None;
@@ -146,6 +170,18 @@ mod tests {
                 { "optionId": "r1", "name": "Reject", "kind": "reject_once" }
             ]
         })
+    }
+
+    #[test]
+    fn ask_mode_picks_codex_read_only_then_claude_default() {
+        let codex = serde_json::json!({"modes":{"availableModes":[{"id":"read-only"},{"id":"agent"},{"id":"agent-full-access"}]}});
+        assert_eq!(ask_session_mode(&codex), Some("read-only"));
+        let claude = serde_json::json!({"modes":{"availableModes":[{"id":"default"},{"id":"acceptEdits"},{"id":"bypassPermissions"}]}});
+        assert_eq!(ask_session_mode(&claude), Some("default"));
+        assert_eq!(
+            ask_session_mode(&serde_json::json!({"sessionId":"s"})),
+            None
+        );
     }
 
     #[test]
