@@ -50,12 +50,17 @@ const AUTH_URL_TIMEOUT_MS = 180_000; // user is approving in a browser tab / sig
 // reminders 30300, status 30315, community pins/bots/sections 30623-30625, Blossom media auth 24242 (relay avatars/images),
 // forum/workflow kinds 40002/40003/40008/45001/45003.
 export const SIGN_KINDS = [22242, 27235, 9, 7, 0, 1, 5, 9021, 9022, 9033, 1984, 20001, 20002, 30078, 30030, 30300, 30315, 30623, 30624, 30625, 24242, 40002, 40003, 40008, 45001, 45003];
+// The kinds named in the nostrconnect:// / connect perms. Frozen at the set Primal iOS is known to accept: adding kinds it
+// doesn't recognise (24242 Blossom auth, 40002/40003/40008/45001/45003 forum/workflow — #244) left new PWA installs stuck at
+// "Waiting for your signer…" (Primal is known to silently drop kinds it does not recognise; the pairing never came back). Kinds outside this list are still signed via the
+// plain `sign_event` grant (the signer prompts per request), so DON'T extend this without re-testing a fresh Primal pairing.
+export const PAIRING_PERM_KINDS = [22242, 27235, 9, 7, 0, 1, 5, 9021, 9022, 9033, 1984, 20001, 20002, 30078, 30030, 30300, 30315, 30623, 30624, 30625];
 export const NOSTRCONNECT_PERMS = [
   "get_public_key",
   "sign_event",
   "nip44_encrypt",
   "nip44_decrypt",
-  ...SIGN_KINDS.map((k) => `sign_event:${k}`),
+  ...PAIRING_PERM_KINDS.map((k) => `sign_event:${k}`),
 ].join(",");
 
 export type Nip46Session = {
