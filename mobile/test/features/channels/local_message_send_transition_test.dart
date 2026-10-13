@@ -114,7 +114,7 @@ void main() {
       expect(motion().widthProgress, 0);
       await tester.pump(localMessageSendTransitionDuration * 0.65);
       final peak = motion().widthProgress!;
-      expect(peak, inExclusiveRange(1, 1.02));
+      expect(peak, inExclusiveRange(1, 1.08));
       expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
       await tester.pump(localMessageSendTransitionDuration * 0.2);
       expect(motion().widthProgress, inExclusiveRange(1, peak));

@@ -16,7 +16,7 @@ final _contractionSpring = _SendContractionSpring();
 
 class _SendContractionSpring extends Curve {
   final _simulation = SpringSimulation(
-    SpringDescription.withDampingRatio(mass: 1, stiffness: 256, ratio: 0.82),
+    const SpringDescription(mass: 10, stiffness: 802.5, damping: 100),
     0,
     1,
     4,
