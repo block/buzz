@@ -15,7 +15,11 @@ void main() {
       (tester) async {
         final key = GlobalKey();
         Rect? origin;
-        Future<void> draw(double progress, {double? widthProgress}) async {
+        Future<void> draw(
+          double progress, {
+          double? widthProgress,
+          double settleScale = 1,
+        }) async {
           await tester.pumpWidget(
             MaterialApp(
               home: Center(
@@ -31,6 +35,7 @@ void main() {
                         child: LocalSendProgress(
                           progress: progress,
                           widthProgress: widthProgress,
+                          settleScale: settleScale,
                           startOffset: 0,
                           origin: origin,
                           child: LocalSendBubbleSurface(
@@ -84,6 +89,15 @@ void main() {
         await draw(1);
         expect(tester.getRect(find.text(text)), textRect);
         expect(await greenAt(finalWidth.ceil() + 2), 255);
+        await draw(1, settleScale: 0.96);
+        expect(
+          tester.getSize(find.byType(LocalSendBubbleSurface)).width,
+          finalWidth,
+        );
+        expect(await greenAt(finalWidth.floor() - 1), 255);
+        expect(await greenAt((finalWidth * 0.96).floor() - 2), 0);
+        await draw(1);
+        expect(await greenAt(finalWidth.floor() - 1), 0);
         final boundary = key.currentContext!.findRenderObject()! as RenderBox;
         origin = Rect.fromLTWH(
           20,

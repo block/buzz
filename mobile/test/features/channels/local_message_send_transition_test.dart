@@ -106,6 +106,22 @@ void main() {
     await tester.pump(localMessageSendTransitionDuration * 0.375);
     expect(motion().progress, 1);
   });
+  testWidgets('late settling shrinks the bubble and returns to full size', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_testable());
+    LocalSendProgress motion() => tester.widget(find.byType(LocalSendProgress));
+    final avatar = tester.getRect(find.byKey(const ValueKey('avatar')));
+    expect(motion().settleScale, 1);
+    await tester.pump(localMessageSendTransitionDuration * 0.55);
+    expect(motion().settleScale, 1);
+    await tester.pump(localMessageSendTransitionDuration * 0.23);
+    expect(motion().settleScale, closeTo(0.96, 0.0001));
+    expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
+    await tester.pump(localMessageSendTransitionDuration * 0.22);
+    expect(motion().settleScale, 1);
+    expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
+  });
   for (final reduced in [false, true]) {
     testWidgets('settled or reduced motion does not expand, reduced=$reduced', (
       tester,
@@ -114,6 +130,12 @@ void main() {
         _testable(animate: reduced, reduceMotion: reduced),
       );
       expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
+      expect(
+        tester
+            .widget<LocalSendProgress>(find.byType(LocalSendProgress))
+            .settleScale,
+        1,
+      );
       await tester.pump(const Duration(milliseconds: 100));
       expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
     });
