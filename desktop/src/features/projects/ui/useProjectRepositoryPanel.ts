@@ -5,6 +5,7 @@ import {
   withProjectSelectionAgentContext,
 } from "@/features/projects/lib/projectDetailAgentContext";
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
+import { isPhoneLayout } from "@/shared/lib/phoneLayout";
 import type { ProjectRightPanelMode } from "./ProjectRightPanelControls";
 
 const REPOSITORY_PANEL_COLLAPSED_KEY =
@@ -12,6 +13,8 @@ const REPOSITORY_PANEL_COLLAPSED_KEY =
 const PROJECT_RIGHT_PANEL_MODE_KEY = "buzz.desktop.project-right-panel-mode";
 
 function initialCollapsed() {
+  // Phone: a project always opens on the chat/README side; the repo is a full-screen toggle, never a split.
+  if (isPhoneLayout()) return true;
   try {
     return (
       globalThis.sessionStorage?.getItem(REPOSITORY_PANEL_COLLAPSED_KEY) ===

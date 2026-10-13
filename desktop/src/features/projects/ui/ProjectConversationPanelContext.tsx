@@ -95,6 +95,7 @@ export function ProjectConversationPanelController({
         data-detached={detached ? "true" : "false"}
         data-project-context-detached={detached ? "true" : undefined}
         data-project-detail-screen
+        data-phone-solo={fallbackVisible ? "repository" : "content"}
         data-testid="project-panel-layout"
       >
         {sharedHeaderBackdrop && !detached ? (

@@ -571,3 +571,24 @@
   text-align: center;
   pointer-events: none;
 }
+
+/* Phone project detail: chat/README side and repo side are a binary full-width toggle, never a split. */
+[data-phone] [data-phone-solo="repository"] > :not([data-testid="project-context-rail"]) {
+  display: none !important;
+}
+[data-phone] [data-phone-solo="repository"] > [data-testid="project-context-rail"] {
+  width: 100% !important;
+  flex: 1 1 auto;
+}
+[data-phone] [data-phone-solo="repository"] > [data-testid="project-context-rail"] > [data-testid="project-context-rail-panel"] {
+  left: 0 !important;
+  right: 0;
+  width: 100% !important;
+}
+[data-phone] [data-phone-solo="content"] > [data-testid="project-context-rail"] {
+  width: 0 !important;
+}
+[data-phone] [data-phone-solo="repository"] [data-testid="project-context-rail-panel"] > * {
+  width: 100% !important;
+  max-width: none !important;
+}
