@@ -269,7 +269,7 @@ export function TerminalSubstrate({
   const effectiveFontRef = React.useRef<number>(effectiveFontSize);
   effectiveFontRef.current = effectiveFontSize;
   type CellPos = { row: number; col: number };
-  const [touchSel, setTouchSel] = React.useState<{ anchor: CellPos; head: CellPos; done: boolean } | null>(null);
+  const [touchSel, setTouchSel] = React.useState<{ anchor: CellPos; head: CellPos; pane?: { start: number; end: number }; done: boolean } | null>(null);
   const touchSelRef = React.useRef(touchSel);
   touchSelRef.current = touchSel;
   const [pasteBox, setPasteBox] = React.useState(false);
@@ -415,10 +415,13 @@ export function TerminalSubstrate({
             break;
           }
           const word = gridRef.current?.wordAt(cell.row, cell.col) ?? null;
+          const pane = gridRef.current?.paneAt(cell.col);
+          const clampCol = (c: number) => (pane ? Math.max(pane.start, Math.min(pane.end, c)) : c);
           setPasteBox(false);
           setTouchSel({
-            anchor: { row: cell.row, col: word?.start ?? cell.col },
-            head: { row: cell.row, col: word?.end ?? cell.col },
+            anchor: { row: cell.row, col: clampCol(word?.start ?? cell.col) },
+            head: { row: cell.row, col: clampCol(word?.end ?? cell.col) },
+            pane,
             done: false,
           });
           navigator.vibrate?.(8);
@@ -426,7 +429,15 @@ export function TerminalSubstrate({
         }
         case "select": {
           const cell = cellAt(action.x, action.y);
-          setTouchSel((c) => (c ? { ...c, head: cell } : c));
+          // Stay inside the pane the selection started in (Herder: the workspace, never the spaces/agents list).
+          setTouchSel((c) =>
+            c
+              ? {
+                  ...c,
+                  head: c.pane ? { row: cell.row, col: Math.max(c.pane.start, Math.min(c.pane.end, cell.col)) } : cell,
+                }
+              : c,
+          );
           break;
         }
         case "selectEnd":
@@ -464,7 +475,8 @@ export function TerminalSubstrate({
       // Select mode: the drag selects rendered cells (works in the alternate screen too); no scroll, no long-press timer.
       gestures.beginSelect();
       const cell = cellAt(event.clientX, event.clientY);
-      setTouchSel({ anchor: cell, head: cell, done: false });
+      const pane = gridRef.current?.paneAt(cell.col);
+      setTouchSel({ anchor: cell, head: cell, pane, done: false });
       window.clearTimeout(longPressTimerRef.current);
       return;
     }
@@ -520,7 +532,7 @@ export function TerminalSubstrate({
     const sel = touchSelRef.current;
     const grid = gridRef.current;
     if (!sel || !grid) return;
-    const text = grid.textBetweenCells(sel.anchor.row, sel.anchor.col, sel.head.row, sel.head.col);
+    const text = grid.textBetweenCells(sel.anchor.row, sel.anchor.col, sel.head.row, sel.head.col, sel.pane);
     if (text) await copyToClipboard(text);
     setTouchSel(null);
     setSelectMode(false); // Copy returns to scroll mode
@@ -1842,7 +1854,12 @@ function TouchSelectionOverlay({
   onPaste,
   onDone,
 }: {
-  sel: { anchor: { row: number; col: number }; head: { row: number; col: number }; done: boolean };
+  sel: {
+    anchor: { row: number; col: number };
+    head: { row: number; col: number };
+    pane?: { start: number; end: number };
+    done: boolean;
+  };
   metrics: CellMetrics;
   columns: number;
   canvas: HTMLCanvasElement | null;
@@ -1858,8 +1875,9 @@ function TouchSelectionOverlay({
   const top = canvas?.offsetTop ?? 0;
   const rects: React.ReactNode[] = [];
   for (let row = a.row; row <= b.row; row += 1) {
-    const c0 = row === a.row ? a.col : 0;
-    const c1 = row === b.row ? b.col : columns - 1;
+    const c0 = row === a.row ? a.col : (sel.pane?.start ?? 0);
+    const c1 = row === b.row ? b.col : (sel.pane?.end ?? columns - 1);
+    if (c1 < c0) continue;
     rects.push(
       <div
         key={row}

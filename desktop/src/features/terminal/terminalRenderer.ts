@@ -201,6 +201,7 @@ export class TerminalGrid {
     colA: number,
     rowB: number,
     colB: number,
+    pane?: { start: number; end: number },
   ): string {
     const forward = rowA < rowB || (rowA === rowB && colA <= colB);
     const [r1, c1, r2, c2] = forward
@@ -211,15 +212,43 @@ export class TerminalGrid {
     let out = "";
     for (let line = first; line <= last; line++) {
       const cells = this.#cellsOf(line);
-      const from = line === r1 ? Math.max(0, c1) : 0;
-      const to = line === r2 ? Math.min(cells.length - 1, c2) : cells.length - 1;
-      let text = cells.slice(from, to + 1).join("");
-      const wrapped = this.#rows[line]?.wrapped ?? false;
+      const lo = pane ? Math.max(0, pane.start) : 0;
+      const hi = pane ? Math.min(cells.length - 1, pane.end) : cells.length - 1;
+      const from = line === r1 ? Math.max(lo, c1) : lo;
+      const to = line === r2 ? Math.min(hi, c2) : hi;
+      let text = from <= to ? cells.slice(from, to + 1).join("") : "";
+      // Soft-wrap only joins full-width rows; a pane-clipped row always ends its line.
+      const wrapped = pane ? false : (this.#rows[line]?.wrapped ?? false);
       if (!wrapped || line === last) text = text.trimEnd();
       out += text;
       if (line < last && !wrapped) out += "\n";
     }
     return out;
+  }
+
+  /**
+   * The pane (inclusive column span) containing `col`, for TUIs that split the screen with vertical borders (Herder's
+   * spaces/agents list beside its workspace, tmux splits…). A column is a border when most rows draw a vertical line
+   * there; the pane runs between the nearest borders on each side. No borders → the full width.
+   */
+  paneAt(col: number): { start: number; end: number } {
+    const columns = this.#viewport.columns;
+    const rows = this.#rows.length;
+    const full = { start: 0, end: Math.max(0, columns - 1) };
+    if (rows < 3 || columns < 3) return full;
+    const counts = new Array<number>(columns).fill(0);
+    for (let line = 0; line < rows; line++) {
+      const cells = this.#cellsOf(line);
+      for (let c = 0; c < columns; c++) if (PANE_BORDER.has(cells[c] ?? "")) counts[c]++;
+    }
+    const isBorder = (c: number) => counts[c] >= Math.max(3, Math.ceil(rows * 0.5));
+    const at = Math.max(0, Math.min(columns - 1, col));
+    if (isBorder(at)) return full;
+    let start = at;
+    while (start > 0 && !isBorder(start - 1)) start--;
+    let end = at;
+    while (end < columns - 1 && !isBorder(end + 1)) end++;
+    return { start, end };
   }
 
   /** The run of non-blank cells around a cell (for double-tap / long-press word selection); null on blank space. */
@@ -397,3 +426,6 @@ export class TerminalGrid {
     return performance.now() - started;
   }
 }
+
+/** Vertical box-drawing glyphs TUIs use as pane borders. */
+const PANE_BORDER = new Set(["│", "┃", "║", "╎", "╏", "┆", "┇", "┊", "┋", "▏", "▕", "├", "┤", "┼", "┣", "┫", "╋", "╟", "╢", "╠", "╣", "╬"]);

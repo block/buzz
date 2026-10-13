@@ -322,3 +322,19 @@ test("wrapped rows join without a newline; word selection stops at blanks", () =
   assert.deepEqual(g2.wordAt(0, 9), { start: 8, end: 10 });
   assert.equal(g2.wordAt(0, 7), null);
 });
+
+test("touch selection clips to the pane beside a vertical border (Herder: workspace only, not the agents list)", () => {
+  const grid = gridWith(14, [
+    { clusters: [...word("space", 0), ...word("│", 6), ...word("alpha", 8)] },
+    { clusters: [...word("agent", 0), ...word("│", 6), ...word("beta", 8)] },
+    { clusters: [...word("other", 0), ...word("│", 6), ...word("gamma", 8)] },
+  ]);
+  assert.deepEqual(grid.paneAt(9), { start: 7, end: 13 });
+  assert.deepEqual(grid.paneAt(2), { start: 0, end: 5 });
+  const pane = grid.paneAt(9);
+  assert.equal(grid.textBetweenCells(0, 8, 2, 12, pane), "alpha\n beta\n gamma");
+  assert.equal(grid.textBetweenCells(0, 10, 1, 9, pane), "pha\n be");
+  // Unbordered screens keep the full width.
+  const plain = gridWith(6, [{ clusters: word("abc", 0) }, { clusters: word("def", 0) }, { clusters: word("ghi", 0) }]);
+  assert.deepEqual(plain.paneAt(2), { start: 0, end: 5 });
+});
