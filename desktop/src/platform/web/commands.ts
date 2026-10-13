@@ -224,6 +224,9 @@ installProxyHandlers(handlers);
 handlers.list_archived_identities = () => ({ archived: [] });
 // web parity round 2 (pure relay ports) take precedence over the placeholder lists above
 Object.assign(handlers, parity2Handlers);
+// No huddles on web: there is never an active huddle to enroll mentioned agents into, so this is a successful no-op
+// (otherwise the mention send path toasts "not available in the web app" and aborts the send).
+handlers.sync_agents_to_active_huddle = () => ({ changed_channel_ids: [], error: null });
 // Link preview cards: only with a configured helper (server/link-preview); otherwise previews stay desktop-only.
 if (import.meta.env.VITE_BUZZ_LINK_PREVIEW_URL) Object.assign(handlers, makeLinkPreviewHandlers(String(import.meta.env.VITE_BUZZ_LINK_PREVIEW_URL)));
 
