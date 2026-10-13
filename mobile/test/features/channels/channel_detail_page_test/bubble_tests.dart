@@ -1,6 +1,71 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  testWidgets(
+    'legacy purpose activity is hidden without splitting the sender group',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'before-purpose',
+              pubkey: 'alice',
+              content: 'Before',
+              createdAt: 1000,
+            ),
+            _systemMsg(
+              id: 'purpose-change',
+              payload: {
+                'type': 'purpose_changed',
+                'actor': 'alice',
+                'purpose': 'Legacy purpose',
+              },
+              createdAt: 1010,
+            ),
+            _reaction(id: 'purpose-reaction', targetId: 'purpose-change'),
+            _textMsg(
+              id: 'after-purpose',
+              pubkey: 'alice',
+              content: 'After',
+              createdAt: 1020,
+            ),
+            _systemMsg(
+              id: 'topic-change',
+              payload: {
+                'type': 'topic_changed',
+                'actor': 'alice',
+                'topic': 'Current topic',
+              },
+              createdAt: 1030,
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('system-message-row-purpose-change')),
+        findsNothing,
+      );
+      expect(findRichText('Legacy purpose'), findsNothing);
+      expect(find.byType(ReactionRow), findsNothing);
+      expect(
+        find.byKey(const ValueKey('message-author-before-purpose')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-author-after-purpose')),
+        findsNothing,
+      );
+      expect(
+        findRichText('changed the topic to "Current topic"'),
+        findsOneWidget,
+      );
+    },
+  );
+
   testWidgets('single-line activity icon and author share a vertical center', (
     tester,
   ) async {

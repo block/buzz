@@ -14,7 +14,7 @@ void actionRowTests() {
       payload: <String, dynamic>{'type': 'member_removed'},
       action: 'removed Someone from the channel',
     ),
-    for (final field in ['topic', 'purpose']) ...[
+    for (final field in ['topic']) ...[
       (
         payload: <String, dynamic>{
           'type': '${field}_changed',
@@ -119,7 +119,7 @@ void actionRowTests() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.text('Someone ${scenario.action}'), findsOneWidget);
+        expect(findRichText('Someone ${scenario.action}'), findsOneWidget);
         expect(
           find.byIcon(
             scenario.payload['type'] == 'member_removed'

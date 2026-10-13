@@ -9458,34 +9458,6 @@ void main() {
       );
     });
 
-    testWidgets('renders purpose_changed system event', (tester) async {
-      final messages = [
-        _systemMsg(
-          id: 'sys1',
-          payload: {
-            'type': 'purpose_changed',
-            'actor': 'alice',
-            'purpose': 'Team standup notes',
-          },
-        ),
-      ];
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: messages,
-          users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        findRichText('changed the purpose to "Team standup notes"'),
-        findsOneWidget,
-      );
-    });
-
     testWidgets('system message breaks author grouping', (tester) async {
       final messages = [
         _textMsg(

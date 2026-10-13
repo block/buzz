@@ -462,6 +462,9 @@ List<TimelineMessage> formatTimeline(
 
     if (event.kind == EventKind.systemMessage) {
       final systemEvent = SystemEvent.fromContent(event.content);
+      // Purpose is legacy metadata with no mobile surface. Omit its activity
+      // before grouping so it cannot leave blank rows or split sender groups.
+      if (systemEvent?.type == SystemEventType.purposeChanged) continue;
       if (systemEvent != null) {
         result.add(
           TimelineMessage(
