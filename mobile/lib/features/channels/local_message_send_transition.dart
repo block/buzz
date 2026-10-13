@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'composer_send_origin.dart';
+import 'local_send_row.dart';
 
 /// Duration of a local message's entrance transition.
-const localMessageSendTransitionDuration = Duration(milliseconds: 280);
+const localMessageSendTransitionDuration = Duration(milliseconds: 360);
 
 /// Default travel multiplier for a message entrance.
 const localMessageSendTransitionStartOffset = 1.5;
@@ -12,15 +15,21 @@ const localMessageSendTransitionStartOffset = 1.5;
 /// Travel multiplier used when the message includes a sender header.
 const localMessageSendTransitionAvatarStartOffset = 2.5;
 
-/// Slides a newly sent local message upward from beneath the composer.
-class LocalMessageSendTransition extends HookWidget {
+/// Coordinates upward row expansion and the bubble flight from the composer.
+class LocalMessageSendTransition extends HookConsumerWidget {
   /// Creates a local send transition around [child].
   const LocalMessageSendTransition({
     super.key,
     required this.animate,
+    this.channelId,
+    this.threadHeadId,
     this.startOffsetFactor = localMessageSendTransitionStartOffset,
     required this.child,
   });
+
+  /// Composer scope used to retrieve the captured sending surface.
+  final String? channelId;
+  final String? threadHeadId;
 
   /// Whether to play the entrance transition.
   final bool animate;
@@ -28,18 +37,26 @@ class LocalMessageSendTransition extends HookWidget {
   /// Initial vertical offset expressed as a multiple of 24 logical pixels.
   final double startOffsetFactor;
 
-  /// Message content translated by the transition.
+  /// Message row whose bottom stays anchored during expansion.
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final origin = useMemoized(
+      () => channelId == null
+          ? null
+          : ref
+                .read(composerSendOriginProvider((channelId!, threadHeadId)))
+                .recentRect,
+      const [],
+    );
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final controller = useAnimationController(
       duration: localMessageSendTransitionDuration,
       initialValue: animate && !reduceMotion ? 0 : 1,
     );
     final easedAnimation = useMemoized(
-      () => CurvedAnimation(parent: controller, curve: Curves.easeOutCubic),
+      () => CurvedAnimation(parent: controller, curve: Curves.easeInOutCubic),
       [controller],
     );
     useEffect(() => easedAnimation.dispose, [easedAnimation]);
@@ -62,10 +79,11 @@ class LocalMessageSendTransition extends HookWidget {
     return AnimatedBuilder(
       animation: easedAnimation,
       child: child,
-      builder: (context, child) => Transform.translate(
-        offset: Offset(0, 24 * startOffsetFactor * (1 - easedAnimation.value)),
-        transformHitTests: false,
-        child: LocalSendProgress(progress: easedAnimation.value, child: child!),
+      builder: (context, child) => LocalSendProgress(
+        progress: easedAnimation.value,
+        origin: origin,
+        startOffset: 24 * startOffsetFactor,
+        child: LocalSendRow(progress: easedAnimation.value, child: child!),
       ),
     );
   }
@@ -77,11 +95,23 @@ class LocalSendProgress extends InheritedWidget {
   const LocalSendProgress({
     super.key,
     required this.progress,
+    this.origin,
+    this.startOffset = 36,
     required super.child,
   });
 
+  /// Captured composer rectangle in global coordinates.
+  final Rect? origin;
+
+  /// Fallback travel when no composer geometry is available.
+  final double startOffset;
+
   /// Entrance progress from zero (full width) to one (settled).
   final double progress;
+
+  /// Geometry and progress inherited by the bubble's paint surface.
+  static LocalSendProgress? scopeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<LocalSendProgress>();
 
   /// Returns settled progress for content outside a local-send transition.
   static double of(BuildContext context) =>

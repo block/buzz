@@ -1,133 +1,107 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/local_message_send_transition.dart';
+import 'package:buzz/features/channels/local_send_row.dart';
 
-Widget _testable({
-  bool animate = true,
-  bool reduceMotion = false,
-  double startOffsetFactor = localMessageSendTransitionStartOffset,
-}) => MaterialApp(
-  home: MediaQuery(
-    data: MediaQueryData(disableAnimations: reduceMotion),
-    child: Scaffold(
-      body: LocalMessageSendTransition(
-        animate: animate,
-        startOffsetFactor: startOffsetFactor,
-        child: const SizedBox(key: ValueKey('message'), width: 100, height: 40),
+Widget _testable({bool animate = true, bool reduceMotion = false}) =>
+    ProviderScope(
+      child: MaterialApp(
+        home: MediaQuery(
+          data: MediaQueryData(disableAnimations: reduceMotion),
+          child: Scaffold(
+            body: Align(
+              alignment: Alignment.bottomLeft,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    key: ValueKey('history'),
+                    width: 100,
+                    height: 40,
+                  ),
+                  LocalMessageSendTransition(
+                    animate: animate,
+                    child: const SizedBox(
+                      width: 100,
+                      height: 80,
+                      child: Align(
+                        alignment: Alignment.bottomLeft,
+                        child: SizedBox(
+                          key: ValueKey('avatar'),
+                          width: 40,
+                          height: 40,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
-    ),
-  ),
-);
+    );
 
 void main() {
-  Finder sendTranslation() => find
-      .descendant(
-        of: find.byType(LocalMessageSendTransition),
-        matching: find.byType(Transform),
-      )
-      .first;
-
-  test('local send claims expire before a later navigation', () {
-    final markedAt = DateTime(2026);
-    final animations = {'event': markedAt};
-
+  test('local send claims expire before later navigation', () {
+    final now = DateTime(2026);
     expect(
       isRecentLocalMessageSendAnimation(
-        animations,
-        'event',
-        now: markedAt.add(const Duration(milliseconds: 999)),
+        {'id': now},
+        'id',
+        now: now.add(const Duration(milliseconds: 999)),
       ),
       isTrue,
     );
     expect(
       isRecentLocalMessageSendAnimation(
-        animations,
-        'event',
-        now: markedAt.add(const Duration(seconds: 2)),
+        {'id': now},
+        'id',
+        now: now.add(const Duration(seconds: 2)),
       ),
       isFalse,
     );
   });
-
-  testWidgets('local send rises from behind the composer', (tester) async {
-    await tester.pumpWidget(_testable());
-
-    var transition = tester.widget<Transform>(sendTranslation());
-    expect(
-      Offset(
-        transition.transform.getTranslation().x,
-        transition.transform.getTranslation().y,
-      ),
-      const Offset(0, 24 * localMessageSendTransitionStartOffset),
-    );
-    expect(
-      find.descendant(
-        of: find.byType(LocalMessageSendTransition),
-        matching: find.byType(FadeTransition),
-      ),
-      findsNothing,
-    );
-
-    await tester.pump(localMessageSendTransitionDuration ~/ 2);
-    transition = tester.widget<Transform>(sendTranslation());
-    expect(transition.transform.getTranslation().y, greaterThan(0));
-    expect(
-      transition.transform.getTranslation().y,
-      lessThan(24 * localMessageSendTransitionStartOffset),
-    );
-
-    await tester.pump(localMessageSendTransitionDuration);
-    transition = tester.widget<Transform>(sendTranslation());
-    expect(
-      Offset(
-        transition.transform.getTranslation().x,
-        transition.transform.getTranslation().y,
-      ),
-      Offset.zero,
-    );
-  });
-
-  testWidgets('an avatar row starts deeper behind the composer', (
+  testWidgets('history moves up while the avatar remains anchored', (
     tester,
   ) async {
-    await tester.pumpWidget(
-      _testable(startOffsetFactor: localMessageSendTransitionAvatarStartOffset),
-    );
-
-    final transition = tester.widget<Transform>(sendTranslation());
+    await tester.pumpWidget(_testable());
+    final avatar = tester.getRect(find.byKey(const ValueKey('avatar')));
+    final history = tester.getRect(find.byKey(const ValueKey('history')));
+    expect(tester.getSize(find.byType(LocalSendRow)).height, 0);
+    await tester.pump(localMessageSendTransitionDuration ~/ 2);
     expect(
-      Offset(
-        transition.transform.getTranslation().x,
-        transition.transform.getTranslation().y,
+      tester.getSize(find.byType(LocalSendRow)).height,
+      inExclusiveRange(35, 45),
+    );
+    expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('history'))).dy,
+      closeTo(
+        history.top - tester.getSize(find.byType(LocalSendRow)).height,
+        0.1,
       ),
-      const Offset(0, 24 * localMessageSendTransitionAvatarStartOffset),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
+    expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('history'))).dy,
+      history.top - 80,
     );
   });
-
-  testWidgets('ordinary messages do not animate', (tester) async {
-    await tester.pumpWidget(_testable(animate: false));
-
-    final transition = tester.widget<Transform>(sendTranslation());
-    expect(
-      Offset(
-        transition.transform.getTranslation().x,
-        transition.transform.getTranslation().y,
-      ),
-      Offset.zero,
-    );
-  });
-
-  testWidgets('reduced motion skips the send translation', (tester) async {
-    await tester.pumpWidget(_testable(reduceMotion: true));
-
-    final transition = tester.widget<Transform>(sendTranslation());
-    expect(
-      Offset(
-        transition.transform.getTranslation().x,
-        transition.transform.getTranslation().y,
-      ),
-      Offset.zero,
-    );
-  });
+  for (final reduced in [false, true]) {
+    testWidgets('settled or reduced motion does not expand, reduced=$reduced', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(animate: reduced, reduceMotion: reduced),
+      );
+      expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
+    });
+  }
 }

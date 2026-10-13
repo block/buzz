@@ -1,12 +1,10 @@
-import 'dart:ui' show lerpDouble;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
 import 'local_message_send_transition.dart';
 
-/// Paints a local-send bubble from the available line width to its final width.
-/// Text keeps its final layout throughout: only the background changes shape.
+/// Paints a local-send bubble from the captured composer rectangle.
+/// The text travels with the bubble but keeps its final size and line wrapping.
 class LocalSendBubbleSurface extends SingleChildRenderObjectWidget {
   /// Creates an animated background without changing the child layout.
   const LocalSendBubbleSurface({
@@ -24,7 +22,7 @@ class LocalSendBubbleSurface extends SingleChildRenderObjectWidget {
 
   @override
   RenderObject createRenderObject(BuildContext context) =>
-      _RenderSendBubble(color, shape, LocalSendProgress.of(context));
+      _RenderSendBubble(color, shape, LocalSendProgress.scopeOf(context));
 
   @override
   void updateRenderObject(
@@ -34,25 +32,30 @@ class LocalSendBubbleSurface extends SingleChildRenderObjectWidget {
     (renderObject as _RenderSendBubble).update(
       color,
       shape,
-      LocalSendProgress.of(context),
+      LocalSendProgress.scopeOf(context),
     );
   }
 }
 
 class _RenderSendBubble extends RenderProxyBox {
-  _RenderSendBubble(this.color, this.shape, this.progress);
+  _RenderSendBubble(this.color, this.shape, this.motion);
 
   Color color;
   ShapeBorder shape;
-  double progress;
+  LocalSendProgress? motion;
+  double get progress => motion?.progress ?? 1;
 
-  void update(Color nextColor, ShapeBorder nextShape, double nextProgress) {
-    if (color == nextColor && shape == nextShape && progress == nextProgress) {
+  void update(
+    Color nextColor,
+    ShapeBorder nextShape,
+    LocalSendProgress? nextMotion,
+  ) {
+    if (color == nextColor && shape == nextShape && motion == nextMotion) {
       return;
     }
     color = nextColor;
     shape = nextShape;
-    progress = nextProgress;
+    motion = nextMotion;
     markNeedsPaint();
   }
 
@@ -61,20 +64,43 @@ class _RenderSendBubble extends RenderProxyBox {
     final width = constraints.hasBoundedWidth
         ? constraints.maxWidth
         : size.width;
-    return shape
+    final bounds = shape
         .getOuterPath(Offset.zero & Size(width, size.height))
         .getBounds()
         .expandToInclude(super.paintBounds);
+    final origin = motion?.origin;
+    return progress < 1 && origin != null
+        ? bounds.expandToInclude(origin.shift(-localToGlobal(Offset.zero)))
+        : bounds;
   }
 
   @override
   void paint(PaintingContext context, Offset offset) {
-    final startWidth = constraints.hasBoundedWidth
-        ? constraints.maxWidth
-        : size.width;
-    final width = lerpDouble(startWidth, size.width, progress)!;
-    final rect = offset & Size(width, size.height);
-    context.canvas.drawPath(shape.getOuterPath(rect), Paint()..color = color);
-    super.paint(context, offset);
+    final end = Offset.zero & size;
+    final origin = motion?.origin;
+    final start = origin == null
+        ? Rect.fromLTWH(
+            0,
+            motion?.startOffset ?? 0,
+            constraints.hasBoundedWidth ? constraints.maxWidth : size.width,
+            size.height,
+          )
+        : origin.shift(-localToGlobal(Offset.zero));
+    final rect = Rect.lerp(start, end, progress)!;
+    final path = shape.getOuterPath(rect.shift(offset));
+    context.canvas.drawPath(path, Paint()..color = color);
+    if (child case final child?) {
+      if (progress < 1) {
+        context.pushClipPath(
+          needsCompositing,
+          Offset.zero,
+          path.getBounds(),
+          path,
+          (context, _) => context.paintChild(child, offset + rect.topLeft),
+        );
+      } else {
+        context.paintChild(child, offset);
+      }
+    }
   }
 }

@@ -14,6 +14,7 @@ void main() {
       'send background contracts without changing text layout: $text',
       (tester) async {
         final key = GlobalKey();
+        Rect? origin;
         Future<void> draw(double progress) async {
           await tester.pumpWidget(
             MaterialApp(
@@ -29,6 +30,8 @@ void main() {
                         alignment: Alignment.topLeft,
                         child: LocalSendProgress(
                           progress: progress,
+                          startOffset: 0,
+                          origin: origin,
                           child: LocalSendBubbleSurface(
                             color: const Color(0xFFFF0000),
                             shape: const RoundedRectangleBorder(),
@@ -80,6 +83,26 @@ void main() {
         await draw(1);
         expect(tester.getRect(find.text(text)), textRect);
         expect(await greenAt(finalWidth.ceil() + 2), 255);
+        final boundary = key.currentContext!.findRenderObject()! as RenderBox;
+        origin = Rect.fromLTWH(
+          20,
+          50,
+          250,
+          30,
+        ).shift(boundary.localToGlobal(Offset.zero));
+        await draw(0);
+        final image = await tester.runAsync(() async {
+          final result = await (boundary as RenderRepaintBoundary).toImage();
+          final bytes = (await result.toByteData(
+            format: ui.ImageByteFormat.rawRgba,
+          ))!;
+          final inside = bytes.getUint8((55 * 300 + 25) * 4 + 1);
+          final outside = bytes.getUint8((55 * 300 + 275) * 4 + 1);
+          result.dispose();
+          return (inside, outside);
+        });
+        expect(image, (0, 255));
+        await draw(1);
         expect(tester.takeException(), isNull);
       },
     );

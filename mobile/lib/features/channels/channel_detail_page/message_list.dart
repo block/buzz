@@ -345,6 +345,13 @@ class _MessageList extends HookConsumerWidget {
       try {
         final targetIndex =
             reversedIndexOf(latestNavigationTargetId.value) ?? 0;
+        if (latestNavigationTargetId.value != null) {
+          itemScrollController.jumpTo(
+            index: targetIndex,
+            alignment: latestAlignment(),
+          );
+          return;
+        }
         await itemScrollController.scrollTo(
           index: targetIndex,
           alignment: latestAlignment(),
@@ -845,6 +852,7 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage.createdAt - message.createdAt > 300;
 
                 return LocalMessageSendTransition(
+                  channelId: channelId,
                   key: ValueKey('channel-message-send-${message.id}'),
                   animate: isRecentLocalMessageSendAnimation(
                     localSendAnimations,

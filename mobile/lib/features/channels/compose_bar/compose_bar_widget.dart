@@ -32,6 +32,10 @@ class ComposeBar extends HookConsumerWidget {
   });
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final sendOrigin = ref.watch(
+      composerSendOriginProvider((channelId, threadHeadId)),
+    );
+    final sendSurfaceKey = useMemoized(GlobalKey.new);
     final controller = useMemoized(_MarkdownEditingController.new);
     final composerText = useListenableSelector(
       controller,
@@ -510,6 +514,7 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value > 0) {
         return;
       }
+      sendOrigin.capture(sendSurfaceKey);
       final submittedDraftRevision = draftRevision.value;
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
@@ -1055,6 +1060,7 @@ class ComposeBar extends HookConsumerWidget {
               attachmentSurface.value = _AttachmentSurface.closed;
             },
             child: _ComposeBarLayout(
+              surfaceKey: sendSurfaceKey,
               voiceNoteRecorder: voiceNote.recorder,
               attachments: attachments.value,
               onRemoveAttachment: removeAttachment,
