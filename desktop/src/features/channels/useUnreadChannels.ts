@@ -984,6 +984,7 @@ export function useUnreadChannels(
     getEffectiveTimestamp,
     getOwnTimestamp,
     readStateVersion,
+    isReadStateReady,
     setContextParentResolver,
     participatedRootIds,
     authoredRootIds,

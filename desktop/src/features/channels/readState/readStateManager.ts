@@ -25,6 +25,13 @@ import {
   readStoredReadState,
   writeStoredReadState,
 } from "@/features/channels/readState/readStateStorage";
+import {
+  applyReadBaseline,
+  computeReadBaseline,
+  isWebPlatform,
+  loadReadBaseline,
+  saveReadBaseline,
+} from "@/features/channels/readState/readStateBaseline";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
@@ -289,6 +296,8 @@ export class ReadStateManager {
   private parentResolver: ContextParentResolver | null = null;
   /** Event ids we published ourselves; used to skip decrypting their echoes. */
   private recentlyPublishedIds = new Set<string>();
+  /** Web-only floor; see readStateBaseline.ts. */
+  private readBaseline: number | null = null;
 
   constructor(pubkey: string, relayClient: RelayClient) {
     this.pubkey = pubkey;
@@ -300,6 +309,7 @@ export class ReadStateManager {
       generateHex(16),
     );
     this.extraSlotIds = loadExtraSlotIds(pubkey);
+    if (isWebPlatform()) this.readBaseline = loadReadBaseline(pubkey);
     window.addEventListener("pagehide", this.flushLocalState);
     document.addEventListener("visibilitychange", this.handleVisibilityChange);
   }
@@ -312,8 +322,14 @@ export class ReadStateManager {
 
     this.hydrateFromLocalStorage();
 
-    await this.fetchAndMerge();
+    const fetched = await this.fetchAndMerge();
     if (this.destroyed) return;
+    if (isWebPlatform() && this.readBaseline === null) {
+      const now = Math.floor(Date.now() / 1_000);
+      this.readBaseline = computeReadBaseline(this.effectiveState.values(), now);
+      // Persist only once the relay answered, so a failed fetch retries next launch.
+      if (fetched) saveReadBaseline(this.pubkey, this.readBaseline);
+    }
     await this.startLiveSubscription();
     if (this.destroyed) return;
     const initContexts = this.currentContexts();
@@ -373,11 +389,14 @@ export class ReadStateManager {
   }
 
   getEffectiveTimestamp(contextId: string): number | null {
-    return resolveEffectiveTimestamp({
-      effectiveState: this.effectiveState,
-      contextId,
-      parentResolver: this.parentResolver,
-    });
+    return applyReadBaseline(
+      resolveEffectiveTimestamp({
+        effectiveState: this.effectiveState,
+        contextId,
+        parentResolver: this.parentResolver,
+      }),
+      this.readBaseline,
+    );
   }
 
   /**
@@ -389,7 +408,10 @@ export class ReadStateManager {
    * it for a background channel's thread would borrow the wrong channel marker.
    */
   getOwnTimestamp(contextId: string): number | null {
-    return this.effectiveState.get(contextId) ?? null;
+    return applyReadBaseline(
+      this.effectiveState.get(contextId) ?? null,
+      this.readBaseline,
+    );
   }
 
   /**
@@ -432,7 +454,7 @@ export class ReadStateManager {
     this.listeners.clear();
   }
 
-  private async fetchAndMerge(): Promise<void> {
+  private async fetchAndMerge(): Promise<boolean> {
     let events: RelayEvent[];
     try {
       events = await this.relayClient.fetchEvents({
@@ -445,12 +467,13 @@ export class ReadStateManager {
     } catch (error) {
       console.debug("[ReadStateManager] fetchAndMerge failed:", error);
       // If fetch fails, proceed with local state only
-      return;
+      return false;
     }
 
     await this.mergeEvents(events);
     this.persistLocalState();
     this.notifyListeners();
+    return true;
   }
 
   private async mergeEvents(events: RelayEvent[]): Promise<void> {

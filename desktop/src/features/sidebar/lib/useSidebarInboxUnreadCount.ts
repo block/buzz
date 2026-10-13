@@ -35,6 +35,7 @@ export function useSidebarInboxUnreadCount(): number | undefined {
     getMessageReadAt,
     getThreadReadAt,
     readStateVersion,
+    isReadStateReady,
     threadActivityFeedItems,
   } = useAppShell();
   const ownedAgentPubkeys = useOwnedAgentPubkeys(
@@ -66,7 +67,8 @@ export function useSidebarInboxUnreadCount(): number | undefined {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates read lookups
   return React.useMemo(() => {
-    if (feed === undefined) return undefined;
+    // Synced read markers must load first, or a fresh install counts everything (99+).
+    if (feed === undefined || !isReadStateReady) return undefined;
 
     const items = filterInboxItems(
       buildInboxItems({
@@ -99,6 +101,7 @@ export function useSidebarInboxUnreadCount(): number | undefined {
     getMessageReadAt,
     getThreadReadAt,
     identityQuery.data?.pubkey,
+    isReadStateReady,
     ownedAgentPubkeys,
     readStateVersion,
   ]);
