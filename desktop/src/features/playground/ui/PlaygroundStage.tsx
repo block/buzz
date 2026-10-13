@@ -51,6 +51,7 @@ import {
 } from "../lib/webview";
 import type { PlaygroundSession } from "../lib/sessions";
 import { DeviceBezel } from "./DeviceBezel";
+import { toastStripHostStyle, useToastStripInset } from "@/shared/ui/toastStrip";
 import { DeviceMuseumToolbar } from "./DeviceMuseumToolbar";
 
 export type { PlaygroundChromeMode };
@@ -555,6 +556,7 @@ function NativeStageHost({
   userAgent: string;
   viewport?: { width: number; height: number };
 }) {
+  const toastInset = useToastStripInset();
   const viewportWidth = viewport?.width;
   const viewportHeight = viewport?.height;
 
@@ -732,7 +734,7 @@ function NativeStageHost({
       style={
         viewport
           ? { width: viewport.width, height: viewport.height }
-          : undefined
+          : toastStripHostStyle(toastInset)
       }
     />
   );

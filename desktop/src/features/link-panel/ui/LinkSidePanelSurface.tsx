@@ -29,6 +29,7 @@ import { cn } from "@/shared/lib/cn";
 import { isNativeWebviewModalParked } from "@/shared/lib/nativeWebviewModalPark";
 import { Button } from "@/shared/ui/button";
 
+import { toastStripHostStyle, useToastStripInset } from "@/shared/ui/toastStrip";
 import {
   LINK_SIDE_PANEL_PIN_ID,
   type LinkSidePanelViewportMode,
@@ -350,6 +351,7 @@ function PinStageHost({
   url: string;
   viewport?: { width: number; height: number };
 }) {
+  const toastInset = useToastStripInset();
   const native = isTauri() || import.meta.env.MODE === "e2e";
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const viewportWidth = viewport?.width;
@@ -430,7 +432,7 @@ function PinStageHost({
       style={
         viewport
           ? { width: viewport.width, height: viewport.height }
-          : undefined
+          : toastStripHostStyle(toastInset)
       }
     >
       {native ? (

@@ -1,6 +1,4 @@
-import { Toaster as Sonner, useSonner } from "sonner";
-
-import { ParkNativeWebviewsWhileMounted } from "@/shared/ui/ParkNativeWebviewsWhileMounted";
+import { Toaster as Sonner } from "sonner";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 
@@ -8,13 +6,11 @@ type ToasterProps = React.ComponentProps<typeof Sonner>;
 
 const Toaster = ({ ...props }: ToasterProps) => {
   const { isDark } = useTheme();
-  // Toasts render in HTML under native pin / playground webviews; park those
-  // while any toast is on screen so it is never hidden behind a site.
-  const { toasts } = useSonner();
+  // Toasts never park native site webviews: hosts yield a bottom strip
+  // instead (see shared/ui/toastStrip.ts).
 
   return (
     <>
-    {toasts.length > 0 ? <ParkNativeWebviewsWhileMounted /> : null}
     <Sonner
       theme={isDark ? "dark" : "light"}
       className="toaster group"

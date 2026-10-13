@@ -35,6 +35,7 @@ import {
   subscribePinnedSiteOpenUrl,
 } from "../lib/pendingPinOpen";
 import { PINNED_SITES_POLL_INTERVAL_MS } from "../lib/types";
+import { useToastStripInset } from "@/shared/ui/toastStrip";
 import { clearPinUnread } from "../lib/pinUnread";
 
 /**
@@ -315,6 +316,7 @@ function PinnedSiteSurface({
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const native = isTauri() || import.meta.env.MODE === "e2e";
   const [loadError, setLoadError] = React.useState<string | null>(null);
+  const toastInset = useToastStripInset();
   // Left-nav Buzz Term parks playground then notifies pin restore while the
   // pin route stays mounted. Gate show/restore so Term is not covered by the
   // pin WKWebView. Read live snapshot inside openOrResize for sync restore.
@@ -418,6 +420,7 @@ function PinnedSiteSurface({
       className="relative min-h-0 min-w-0 flex-1 bg-background"
       data-testid="pinned-site-surface"
       ref={hostRef}
+      style={toastInset ? { marginBottom: toastInset } : undefined}
     >
       {native ? (
         loadError ? (
