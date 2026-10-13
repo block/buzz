@@ -189,6 +189,7 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 | 45003 | KIND_FORUM_COMMENT | Forum thread reply |
 | 46001–46012 | KIND_WORKFLOW_* | Workflow execution events |
 | 20001 | KIND_PRESENCE_UPDATE | Ephemeral presence heartbeat |
+| 20003 | KIND_AGENT_PRESENCE | Ephemeral presence heartbeat an owner sends for its agents |
 
 `buzz-core` defines each event kind as a `pub const u32` and exports the full registry as `ALL_KINDS: &[u32]` (127 kinds at the time of writing); `crates/buzz-core/src/kind.rs` is the source of truth for the current list. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
 
@@ -304,6 +305,8 @@ Ephemeral events bypass DB storage, audit, and search. Two sub-paths:
 3. LOCAL FAN-OUT     — sub_registry.fan_out → conn_manager.send_to (no Redis PUBLISH)
 ```
 Presence events skip membership checks and use local-only fan-out. Multi-node presence fan-out would require Redis pub/sub (documented as future work).
+
+**Agent presence (kind 20003):** an owner's one heartbeat for all its agents, so an app that runs agents without a socket per agent can still show them online. Content is the status (`online`, `away` or `offline`) and each `p` tag names an agent, at most 256. WebSocket only. The relay keeps the agents the signer owns (`users.agent_owner_pubkey`, through the owner cache), skips the rest, and sets or clears their presence exactly as their own kind 20001 would, so the presence snapshot reports them unchanged. It is not fanned out, since live presence is matched by author; viewers see it on their next snapshot read.
 
 **Other ephemeral events (e.g., typing indicators):**
 ```

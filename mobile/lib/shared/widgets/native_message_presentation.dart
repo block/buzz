@@ -32,12 +32,20 @@ class NativeMessagePresentation {
     String method,
     Map<String, Object?> arguments, {
     VoidCallback? onPresented,
+    ValueChanged<String>? onReaction,
   }) async {
     if (!isSupportedPlatform) return null;
-    final requestId = 'message-${_nextRequest++}';
-    if (onPresented != null) {
-      _presentedCallbacks[requestId] = onPresented;
+    final requestId =
+        arguments['requestId'] as String? ?? 'message-${_nextRequest++}';
+    if (onPresented != null || onReaction != null) {
+      if (onPresented != null) _presentedCallbacks[requestId] = onPresented;
       channel.setMethodCallHandler((call) async {
+        if (call.method == 'toggleReaction') {
+          final data = call.arguments as Map;
+          if (data['requestId'] == requestId && data['emoji'] is String) {
+            onReaction?.call(data['emoji'] as String);
+          }
+        }
         if (call.method == 'messagePresented') {
           _presentedCallbacks[call.arguments]?.call();
         }
@@ -46,7 +54,7 @@ class NativeMessagePresentation {
     try {
       return await channel.invokeMapMethod<Object?, Object?>(method, {
         ...arguments,
-        if (onPresented != null) 'requestId': requestId,
+        'requestId': requestId,
       });
     } on MissingPluginException {
       return null;
@@ -54,6 +62,9 @@ class NativeMessagePresentation {
       return null;
     } finally {
       _presentedCallbacks.remove(requestId);
+      if (onPresented != null || onReaction != null) {
+        channel.setMethodCallHandler(null);
+      }
     }
   }
 }

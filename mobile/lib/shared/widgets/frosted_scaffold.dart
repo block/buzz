@@ -21,6 +21,10 @@ class FrostedScaffold extends HookWidget {
   /// using [frostedAppBarHeight] — the scaffold does NOT add automatic padding.
   final Widget body;
 
+  /// Non-scrolling content painted above the navigation bar and its blur.
+  /// Position this child within the scaffold's full-screen stack.
+  final Widget? foreground;
+
   /// Optional floating action button, passed through to [Scaffold].
   final Widget? floatingActionButton;
 
@@ -45,6 +49,7 @@ class FrostedScaffold extends HookWidget {
     super.key,
     required this.appBar,
     required this.body,
+    this.foreground,
     this.floatingActionButton,
     this.resizeToAvoidBottomInset,
     this.backgroundColor,
@@ -248,7 +253,13 @@ class FrostedScaffold extends HookWidget {
     // only samples pixels that were already painted behind it. This is the
     // same composition as channel navigation, so top-level headers blur their
     // content rather than only the fixed gradient.
-    return [...backdrop, bodyMotion, appBar];
+    return [
+      ...backdrop,
+      bodyMotion,
+      appBar,
+      if (foreground != null)
+        Positioned.fill(child: DirectionalTransitionMotion(child: foreground!)),
+    ];
   }
 }
 

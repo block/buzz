@@ -1,13 +1,9 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
-import 'dart:ui';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -23,17 +19,14 @@ import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../../shared/widgets/native_message_presentation.dart';
-import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 import 'emoji_picker.dart';
-import 'message_action_backdrop_state.dart';
-import 'message_actions/native_message_action_selection.dart';
 import 'reaction_row.dart';
 import 'recent_emoji_provider.dart';
 import '../../shared/read_state/message_read_state.dart';
@@ -44,38 +37,30 @@ import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
 import 'unread_badge/is_high_priority_event.dart';
 
-part 'message_actions/reaction_popover.dart';
 part 'message_actions/quick_reaction_row.dart';
-part 'message_actions/message_action_popover.dart';
-part 'message_actions/message_action_popover_widgets.dart';
-part 'message_actions/message_reaction_tray.dart';
-part 'message_actions/native_actions.dart';
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
 const _reminderPreviewLength = 100;
-const _messageActionBackdropBlurSigma = 20.0;
-const _messageActionBackdropTintOpacity = 0.10;
-final _messageActionBackdropFilter = ImageFilter.blur(
-  sigmaX: _messageActionBackdropBlurSigma,
-  sigmaY: _messageActionBackdropBlurSigma,
-);
 
-/// Presents the actions for [message] as an anchored popover when both
-/// [anchorRect] and [captureAnchorSnapshot] are supplied, otherwise as a sheet.
-///
-/// Popover capture is asynchronous: [captureAnchorSnapshot] must remain valid
-/// until its future completes, and the returned image becomes this function's
-/// responsibility to dispose. [onPopoverPreviewVisibilityChanged] reports
-/// whether the constrained layout actually renders the lifted preview;
-/// [onPopoverDismissed] runs after the route completes while [context] is still
-/// mounted. Neither callback runs for sheet fallback or a failed capture.
-///
-/// [composerFocusNode] remains caller-owned and must outlive the popover. If it
-/// has focus when this function is called, the popover unfocuses it and invokes
-/// [restoreComposerFocus] only after a dismissal with no selected action. The
-/// restorer must remain callable for the same lifetime and no-op if its composer
-/// is later disposed or replaced.
+// A weak, route-owned latch shared by every action, including pointers that
+// were already down when another selection started dismissing the sheet.
+final _selectedMessageActionRoutes = Expando<bool>();
+
+bool _selectMessageAction(BuildContext context) {
+  final route = ModalRoute.of(context);
+  if (route == null ||
+      !route.isCurrent ||
+      _selectedMessageActionRoutes[route] == true) {
+    return false;
+  }
+  _selectedMessageActionRoutes[route] = true;
+  Navigator.of(context).pop(true);
+  return true;
+}
+
+/// Presents message reactions and grouped actions in the shared bottom sheet.
+/// Snapshot and preview callbacks are not used by the sheet presentation.
 Future<void> showMessageActions({
   required BuildContext context,
   required WidgetRef ref,
@@ -94,66 +79,22 @@ Future<void> showMessageActions({
   bool isArchived = false,
   EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
 }) async {
-  if (NativeMessagePresentation.isSupportedPlatform &&
-      anchorRect != null &&
-      await _showNativeMessageActions(
-        context: context,
-        ref: ref,
-        message: message,
-        channelId: channelId,
-        canManageMessage: canManageMessage,
-        allMessages: allMessages,
-        currentPubkey: currentPubkey,
-        isMember: isMember,
-        isArchived: isArchived,
-        anchorRect: anchorRect,
-        captureAnchorSnapshot: captureAnchorSnapshot,
-        composerFocusNode: composerFocusNode,
-        restoreComposerFocus: restoreComposerFocus,
-        onPopoverPreviewVisibilityChanged: onPopoverPreviewVisibilityChanged,
-        onPopoverDismissed: onPopoverDismissed,
-      )) {
-    return;
-  }
   if (!context.mounted) return;
-  final hasReactionOnlyActions = message.isSystem && !canManageMessage;
-  if (anchorRect != null && hasReactionOnlyActions) {
-    _showMessageReactionPopover(
-      context: context,
-      ref: ref,
-      message: message,
-      anchorRect: anchorRect,
-      spotlightPadding: popoverSpotlightPadding,
-    );
-    return;
-  }
+  unawaited(HapticFeedback.mediumImpact());
+  final restoreFocusOnCancel = composerFocusNode?.hasFocus ?? false;
+  composerFocusNode?.unfocus();
 
-  if (_tryShowMessageActionsPopover(
-    context: context,
-    ref: ref,
-    message: message,
-    channelId: channelId,
-    canManageMessage: canManageMessage,
-    allMessages: allMessages,
-    currentPubkey: currentPubkey,
-    isMember: isMember,
-    isArchived: isArchived,
-    anchorRect: anchorRect,
-    captureAnchorSnapshot: captureAnchorSnapshot,
-    onPopoverPreviewVisibilityChanged: onPopoverPreviewVisibilityChanged,
-    onPopoverDismissed: onPopoverDismissed,
-    composerFocusNode: composerFocusNode,
-    restoreComposerFocus: restoreComposerFocus,
-  )) {
-    return;
-  }
-
-  showBuzzModalBottomSheet<void>(
+  final selectedAction = await showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
     showCloseButton: false,
+    constraints: BoxConstraints(
+      maxWidth: 640,
+      maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+    ),
     builder: (sheetContext) => SafeArea(
+      top: false,
       child: IconTheme.merge(
         data: const IconThemeData(size: 22),
         child: ConstrainedBox(
@@ -177,10 +118,10 @@ Future<void> showMessageActions({
                     pageContext: context,
                     pageRef: ref,
                   ),
-                  const SizedBox(height: Grid.xs),
+                  SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
                   if (!message.isSystem) ...[
                     // Fast actions: respond now, hand off context, defer.
-                    _FastActionsRow(
+                    _MessageQuickActionsRow(
                       message: message,
                       channelId: channelId,
                       allMessages: allMessages,
@@ -189,7 +130,8 @@ Future<void> showMessageActions({
                       isArchived: isArchived,
                       pageContext: context,
                     ),
-                    const SizedBox(height: Grid.xs),
+                    // Section cards supply the other half of the 16pt gap.
+                    const SizedBox(height: Grid.xxs),
                     // Triage: come back to this message later.
                     SheetActionSection(
                       children: [
@@ -208,7 +150,7 @@ Future<void> showMessageActions({
                           leading: const Icon(BuzzIcons.copy),
                           title: const Text('Copy text'),
                           onTap: () {
-                            Navigator.of(sheetContext).pop();
+                            if (!_selectMessageAction(sheetContext)) return;
                             // Copy to clipboard
                             final data = ClipboardData(text: message.content);
                             Clipboard.setData(data);
@@ -224,7 +166,7 @@ Future<void> showMessageActions({
                           leading: const Icon(BuzzIcons.pencil),
                           title: const Text('Edit message'),
                           onTap: () {
-                            Navigator.of(sheetContext).pop();
+                            if (!_selectMessageAction(sheetContext)) return;
                             _showEditSheet(
                               context: context,
                               ref: ref,
@@ -243,7 +185,7 @@ Future<void> showMessageActions({
                             style: TextStyle(color: sheetContext.colors.error),
                           ),
                           onTap: () {
-                            Navigator.of(sheetContext).pop();
+                            if (!_selectMessageAction(sheetContext)) return;
                             _confirmDelete(
                               context: context,
                               ref: ref,
@@ -262,6 +204,9 @@ Future<void> showMessageActions({
       ),
     ),
   );
+  if (selectedAction != true && restoreFocusOnCancel && context.mounted) {
+    restoreComposerFocus?.call();
+  }
 }
 
 /// Image-focused actions shown from the full-screen viewer.
@@ -567,7 +512,7 @@ class _MarkReadUnreadTile extends ConsumerWidget {
       leading: Icon(unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen),
       title: Text(unread ? 'Mark read' : 'Mark unread'),
       onTap: () {
-        Navigator.of(context).pop();
+        if (!_selectMessageAction(context)) return;
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
           // Advances the `msg:` marker and clears this message's own forced
@@ -608,7 +553,7 @@ class _FollowThreadTile extends ConsumerWidget {
       leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () {
-        Navigator.of(context).pop();
+        if (!_selectMessageAction(context)) return;
         final notifier = ref.read(threadFollowsProvider.notifier);
         if (following) {
           notifier.unfollowThread(rootId);
@@ -620,7 +565,7 @@ class _FollowThreadTile extends ConsumerWidget {
   }
 }
 
-class _FastActionsRow extends ConsumerWidget {
+class _MessageQuickActionsRow extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
   final List<TimelineMessage>? allMessages;
@@ -632,7 +577,7 @@ class _FastActionsRow extends ConsumerWidget {
   /// for the thread push and the copy-link snackbar.
   final BuildContext pageContext;
 
-  const _FastActionsRow({
+  const _MessageQuickActionsRow({
     required this.message,
     required this.channelId,
     required this.allMessages,
@@ -649,11 +594,11 @@ class _FastActionsRow extends ConsumerWidget {
 
     final tiles = <Widget>[
       if (messages != null)
-        _FastActionTile(
+        _MessageQuickActionTile(
           icon: BuzzIcons.messageSquareReply,
           label: 'Reply',
           onTap: () {
-            Navigator.of(context).pop();
+            if (!_selectMessageAction(context)) return;
             Navigator.of(pageContext).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(
@@ -668,11 +613,11 @@ class _FastActionsRow extends ConsumerWidget {
             );
           },
         ),
-      _FastActionTile(
+      _MessageQuickActionTile(
         icon: BuzzIcons.link2,
         label: 'Copy link',
         onTap: () {
-          Navigator.of(context).pop();
+          if (!_selectMessageAction(context)) return;
           copyToClipboard(
             pageContext,
             messageLinkFor(message: message, channelId: channelId),
@@ -681,7 +626,7 @@ class _FastActionsRow extends ConsumerWidget {
         },
       ),
       if (canRemind)
-        _FastActionTile(
+        _MessageQuickActionTile(
           icon: BuzzIcons.clock,
           label: 'Remind me',
           onTap: () {
@@ -689,7 +634,7 @@ class _FastActionsRow extends ConsumerWidget {
               context,
               rootNavigator: true,
             ).context;
-            Navigator.of(context).pop();
+            if (!_selectMessageAction(context)) return;
             showRemindMeLaterSheet(
               context: rootContext,
               ref: ref,
@@ -706,57 +651,56 @@ class _FastActionsRow extends ConsumerWidget {
         ),
     ];
 
-    return Row(
-      children: [
-        for (var index = 0; index < tiles.length; index++) ...[
-          Expanded(child: tiles[index]),
-          if (index < tiles.length - 1) const SizedBox(width: Grid.twelve),
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var index = 0; index < tiles.length; index++) ...[
+            Expanded(child: tiles[index]),
+            if (index < tiles.length - 1) const SizedBox(width: Grid.twelve),
+          ],
         ],
-      ],
+      ),
     );
   }
 }
 
-class _FastActionTile extends StatelessWidget {
+class _MessageQuickActionTile extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
 
-  const _FastActionTile({
+  const _MessageQuickActionTile({
     required this.icon,
     required this.label,
     required this.onTap,
   });
 
   @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
-        unawaited(HapticFeedback.lightImpact());
-        onTap();
-      },
-      behavior: HitTestBehavior.opaque,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // The full-width tiles deliberately contrast with the compact emoji
-          // reactions immediately above them.
-          Container(
-            height: 68 + (Grid.xxs * 2),
-            decoration: BoxDecoration(
-              color: context.colors.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(Radii.dialog),
-            ),
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    child: Material(
+      color: context.colors.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(Radii.dialog),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () {
+          unawaited(HapticFeedback.lightImpact());
+          onTap();
+        },
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 68 + (Grid.xxs * 2)),
+          child: Padding(
+            padding: const EdgeInsets.all(Grid.xxs),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(icon, size: 22, color: context.colors.onSurface),
                 const SizedBox(height: Grid.xxs),
                 Text(
                   label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
                   style: context.textTheme.labelMedium?.copyWith(
                     color: context.colors.onSurface,
                   ),
@@ -764,51 +708,10 @@ class _FastActionTile extends StatelessWidget {
               ],
             ),
           ),
-        ],
+        ),
       ),
-    );
-  }
-}
-
-/// The emoji shown are the user's own frequently-used set (desktop's
-/// `useQuickReactionEmojis` behaviour), topped up with [defaultQuickEmojis] so
-/// the row is full on a fresh install.
-class _ReactionItemReveal extends StatelessWidget {
-  final Animation<double>? animation;
-  final int index;
-  final Widget child;
-
-  const _ReactionItemReveal({
-    super.key,
-    required this.animation,
-    required this.index,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final parent = animation;
-    if (parent == null) return child;
-
-    final start = 0.06 + (index * 0.11);
-    final opacityEnd = math.min(1.0, start + 0.20);
-    final scaleEnd = math.min(1.0, start + 0.30);
-    final opacity = CurvedAnimation(
-      parent: parent,
-      curve: Interval(start, opacityEnd, curve: Curves.easeOutCubic),
-    );
-    final scale = Tween<double>(begin: 0.86, end: 1).animate(
-      CurvedAnimation(
-        parent: parent,
-        curve: Interval(start, scaleEnd, curve: _reactionSpringCurve),
-      ),
-    );
-
-    return FadeTransition(
-      opacity: opacity,
-      child: ScaleTransition(scale: scale, child: child),
-    );
-  }
+    ),
+  );
 }
 
 /// Renders a quick-reaction value: a Unicode glyph as text, a `:shortcode:` as
@@ -845,33 +748,48 @@ class _QuickReactionCircle extends StatelessWidget {
   final VoidCallback onTap;
   final Widget child;
   final double size;
+  final String label;
+  final bool? selected;
 
   const _QuickReactionCircle({
     required this.onTap,
     required this.child,
     required this.size,
+    required this.label,
+    this.selected,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
-        unawaited(HapticFeedback.lightImpact());
-        onTap();
-      },
-      child: Container(
-        width: size,
-        height: size,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: Color.lerp(
-            context.colors.surface,
-            context.colors.primaryContainer,
-            0.78,
+    return Semantics(
+      button: true,
+      label: label,
+      selected: selected,
+      excludeSemantics: true,
+      onTap: onTap,
+      child: GestureDetector(
+        excludeFromSemantics: true,
+        onTap: () {
+          unawaited(HapticFeedback.lightImpact());
+          onTap();
+        },
+        child: Container(
+          width: size,
+          height: size,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected == true
+                ? context.colors.primary.withValues(alpha: 0.10)
+                : context.colors.surfaceContainerHighest,
+            border: selected == true
+                ? Border.all(
+                    color: context.colors.primary.withValues(alpha: 0.40),
+                  )
+                : null,
+            shape: BoxShape.circle,
           ),
-          shape: BoxShape.circle,
+          child: child,
         ),
-        child: child,
       ),
     );
   }
