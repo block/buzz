@@ -5781,7 +5781,7 @@ void main() {
       expect(find.byType(CircleAvatar), findsNothing);
       final nameText = tester.widget<Text>(find.text('Alice'));
       expect(nameText.style?.fontSize, 14);
-      expect(nameText.style?.fontWeight, FontWeight.w500);
+      expect(nameText.style?.fontWeight, FontWeight.w400);
       expect(
         find.byKey(const ValueKey('system-message-username-alice')),
         findsNothing,
@@ -9226,7 +9226,7 @@ void main() {
       expect(effectiveFontSizeForText(addedText.text, 'added '), 14);
     });
 
-    testWidgets('groups member additions with tappable overflow names', (
+    testWidgets('groups member additions with regular-weight tappable names', (
       tester,
     ) async {
       final messages = [
@@ -9289,10 +9289,20 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Bob'), findsOneWidget);
-      expect(findRichText(', Carol, Dave, Erin, and '), findsOneWidget);
-      expect(find.byKey(const Key('membership-overflow')), findsOneWidget);
-      expect(find.text('1 others'), findsOneWidget);
-      expect(find.byTooltip('Frank'), findsOneWidget);
+      expect(find.byKey(const Key('membership-overflow')), findsNothing);
+      for (final pubkey in ['alice', 'bob', 'carol', 'dave', 'erin', 'frank']) {
+        final name = find.byKey(ValueKey('system-message-author-$pubkey'));
+        expect(name, findsOneWidget);
+        expect(tester.widget<Text>(name).style?.fontWeight, FontWeight.w400);
+        await tester.tap(name);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<UserProfileSheet>(find.byType(UserProfileSheet)).pubkey,
+          pubkey,
+        );
+        await tester.tap(find.byTooltip('Close sheet'));
+        await tester.pumpAndSettle();
+      }
     });
 
     testWidgets('aligns grouped reactions with the system message content', (
@@ -9438,7 +9448,10 @@ void main() {
 
       expect(find.text('Alice'), findsOneWidget);
       expect(findRichText('removed '), findsOneWidget);
-      expect(find.widgetWithText(MessageMentionPill, 'Bob'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('system-message-author-bob')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('renders topic_changed system event', (tester) async {

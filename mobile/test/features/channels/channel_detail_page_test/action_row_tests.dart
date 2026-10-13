@@ -69,7 +69,7 @@ void actionRowTests() {
         expect(author, findsOneWidget);
         expect(
           find.byKey(const ValueKey('system-message-author-bob')),
-          findsNothing,
+          scenario.payload['target'] == 'bob' ? findsOneWidget : findsNothing,
         );
         expect(findRichText('Alice ${scenario.action}'), findsNothing);
         final body = findRichText(
@@ -77,10 +77,10 @@ void actionRowTests() {
         );
         if (scenario.payload['target'] == 'bob') {
           expect(
-            find.widgetWithText(MessageMentionPill, 'Bob'),
+            find.byKey(const ValueKey('system-message-author-bob')),
             findsOneWidget,
           );
-          expect(find.text('@'), findsOneWidget);
+          expect(find.text('@'), findsNothing);
         }
         expect(body, findsOneWidget);
         final regularBody = tester.getRect(findRichText('Regular message'));
@@ -172,7 +172,7 @@ void actionRowTests() {
         ),
         isTrue,
       );
-      await tester.tap(find.widgetWithText(MessageMentionPill, 'Bob'));
+      await tester.tap(find.byKey(const ValueKey('system-message-author-bob')));
       await tester.pumpAndSettle();
       expect(
         tester.widget<UserProfileSheet>(find.byType(UserProfileSheet)).pubkey,
@@ -192,7 +192,7 @@ void actionRowTests() {
     });
 
     for (final source in ['directory', 'profile', 'channel role']) {
-      testWidgets('removed agent uses chat mention pill from $source', (
+      testWidgets('removed agent has a plain tappable name from $source', (
         tester,
       ) async {
         await tester.pumpWidget(
@@ -221,17 +221,9 @@ void actionRowTests() {
           ),
         );
         await tester.pumpAndSettle();
-        final pill = find.widgetWithText(MessageMentionPill, 'Helper Bot');
+        final pill = find.byKey(const ValueKey('system-message-author-bob'));
         expect(pill, findsOneWidget);
-        expect(tester.widget<MessageMentionPill>(pill).isAgent, isTrue);
-        expect(
-          find.descendant(of: pill, matching: find.byIcon(BuzzIcons.bot)),
-          findsOneWidget,
-        );
-        expect(
-          find.descendant(of: pill, matching: find.text('@')),
-          findsNothing,
-        );
+        expect(find.byType(MessageMentionPill), findsNothing);
         expect(
           tester.widget<Text>(find.text('Helper Bot')).style?.decoration,
           isNot(TextDecoration.underline),
@@ -302,10 +294,7 @@ void actionRowTests() {
               .data,
           names.labelFor(first),
         );
-        final pill = find.widgetWithText(
-          MessageMentionPill,
-          names.labelFor(second),
-        );
+        final pill = find.byKey(ValueKey('system-message-author-$second'));
         expect(pill, findsOneWidget);
         expect(names.labelFor(first), isNot(names.labelFor(second)));
         expect(find.text('Scout'), findsNothing);

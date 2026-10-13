@@ -39,38 +39,13 @@ class _SystemMessageRow extends HookConsumerWidget {
     }
 
     final target = systemEvent.targetPubkey?.trim().toLowerCase();
-    final targetIsAgent =
-        ref.watch(agentMentionPubkeysProvider(channelId)).contains(target) ||
-        userCache[target]?.ownerPubkey != null;
     final messageStyleAction = switch (systemEvent.type) {
       SystemEventType.memberRemoved => <InlineSpan>[
         const TextSpan(text: 'removed '),
         if (target == null || target.isEmpty)
           TextSpan(text: resolveLabel(target))
         else
-          WidgetSpan(
-            alignment: PlaceholderAlignment.baseline,
-            baseline: TextBaseline.alphabetic,
-            child: Semantics(
-              container: true,
-              label: resolveLabel(target),
-              button: true,
-              child: GestureDetector(
-                onTap: () => showUserProfileSheet(
-                  context,
-                  target,
-                  names: channelIdentityNamesProvider(channelId),
-                ),
-                child: ExcludeSemantics(
-                  child: MessageMentionPill(
-                    label: resolveLabel(target),
-                    isAgent: targetIsAgent,
-                    textStyle: _systemActionTextStyle(context),
-                  ),
-                ),
-              ),
-            ),
-          ),
+          _systemNameSpan(context, target, channelId, resolveLabel),
         const TextSpan(text: ' from the channel'),
       ],
       SystemEventType.topicChanged => [
@@ -245,8 +220,6 @@ class _SystemMessageRow extends HookConsumerWidget {
   }
 }
 
-const _maxVisibleAdditionalMemberNames = 3;
-
 class _MembershipDisplayEvent {
   final String? actorPubkey;
   final List<String> targetPubkeys;
@@ -360,13 +333,6 @@ class _MembershipSystemMessageContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final firstTarget = event.targetPubkeys.first;
     final additionalTargets = event.targetPubkeys.skip(1).toList();
-    final visibleTargets = additionalTargets
-        .take(_maxVisibleAdditionalMemberNames)
-        .toList();
-    final hiddenTargets = additionalTargets
-        .skip(_maxVisibleAdditionalMemberNames)
-        .toList();
-    final actionStyle = _systemActionTextStyle(context);
     final actionSpans = <InlineSpan>[
       TextSpan(text: event.isSelfJoin ? 'joined the channel' : 'added '),
       if (!event.isSelfJoin)
@@ -381,10 +347,9 @@ class _MembershipSystemMessageContent extends StatelessWidget {
         ),
       ..._memberNameSpans(
         context,
-        visibleTargets: visibleTargets,
-        hiddenTargets: hiddenTargets,
+        targets: additionalTargets,
+        channelId: channelId,
         resolveLabel: resolveLabel,
-        style: actionStyle,
       ),
       if (!event.isSelfJoin) const TextSpan(text: ' to the channel'),
     ];
@@ -469,9 +434,7 @@ WidgetSpan _systemNameSpan(
             key: ValueKey('system-message-author-$pubkey'),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: _systemActionTextStyle(
-              context,
-            )?.copyWith(fontWeight: FontWeight.w500),
+            style: _systemActionTextStyle(context),
           ),
         ),
       ),
@@ -481,49 +444,21 @@ WidgetSpan _systemNameSpan(
 
 List<InlineSpan> _memberNameSpans(
   BuildContext context, {
-  required List<String> visibleTargets,
-  required List<String> hiddenTargets,
+  required List<String> targets,
+  required String channelId,
   required String Function(String? pubkey) resolveLabel,
-  required TextStyle? style,
 }) {
-  final spans = <InlineSpan>[];
-  for (var index = 0; index < visibleTargets.length; index++) {
-    final isLast = index == visibleTargets.length - 1;
-    final separator = index == 0
-        ? ''
-        : isLast && hiddenTargets.isEmpty
-        ? (visibleTargets.length == 2 ? ' and ' : ', and ')
-        : ', ';
-    spans.add(
-      TextSpan(text: '$separator${resolveLabel(visibleTargets[index])}'),
-    );
-  }
-
-  if (hiddenTargets.isNotEmpty) {
-    final hiddenLabels = hiddenTargets.map(resolveLabel).toList();
-    spans
-      ..add(const TextSpan(text: ', and '))
-      ..add(
-        WidgetSpan(
-          alignment: PlaceholderAlignment.baseline,
-          baseline: TextBaseline.alphabetic,
-          child: Tooltip(
-            message: hiddenLabels.join('\n'),
-            triggerMode: TooltipTriggerMode.tap,
-            child: Text(
-              '${hiddenTargets.length} others',
-              key: const Key('membership-overflow'),
-              style: style?.copyWith(
-                decoration: TextDecoration.underline,
-                decorationStyle: TextDecorationStyle.dotted,
-              ),
-            ),
-          ),
+  return [
+    for (var index = 0; index < targets.length; index++) ...[
+      if (index > 0)
+        TextSpan(
+          text: index == targets.length - 1
+              ? (targets.length == 2 ? ' and ' : ', and ')
+              : ', ',
         ),
-      );
-  }
-
-  return spans;
+      _systemNameSpan(context, targets[index], channelId, resolveLabel),
+    ],
+  ];
 }
 
 class _ThreadSummaryRow extends ConsumerWidget {
