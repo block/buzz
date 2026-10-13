@@ -96,6 +96,8 @@ function markMachineOnboardingDone(pubkey: string) {
 
 /** Sign out / forget signer: stops signer sockets, wipes the stored NIP-46 session (IndexedDB) and public session info. */
 export function signOutSigner(): Promise<void> {
+  // Lets the relay HTTP layer revoke its read session (relaySession.ts) without an import cycle.
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("buzz-signout"));
   clearSignerCache();
   const done = forgetNip46(active);
   active = null;

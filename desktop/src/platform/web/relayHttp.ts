@@ -3,7 +3,8 @@
 import { relayFetchUrl } from "./relayProxy";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { getSigner } from "./signer";
+import { getSigner, signerPubkey } from "./signer";
+import { dropRelaySession, relaySessionAuth, revokeRelaySession } from "./relaySession";
 import type { SignPriority } from "./signer/types";
 import type { Filter, NostrEvent } from "./nostrTypes";
 import { relayHttpBase } from "./relayConfig";
@@ -75,11 +76,13 @@ async function post(path: string, body: unknown): Promise<unknown> {
   return p;
 }
 
-async function postOnce(path: string, body: unknown): Promise<unknown> {
+async function postOnce(path: string, body: unknown, noSession = false): Promise<unknown> {
   const url = `${relayHttpBase()}${path}`;
   const bytes = utf8(JSON.stringify(body));
   const prio: SignPriority = path === "/events" ? 0 : isPresenceRead(body) ? 3 : 1;
-  const auth = await nip98Header("POST", url, bytes, prio);
+  // Reads use the per-session bearer (one signature per session); writes and fallbacks sign NIP-98 per request.
+  const session = path === "/query" && !noSession ? await readSessionAuth() : null;
+  const auth = session ?? (await nip98Header("POST", url, bytes, prio));
   let res: Response;
     // Dev: same-origin /__relay proxy; production: the relay directly (or a CDN prefix). See relayProxy.ts. The NIP-98 `u`
   // tag above is still signed for the real relay URL.
@@ -99,6 +102,11 @@ async function postOnce(path: string, body: unknown): Promise<unknown> {
       `relay unreachable: could not connect to relay (${e instanceof Error ? e.message : e}; possible CORS block for ${location.origin})`,
     );
   }
+  if (session && res.status === 401) {
+    // Expired or revoked session: forget it and retry once (mints a new session, or falls back to NIP-98).
+    dropRelaySession(session);
+    return postOnce(path, body, true);
+  }
   if (!res.ok) {
     const msg = await relayError(res);
     console.error(`[relay-http] POST ${url} -> ${msg}`);
@@ -107,7 +115,30 @@ async function postOnce(path: string, body: unknown): Promise<unknown> {
   return res.json();
 }
 
-/** POST /query — one-shot filter query over HTTP (NIP-98 per request). */
+const SESSION_PATH = "/auth/session";
+
+/** Session bearer for HTTP reads, or null (no signer / relay without sessions) → per-request NIP-98. */
+function readSessionAuth(): Promise<string | null> {
+  const base = relayHttpBase();
+  return relaySessionAuth({
+    base,
+    pubkey: signerPubkey(),
+    mint: async () => {
+      const url = `${base}${SESSION_PATH}`;
+      const auth = await nip98Header("POST", url, new Uint8Array(), 1);
+      return fetch(relayFetchUrl(base, SESSION_PATH), { method: "POST", headers: { Authorization: auth } });
+    },
+  });
+}
+
+if (typeof window !== "undefined")
+  window.addEventListener("buzz-signout", () =>
+    revokeRelaySession((base, auth) =>
+      fetch(relayFetchUrl(base, SESSION_PATH), { method: "DELETE", headers: { Authorization: auth } }),
+    ),
+  );
+
+/** POST /query — one-shot filter query over HTTP (session bearer, or NIP-98 per request). */
 export async function queryRelayHttp(filters: Filter[]): Promise<NostrEvent[]> {
   return (await post("/query", filters)) as NostrEvent[];
 }
