@@ -696,6 +696,11 @@ pub async fn pin_webview_show(
     let builder = WebviewBuilder::new(label, WebviewUrl::External(initial_url))
         .data_directory(profile_dir.clone())
         .data_store_identifier(pin_data_store_identifier(&pin_id))
+        // Pinned sites stay live while you are elsewhere (forms, scroll,
+        // streaming sessions such as Amazon WorkSpaces). Throttling a
+        // background pin can drop those sessions, so it is disabled; the cost
+        // is CPU / bandwidth for pins left open (see MAX_LIVE_PARKED_PINS).
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .on_navigation(move |url| {
             if let Some(manager) = nav_app.try_state::<PinWebviewManager>() {
                 record_navigation(&nav_app, &manager, &nav_pin, url);

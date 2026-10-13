@@ -35,6 +35,20 @@ import {
   subscribePinnedSiteOpenUrl,
 } from "../lib/pendingPinOpen";
 import { PINNED_SITES_POLL_INTERVAL_MS } from "../lib/types";
+import { clearPinUnread } from "../lib/pinUnread";
+
+/**
+ * The start URL to hand a pin's webview: the tagged state when it belongs to
+ * this pin, otherwise the pin's own home URL. Never another pin's URL.
+ */
+export function resolvePinStartUrl(
+  state: { pinId: string; url: string },
+  pin: { id: string; url: string } | null,
+): string {
+  if (!pin) return "";
+  if (state.pinId === pin.id && state.url) return state.url;
+  return pin.url;
+}
 
 export function PinnedSiteScreen({ pinId }: { pinId: string }) {
   const pin = usePinnedSite(pinId);
@@ -55,16 +69,42 @@ export function PinnedSiteScreen({ pinId }: { pinId: string }) {
     };
   }, [location.state]);
   const Icon = pin ? getPinnedSiteIcon(pin.icon) : Compass;
+  // Viewing the pin clears its "pull for changes" unread mark.
+  React.useEffect(() => {
+    if (pin?.id) clearPinUnread(pin.id);
+  }, [pin?.id]);
   // Deep-link / markdown open into this pin: navigate webview to clicked URL.
   // consume peeks only (Strict Mode remount-safe). Clear after the surface
   // applies startUrl via showPinWebview. Subscribe for already-mounted re-opens.
   // Pending/navOpenUrl always win over sticky navClearsDeepLink + pin.url so a
   // queued full href is not clobbered back to pin home before router state lands.
-  const [startUrl, setStartUrl] = React.useState(() => {
-    if (!pin) return "";
-    return consumePinnedSiteOpenUrl(pin.id, "") || navOpenUrl || pin.url;
-  });
+  const [startUrlState, setStartUrlState] = React.useState<{
+    pinId: string;
+    url: string;
+  }>(() => ({
+    pinId: pin?.id ?? "",
+    url: pin
+      ? consumePinnedSiteOpenUrl(pin.id, "") || navOpenUrl || pin.url
+      : "",
+  }));
+  // startUrl is tagged with the pin it was computed for. A render where the
+  // pin changed but state has not caught up must never hand pin A's URL to
+  // pin B's webview (that loaded GitHub inside the OpenClaw pin).
+  const startUrl = resolvePinStartUrl(startUrlState, pin);
+  const setStartUrl = React.useCallback(
+    (next: string | ((prev: string) => string)) => {
+      setStartUrlState((prev) => {
+        const id = pinIdRef.current;
+        const prevUrl = prev.pinId === id ? prev.url : "";
+        const url = typeof next === "function" ? next(prevUrl) : next;
+        return { pinId: id, url };
+      });
+    },
+    [],
+  );
   const appliedPinIdRef = React.useRef<string | null>(pin?.id ?? null);
+  const pinIdRef = React.useRef(pin?.id ?? "");
+  pinIdRef.current = pin?.id ?? "";
 
   React.useLayoutEffect(() => {
     if (!pin) {
@@ -361,9 +401,10 @@ function PinnedSiteSurface({
     const timer = window.setInterval(() => {
       void pollPinWebview(pinId, startUrl)
         .then((result) => {
-          if (result.changed) {
-            void pinWebviewReload(pinId);
-          }
+          // Never reload: the live page (forms, scroll, login) must survive.
+          // While on screen the user sees changes directly; the poll only
+          // refreshes the baseline so the sidebar watcher does not re-flag.
+          void result;
         })
         .catch((error) => {
           console.warn("Pinned site poll failed", error);

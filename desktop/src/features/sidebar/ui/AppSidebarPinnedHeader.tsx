@@ -1,3 +1,4 @@
+import * as React from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -50,6 +51,14 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
+import { SidebarMenuBadge } from "@/shared/ui/sidebar";
+import {
+  clearPinUnread,
+  markPinUnread,
+  usePinUnread,
+} from "@/features/pinned-sites/lib/pinUnread";
+import { pollPinWebview } from "@/features/pinned-sites/lib/pinWebview";
+import { PINNED_SITES_POLL_INTERVAL_MS } from "@/features/pinned-sites/lib/types";
 import { ProtectedBestieSidebarEntry } from "@protected-feature-components";
 
 type AppSidebarPinnedHeaderProps = {
@@ -432,6 +441,25 @@ function PinnedSiteMenuItem({
   testId: string;
 }) {
   const Icon = getPinnedSiteIcon(pin.icon);
+  const unread = usePinUnread(pin.id);
+  // "Pull for changes": a cheap native HTTP check of the pin URL (ETag /
+  // Last-Modified / body hash). It never touches or reloads the live webview;
+  // a change while the pin is not on screen only shows an unread dot.
+  React.useEffect(() => {
+    if (isActive) {
+      clearPinUnread(pin.id);
+      return;
+    }
+    if (!pin.pollForChanges || !isTauri()) return;
+    const timer = window.setInterval(() => {
+      void pollPinWebview(pin.id, pin.url)
+        .then((result) => {
+          if (result.changed) markPinUnread(pin.id);
+        })
+        .catch(() => {});
+    }, PINNED_SITES_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [isActive, pin.id, pin.pollForChanges, pin.url]);
   return (
     <SidebarSurfaceTabMenu
       label={pin.name}
@@ -449,6 +477,14 @@ function PinnedSiteMenuItem({
           <Icon className="h-4 w-4" />
           <SidebarMenuLabel>{pin.name}</SidebarMenuLabel>
         </SidebarMenuButton>
+        {unread ? (
+          <SidebarMenuBadge
+            aria-label="New changes"
+            data-testid={`${testId}-unread`}
+          >
+            <span className="h-2 w-2 rounded-full bg-primary" />
+          </SidebarMenuBadge>
+        ) : null}
       </SidebarMenuItem>
     </SidebarSurfaceTabMenu>
   );
