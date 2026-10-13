@@ -3,6 +3,7 @@ import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronRight, Circle } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
+import { ParkNativeWebviewsWhileMounted } from "@/shared/ui/ParkNativeWebviewsWhileMounted";
 import {
   POPOVER_RADIX_MOTION_CLASS,
   POPOVER_RADIX_SIDE_MOTION_CLASS,
@@ -85,6 +86,8 @@ const DropdownMenuContent = React.forwardRef<
       style={{ ...POPOVER_SHADOW_STYLE, ...style }}
       {...props}
     />
+    {/* Native pin / playground webviews paint above HTML; park them while open. */}
+    <ParkNativeWebviewsWhileMounted />
   </DropdownMenuPrimitive.Portal>
 ));
 DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName;

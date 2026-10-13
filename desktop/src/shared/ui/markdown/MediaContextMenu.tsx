@@ -2,6 +2,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 
 import { cn } from "@/shared/lib/cn";
+import { ParkNativeWebviewsWhileMounted } from "@/shared/ui/ParkNativeWebviewsWhileMounted";
 import {
   POPOVER_CUSTOM_ENTER_MOTION_CLASS,
   POPOVER_SHADOW_STYLE,
@@ -83,6 +84,8 @@ export function MediaContextMenu({
   const itemClass =
     "flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground";
   return createPortal(
+    <>
+    <ParkNativeWebviewsWhileMounted />
     <div
       className={cn(
         "fixed z-[100] min-w-60 origin-top-left rounded-xl p-1 slide-in-from-top-1",
@@ -105,7 +108,8 @@ export function MediaContextMenu({
           {item.label}
         </button>
       ))}
-    </div>,
+    </div>
+    </>,
     portalContainer ?? document.body,
   );
 }

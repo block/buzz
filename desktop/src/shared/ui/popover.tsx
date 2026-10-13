@@ -7,6 +7,7 @@ import {
   type CardTextureTone,
   texturedSurfaceClasses,
 } from "@/shared/ui/card";
+import { ParkNativeWebviewsWhileMounted } from "@/shared/ui/ParkNativeWebviewsWhileMounted";
 import {
   POPOVER_RADIX_MOTION_CLASS,
   POPOVER_RADIX_SIDE_MOTION_CLASS,
@@ -77,7 +78,11 @@ const PopoverContent = React.forwardRef<
     );
 
     return portalled ? (
-      <PopoverPrimitive.Portal>{content}</PopoverPrimitive.Portal>
+      <PopoverPrimitive.Portal>
+        {content}
+        {/* Native pin / playground webviews paint above HTML; park while open. */}
+        <ParkNativeWebviewsWhileMounted />
+      </PopoverPrimitive.Portal>
     ) : (
       content
     );
