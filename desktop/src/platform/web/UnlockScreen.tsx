@@ -174,14 +174,28 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
           ? "Waiting for your signer…"
           : "Connect with bunker URL"}
       </button>
-      {busy === "connect" && (
-        <p
-          role="status"
-          style={{ ...note, color: WARN, fontSize: 15 }}
-          data-testid="web-unlock-finishing"
+      {(busy === "connect" || busy === "bunker") && (
+        <div
+          style={{ display: "grid", gap: 6 }}
+          data-testid="web-unlock-waiting"
         >
-          {resumed ? "Finishing sign-in…" : "Waiting for your signer…"}
-        </p>
+          {busy === "connect" && (
+            <p
+              role="status"
+              style={{ ...note, color: WARN, fontSize: 15 }}
+              data-testid="web-unlock-finishing"
+            >
+              {resumed ? "Finishing sign-in…" : "Waiting for your signer…"}
+            </p>
+          )}
+          {!resumed && (
+            <p style={note} data-testid="web-unlock-signer-perms-hint">
+              When your signer asks, choose full access (sometimes called
+              "Always allow" or "Trust this app") so HulaBuzz can sign messages
+              without asking each time.
+            </p>
+          )}
+        </div>
       )}
       <p style={note}>— or connect by scanning / opening a link —</p>
       {!uri && (
@@ -244,9 +258,9 @@ function Nip46Panel({ onDone }: { onDone: (pubkey: string) => void }) {
             onFocus={(e) => e.currentTarget.select()}
             data-testid="web-unlock-nostrconnect-uri"
           />
-          <p style={note}>
-            Approve in your signer app, then come back here. This page will
-            finish signing in on its own (valid 10 min).
+          <p style={note} data-testid="web-unlock-approve-hint">
+            Approve with full access in your signer, then come back here. This
+            page will finish signing in on its own (valid 10 min).
           </p>
           <button
             type="button"
