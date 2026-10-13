@@ -427,7 +427,7 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         _SystemActivityIcon(icon: icon),
         const SizedBox(width: Grid.xxs),

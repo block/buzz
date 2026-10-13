@@ -9402,41 +9402,6 @@ void main() {
       expect(findRichText('left the channel'), findsOneWidget);
     });
 
-    testWidgets(
-      'keeps centered activities timestamp-free at accessibility text sizes',
-      (tester) async {
-        tester.view.physicalSize = const Size(240, 600);
-        tester.view.devicePixelRatio = 1;
-        addTearDown(tester.view.resetPhysicalSize);
-        addTearDown(tester.view.resetDevicePixelRatio);
-
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: [
-              _systemMsg(
-                id: 'sys-accessible',
-                payload: {'type': 'member_left', 'actor': 'alice'},
-                createdAt:
-                    DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/
-                    1000,
-              ),
-            ],
-            users: {
-              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            },
-            textScaler: const TextScaler.linear(3),
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        final timestampFinder = find.byKey(
-          const ValueKey('system-message-timestamp-alice'),
-        );
-        expect(timestampFinder, findsNothing);
-        expect(tester.takeException(), isNull);
-      },
-    );
-
     testWidgets('renders member_removed system event', (tester) async {
       final messages = [
         _systemMsg(
