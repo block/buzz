@@ -279,7 +279,7 @@ async function ensurePushSubscribedInner(): Promise<boolean> {
   return true;
 }
 
-/** User-gesture path: ask permission, then subscribe. */
+/** User-gesture path: ask permission, then subscribe. Returns the post-prompt UI state. */
 export async function enablePushFromTap(): Promise<PushUiState> {
   if (
     typeof Notification !== "undefined" &&
@@ -287,8 +287,12 @@ export async function enablePushFromTap(): Promise<PushUiState> {
   ) {
     await Notification.requestPermission();
   }
-  const state = pushUiState();
-  if (state === "ready") await ensurePushSubscribed().catch(() => false);
+  // Re-read after the OS dialog — Notification.permission may have flipped.
+  let state = pushUiState();
+  if (state === "ready") {
+    await ensurePushSubscribed().catch(() => false);
+    state = pushUiState();
+  }
   return state;
 }
 
