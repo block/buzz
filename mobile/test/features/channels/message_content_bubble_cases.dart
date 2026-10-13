@@ -16,8 +16,12 @@ void bubbleContentTests() {
         ),
       );
       await tester.pumpAndSettle();
-      final decoration =
-          tester.widget<Container>(bubbles).decoration! as ShapeDecoration;
+      final decoration = tester.widget<LocalSendBubbleSurface>(
+        find.descendant(
+          of: bubbles,
+          matching: find.byType(LocalSendBubbleSurface),
+        ),
+      );
       final bounds = decoration.shape
           .getOuterPath(Offset.zero & tester.getSize(bubbles))
           .getBounds();
@@ -90,8 +94,12 @@ void bubbleContentTests() {
       await tester.pumpAndSettle();
       expect(bubbles, findsOneWidget);
       expect(tester.getSize(bubbles).width, lessThan(160));
-      final decoration =
-          tester.widget<Container>(bubbles).decoration! as ShapeDecoration;
+      final decoration = tester.widget<LocalSendBubbleSurface>(
+        find.descendant(
+          of: bubbles,
+          matching: find.byType(LocalSendBubbleSurface),
+        ),
+      );
       expect(decoration.color, isNotNull);
       expect(
         find.descendant(of: bubbles, matching: _findRich('Hello')),

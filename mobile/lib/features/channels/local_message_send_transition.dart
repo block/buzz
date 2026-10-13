@@ -65,13 +65,32 @@ class LocalMessageSendTransition extends HookWidget {
       builder: (context, child) => Transform.translate(
         offset: Offset(0, 24 * startOffsetFactor * (1 - easedAnimation.value)),
         transformHitTests: false,
-        child: Transform.scale(
-          scale: 0.96 + 0.04 * easedAnimation.value,
-          alignment: Alignment.bottomLeft,
-          transformHitTests: false,
-          child: child,
-        ),
+        child: LocalSendProgress(progress: easedAnimation.value, child: child!),
       ),
     );
   }
+}
+
+/// Shares the local entrance progress with bubble backgrounds beneath the row.
+class LocalSendProgress extends InheritedWidget {
+  /// Creates a progress scope for the message row.
+  const LocalSendProgress({
+    super.key,
+    required this.progress,
+    required super.child,
+  });
+
+  /// Entrance progress from zero (full width) to one (settled).
+  final double progress;
+
+  /// Returns settled progress for content outside a local-send transition.
+  static double of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<LocalSendProgress>()
+          ?.progress ??
+      1;
+
+  @override
+  bool updateShouldNotify(LocalSendProgress oldWidget) =>
+      progress != oldWidget.progress;
 }

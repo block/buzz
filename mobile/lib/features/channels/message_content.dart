@@ -30,6 +30,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/emoji_only.dart';
 import 'channels_provider.dart';
+import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
@@ -402,18 +403,10 @@ class MessageContent extends HookConsumerWidget {
                     child: renderMarkdown(segment.text),
                   )
                 else
-                  Container(
+                  Padding(
                     key: ValueKey('message-text-bubble-$index'),
-                    margin: const EdgeInsets.only(bottom: Grid.quarter),
-                    padding: EdgeInsets.fromLTRB(
-                      Grid.xs,
-                      Grid.xxs,
-                      Grid.xs,
-                      hasReactions && index == segments.length - 1
-                          ? Grid.xs
-                          : Grid.xxs,
-                    ),
-                    decoration: ShapeDecoration(
+                    padding: const EdgeInsets.only(bottom: Grid.quarter),
+                    child: LocalSendBubbleSurface(
                       color: ownMessage
                           ? (context.colors.brightness == Brightness.dark
                                 ? const Color(0xFFF2F2F2)
@@ -426,8 +419,18 @@ class MessageContent extends HookConsumerWidget {
                             trailingGallery == null &&
                             index == segments.length - 1,
                       ),
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          Grid.xs,
+                          Grid.xxs,
+                          Grid.xs,
+                          hasReactions && index == segments.length - 1
+                              ? Grid.xs
+                              : Grid.xxs,
+                        ),
+                        child: renderMarkdown(segment.text),
+                      ),
                     ),
-                    child: renderMarkdown(segment.text),
                   ),
             ],
           )
