@@ -141,6 +141,8 @@
 [data-phone] [data-testid="app-top-chrome"] [data-testid="phone-back"] {
   position: absolute;
   left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 /* The channel header is already pinned over the timeline; keep it inside the screen width. */
 [data-phone] [data-testid="chat-header"] {
@@ -218,31 +220,49 @@
   border-bottom: 1px solid hsl(var(--border));
   flex-shrink: 0;
 }
-/* Phone header back: a labeled pill button ("‹ Channels") instead of a bare arrow. */
+/* Phone back control (one pattern app-wide): iOS-style chevron + destination label in the theme accent, no fill or
+   border, so "go back" reads as navigation and never looks like a #channel chip, tab, or thread link. Compact 32px
+   control centered in the header with margin above/below; the invisible ::after keeps a 44px tap target. */
 [data-phone] .phone-back-button {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  min-height: 44px;
-  min-width: 44px;
+  gap: 1px;
+  height: 32px;
+  min-width: 32px;
   max-width: min(46vw, 220px);
-  padding: 0 12px 0 6px;
-  border-radius: 9999px;
-  border: 1px solid hsl(var(--border));
-  background: hsl(var(--muted) / 0.6);
-  color: hsl(var(--foreground));
+  margin: 0;
+  padding: 0 8px 0 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: hsl(var(--primary));
   font-size: 15px;
   font-weight: 500;
+  letter-spacing: -0.01em;
   line-height: 1;
   flex-shrink: 0;
   -webkit-tap-highlight-color: transparent;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+[data-phone] .phone-back-button::after {
+  content: "";
+  position: absolute;
+  inset: -6px -4px;
 }
 [data-phone] .phone-back-button:active {
-  background: hsl(var(--accent));
+  opacity: 0.55;
+  background: hsl(var(--primary) / 0.1);
+}
+[data-phone] .phone-back-button:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
 }
 [data-phone] .phone-back-button .phone-back-chevron {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
+  margin-right: -1px;
+  stroke-width: 2.25;
   flex-shrink: 0;
 }
 [data-phone] .phone-back-button .phone-back-label {
@@ -250,6 +270,35 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* In-page backs (reminder detail, inbox detail, project inbox, repo/link panels, channel browser): same accent chevron,
+   no outline box, so every back on phone looks the same. The arrow icon is swapped for the chevron via a mask. */
+[data-phone] button[aria-label^="Back"]:not(.phone-back-button) {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: hsl(var(--primary)) !important;
+}
+[data-phone] button[aria-label^="Back"]:not(.phone-back-button):active {
+  opacity: 0.55;
+}
+[data-phone] button[aria-label^="Back"]:not(.phone-back-button) svg.lucide-arrow-left {
+  display: none;
+}
+[data-phone] button[aria-label^="Back"]:not(.phone-back-button):has(svg.lucide-arrow-left)::before {
+  content: "";
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m15 18-6-6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m15 18-6-6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+/* An open thread's own back/close controls are redundant on phone: the header back ("‹ #general") closes it. */
+[data-phone] [data-testid="message-thread-back"],
+[data-phone] [data-testid="message-thread-panel"] [data-testid="auxiliary-panel-close"] {
+  display: none !important;
 }
 [data-phone] .phone-settings-scroll {
   flex: 1 1 auto;
@@ -462,4 +511,16 @@
 [data-phone] [data-new-reply="true"] {
   border-radius: 0.75rem;
   animation: buzz-new-reply-fade 4s ease-out 1 both;
+}
+/* Settings header: iOS layout, back on the left and the page title centered, so "‹ Settings" never reads as part of the title. */
+[data-phone] .phone-settings-header {
+  position: relative;
+}
+[data-phone] .phone-settings-header > h1 {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 2 * min(46vw, 150px));
+  text-align: center;
+  pointer-events: none;
 }

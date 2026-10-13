@@ -227,11 +227,25 @@ export function AppShell() {
     isPhone && !phoneHidesTabBar(location.pathname, phoneOverlay);
   const navigate = useNavigate();
   const isPhoneThread = location.pathname.includes("/posts/");
+  // A thread opened inside a channel (?thread=…) is its own phone screen: back closes it via the panel's own handler.
+  const isPhoneInlineThread =
+    !isPhoneThread &&
+    location.pathname.startsWith("/channels/") &&
+    Boolean((location.search as { thread?: unknown }).thread);
   const handlePhoneBack = React.useCallback(() => {
+    if (isPhoneInlineThread) {
+      const close = document.querySelector<HTMLElement>(
+        '[data-testid="message-thread-back"], [data-testid="message-thread-panel"] [data-testid="auxiliary-panel-close"]',
+      );
+      if (close) {
+        close.click();
+        return;
+      }
+    }
     if (isPhoneThread) goBack();
     else if (phoneTab === "me") setPhoneOverlay("me"); // Agents, Bots, Projects… return to the Me list
     else setPhoneOverlay("channels");
-  }, [goBack, isPhoneThread, phoneTab]);
+  }, [goBack, isPhoneInlineThread, isPhoneThread, phoneTab]);
   // Previous pathname, so phone back buttons can name where history-back lands.
   const phonePathRef = React.useRef<{ current: string; previous: string | null }>({
     current: location.pathname,
@@ -369,6 +383,9 @@ export function AppShell() {
       phonePreviousLabel && phonePreviousLabel !== "Thread" && phonePreviousPath !== location.pathname
         ? phonePreviousLabel
         : (channelLabel ?? "Back");
+  } else if (isPhoneInlineThread) {
+    const channelId = /^\/channels\/([^/?]+)/.exec(location.pathname)?.[1];
+    phoneBackLabel = (channelId ? phoneChannelLabel(decodeURIComponent(channelId)) : undefined) ?? "Channel";
   } else if (phoneTab === "me") phoneBackLabel = "Me";
   else phoneBackLabel = "Channels";
   setPhoneSettingsReturnLabel(settingsOpen ? (phonePreviousLabel ?? "Back") : null);
