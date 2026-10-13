@@ -3901,12 +3901,13 @@ void main() {
       },
     );
 
-    testWidgets('uses larger participant avatars in reply summaries', (
+    testWidgets('attaches replies after reactions with an eight pixel gap', (
       tester,
     ) async {
       await tester.pumpWidget(
         _buildTestable(
           messages: [
+            _reaction(id: 'reaction-root', targetId: 'root'),
             _textMsg(
               id: 'root',
               pubkey: 'alice',
@@ -3936,33 +3937,30 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        findRichText(
-          '2 replies · last reply '
-          '${formatThreadSummaryLastReplyTime(1200)}',
-        ),
-        findsOneWidget,
-      );
-      expect(find.byIcon(BuzzIcons.chevronRight), findsNothing);
-      final replyAvatars = find.byType(SmallAvatar);
-      expect(replyAvatars, findsNWidgets(2));
-      for (final avatar in replyAvatars.evaluate()) {
+      expect(find.text('2 replies'), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.messageSquareReply), findsNothing);
+      expect(find.byType(SmallAvatar), findsNWidgets(2));
+      for (final avatar in find.byType(SmallAvatar).evaluate()) {
         expect(
           tester.getSize(find.byWidget(avatar.widget)),
-          const Size.square(32),
+          const Size.square(20),
         );
       }
-      final summaryPadding = tester.widget<Padding>(
-        find.byKey(const ValueKey('thread-summary-root')),
-      );
+      final pill = find.byKey(const ValueKey('thread-summary-root'));
+      final tray = find.byKey(const ValueKey('combined-reaction-tray'));
+      expect(tester.getTopLeft(pill).dx - tester.getTopRight(tray).dx, 8);
       expect(
-        summaryPadding.padding,
-        const EdgeInsets.only(
-          left: messageAvatarSize + messageAvatarContentGap,
-          top: Grid.half,
-          bottom: Grid.xs,
-        ),
+        tester.getCenter(pill).dy,
+        closeTo(tester.getCenter(tray).dy, 0.1),
       );
+      final body = find.text('Thread head', findRichText: true);
+      expect(
+        tester.getTopLeft(pill).dy,
+        lessThan(tester.getBottomLeft(body).dy + 24),
+      );
+      await tester.tap(pill);
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
     });
 
     testWidgets('constrains reply summaries at accessibility text sizes', (
@@ -3984,7 +3982,7 @@ void main() {
               content: 'Thread head',
               createdAt: lastReplyAt - 300,
             ),
-            for (var i = 0; i < 3; i++)
+            for (var i = 0; i < 4; i++)
               _textMsg(
                 id: 'reply-$i',
                 pubkey: 'participant-$i',
@@ -4001,9 +3999,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final summaryText = tester.widget<RichText>(findRichText('3 replies'));
+      final summaryText = tester.widget<RichText>(findRichText('4 replies'));
       expect(summaryText.maxLines, 2);
       expect(summaryText.overflow, TextOverflow.ellipsis);
+      expect(find.byType(SmallAvatar), findsNWidgets(3));
       expect(tester.takeException(), isNull);
     });
 

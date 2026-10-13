@@ -150,8 +150,7 @@ class _ThreadMessage extends HookConsumerWidget {
             snapshotKey: messageSnapshotKey,
             child: Padding(
               padding: EdgeInsets.only(
-                top: showAuthor ? 0 : Grid.quarter,
-                bottom: Grid.quarter,
+                bottom: showAvatar ? Grid.quarter : Grid.quarter / 2,
               ),
               child: MessageFooterLayout(
                 animateSize: true,

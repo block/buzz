@@ -8,7 +8,9 @@ void bubbleContentTests() {
           'message-text-bubble-',
         ),
   );
-  testWidgets('only a group-ending bubble paints thought dots', (tester) async {
+  testWidgets('message shapes remain inside their bounds without tails', (
+    tester,
+  ) async {
     for (final tail in [false, true]) {
       await tester.pumpWidget(
         _testable(
@@ -25,9 +27,47 @@ void bubbleContentTests() {
       final bounds = decoration.shape
           .getOuterPath(Offset.zero & tester.getSize(bubbles))
           .getBounds();
-      expect(bounds.left, tail ? lessThan(0) : equals(0));
+      expect(bounds.left, 0);
+      expect(bounds.bottom, tester.getSize(bubbles).height);
     }
   });
+
+  for (final dark in [false, true]) {
+    testWidgets('outgoing mentions and links contrast in dark=$dark', (
+      tester,
+    ) async {
+      String? tapped;
+      await tester.pumpWidget(
+        _testable(
+          MessageContent(
+            content: '@Alice @Helper [Website](https://example.com)',
+            bubble: true,
+            ownMessage: true,
+            mentionNames: const {'person': 'Alice', 'agent': 'Helper'},
+            agentMentionPubkeys: const {'agent'},
+            onMentionTap: (pubkey) => tapped = pubkey,
+          ),
+          dark: dark,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final foreground = dark ? Colors.black : Colors.white;
+      for (final label in ['Alice', 'Helper']) {
+        expect(tester.widget<Text>(find.text(label)).style?.color, foreground);
+      }
+      expect(tester.widget<Icon>(find.byIcon(BuzzIcons.bot)).color, foreground);
+      final link = tester.widget<Text>(
+        find.byWidgetPredicate(
+          (w) => w is Text && w.textSpan?.toPlainText() == 'Website',
+        ),
+      );
+      expect(link.textSpan?.style?.color, foreground);
+      await tester.tap(find.text('Alice'));
+      expect(tapped, 'person');
+      await tester.tap(find.text('Helper'));
+      expect(tapped, 'agent');
+    });
+  }
 
   testWidgets('image corners follow the conversation group', (tester) async {
     for (final grouped in [false, true]) {
@@ -52,10 +92,7 @@ void bubbleContentTests() {
       final corners =
           (frame.decoration! as BoxDecoration).borderRadius! as BorderRadius;
       expect(corners.topLeft.x, grouped ? Radii.sm : Radii.container);
-      expect(
-        corners.bottomLeft.x,
-        grouped ? Radii.sm : (Radii.sm + Radii.container) / 2,
-      );
+      expect(corners.bottomLeft.x, grouped ? Radii.sm : Radii.container);
       expect(corners.topRight.x, Radii.container);
       expect(corners.bottomRight.x, Radii.container);
     }

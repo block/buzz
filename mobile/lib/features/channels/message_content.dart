@@ -428,7 +428,16 @@ class MessageContent extends HookConsumerWidget {
                               ? Grid.xs
                               : Grid.xxs,
                         ),
-                        child: renderMarkdown(segment.text),
+                        child: ownMessage
+                            ? Theme(
+                                data: Theme.of(context).copyWith(
+                                  colorScheme: context.colors.copyWith(
+                                    primary: ownTextColor,
+                                  ),
+                                ),
+                                child: renderMarkdown(segment.text),
+                              )
+                            : renderMarkdown(segment.text),
                       ),
                     ),
                   ),

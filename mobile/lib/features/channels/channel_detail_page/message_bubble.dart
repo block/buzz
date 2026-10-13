@@ -5,6 +5,7 @@ class _MessageBubble extends HookConsumerWidget {
   final bool showAuthor;
   final bool showAvatar;
   final bool hasReplies;
+  final Widget? replyFooter;
   final Map<String, String> channelNames;
   final String currentChannelId;
   final String? currentPubkey;
@@ -19,6 +20,7 @@ class _MessageBubble extends HookConsumerWidget {
     required this.showAuthor,
     this.showAvatar = true,
     required this.hasReplies,
+    this.replyFooter,
     required this.channelNames,
     required this.currentChannelId,
     required this.currentPubkey,
@@ -155,13 +157,14 @@ class _MessageBubble extends HookConsumerWidget {
                 ),
           child: Padding(
             padding: EdgeInsets.only(
-              top: showAuthor ? 0 : Grid.quarter,
-              bottom: Grid.quarter,
+              bottom: showAvatar ? Grid.quarter : Grid.quarter / 2,
             ),
             child: MessageFooterLayout(
               animateSize: true,
-              overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
-              footer: message.reactions.isNotEmpty
+              overlap: message.reactions.isNotEmpty || replyFooter != null
+                  ? Grid.xs
+                  : 0,
+              footer: message.reactions.isNotEmpty || replyFooter != null
                   ? Padding(
                       padding: const EdgeInsets.only(
                         left:
@@ -169,19 +172,32 @@ class _MessageBubble extends HookConsumerWidget {
                             messageAvatarContentGap +
                             Grid.xxs,
                       ),
-                      child: ReactionRow(
-                        combined: true,
-                        messageId: message.id,
-                        channelId: currentChannelId,
-                        reactions: message.reactions,
-                        onToggle: (emoji) =>
-                            toggleReaction(ref, message, emoji),
-                        showAddButton: isMember && !isArchived,
-                        onAddReaction: () => showAddReactionPicker(
-                          context: context,
-                          ref: ref,
-                          message: message,
-                        ),
+                      child: Wrap(
+                        spacing: Grid.xxs,
+                        runSpacing: Grid.half,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          if (message.reactions.isNotEmpty)
+                            ReactionRow(
+                              combined: true,
+                              messageId: message.id,
+                              channelId: currentChannelId,
+                              reactions: message.reactions,
+                              onToggle: (emoji) =>
+                                  toggleReaction(ref, message, emoji),
+                              showAddButton: isMember && !isArchived,
+                              onAddReaction: () => showAddReactionPicker(
+                                context: context,
+                                ref: ref,
+                                message: message,
+                              ),
+                            ),
+                          if (replyFooter != null)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: Grid.xxs),
+                              child: replyFooter,
+                            ),
+                        ],
                       ),
                     )
                   : const SizedBox.shrink(),
@@ -280,7 +296,9 @@ class _MessageBubble extends HookConsumerWidget {
                                 MessageContent(
                                   content: message.content,
                                   bubble: true,
-                                  hasReactions: message.reactions.isNotEmpty,
+                                  hasReactions:
+                                      message.reactions.isNotEmpty ||
+                                      replyFooter != null,
                                   bubbleEnd: showAvatar,
                                   bubbleStart: showAuthor,
                                   ownMessage:

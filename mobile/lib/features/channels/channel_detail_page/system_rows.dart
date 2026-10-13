@@ -529,8 +529,8 @@ class _ThreadSummaryRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final participants = summary.participantPubkeys.take(3).toList();
     final userCache = ref.watch(userCacheProvider);
-
     return GestureDetector(
       onTap: () {
         Navigator.of(context).push(
@@ -546,71 +546,59 @@ class _ThreadSummaryRow extends ConsumerWidget {
           ),
         );
       },
-      child: Padding(
-        key: ValueKey('thread-summary-${message.id}'),
-        padding: const EdgeInsets.only(
-          left: messageAvatarSize + messageAvatarContentGap,
-          top: Grid.half,
-          bottom: Grid.xs,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Stacked participant avatars.
-            SizedBox(
-              width: 32.0 + (summary.participantPubkeys.length - 1) * 20.0,
-              height: 32,
-              child: Stack(
-                children: [
-                  for (var i = 0; i < summary.participantPubkeys.length; i++)
-                    Positioned(
-                      left: i * 20.0,
-                      child: SmallAvatar(
-                        pubkey: summary.participantPubkeys[i],
-                        userCache: userCache,
-                        size: 32,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: Grid.xxs),
-            Flexible(
-              child: Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text: summary.isCountPending
-                          ? 'Replies'
-                          : '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
-                      style: replyPreviewTextStyle.copyWith(
-                        color: context.colors.primary,
-                      ),
-                    ),
-                    if (summary.lastReplyAt case final lastReplyAt?) ...[
-                      TextSpan(
-                        text: ' · ',
-                        style: replyPreviewTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant.withValues(
-                            alpha: 0.5,
+      child: Semantics(
+        button: true,
+        child: Container(
+          key: ValueKey('thread-summary-${message.id}'),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Grid.xxs + Grid.quarter,
+            vertical: Grid.half,
+          ),
+          decoration: BoxDecoration(
+            color: context.colors.secondaryContainer,
+            borderRadius: BorderRadius.circular(Radii.container),
+            border: Border.all(color: context.colors.surface, width: 2),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (participants.isNotEmpty) ...[
+                ExcludeSemantics(
+                  child: SizedBox(
+                    width:
+                        Grid.gutter + (participants.length - 1) * Grid.twelve,
+                    height: Grid.gutter,
+                    child: Stack(
+                      children: [
+                        for (var i = 0; i < participants.length; i++)
+                          Positioned(
+                            left: i * Grid.twelve,
+                            child: SmallAvatar(
+                              pubkey: participants[i],
+                              userCache: userCache,
+                              size: Grid.gutter,
+                            ),
                           ),
-                        ),
-                      ),
-                      TextSpan(
-                        text:
-                            'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
-                        style: replyPreviewTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ],
+                      ],
+                    ),
+                  ),
                 ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+                const SizedBox(width: Grid.half),
+              ],
+              Flexible(
+                child: Text(
+                  summary.isCountPending
+                      ? 'Replies'
+                      : '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onSurface,
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

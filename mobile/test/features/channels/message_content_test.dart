@@ -41,6 +41,7 @@ Widget _testable(
   Widget child, {
   List<Override> overrides = const [],
   bool disableAnimations = false,
+  bool dark = false,
   VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
@@ -51,7 +52,7 @@ Widget _testable(
       ...overrides,
     ],
     child: MaterialApp(
-      theme: AppTheme.light(),
+      theme: dark ? AppTheme.dark() : AppTheme.light(),
       // Use MaterialApp.builder so the MediaQuery override (including
       // disableAnimations) applies to every pushed route, not just the
       // home scaffold.  Navigator-pushed routes (e.g. MediaVideoViewerPage)

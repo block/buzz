@@ -145,6 +145,7 @@ class ReactionRow extends StatelessWidget {
       return Padding(
         padding: const EdgeInsets.only(bottom: Grid.xxs),
         child: Align(
+          widthFactor: 1,
           alignment: Alignment.centerLeft,
           child: Semantics(
             button: true,

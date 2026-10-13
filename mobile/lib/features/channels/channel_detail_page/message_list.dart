@@ -894,6 +894,17 @@ class _MessageList extends HookConsumerWidget {
                             showAuthor: showAuthor,
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
+                            replyFooter: entry.summary == null
+                                ? null
+                                : _ThreadSummaryRow(
+                                    summary: entry.summary!,
+                                    message: message,
+                                    allMessages: allMessages,
+                                    channelId: channelId,
+                                    currentPubkey: currentPubkey,
+                                    isMember: isMember,
+                                    isArchived: isArchived,
+                                  ),
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,
                             currentPubkey: currentPubkey,
@@ -903,16 +914,6 @@ class _MessageList extends HookConsumerWidget {
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,
                           ),
-                          if (entry.summary != null)
-                            _ThreadSummaryRow(
-                              summary: entry.summary!,
-                              message: message,
-                              allMessages: allMessages,
-                              channelId: channelId,
-                              currentPubkey: currentPubkey,
-                              isMember: isMember,
-                              isArchived: isArchived,
-                            ),
                         ],
                       ],
                     ),

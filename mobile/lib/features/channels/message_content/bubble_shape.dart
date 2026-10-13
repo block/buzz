@@ -1,6 +1,6 @@
 part of '../message_content.dart';
 
-/// Connected-looking corners with a two-circle thought detail at the group end.
+/// Grouped message corners without a tail.
 class _MessageBubbleShape extends ShapeBorder {
   const _MessageBubbleShape({required this.start, required this.end});
 
@@ -25,28 +25,11 @@ class _MessageBubbleShape extends ShapeBorder {
           rect,
           topLeft: start ? round : joined,
           topRight: round,
-          bottomLeft: end
-              ? const Radius.circular((Radii.sm + Radii.container) / 2)
-              : joined,
+          bottomLeft: end ? round : joined,
           bottomRight: round,
         ),
       );
-    if (!end) return body;
-    // The larger circle overlaps the body; the little one sits in the avatar
-    // gutter with a small gap. Union avoids seams in translucent fills.
-    final attached = Path()
-      ..addOval(
-        Rect.fromCircle(
-          center: Offset(rect.left + Grid.half, rect.bottom - Grid.xxs),
-          radius: Grid.xxs,
-        ),
-      );
-    return Path.combine(PathOperation.union, body, attached)..addOval(
-      Rect.fromCircle(
-        center: Offset(rect.left - Grid.xxs, rect.bottom + Grid.quarter),
-        radius: Grid.quarter + 1,
-      ),
-    );
+    return body;
   }
 
   @override
@@ -61,8 +44,6 @@ BorderRadius _attachmentCorners({required bool start, required bool end}) =>
     BorderRadius.only(
       topLeft: Radius.circular(start ? Radii.container : Radii.sm),
       topRight: const Radius.circular(Radii.container),
-      bottomLeft: Radius.circular(
-        end ? (Radii.sm + Radii.container) / 2 : Radii.sm,
-      ),
+      bottomLeft: Radius.circular(end ? Radii.container : Radii.sm),
       bottomRight: const Radius.circular(Radii.container),
     );
