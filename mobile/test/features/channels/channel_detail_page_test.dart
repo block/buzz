@@ -44,6 +44,7 @@ import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
+import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/message_content.dart';
@@ -220,6 +221,9 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  ProfileNotifier? profileNotifier,
+  String? signingPubkey,
+  bool darkTheme = false,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
   List<TypingEntry> typing = const [],
@@ -295,7 +299,11 @@ Widget _buildTestable({
       userCacheProvider.overrideWith(
         () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
       ),
-      profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      profileProvider.overrideWith(
+        () => profileNotifier ?? _FakeProfileNotifier(),
+      ),
+      if (signingPubkey != null)
+        myPubkeyProvider.overrideWithValue(signingPubkey),
       if (presenceCache != null)
         presenceCacheProvider.overrideWith(() => presenceCache),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
@@ -405,7 +413,7 @@ Widget _buildTestable({
     ],
     child: MaterialApp(
       navigatorKey: navigatorKey,
-      theme: AppTheme.light(),
+      theme: darkTheme ? AppTheme.dark() : AppTheme.light(),
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(
           textScaler: textScaler,
@@ -5102,6 +5110,87 @@ void main() {
         findsNothing,
       );
     });
+
+    for (final dark in [false, true]) {
+      for (final thread in [false, true]) {
+        testWidgets(
+          'own bubble colors survive profile reloads dark=$dark thread=$thread',
+          (tester) async {
+            final events = [
+              _textMsg(
+                id: 'own-color',
+                pubkey: 'self',
+                content: 'My message',
+                createdAt: 2000,
+              ),
+              _textMsg(
+                id: 'other-color',
+                pubkey: 'other',
+                content: 'Their message',
+                createdAt: 2001,
+              ),
+            ];
+            final profile = _MutableColorProfileNotifier();
+            final timeline = formatTimeline(events, currentPubkey: 'self');
+            await tester.pumpWidget(
+              _buildTestable(
+                messages: events,
+                profileNotifier: profile,
+                signingPubkey: 'SELF',
+                darkTheme: dark,
+                home: thread
+                    ? ThreadDetailPage(
+                        threadHead: timeline.first,
+                        allMessages: timeline,
+                        channelId: _channelId,
+                        currentPubkey: null,
+                        isMember: true,
+                        isArchived: false,
+                      )
+                    : null,
+              ),
+            );
+            await tester.pumpAndSettle();
+            Color ownColor() => tester
+                .widget<LocalSendBubbleSurface>(
+                  find
+                      .descendant(
+                        of: find
+                            .ancestor(
+                              of: findRichText('My message'),
+                              matching: find.byType(MessageContent),
+                            )
+                            .first,
+                        matching: find.byType(LocalSendBubbleSurface),
+                      )
+                      .first,
+                )
+                .color;
+            final container = ProviderScope.containerOf(
+              tester.element(find.byType(MessageContent).first),
+            );
+            final subscription = container.listen(profileProvider, (_, _) {});
+            addTearDown(subscription.close);
+            final expected = dark ? const Color(0xFFF2F2F2) : Colors.black;
+            expect(ownColor(), expected);
+            for (final state in <AsyncValue<UserProfile?>>[
+              const AsyncLoading(),
+              AsyncError(StateError('Profile unavailable'), StackTrace.current),
+              const AsyncData(null),
+              const AsyncData(
+                UserProfile(pubkey: 'other', displayName: 'Stale profile'),
+              ),
+              const AsyncData(UserProfile(pubkey: 'self', displayName: 'Self')),
+            ]) {
+              profile.setProfileState(state);
+              await tester.pump();
+              expect(ownColor(), expected);
+            }
+            await tester.pumpAndSettle();
+          },
+        );
+      }
+    }
 
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       for (final multiline in [false, true]) {
@@ -16508,4 +16597,11 @@ String _previewRowAvatarInitial(WidgetTester tester, String pubkey) {
     find.descendant(of: avatar, matching: find.byType(Text)),
   );
   return initial.data!;
+}
+
+class _MutableColorProfileNotifier extends ProfileNotifier {
+  @override
+  Future<UserProfile?> build() => SynchronousFuture(null);
+
+  void setProfileState(AsyncValue<UserProfile?> value) => state = value;
 }

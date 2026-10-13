@@ -27,6 +27,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
+import 'channel_management_provider.dart' show currentPubkeyProvider;
 import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
@@ -106,6 +107,10 @@ class ThreadDetailPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // A route can open before profile metadata arrives. Follow the active
+    // signing identity instead of freezing that incomplete route snapshot.
+    final currentPubkey =
+        ref.watch(currentPubkeyProvider) ?? this.currentPubkey;
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
@@ -716,7 +721,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         .where(
           (e) =>
               currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey?.toLowerCase(),
+              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
         )
         .toList();
 

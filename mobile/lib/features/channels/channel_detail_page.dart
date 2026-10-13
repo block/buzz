@@ -34,7 +34,6 @@ import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../profile/presence_cache_provider.dart';
-import '../profile/profile_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
@@ -323,10 +322,8 @@ class ChannelDetailPage extends HookConsumerWidget {
         initialOldestOrdinaryUnreadMessageIdRef.value;
     final initialForcedUnreadMessageIds =
         initialForcedUnreadMessageIdsRef.value;
-    final currentPubkey = ref
-        .watch(profileProvider)
-        .whenData((value) => value?.pubkey)
-        .value;
+    // Ownership comes from the signing identity, not reloadable profile metadata.
+    final currentPubkey = ref.watch(currentPubkeyProvider);
     // Only show channel-level typing (exclude thread-scoped entries and self).
     final typingEntries = ref
         .watch(channelTypingProvider(channel.id))
