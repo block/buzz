@@ -393,6 +393,43 @@ async fn replace_parameterized_event_in_transaction_impl(
     ))
 }
 
+/// Newest live addressable event for a (community, kind, pubkey) inside one channel.
+///
+/// Every predicate column is an equality or `IS NULL` test so the statement is
+/// bounded by `idx_events_addressable` (community_id, kind, pubkey, channel_id,
+/// deleted_at) with all five columns in the index condition.
+/// `channel_id IS NOT DISTINCT FROM $4` is not index-sargable: it defeated that
+/// index and walked the whole (community, kind) pile newest-first (TT-171).
+pub(crate) const LATEST_LIVE_ADDRESSABLE_IN_CHANNEL_SQL: &str =
+    "SELECT created_at, id FROM events \
+     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+     AND channel_id = $4 \
+     AND deleted_at IS NULL \
+     ORDER BY created_at DESC, id ASC LIMIT 1";
+
+/// Channel-less counterpart of [`LATEST_LIVE_ADDRESSABLE_IN_CHANNEL_SQL`].
+/// `IS NULL` is sargable on a btree column, so the same index serves it.
+pub(crate) const LATEST_LIVE_ADDRESSABLE_GLOBAL_SQL: &str = "SELECT created_at, id FROM events \
+     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+     AND channel_id IS NULL \
+     AND deleted_at IS NULL \
+     ORDER BY created_at DESC, id ASC LIMIT 1";
+
+/// Soft-delete every live addressable row the incoming event supersedes
+/// (channel-scoped form). Same predicate shape as the lookup for the same reason.
+pub(crate) const SOFT_DELETE_LIVE_ADDRESSABLE_IN_CHANNEL_SQL: &str =
+    "UPDATE events SET deleted_at = NOW() \
+     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+     AND channel_id = $4 \
+     AND deleted_at IS NULL";
+
+/// Channel-less counterpart of [`SOFT_DELETE_LIVE_ADDRESSABLE_IN_CHANNEL_SQL`].
+pub(crate) const SOFT_DELETE_LIVE_ADDRESSABLE_GLOBAL_SQL: &str =
+    "UPDATE events SET deleted_at = NOW() \
+     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+     AND channel_id IS NULL \
+     AND deleted_at IS NULL";
+
 impl Db {
     /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
     /// and NIP-29 discovery state (39000–39002, called from side_effects.rs).
@@ -447,20 +484,32 @@ impl Db {
 
                 // Check for the newest existing event. ORDER BY + LIMIT 1 is defensive against
                 // historical data where prior bugs may have left multiple live rows.
+                //
+                // The channel predicate is spelled as `channel_id = $4` or
+                // `channel_id IS NULL`, never `IS NOT DISTINCT FROM`: the latter is
+                // not index-sargable, so for a brand-new channel the planner walked
+                // every (community, kind) row newest-first looking for a match
+                // (TT-171: 20-85s per kind on a 1.7M-row pile).
                 let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> =
-                    sqlx::query_as(
-                        "SELECT created_at, id FROM events \
-                         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-                         AND channel_id IS NOT DISTINCT FROM $4 \
-                         AND deleted_at IS NULL \
-                         ORDER BY created_at DESC, id ASC LIMIT 1",
-                    )
-                    .bind(community_id.as_uuid())
-                    .bind(kind_i32)
-                    .bind(pubkey_bytes.as_slice())
-                    .bind(channel_id)
-                    .fetch_optional(tx.conn())
-                    .await?;
+                    match channel_id {
+                        Some(channel_id) => {
+                            sqlx::query_as(LATEST_LIVE_ADDRESSABLE_IN_CHANNEL_SQL)
+                                .bind(community_id.as_uuid())
+                                .bind(kind_i32)
+                                .bind(pubkey_bytes.as_slice())
+                                .bind(channel_id)
+                                .fetch_optional(tx.conn())
+                                .await?
+                        }
+                        None => {
+                            sqlx::query_as(LATEST_LIVE_ADDRESSABLE_GLOBAL_SQL)
+                                .bind(community_id.as_uuid())
+                                .bind(kind_i32)
+                                .bind(pubkey_bytes.as_slice())
+                                .fetch_optional(tx.conn())
+                                .await?
+                        }
+                    };
 
                 // Stale-write protection: reject if incoming is not newer.
                 // NIP-16: created_at is second-resolution. On same-second tie, lowest
@@ -485,19 +534,27 @@ impl Db {
                     }
                 }
 
-                // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
-                sqlx::query(
-                    "UPDATE events SET deleted_at = NOW() \
-                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-                     AND channel_id IS NOT DISTINCT FROM $4 \
-                     AND deleted_at IS NULL",
-                )
-                .bind(community_id.as_uuid())
-                .bind(kind_i32)
-                .bind(pubkey_bytes.as_slice())
-                .bind(channel_id)
-                .execute(tx.conn())
-                .await?;
+                // Soft-delete the old event (if any). Same sargable predicate split as
+                // the lookup above so the UPDATE walks the index, not the pile.
+                match channel_id {
+                    Some(channel_id) => {
+                        sqlx::query(SOFT_DELETE_LIVE_ADDRESSABLE_IN_CHANNEL_SQL)
+                            .bind(community_id.as_uuid())
+                            .bind(kind_i32)
+                            .bind(pubkey_bytes.as_slice())
+                            .bind(channel_id)
+                            .execute(tx.conn())
+                            .await?;
+                    }
+                    None => {
+                        sqlx::query(SOFT_DELETE_LIVE_ADDRESSABLE_GLOBAL_SQL)
+                            .bind(community_id.as_uuid())
+                            .bind(kind_i32)
+                            .bind(pubkey_bytes.as_slice())
+                            .execute(tx.conn())
+                            .await?;
+                    }
+                }
 
                 // Insert the new event inside the same transaction.
                 let sig_bytes = event.sig.serialize();
@@ -2380,5 +2437,254 @@ mod postgres_tests {
             vec![(new_id, false)],
             "the racing head is spared and no soft-deleted read-state row remains"
         );
+    }
+
+    /// Seed `rows` live kind-39000 rows and `rows` soft-deleted ones for one
+    /// (community, pubkey) in `pile_channel`, all inside one month partition.
+    /// This is the TT-171 shape: a big pile of discovery history for one relay
+    /// pubkey that a brand-new channel's lookup must not have to walk.
+    async fn seed_addressable_pile(
+        pool: &PgPool,
+        community: Uuid,
+        pubkey: &[u8],
+        pile_channel: Uuid,
+        rows: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, deleted_at) \
+             SELECT $1, decode(md5(g::text || 'live'), 'hex') || decode(md5(g::text || 'l2'), 'hex'), $2, \
+                    TIMESTAMPTZ '2026-03-01' + (g || ' seconds')::interval, 39000, '[]'::jsonb, '', \
+                    decode(repeat('00', 64), 'hex'), $3, NULL \
+             FROM generate_series(1, $4) AS g",
+        )
+        .bind(community)
+        .bind(pubkey)
+        .bind(pile_channel)
+        .bind(rows)
+        .execute(pool)
+        .await
+        .expect("seed live pile");
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, deleted_at) \
+             SELECT $1, decode(md5(g::text || 'dead'), 'hex') || decode(md5(g::text || 'd2'), 'hex'), $2, \
+                    TIMESTAMPTZ '2026-03-01' + (g || ' seconds')::interval, 39000, '[]'::jsonb, '', \
+                    decode(repeat('00', 64), 'hex'), $3, NOW() \
+             FROM generate_series(1, $4) AS g",
+        )
+        .bind(community)
+        .bind(pubkey)
+        .bind(pile_channel)
+        .bind(rows)
+        .execute(pool)
+        .await
+        .expect("seed soft-deleted pile");
+        sqlx::query("ANALYZE events")
+            .execute(pool)
+            .await
+            .expect("analyze");
+    }
+
+    /// TT-171: the replacement lookup and soft-delete must be bounded by the
+    /// (community, kind, pubkey, channel) index condition instead of walking
+    /// every (community, kind) row newest-first. Asserted with EXPLAIN against
+    /// a seeded pile where the target channel has no match (the channel-create
+    /// case) for both the channel-scoped and the channel-less statement forms.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn addressable_replacement_statements_are_index_bounded_by_channel() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "tt171_plan").await;
+        let community = Uuid::new_v4();
+        let pile_channel = Uuid::new_v4();
+        let new_channel = Uuid::new_v4();
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_bytes();
+        seed_community_channel(&pool, community, pile_channel, &keys).await;
+        seed_addressable_pile(&pool, community, &pubkey, pile_channel, 5_000).await;
+
+        let plan_text = |pool: PgPool, sql: String, channel: Option<Uuid>| async move {
+            let explain_sql = format!("EXPLAIN (FORMAT TEXT) {sql}");
+            let mut query = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(explain_sql))
+                .bind(community)
+                .bind(39000_i32)
+                .bind(pubkey.as_slice());
+            if let Some(channel) = channel {
+                query = query.bind(channel);
+            }
+            query.fetch_all(&pool).await.expect("explain").join("\n")
+        };
+
+        for (label, sql, channel) in [
+            (
+                "select in channel",
+                LATEST_LIVE_ADDRESSABLE_IN_CHANNEL_SQL,
+                Some(new_channel),
+            ),
+            ("select global", LATEST_LIVE_ADDRESSABLE_GLOBAL_SQL, None),
+            (
+                "update in channel",
+                SOFT_DELETE_LIVE_ADDRESSABLE_IN_CHANNEL_SQL,
+                Some(new_channel),
+            ),
+            (
+                "update global",
+                SOFT_DELETE_LIVE_ADDRESSABLE_GLOBAL_SQL,
+                None,
+            ),
+        ] {
+            let plan = plan_text(pool.clone(), sql.to_owned(), channel).await;
+            eprintln!("{label} plan:\n{plan}");
+            // The seeded partition must be served by an index whose condition
+            // includes the channel predicate, so the walk is bounded by
+            // (community, kind, pubkey, channel) and not by (community, kind).
+            let seeded = plan
+                .lines()
+                .skip_while(|line| !(line.contains("Scan") && line.contains("on events_p2026_03")))
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                seeded.contains("Index Scan using") || seeded.contains("Index Only Scan using"),
+                "{label}: seeded partition must be index-served:\n{plan}"
+            );
+            let channel_cond = match channel {
+                Some(_) => "(channel_id = ",
+                None => "(channel_id IS NULL)",
+            };
+            assert!(
+                seeded.contains("Index Cond:") && seeded.contains(channel_cond),
+                "{label}: channel predicate must be part of the index condition:\n{plan}"
+            );
+            assert!(
+                !plan.contains("Seq Scan on events_p2026_03")
+                    && !plan.contains("idx_events_community_kind_created"),
+                "{label}: plan must not walk the (community, kind) pile:\n{plan}"
+            );
+        }
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    /// The `IS NOT DISTINCT FROM` predicate was replaced by two statement
+    /// forms. They must keep the same semantics: a channel-scoped replacement
+    /// supersedes only rows of that channel, and a channel-less replacement
+    /// supersedes only channel-less rows, never the other way around.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn addressable_replacement_scopes_supersession_by_channel_form() {
+        use nostr::{EventBuilder, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "tt171_scope").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        let keys = nostr::Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel_a, &keys).await;
+        crate::channel::create_channel_with_id(
+            &pool,
+            CommunityId::from_uuid(community_uuid),
+            channel_b,
+            &format!("tt171-{channel_b}"),
+            crate::channel::ChannelType::Stream,
+            crate::channel::ChannelVisibility::Open,
+            None,
+            keys.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create second channel");
+        let community = CommunityId::from_uuid(community_uuid);
+        let base = Timestamp::now().as_secs();
+        let make = |content: &str, offset: u64| {
+            EventBuilder::new(Kind::Custom(39000), content)
+                .tags([Tag::parse(["d", content]).expect("d tag")])
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+
+        let a1 = make("a1", 0);
+        let b1 = make("b1", 0);
+        let g1 = make("g1", 0);
+        for (event, channel) in [(&a1, Some(channel_a)), (&b1, Some(channel_b)), (&g1, None)] {
+            assert!(
+                db.replace_addressable_event(community, event, channel)
+                    .await
+                    .expect("seed replaceable")
+                    .1
+            );
+        }
+
+        let live_ids = |pool: PgPool| async move {
+            let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+                "SELECT id FROM events WHERE community_id = $1 AND kind = 39000 AND deleted_at IS NULL",
+            )
+            .bind(community_uuid)
+            .fetch_all(&pool)
+            .await
+            .expect("live ids");
+            rows
+        };
+        let contains = |ids: &[Vec<u8>], event: &nostr::Event| {
+            ids.iter().any(|id| id.as_slice() == event.id.as_bytes())
+        };
+
+        // Channel-scoped replacement in A supersedes only A's row.
+        let a2 = make("a2", 1);
+        assert!(
+            db.replace_addressable_event(community, &a2, Some(channel_a))
+                .await
+                .expect("replace in channel A")
+                .1
+        );
+        let ids = live_ids(pool.clone()).await;
+        assert!(!contains(&ids, &a1) && contains(&ids, &a2));
+        assert!(
+            contains(&ids, &b1),
+            "channel B row must survive a channel A replacement"
+        );
+        assert!(
+            contains(&ids, &g1),
+            "channel-less row must survive a channel A replacement"
+        );
+
+        // Channel-less replacement supersedes only the channel-less row.
+        let g2 = make("g2", 1);
+        assert!(
+            db.replace_addressable_event(community, &g2, None)
+                .await
+                .expect("replace global")
+                .1
+        );
+        let ids = live_ids(pool.clone()).await;
+        assert!(!contains(&ids, &g1) && contains(&ids, &g2));
+        assert!(
+            contains(&ids, &a2) && contains(&ids, &b1),
+            "channel rows must survive a global replacement"
+        );
+
+        // Stale-write protection still keys on the same scope.
+        let a0 = make("a0", 0);
+        assert!(
+            !db.replace_addressable_event(community, &a0, Some(channel_a))
+                .await
+                .expect("stale write")
+                .1
+        );
+        let g_stale = make("g0", 0);
+        assert!(
+            !db.replace_addressable_event(community, &g_stale, None)
+                .await
+                .expect("stale global write")
+                .1
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 }
