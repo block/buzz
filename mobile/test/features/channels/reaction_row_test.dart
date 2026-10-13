@@ -157,6 +157,8 @@ void main() {
                       '🇺🇸',
                       '✅',
                       '🎥',
+                      '🎯',
+                      '🙌',
                     ])
                       _reaction(emoji: emoji),
                     TimelineReaction(
@@ -207,7 +209,15 @@ void main() {
               of: finder,
               matching: find.byType(Text),
             );
-            expect(tester.getCenter(paintedText).dy, closeTo(center, 0.01));
+            // This checks the device-calibrated optical correction, not the
+            // pixel bounds of the font (host rendering differs from iOS).
+            final opticalLift = defaultTargetPlatform == TargetPlatform.iOS
+                ? 2.0
+                : 0.0;
+            expect(
+              tester.getCenter(paintedText).dy,
+              closeTo(center - opticalLift, 0.01),
+            );
           }
           final customBox = find
               .ancestor(
@@ -217,7 +227,7 @@ void main() {
               .first;
           expect(tester.getSize(customBox), const Size.square(20));
           expect(tester.getCenter(customBox).dy, closeTo(center, 0.01));
-          expect(tester.getCenter(find.text('8')).dy, closeTo(center, 0.01));
+          expect(tester.getCenter(find.text('10')).dy, closeTo(center, 0.01));
           expect(tester.takeException(), isNull);
         },
         variant: TargetPlatformVariant({

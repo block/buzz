@@ -48,8 +48,6 @@ class NativeEmojiGlyph extends StatelessWidget {
       ),
     );
     if (defaultTargetPlatform == TargetPlatform.iOS && !centerInOpticalBox) {
-      // Fixed reaction boxes already center the emoji-font line. Keep the
-      // existing baseline correction only for inline glyphs.
       glyph = Transform.translate(offset: const Offset(0, -1), child: glyph);
     }
     final boxSize = opticalBoxSize;
@@ -58,9 +56,16 @@ class NativeEmojiGlyph extends StatelessWidget {
     // Emoji sequences have very different typographic advances. Constrain
     // them to the same square optical box so wide glyphs scale down around the
     // same center instead of appearing to lean toward one edge.
-    return SizedBox.square(
-      dimension: boxSize,
-      child: FittedBox(fit: BoxFit.scaleDown, child: glyph),
-    );
+    Widget fitted = FittedBox(fit: BoxFit.scaleDown, child: glyph);
+    if (defaultTargetPlatform == TargetPlatform.iOS && centerInOpticalBox) {
+      // Apple emoji artwork sits below its line-box center on the device.
+      // Apply the optical lift after fitting so wide sequences get the same
+      // correction as a single glyph; the surrounding box stays centered.
+      fitted = Transform.translate(
+        offset: Offset(0, -boxSize * 0.1),
+        child: fitted,
+      );
+    }
+    return SizedBox.square(dimension: boxSize, child: fitted);
   }
 }
