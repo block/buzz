@@ -33,6 +33,11 @@ export function buildSearchHitEvent(hit: SearchHit): RelayEvent {
 
 export function cacheSearchHitEvent(hit: SearchHit): RelayEvent {
   const event = buildSearchHitEvent(hit);
+  // A reply's synthetic event has no NIP-10 tags, so the route would treat it as a root and open the reply itself as an
+  // empty thread branch (push tap → "No replies in this branch yet"). Let the route fetch the real event instead.
+  if (hit.threadRootId && hit.threadRootId !== hit.eventId) {
+    return event;
+  }
   searchHitEventCache.set(event.id, event);
   trimCache();
   return event;
