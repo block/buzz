@@ -5103,6 +5103,81 @@ void main() {
       );
     });
 
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+      for (final multiline in [false, true]) {
+        testWidgets(
+          'group avatar stays fixed throughout a local send: $platform, multiline=$multiline',
+          (tester) async {
+            final previousPlatform = debugDefaultTargetPlatformOverride;
+            debugDefaultTargetPlatformOverride = platform;
+            try {
+              tester.view.physicalSize = const Size(400, 800);
+              tester.view.devicePixelRatio = 1;
+              addTearDown(tester.view.reset);
+              final initial = [
+                _textMsg(
+                  id: 'first',
+                  pubkey: 'self',
+                  content: 'First message',
+                  createdAt: 2000,
+                ),
+              ];
+              final notifier = _FakeMessagesNotifier(initial);
+              await tester.pumpWidget(
+                _buildTestable(
+                  messages: const [],
+                  messagesNotifier: notifier,
+                  users: const {
+                    'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+                  },
+                ),
+              );
+              await tester.pumpAndSettle();
+              Finder avatar(String id) => find.descendant(
+                of: find.byKey(ValueKey('message-row-$id')),
+                matching: find.byType(AvatarImage),
+              );
+              final before = tester.getRect(avatar('first'));
+              final container = ProviderScope.containerOf(
+                tester.element(find.byType(ChannelDetailPage)),
+              );
+              container
+                  .read(localMessageSendAnimationProvider(_channelId).notifier)
+                  .mark('second');
+              notifier.setMessages([
+                ...initial,
+                _textMsg(
+                  id: 'second',
+                  pubkey: 'self',
+                  content: multiline
+                      ? 'Second message\nwith more lines\nand more text'
+                      : 'Second message',
+                  createdAt: 2001,
+                ),
+              ]);
+              for (var frame = 0; frame < 32; frame++) {
+                await tester.pump(const Duration(milliseconds: 16));
+                final visibleAvatar = avatar('second').evaluate().isNotEmpty
+                    ? avatar('second')
+                    : avatar('first');
+                expect(visibleAvatar, findsOneWidget);
+                final current = tester.getRect(visibleAvatar);
+                expect(
+                  current.top,
+                  closeTo(before.top, 1),
+                  reason: 'avatar frame $frame',
+                );
+              }
+              await tester.pumpAndSettle();
+              expect(avatar('second'), findsOneWidget);
+            } finally {
+              debugDefaultTargetPlatformOverride = previousPlatform;
+            }
+          },
+        );
+      }
+    }
+
     testWidgets(
       'a same-second local send follows its inserted row when the tail ID stays unchanged',
       (tester) async {

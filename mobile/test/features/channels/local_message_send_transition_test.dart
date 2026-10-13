@@ -70,7 +70,7 @@ void main() {
     await tester.pumpWidget(_testable());
     final avatar = tester.getRect(find.byKey(const ValueKey('avatar')));
     final history = tester.getRect(find.byKey(const ValueKey('history')));
-    expect(tester.getSize(find.byType(LocalSendRow)).height, 0);
+    expect(tester.getSize(find.byType(LocalSendRow)).height, closeTo(0, 0.01));
     await tester.pump(localMessageSendTransitionDuration ~/ 2);
     expect(
       tester.getSize(find.byType(LocalSendRow)).height,
@@ -89,7 +89,7 @@ void main() {
     expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
     expect(
       tester.getTopLeft(find.byKey(const ValueKey('history'))).dy,
-      history.top - 80,
+      closeTo(history.top - 80, 0.01),
     );
   });
   testWidgets('contraction leads the overlapping lift and settles first', (

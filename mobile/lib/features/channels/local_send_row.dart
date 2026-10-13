@@ -33,8 +33,13 @@ class _RenderSendRow extends RenderProxyBox {
   @override
   void performLayout() {
     child?.layout(constraints, parentUsesSize: true);
+    // A zero-extent item can be culled by the indexed list before the lift
+    // begins, briefly removing its avatar. Keep it laid out from the first frame.
     size = constraints.constrain(
-      Size(child?.size.width ?? 0, (child?.size.height ?? 0) * progress),
+      Size(
+        child?.size.width ?? 0,
+        (child?.size.height ?? 0) * progress.clamp(0.0001, 1.0),
+      ),
     );
   }
 

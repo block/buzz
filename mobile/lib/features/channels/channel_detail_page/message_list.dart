@@ -348,7 +348,8 @@ class _MessageList extends HookConsumerWidget {
         if (latestNavigationTargetId.value != null) {
           itemScrollController.jumpTo(
             index: targetIndex,
-            alignment: latestAlignment(),
+            // Index zero already includes the composer padding.
+            alignment: targetIndex == 0 ? 0 : latestAlignment(),
           );
           return;
         }
