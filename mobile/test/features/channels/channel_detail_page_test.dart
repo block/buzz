@@ -663,7 +663,14 @@ void main() {
         await tester.pumpAndSettle();
 
         AvatarImage avatarIn(Finder row) => tester.widget<AvatarImage>(
-          find.descendant(of: row, matching: find.byType(AvatarImage)),
+          find.descendant(
+            of: row,
+            matching: find.byWidgetPredicate(
+              (widget) =>
+                  widget is AvatarImage &&
+                  widget.radius == messageAvatarSize / 2,
+            ),
+          ),
         );
         expect(
           avatarIn(
