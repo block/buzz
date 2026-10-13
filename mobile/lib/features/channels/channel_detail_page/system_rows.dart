@@ -224,11 +224,13 @@ class _MembershipDisplayEvent {
   final String? actorPubkey;
   final List<String> targetPubkeys;
   final bool isSelfJoin;
+  final bool isRemoval;
 
   const _MembershipDisplayEvent({
     required this.actorPubkey,
     required this.targetPubkeys,
     required this.isSelfJoin,
+    required this.isRemoval,
   });
 }
 
@@ -240,7 +242,8 @@ _MembershipDisplayEvent? _membershipDisplayEvent(
   final first = messages.first.systemEvent;
   final firstActor = first?.actorPubkey?.trim().toLowerCase();
   final firstTarget = first?.targetPubkey?.trim().toLowerCase();
-  if (first?.type != SystemEventType.memberJoined ||
+  if ((first?.type != SystemEventType.memberJoined &&
+          first?.type != SystemEventType.memberRemoved) ||
       firstActor == null ||
       firstActor.isEmpty ||
       firstTarget == null ||
@@ -248,20 +251,21 @@ _MembershipDisplayEvent? _membershipDisplayEvent(
     return null;
   }
 
-  final isSelfJoin = firstActor == firstTarget;
+  final isRemoval = first!.type == SystemEventType.memberRemoved;
+  final isSelfJoin = !isRemoval && firstActor == firstTarget;
   final targets = <String>[];
   for (final message in messages) {
     final event = message.systemEvent;
     final actor = event?.actorPubkey?.trim().toLowerCase();
     final target = event?.targetPubkey?.trim().toLowerCase();
-    if (event?.type != SystemEventType.memberJoined ||
+    if (event?.type != first.type ||
         actor == null ||
         actor.isEmpty ||
         target == null ||
         target.isEmpty ||
         (isSelfJoin
             ? actor != target
-            : actor != firstActor || actor == target)) {
+            : actor != firstActor || (!isRemoval && actor == target))) {
       return null;
     }
     targets.add(target);
@@ -269,8 +273,9 @@ _MembershipDisplayEvent? _membershipDisplayEvent(
 
   return _MembershipDisplayEvent(
     actorPubkey: isSelfJoin ? null : firstActor,
-    targetPubkeys: targets,
+    targetPubkeys: targets.toSet().toList(),
     isSelfJoin: isSelfJoin,
+    isRemoval: isRemoval,
   );
 }
 
@@ -332,16 +337,23 @@ class _MembershipSystemMessageContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final firstTarget = event.targetPubkeys.first;
-    final additionalTargets = event.targetPubkeys.skip(1).toList();
+    final additionalTargets = event.targetPubkeys.skip(1).take(1).toList();
+    final hiddenCount = event.targetPubkeys.length - 2;
     final actionSpans = <InlineSpan>[
-      TextSpan(text: event.isSelfJoin ? 'joined the channel' : 'added '),
+      TextSpan(
+        text: event.isSelfJoin
+            ? 'joined the channel'
+            : event.isRemoval
+            ? 'removed '
+            : 'added ',
+      ),
       if (!event.isSelfJoin)
         _systemNameSpan(context, firstTarget, channelId, resolveLabel),
       if (additionalTargets.isNotEmpty)
         TextSpan(
           text: event.isSelfJoin
               ? ' along with '
-              : additionalTargets.length == 1
+              : additionalTargets.length == 1 && hiddenCount <= 0
               ? ' and '
               : ', ',
         ),
@@ -351,7 +363,42 @@ class _MembershipSystemMessageContent extends StatelessWidget {
         channelId: channelId,
         resolveLabel: resolveLabel,
       ),
-      if (!event.isSelfJoin) const TextSpan(text: ' to the channel'),
+      if (hiddenCount > 0)
+        TextSpan(
+          text: ' and $hiddenCount ${hiddenCount == 1 ? 'other' : 'others'}',
+        ),
+      if (!event.isSelfJoin)
+        TextSpan(
+          text: event.isRemoval ? ' from the channel' : ' to the channel',
+        ),
+      if (hiddenCount > 0) ...[
+        const TextSpan(text: '. '),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: Semantics(
+            button: true,
+            child: GestureDetector(
+              onTap: () => showBuzzModalBottomSheet<void>(
+                context: context,
+                title: event.isRemoval ? 'Removed members' : 'Added members',
+                isScrollControlled: true,
+                showDragHandle: true,
+                builder: (_) => _ActivityMembersSheet(
+                  pubkeys: event.targetPubkeys,
+                  channelId: channelId,
+                ),
+              ),
+              child: Text(
+                'See all',
+                style: _systemActionTextStyle(
+                  context,
+                )?.copyWith(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+        ),
+      ],
     ];
 
     return _MessageStyleSystemMessageContent(

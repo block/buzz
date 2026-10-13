@@ -9226,84 +9226,122 @@ void main() {
       expect(effectiveFontSizeForText(addedText.text, 'added '), 14);
     });
 
-    testWidgets('groups member additions with regular-weight tappable names', (
-      tester,
-    ) async {
-      final messages = [
-        _systemMsg(
-          id: 'sys1',
-          payload: {'type': 'member_joined', 'actor': 'alice', 'target': 'bob'},
-          createdAt: 1000,
-        ),
-        _systemMsg(
-          id: 'sys2',
-          payload: {
-            'type': 'member_joined',
-            'actor': 'alice',
-            'target': 'carol',
-          },
-          createdAt: 1060,
-        ),
-        _systemMsg(
-          id: 'sys3',
-          payload: {
-            'type': 'member_joined',
-            'actor': 'alice',
-            'target': 'dave',
-          },
-          createdAt: 1120,
-        ),
-        _systemMsg(
-          id: 'sys4',
-          payload: {
-            'type': 'member_joined',
-            'actor': 'alice',
-            'target': 'erin',
-          },
-          createdAt: 1180,
-        ),
-        _systemMsg(
-          id: 'sys5',
-          payload: {
-            'type': 'member_joined',
-            'actor': 'alice',
-            'target': 'frank',
-          },
-          createdAt: 1240,
-        ),
-      ];
+    for (final removal in [false, true]) {
+      testWidgets(
+        'limits activity names and opens all members, removal=$removal',
+        (tester) async {
+          final messages = [
+            _systemMsg(
+              id: 'sys1',
+              payload: {
+                'type': removal ? 'member_removed' : 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+              createdAt: 1000,
+            ),
+            _systemMsg(
+              id: 'sys2',
+              payload: {
+                'type': removal ? 'member_removed' : 'member_joined',
+                'actor': 'alice',
+                'target': 'carol',
+              },
+              createdAt: 1060,
+            ),
+            _systemMsg(
+              id: 'sys3',
+              payload: {
+                'type': removal ? 'member_removed' : 'member_joined',
+                'actor': 'alice',
+                'target': 'dave',
+              },
+              createdAt: 1120,
+            ),
+            _systemMsg(
+              id: 'sys4',
+              payload: {
+                'type': removal ? 'member_removed' : 'member_joined',
+                'actor': 'alice',
+                'target': 'erin',
+              },
+              createdAt: 1180,
+            ),
+            _systemMsg(
+              id: 'sys5',
+              payload: {
+                'type': removal ? 'member_removed' : 'member_joined',
+                'actor': 'alice',
+                'target': 'frank',
+              },
+              createdAt: 1240,
+            ),
+          ];
 
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: messages,
-          users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
-            'carol': const UserProfile(pubkey: 'carol', displayName: 'Carol'),
-            'dave': const UserProfile(pubkey: 'dave', displayName: 'Dave'),
-            'erin': const UserProfile(pubkey: 'erin', displayName: 'Erin'),
-            'frank': const UserProfile(pubkey: 'frank', displayName: 'Frank'),
-          },
-        ),
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: messages,
+              users: {
+                'alice': const UserProfile(
+                  pubkey: 'alice',
+                  displayName: 'Alice',
+                ),
+                'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+                'carol': const UserProfile(
+                  pubkey: 'carol',
+                  displayName: 'Carol',
+                ),
+                'dave': const UserProfile(pubkey: 'dave', displayName: 'Dave'),
+                'erin': const UserProfile(pubkey: 'erin', displayName: 'Erin'),
+                'frank': const UserProfile(
+                  pubkey: 'frank',
+                  displayName: 'Frank',
+                ),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(find.text('Bob'), findsOneWidget);
+          for (final pubkey in ['alice', 'bob', 'carol']) {
+            final name = find.byKey(ValueKey('system-message-author-$pubkey'));
+            expect(name, findsOneWidget);
+            expect(
+              tester.widget<Text>(name).style?.fontWeight,
+              FontWeight.w400,
+            );
+          }
+          expect(find.text('Dave'), findsNothing);
+          expect(find.text('Erin'), findsNothing);
+          expect(find.text('Frank'), findsNothing);
+          expect(findRichText('and 3 others'), findsOneWidget);
+          expect(
+            tester.widget<Text>(find.text('See all')).style?.fontWeight,
+            FontWeight.w600,
+          );
+          await tester.tap(find.text('See all'));
+          await tester.pumpAndSettle();
+          expect(
+            find.text(removal ? 'Removed members' : 'Added members'),
+            findsOneWidget,
+          );
+          for (final pubkey in ['bob', 'carol', 'dave', 'erin', 'frank']) {
+            final tile = find.byKey(ValueKey('activity-member-$pubkey'));
+            await tester.ensureVisible(tile);
+            await tester.tap(tile);
+            await tester.pumpAndSettle();
+            expect(
+              tester
+                  .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+                  .pubkey,
+              pubkey,
+            );
+            await tester.tap(find.byTooltip('Close sheet').last);
+            await tester.pumpAndSettle();
+          }
+        },
       );
-      await tester.pumpAndSettle();
-
-      expect(find.text('Bob'), findsOneWidget);
-      expect(find.byKey(const Key('membership-overflow')), findsNothing);
-      for (final pubkey in ['alice', 'bob', 'carol', 'dave', 'erin', 'frank']) {
-        final name = find.byKey(ValueKey('system-message-author-$pubkey'));
-        expect(name, findsOneWidget);
-        expect(tester.widget<Text>(name).style?.fontWeight, FontWeight.w400);
-        await tester.tap(name);
-        await tester.pumpAndSettle();
-        expect(
-          tester.widget<UserProfileSheet>(find.byType(UserProfileSheet)).pubkey,
-          pubkey,
-        );
-        await tester.tap(find.byTooltip('Close sheet'));
-        await tester.pumpAndSettle();
-      }
-    });
+    }
 
     testWidgets('aligns grouped reactions with the system message content', (
       tester,

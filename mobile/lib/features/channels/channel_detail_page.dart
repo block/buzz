@@ -1,3 +1,5 @@
+import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'dart:async';
@@ -83,6 +85,7 @@ import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/system_rows.dart';
+part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
 part 'channel_detail_page/huddle_participant_cluster.dart';

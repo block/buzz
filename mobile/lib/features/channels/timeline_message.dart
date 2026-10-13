@@ -255,13 +255,20 @@ const _membershipGroupWindowSeconds = 5 * 60;
 class _MembershipChange {
   final String? actor;
   final bool isSelfJoin;
+  final SystemEventType type;
 
-  const _MembershipChange({required this.actor, required this.isSelfJoin});
+  const _MembershipChange({
+    required this.actor,
+    required this.isSelfJoin,
+    required this.type,
+  });
 }
 
 _MembershipChange? _membershipChange(MainTimelineEntry entry) {
   final event = entry.message.systemEvent;
-  if (!entry.message.isSystem || event?.type != SystemEventType.memberJoined) {
+  if (!entry.message.isSystem ||
+      (event?.type != SystemEventType.memberJoined &&
+          event?.type != SystemEventType.memberRemoved)) {
     return null;
   }
 
@@ -271,8 +278,10 @@ _MembershipChange? _membershipChange(MainTimelineEntry entry) {
     return null;
   }
 
-  final isSelfJoin = actor == target;
+  final isSelfJoin =
+      event!.type == SystemEventType.memberJoined && actor == target;
   return _MembershipChange(
+    type: event.type,
     actor: isSelfJoin ? null : actor,
     isSelfJoin: isSelfJoin,
   );
@@ -282,7 +291,8 @@ bool _membershipChangesCanGroup(
   _MembershipChange first,
   _MembershipChange second,
 ) {
-  return first.isSelfJoin == second.isSelfJoin &&
+  return first.type == second.type &&
+      first.isSelfJoin == second.isSelfJoin &&
       (first.isSelfJoin || first.actor == second.actor);
 }
 
@@ -294,10 +304,9 @@ bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
       first.day == second.day;
 }
 
-/// Groups consecutive membership arrivals using the same display rule as
-/// desktop: matching additions (or self-joins) within a fixed five-minute
-/// window become one render item. Other events and local day boundaries break
-/// the group.
+/// Groups consecutive matching additions, removals, or self-joins within a
+/// five-minute window into one render item. Other events and local day
+/// boundaries break the group.
 ///
 /// Each inner list is one renderable timeline item. Non-grouped entries are
 /// returned as single-item lists.
