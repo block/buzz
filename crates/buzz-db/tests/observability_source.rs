@@ -179,7 +179,19 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     let side_effects = include_str!("../../buzz-relay/src/handlers/side_effects.rs");
     assert!(side_effects.contains("query_events_for_event_write"));
     assert!(side_effects.contains("query_events_for_bootstrap"));
-    assert!(side_effects.contains(".list_channels_for_bootstrap("));
+    assert!(side_effects.contains(".channel_metadata_repair_page("));
+    let metadata_activation = include_str!("../src/store/channel_metadata/activation.rs");
+    let repair_page = metadata_activation
+        .split_once("pub async fn channel_metadata_repair_page(")
+        .expect("metadata repair must expose a paged bootstrap read")
+        .1
+        .split_once("pub async fn verify_channel_metadata_activation(")
+        .expect("repair paging must precede activation verification")
+        .0;
+    assert!(repair_page.contains("WriterOperation::Bootstrap"));
+    assert!(repair_page.contains("observability::acquire_writer("));
+    assert!(repair_page.contains("fetch_all(&mut *connection)"));
+    assert!(!repair_page.contains("fetch_all(&self.pool)"));
 
     let deletion = include_str!("../src/store/deletion.rs");
     let public_serving_catalog = deletion
@@ -601,6 +613,10 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
             "channel_members",
             include_str!("../src/store/channel_members.rs"),
         ),
+        (
+            "channel_member_snapshots",
+            include_str!("../src/store/channel_members/snapshot.rs"),
+        ),
         ("archived_identities", archived_identities),
         ("event", event),
         ("git_repo", include_str!("../src/store/git_repo.rs")),
@@ -706,14 +722,24 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         "parameterized replacements must include a tenant-local chokepoint call"
     );
 
-    let channel_members = include_str!("../src/store/channel_members.rs");
-    let snapshot_lock = channel_members
-        .split_once("pub async fn lock_member_snapshot(\n")
-        .expect("channel_members must expose lock_member_snapshot")
-        .1
-        .split_once("/// Add a member to a channel.")
-        .expect("snapshot lock path must precede member add path")
-        .0;
+    let snapshots = include_str!("../src/store/channel_members/snapshot.rs");
+    for entry in [
+        "pub async fn lock_member_snapshot(",
+        "pub async fn lock_admin_snapshot(",
+    ] {
+        let route = function_slices(snapshots)
+            .into_iter()
+            .find(|function| function_header(function).starts_with(entry))
+            .expect("discovery entry point must exist");
+        assert!(
+            route.contains("lock_snapshot("),
+            "{entry} must use the admitted constructor"
+        );
+    }
+    let snapshot_lock = function_slices(snapshots)
+        .into_iter()
+        .find(|function| function_header(function).starts_with("async fn lock_snapshot("))
+        .expect("shared snapshot constructor must exist");
     assert!(
         has_any_tenant_local_chokepoint(snapshot_lock),
         "snapshot publication locks must include a tenant-local chokepoint call"
@@ -921,8 +947,8 @@ const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 3] = [
 ];
 
 const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(
-    "pub async fn replace_member_event(",
-    "pub async fn lock_member_snapshot(",
+    "pub async fn replace_discovery_event(",
+    "async fn lock_snapshot(",
 )];
 
 fn production_contains_guarded_write(production_source: &str) -> bool {

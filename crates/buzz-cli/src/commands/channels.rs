@@ -1867,6 +1867,7 @@ pub async fn dispatch(
 ) -> Result<(), CliError> {
     use crate::ChannelsCmd;
     match cmd {
+        ChannelsCmd::Labels { command } => super::channel_labels::dispatch(command, client).await,
         ChannelsCmd::List {
             visibility,
             member,
@@ -1890,6 +1891,9 @@ pub async fn dispatch(
             ttl,
             template,
             templates_file,
+            labels,
+            command_file,
+            trusted_relay,
         } => {
             if let Some(template_name) = template {
                 cmd_create_channel_from_template(
@@ -1910,15 +1914,42 @@ pub async fn dispatch(
                     channel_type.ok_or_else(|| CliError::Usage("--type is required".into()))?;
                 let visibility =
                     visibility.ok_or_else(|| CliError::Usage("--visibility is required".into()))?;
-                cmd_create_channel(
-                    client,
-                    &name,
-                    &channel_type.to_string(),
-                    &visibility.to_string(),
-                    description.as_deref(),
-                    ttl,
-                )
-                .await
+                if let Some(path) = command_file {
+                    let channel = Uuid::new_v4();
+                    let builder = buzz_sdk::build_create_channel(
+                        channel,
+                        &name,
+                        Some(match visibility {
+                            crate::ChannelVisibility::Open => buzz_sdk::Visibility::Open,
+                            crate::ChannelVisibility::Private => buzz_sdk::Visibility::Private,
+                        }),
+                        Some(match channel_type {
+                            crate::ChannelType::Stream => buzz_sdk::ChannelKind::Stream,
+                            crate::ChannelType::Forum => buzz_sdk::ChannelKind::Forum,
+                        }),
+                        description.as_deref(),
+                        ttl.map(validate_ttl_seconds).transpose()?,
+                    )
+                    .map_err(|e| CliError::Usage(e.to_string()))?;
+                    super::channel_labels::create(
+                        client,
+                        builder,
+                        labels,
+                        &path,
+                        trusted_relay.as_deref(),
+                    )
+                    .await
+                } else {
+                    cmd_create_channel(
+                        client,
+                        &name,
+                        &channel_type.to_string(),
+                        &visibility.to_string(),
+                        description.as_deref(),
+                        ttl,
+                    )
+                    .await
+                }
             }
         }
         ChannelsCmd::Update {

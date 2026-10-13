@@ -906,6 +906,27 @@ impl BuzzClient {
         .await
     }
 
+    /// Fetch capability and identity only from the configured NIP-11 origin.
+    /// Redirects cannot retarget trust or a pending channel-label command.
+    pub(crate) async fn nip11_for_channel_labels(&self) -> Result<String, CliError> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
+            .build()?;
+        let response = http
+            .get(format!("{}/", self.relay_url))
+            .header("Accept", "application/nostr+json")
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(CliError::Other(format!(
+                "NIP-11 returned HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response.text().await?)
+    }
+
     /// Send a state-changing JSON command exactly once. Ambiguous delivery
     /// never invites an automatic re-run with a newly observed version.
     pub async fn post_json_once_authed(

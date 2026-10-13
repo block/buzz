@@ -12,6 +12,8 @@ pub mod archived_identities;
 pub mod channel;
 /// Channel membership and roster persistence.
 pub mod channel_members;
+/// Serialized channel metadata and NIP-CL application.
+pub mod channel_metadata;
 /// Community lifecycle and host-map persistence.
 pub mod community;
 /// Durable whole-community deletion lifecycle and PostgreSQL adapter.

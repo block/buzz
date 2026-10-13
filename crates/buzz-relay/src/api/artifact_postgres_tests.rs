@@ -387,6 +387,7 @@ async fn generic_d_lookup_matches_before_limit() {
     for filter in [
         json!([{"kinds":[45010],"#h":[f.home],"#d":[a],"limit":1}]),
         json!([{"kinds":[45010,45011],"#h":[f.home],"#d":[a],"limit":1}]),
+        json!([{"kinds":[45010,45011,39000],"#h":[f.home],"#d":[a],"limit":1}]),
         json!([{"#h":[f.home],"#p":[reader],"#d":[a],"limit":1}]),
     ] {
         let (status, body) = f.request_as(&f.peer, "/query", filter.clone()).await;

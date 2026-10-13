@@ -868,4 +868,102 @@ mod postgres_tests {
             "the sampler must be owned by a relay that finished booting: {logs}"
         );
     }
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn label_integrity_boot_tolerates_ordinary_updates_and_retiring_tenants_but_rejects_drift() {
+        let database_url = std::env::var("DATABASE_URL").unwrap();
+        let redis_url = std::env::var("REDIS_URL").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (db, community, channel) = runtime.block_on(async {
+            use buzz_core::channel::{ChannelType, ChannelVisibility};
+            let db = buzz_db::Db::new(&buzz_db::DbConfig {
+                database_url: database_url.clone(), ..Default::default()
+            }).await.unwrap();
+            let community = db.ensure_configured_community("label-restart.example").await.unwrap().id;
+            let channel = uuid::Uuid::new_v4();
+            let keys = nostr::Keys::parse(VALID_RELAY_PRIVATE_KEY).unwrap();
+            db.create_channel_with_id(community, channel, "restart", ChannelType::Stream,
+                ChannelVisibility::Open, None, keys.public_key().as_bytes(), None).await.unwrap();
+            sqlx::query("UPDATE channels SET labels=ARRAY['retained']::text[] WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid()).bind(channel).execute(db.pool()).await.unwrap();
+            let mut write = db.begin_channel_metadata_write(community, channel, keys.public_key()).await.unwrap();
+            let snapshot = nostr::EventBuilder::new(nostr::Kind::Custom(39000), "")
+                .tags(write.snapshot_tags().await.unwrap()).custom_created_at(write.snapshot_timestamp().unwrap())
+                .sign_with_keys(&keys).unwrap();
+            write.store_snapshot(&snapshot, 512 * 1024).await.unwrap();
+            write.commit().await.unwrap();
+            // Ordinary writers commit first. Simulate interruption before publication.
+            db.set_topic(community, channel, "unpublished", keys.public_key().as_bytes()).await.unwrap();
+            db.archive_channel(community, channel).await.unwrap();
+            // Routine restarts must not depend on another tenant finishing its
+            // deletion drain. Retained channel rows are not serving state.
+            for state in ["quiescing", "fenced", "tombstone"] {
+                let retiring = db.ensure_configured_community(&format!("{state}.example")).await.unwrap().id;
+                db.create_channel_with_id(retiring, channel, "retiring", ChannelType::Stream,
+                    ChannelVisibility::Open, None, keys.public_key().as_bytes(), None).await.unwrap();
+                let mut lifecycle = db.pool().begin().await.unwrap();
+                sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true), set_config('buzz.deletion_fence_generation', '0', true)")
+                    .bind(retiring.to_string()).execute(&mut *lifecycle).await.unwrap();
+                sqlx::query("UPDATE communities SET deletion_state=$2, deleted_at=CASE WHEN $2='tombstone' THEN now() END WHERE id=$1")
+                    .bind(retiring.as_uuid()).bind(state).execute(&mut *lifecycle).await.unwrap();
+                lifecycle.commit().await.unwrap();
+            }
+            (db, community, channel)
+        });
+        let metrics_port = reserve_closed_port();
+        let metrics_port_value = metrics_port.to_string();
+        let health_port_value = reserve_closed_port().to_string();
+        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+        let environment = [
+            ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+            ("BUZZ_NIP_CL_ENABLED", "true"),
+            ("BUZZ_NIP_CL_WRITER_CUTOVER", "offline-v1"),
+            ("RELAY_URL", "wss://label-restart.example"),
+            ("BUZZ_METRICS_PORT", &metrics_port_value),
+            ("BUZZ_HEALTH_PORT", &health_port_value),
+            ("BUZZ_BIND_ADDR", &bind_addr),
+            ("DATABASE_URL", &database_url),
+            ("REDIS_URL", &redis_url),
+            ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+        ];
+        let mut process = RelayProcess::spawn(&environment);
+        wait_for_scraped_metric(
+            &mut process,
+            metrics_port,
+            "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+        );
+        let output = process.terminate();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(logs.contains("Health probe listener started"), "{logs}");
+        assert!(
+            logs.contains("NIP-CL label-integrity startup audit passed"),
+            "{logs}"
+        );
+        runtime.block_on(async {
+            sqlx::query(
+                "UPDATE channels SET labels=ARRAY['drift']::text[] WHERE community_id=$1 AND id=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(channel)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        });
+        let output = run_relay(&environment);
+        assert!(!output.status.success());
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            logs.contains("NIP-CL activation requires metadata repair"),
+            "{logs}"
+        );
+        assert!(!logs.contains("Health probe listener started"), "{logs}");
+    }
 }

@@ -481,6 +481,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
+    // Fail closed before listeners/background publishers start. This audit proves
+    // local persisted compatibility, not that an old fleet has been fenced.
+    if config.nip_cl_enabled {
+        let checked = db
+            .verify_channel_metadata_activation(relay_keypair.public_key())
+            .await?;
+        info!(checked, "NIP-CL label-integrity startup audit passed");
+    }
+
     let partition_policy = buzz_db::partition::PartitionMaintenancePolicy {
         create_enabled: config.partition_manager_create_enabled,
         advance_enabled: config.partition_manager_advance_enabled,

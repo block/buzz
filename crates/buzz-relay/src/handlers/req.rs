@@ -111,9 +111,13 @@ pub async fn handle_req(
             .increment(1);
         Vec::new()
     } else {
-        match state
-            .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
-            .await
+        match accessible_channels_for_filters(
+            &state,
+            conn.tenant.community(),
+            &pubkey_bytes,
+            &filters,
+        )
+        .await
         {
             Ok(ids) => ids,
             Err(e) => {
@@ -411,6 +415,7 @@ pub async fn handle_req(
                 };
                 let mut params =
                     filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
+                apply_metadata_read_context(&mut params, filter, &pubkey_bytes, &state);
                 params.before_id = before_ids.get(idx).cloned().flatten();
                 apply_channel_scope_to_query(
                     &mut params,
@@ -911,18 +916,71 @@ async fn handle_search_req(
     conn.send(RelayMessage::eose(sub_id));
 }
 
+// Metadata-only COUNT can use the exact SQL path. Mixed-kind COUNT retains
+// its bounded fallback, even though metadata-capable reads push ordinary tags.
+fn filter_is_channel_metadata_only(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_some_and(|kinds| {
+        kinds.len() == 1
+            && kinds
+                .iter()
+                .all(|kind| kind.as_u16() as u32 == buzz_core::kind::KIND_NIP29_GROUP_METADATA)
+    })
+}
+
+// Metadata is mutable authorization-sensitive state, including in mixed/id reads.
+fn filter_can_match_channel_metadata(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_none_or(|kinds| {
+        kinds
+            .iter()
+            .any(|kind| kind.as_u16() as u32 == buzz_core::kind::KIND_NIP29_GROUP_METADATA)
+    })
+}
+
+fn apply_metadata_read_context(
+    query: &mut EventQuery,
+    filter: &Filter,
+    reader: &[u8],
+    state: &AppState,
+) {
+    if filter_can_match_channel_metadata(filter) {
+        query.channel_metadata_read = Some(buzz_db::event::ChannelMetadataRead {
+            reader: reader.to_vec(),
+            relay: state.relay_keypair.public_key().to_bytes().to_vec(),
+        });
+    }
+}
+
+/// Metadata discovery cannot lose newly accessible channels to a stale catalog.
+/// SQL independently rechecks the ACL so revocations after this read fail closed.
+pub(crate) async fn accessible_channels_for_filters(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    reader: &[u8],
+    filters: &[Filter],
+) -> buzz_db::Result<Vec<uuid::Uuid>> {
+    if filters.iter().any(filter_can_match_channel_metadata) {
+        state.db.get_accessible_channel_ids(community, reader).await
+    } else {
+        state
+            .get_accessible_channel_ids_cached(community, reader)
+            .await
+    }
+}
+
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
 ///
 /// Public wrapper for use by the HTTP bridge and COUNT handler.
 /// Resolves accessible channels for the given pubkey and builds the query.
 pub async fn build_event_query_from_filter(
     filter: &Filter,
-    _pubkey_bytes: &[u8],
-    _state: &AppState,
+    pubkey_bytes: &[u8],
+    state: &AppState,
     community: buzz_core::tenant::CommunityId,
 ) -> EventQuery {
     let channel_id = extract_channel_id_from_filter(filter);
-    filter_to_query_params(filter, channel_id, community)
+    let mut query = filter_to_query_params(filter, channel_id, community);
+    apply_metadata_read_context(&mut query, filter, pubkey_bytes, state);
+    query
 }
 
 /// Maximum SQL candidate rows a non-pushable COUNT filter may inspect before
@@ -951,11 +1009,15 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 ///
 /// Pushed constraints: kinds, authors (single or multi), ids, since, until,
 /// authorized channel scope (#h single or multi, injected by caller), #p (single),
-/// #d (single, NIP-33-only kinds), #e (any).
+/// #d (single, NIP-33-only kinds), #e (any). Metadata-only filters push every
+/// generic tag using exact first-value matching.
 ///
 /// Anything else (multi-#p, #t, #a, search, #d on non-NIP-33) requires
 /// post-filtering and cannot use the fast COUNT path.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
+    if filter_is_channel_metadata_only(filter) {
+        return filter.search.is_none();
+    }
     // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
     let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
         !ks.is_empty()
@@ -1161,7 +1223,7 @@ fn filter_to_query_params(
         .filter(|values| !values.is_empty())
         .map(|values| values.iter().map(|v| v.to_string()).collect());
 
-    EventQuery {
+    let mut query = EventQuery {
         channel_id,
         kinds,
         pubkey,
@@ -1176,7 +1238,41 @@ fn filter_to_query_params(
         e_tags,
         d_tag_values,
         ..EventQuery::for_community(community)
+    };
+    if filter_can_match_channel_metadata(filter) {
+        query.tag_filters = filter
+            .generic_tags
+            .iter()
+            // #h also matches the stored channel coordinate for metadata without
+            // an h tag. The caller supplies that authorized scope separately.
+            .filter(|(key, _)| key.to_string() != "h")
+            .map(|(key, values)| {
+                (
+                    key.to_string(),
+                    values.iter().map(ToString::to_string).collect(),
+                )
+            })
+            .collect();
+        // These optimizations use derived columns / indexes rather than exact
+        // first-value matching. The predicates above cover them without losing
+        // metadata whose p value is not a valid indexed mention, for example.
+        if filter
+            .authors
+            .as_ref()
+            .is_some_and(|authors| authors.is_empty())
+        {
+            query.authors = Some(Vec::new());
+        }
+        if filter.ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+            query.ids = Some(Vec::new());
+        }
+        query.p_tag_hex = None;
+        query.e_tags = None;
+        query.d_tag = None;
+        query.d_tags = None;
+        query.d_tag_values = None;
     }
+    query
 }
 
 /// Push channel constraints into SQL before `LIMIT`.
@@ -2460,9 +2556,17 @@ mod tests {
         let mixed = artifact.clone().kind(nostr::Kind::Custom(45011));
         let q = filter_to_query_params(&mixed, None, community);
         assert_eq!(q.d_tag_values, Some(vec!["a".to_string()]));
-        let kindless = Filter::new().custom_tag(d, "a").limit(1);
-        let q = filter_to_query_params(&kindless, None, community);
-        assert_eq!(q.d_tag_values, Some(vec!["a".to_string()]));
+        // Kindless and metadata-mixed reads use exact generic predicates for
+        // every kind, which also filter artifact d tags before LIMIT.
+        for filter in [
+            Filter::new().custom_tag(d, "a").limit(1),
+            mixed.kind(nostr::Kind::Custom(39000)),
+        ] {
+            let q = filter_to_query_params(&filter, None, community);
+            assert_eq!(q.tag_filters, vec![("d".into(), vec!["a".into()])]);
+            assert_eq!(q.limit, Some(1));
+            assert!(q.d_tag_values.is_none());
+        }
 
         // Filters that cannot select artifacts keep the generic post-filter path.
         let other = Filter::new()
@@ -3827,3 +3931,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod metadata_filter_tests;

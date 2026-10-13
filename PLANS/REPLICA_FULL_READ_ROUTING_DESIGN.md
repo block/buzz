@@ -27,7 +27,13 @@ event during post-write verification and report a false conflict). Every such
 read stays on `query_events` / writer.
 
 Display reads — a page the user scrolls, a count on a badge, a history list —
-tolerate bounded staleness and take the routed path.
+tolerate bounded staleness and take the routed path, except when they also
+select current authorization-sensitive state. Queries that can match channel
+metadata (kind `39000`, including mixed-kind and ID-only filters) carry
+`EventQuery.channel_metadata_read`: current relay head and channel ACL predicates
+are evaluated on the writer before filtering and limits. The routed query,
+bounded-query and count APIs enforce this pin regardless of client consistency
+intent.
 
 Adding, removing, or reclassifying a caller **requires updating the table
 below**; the `query_events_routed` doc-comment points here.
@@ -53,24 +59,25 @@ in `crates/buzz-relay/src/api/bridge.rs` (`extract_consistency`).
 ## Caller classification table
 
 Rows below are every `query_events_routed` / `query_events_routed_bounded`
-call site at head, plus the writer-pinned canvas row this change adds. (The
-`count` and feed routed families — `count_events_routed`,
+call site at head, plus writer-pinned metadata and canvas reads. (The
+other count and feed routed families —
 `get_events_by_ids_routed`, `query_feed_*_routed`, and the `get_channel_window`
-cursor/head reads — are all display or bounded-count surfaces on the routed
+cursor/head reads — are display or bounded-count surfaces on the routed
 path; they carry their own soundness notes at their definitions in
 `crates/buzz-db/src/lib.rs` and are out of scope for this table.)
 
 | Caller / path label | Pool | Justification |
 |---|---|---|
-| `bridge_query` (default `/query` filter) | routed | Display reads over the HTTP bridge; bounded staleness acceptable. |
+| `bridge_query` (default `/query` filter) | routed, except metadata | Display reads over the HTTP bridge; metadata exception below. |
 | `bridge_query` + `consistency: strong` | **writer** | Client-declared write-influencing read (canvas save precondition, restore precondition, post-write ancestry verification). |
-| `req_historical` (WS REQ historical page) | routed | Display backfill of a subscription; per-row re-filter absorbs a briefly-stale row. |
+| `req_historical` (WS REQ historical page) | routed, except metadata | Display backfill; metadata exception below. |
 | `bridge_thread_aux` (`AuxReader::Routed`, thread aux page) | routed | Thread reply hydration; display, post-verified against the fence wall. |
-| `bridge_count_fallback` (`query_events_routed_bounded`) | routed (bounded arm) | COUNT fallback that materializes rows; bounded arm only, never covered. |
-| `count_req_fallback` (`query_events_routed_bounded`) | routed (bounded arm) | WS COUNT fallback that materializes rows; bounded arm only. |
+| `bridge_count_fallback` (`query_events_routed_bounded`) | routed (bounded arm), except metadata | COUNT fallback that materializes rows; bounded arm only, never covered. |
+| `count_req_fallback` (`query_events_routed_bounded`) | routed (bounded arm), except metadata | WS COUNT fallback that materializes rows; bounded arm only. |
+| Any query / bounded query / count carrying `channel_metadata_read` | **writer** | Current kind-39000 head and current ACL are authority decisions, including mixed-kind and ID-only filters; no replica-staleness budget can relax them. |
 
-The **writer** row is the only write-influencing entry; every other caller is a
-display or count surface that tolerates bounded staleness. Client canvas reads
+The metadata **writer** row is enforced by `buzz-db` in each routed entry point;
+HTTP and WS callers attach the context in `handlers/req.rs`. Client canvas reads
 that gate a write set `consistency: strong` (Desktop
 `desktop/src-tauri/src/commands/canvas.rs`, CLI
 `crates/buzz-cli/src/commands/channels.rs`) so they land on the writer row.

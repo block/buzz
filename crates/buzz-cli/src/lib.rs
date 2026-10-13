@@ -569,8 +569,54 @@ pub enum MessagesCmd {
     },
 }
 
+/// NIP-CL operations. Recovery never creates a replacement event ID.
+#[derive(Subcommand)]
+pub enum ChannelLabelsCmd {
+    /// Read the authorized, verified current label snapshot
+    Get {
+        #[arg(long)]
+        channel: String,
+        #[arg(long)]
+        trusted_relay: Option<String>,
+    },
+    /// Find authorized channels matching any supplied label (not a uniqueness check)
+    Find {
+        #[arg(long = "label", required = true)]
+        labels: Vec<String>,
+        #[arg(long = "type", value_enum)]
+        channel_type: Option<ChannelType>,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=500))]
+        limit: u32,
+        #[arg(long)]
+        trusted_relay: Option<String>,
+    },
+    /// Add/remove labels without changing other metadata
+    Update {
+        #[arg(long)]
+        channel: String,
+        #[arg(long = "add-label", required_unless_present = "remove")]
+        add: Vec<String>,
+        #[arg(long = "remove-label", required_unless_present = "add")]
+        remove: Vec<String>,
+        #[arg(long)]
+        command_file: std::path::PathBuf,
+        #[arg(long)]
+        trusted_relay: Option<String>,
+    },
+    /// Resubmit the persisted signed event; never infer a receipt from current labels
+    Retry {
+        #[arg(long)]
+        command_file: std::path::PathBuf,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ChannelsCmd {
+    /// Read, discover, mutate, or retry shared channel labels (NIP-CL)
+    Labels {
+        #[command(subcommand)]
+        command: ChannelLabelsCmd,
+    },
     /// List channels visible to the current identity
     #[command(
         after_help = "Examples:\n  buzz channels list\n  buzz channels list --visibility open"
@@ -641,6 +687,15 @@ pub enum ChannelsCmd {
         /// app's prod app-data dir). Mainly for the dev store or testing.
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
+        /// Initial shared label; repeat for multiple values. Requires NIP-CL.
+        #[arg(long = "label", requires = "command_file", conflicts_with = "template")]
+        labels: Vec<String>,
+        /// Persist the exact signed creation for safe retry. Also opts unlabeled creation into NIP-CL.
+        #[arg(long, conflicts_with = "template")]
+        command_file: Option<std::path::PathBuf>,
+        /// Explicitly trusted relay key (required for NIP-CL over plain HTTP).
+        #[arg(long, requires = "command_file")]
+        trusted_relay: Option<String>,
     },
     /// Update channel name, description, visibility, or ephemeral TTL
     #[command(
@@ -2461,6 +2516,7 @@ mod tests {
                 "delete",
                 "get",
                 "join",
+                "labels",
                 "leave",
                 "list",
                 "members",
@@ -2581,7 +2637,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 16),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),

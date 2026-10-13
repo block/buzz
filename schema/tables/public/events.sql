@@ -37,6 +37,8 @@ CREATE TABLE events (
     d_tag       TEXT,
     not_before  BIGINT,
     delivered_at BIGINT,
+    nip_cl_applied BOOLEAN NOT NULL DEFAULT FALSE,
+    CONSTRAINT chk_events_nip_cl_applied_kind CHECK (NOT nip_cl_applied OR kind IN (9002, 9007)),
     PRIMARY KEY (community_id, created_at, id)
 ) PARTITION BY RANGE (created_at);
 
