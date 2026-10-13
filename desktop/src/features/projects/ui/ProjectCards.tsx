@@ -280,6 +280,10 @@ function RepositoryUnavailableIndicator({
       description: "The advertised branch is missing from the git remote.",
       label: "Branch missing",
     },
+    desktop: {
+      description: "This repo lives on your Mac. Open HulaBuzz there to browse it.",
+      label: "On your Mac",
+    },
     unknown: {
       description: "Buzz could not load this repository.",
       label: "Unavailable",

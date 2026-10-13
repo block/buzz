@@ -378,6 +378,8 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       ])
     ).flat();
     const error = results.find((result) => result.error)?.error;
+    // Web without the desktop: the page already shows the calm "Open HulaBuzz on your Mac" card, no error toast.
+    if (error && projectRepoUnavailableReason(error) === "desktop") return;
     if (error) {
       toast.error("Could not read OpenClaw.", {
         description: hulaFilesErrorMessage(error),

@@ -95,6 +95,9 @@ export const CMD_READS = [
   "get_managed_agent_log",
   "get_agent_memory",
   "list_permission_prompts",
+  "call_openclaw_workspace_mcp_tool",
+  "gh_pr_list",
+  "get_git_identity",
 ] as const;
 export const CMD_WRITES = [
   "start_managed_agent",
@@ -106,6 +109,7 @@ export const CMD_WRITES = [
   "prepare_term_session_launch",
   "add_team_from_catalog",
   "respond_permission_prompt",
+  "refresh_openclaw_workspace_mcp",
 ] as const;
 const PROMPT_MAX = 20_000;
 async function runtimeIdFor(deps: CmdDeps, id: string): Promise<void> {
@@ -218,6 +222,121 @@ async function managedPubkey(deps: CmdDeps, raw: unknown): Promise<string> {
   if (!agents.some((x) => String(x.pubkey).toLowerCase() === pk)) throw new MgmtError("not_found", "That agent isn't on your desktop.");
   return pk;
 }
+// ---- OpenClaw workspace MCP over Direct (web project pages: repo files, commits, branches, README) ----
+/** Workspace tools the web may call. Writes (write_file, edit, delete, ...) never run remotely. */
+export const OPENCLAW_TOOLS = ["list_directory", "stat_path", "read_file", "exec"] as const;
+/** Read-only git subcommands the project pages run (see features/projects/lib/*Argv). `null` = any args; a list = required 2nd word. */
+const GIT_READS: Record<string, readonly string[] | null> = {
+  log: null,
+  diff: null,
+  show: null,
+  status: null,
+  "rev-list": null,
+  "rev-parse": null,
+  "for-each-ref": null,
+  "ls-files": null,
+  "ls-tree": null,
+  "merge-base": null,
+  branch: ["--list"],
+  worktree: ["list"],
+  remote: ["get-url"],
+};
+/** Options that write files or run external programs. */
+const GIT_BAD_ARG = /^(--output|--ext-diff|--textconv|--exec|--upload-pack|--receive-pack|--config|-c$|-C$|--git-dir|--work-tree|--namespace|--open-files-in-pager|-O)/;
+/** Files whose contents never leave the desktop, even inside the workspace. */
+const SECRET_FILE = /(^|\/)(\.env(\..*)?|\.npmrc|\.netrc|\.pypirc|\.git-credentials|credentials(\.json)?|id_(rsa|dsa|ecdsa|ed25519)[^/]*|[^/]*\.(pem|key|p12|pfx|keystore|jks|kdbx))$|(^|\/)\.(ssh|aws|gnupg|docker|kube)(\/|$)/i;
+const URL_CREDS = /(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+(:[^/\s@]*)?@/gi;
+/** Text from the desktop's disk: obvious credentials masked, URL user:token@ removed, size capped. */
+export function scrubText(t: unknown, max = 2_000_000): string {
+  return redactSecrets(typeof t === "string" ? t : "").replace(URL_CREDS, "$1").slice(0, max);
+}
+function wsPath(v: unknown, field: string): string {
+  const p = str(v, field, 4096) ?? bad(`Missing ${field.toLowerCase()}.`);
+  if (SECRET_FILE.test(p)) throw new MgmtError("not_found", "That file stays on your desktop.");
+  return p;
+}
+export function checkGitArgv(argv: unknown): string[] {
+  if (!Array.isArray(argv) || argv.length < 2 || argv.length > 64) return bad("Only git read commands can run remotely.");
+  const a = argv.map((x) => (typeof x === "string" && x.length <= 4096 && !CONTROL.test(x) ? x : bad("Invalid command.")));
+  if (a[0] !== "git") bad("Only git read commands can run remotely.");
+  const sub = a[1] as string;
+  if (!(sub in GIT_READS)) bad("Only git read commands can run remotely.");
+  const need = GIT_READS[sub];
+  if (need && !need.includes(a[2] ?? "")) bad("Only git read commands can run remotely.");
+  if (sub === "branch" && a.slice(3).some((x) => /^(-[dDmMcCfu]|--(delete|move|copy|force|set-upstream|unset-upstream|edit-description|track|no-track|create-reflog))/.test(x)))
+    bad("Only git read commands can run remotely.");
+  for (const x of a.slice(2)) if (GIT_BAD_ARG.test(x)) bad("That git option can't be used remotely.");
+  // git show <ref>:<path> reads a blob: same secret-file rule as read_file.
+  if (sub === "show") for (const x of a.slice(2)) if (x.includes(":") && SECRET_FILE.test(x.slice(x.indexOf(":") + 1))) throw new MgmtError("not_found", "That file stays on your desktop.");
+  return a;
+}
+/** Scrub every string in an MCP tool result (content blocks carry JSON or text). */
+function scrubResult(v: unknown, depth = 0): unknown {
+  if (depth > 12) return null;
+  if (typeof v === "string") return scrubText(v);
+  if (Array.isArray(v)) return v.slice(0, 20_000).map((x) => scrubResult(x, depth + 1));
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (/^(token|headers?|authorization|url|endpoint)$/i.test(k)) continue;
+      out[k] = scrubResult(x, depth + 1);
+    }
+    return out;
+  }
+  return v;
+}
+/** Drops directory entries for secret files so their names/paths don't list either. */
+function dropSecretEntries(v: unknown, depth = 0): unknown {
+  if (depth > 12) return v;
+  if (Array.isArray(v)) return v.filter((e) => !(e && typeof e === "object" && typeof (e as { path?: unknown }).path === "string" && SECRET_FILE.test((e as { path: string }).path))).map((x) => dropSecretEntries(x, depth + 1));
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, dropSecretEntries(x, depth + 1)]));
+  return v;
+}
+async function openClawTool(a: Record<string, unknown>, inv: RawInvoke): Promise<unknown> {
+  const name = a.name;
+  if (typeof name !== "string" || !(OPENCLAW_TOOLS as readonly string[]).includes(name)) bad("That workspace tool isn't available remotely.");
+  const i = obj(a.arguments);
+  let args: Record<string, unknown>;
+  switch (name) {
+    case "list_directory": {
+      const depth = Number.isInteger(i.depth) ? Math.min(Math.max(i.depth as number, 0), 8) : 1;
+      args = { path: wsPath(i.path, "Path"), depth, namesOnly: i.namesOnly === true };
+      break;
+    }
+    case "stat_path":
+    case "read_file":
+      args = { path: wsPath(i.path, "Path") };
+      break;
+    default:
+      args = { argv: checkGitArgv(i.argv), cwd: wsPath(i.cwd, "Directory") };
+  }
+  const r = obj(await inv("call_openclaw_workspace_mcp_tool", { name, arguments: args }));
+  // Entries are JSON inside text blocks; parse, filter and re-serialize so secret file names don't list.
+  const result = scrubResult(r.result);
+  const filtered =
+    name === "list_directory"
+      ? (() => {
+          const res = obj(result);
+          const content = Array.isArray(res.content) ? res.content : null;
+          if (!content) return dropSecretEntries(result);
+          return {
+            ...res,
+            content: content.map((c) => {
+              const b = obj(c);
+              if (b.type !== "text" || typeof b.text !== "string") return c;
+              try {
+                return { ...b, text: JSON.stringify(dropSecretEntries(JSON.parse(b.text))) };
+              } catch {
+                return c;
+              }
+            }),
+            ...(res.structuredContent ? { structuredContent: dropSecretEntries(res.structuredContent) } : {}),
+          };
+        })()
+      : result;
+  return { isError: r.isError === true, result: filtered };
+}
+
 export const CMD_NAMES: readonly string[] = [...CMD_READS, ...CMD_WRITES];
 
 /** The result of a proxied command, or throws MgmtError. `which` tells the caller whether the call mutates agent state. */
@@ -318,6 +437,36 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
     }
     case "agent_access_owner_only":
       return (await inv(name)) === true;
+    case "call_openclaw_workspace_mcp_tool":
+      return openClawTool(a, inv);
+    case "gh_pr_list": {
+      // OpenClaw checkout PR badges: the desktop's own `gh pr list --json ...` (its gh login never leaves). Fields re-picked.
+      const repo = str(a.repo, "Repository", 200) ?? bad("Missing repository.");
+      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) bad("Invalid repository. Expected owner/name.");
+      let rows: unknown = [];
+      try {
+        rows = JSON.parse(String(await inv(name, { repo })));
+      } catch {
+        rows = [];
+      }
+      const s = (v: unknown, max = 500) => (typeof v === "string" ? scrubText(v, max) : null);
+      return JSON.stringify(
+        list(rows, (x) => {
+          const o = obj(x);
+          return { number: Number(o.number) || 0, title: s(o.title) ?? "", state: s(o.state, 20) ?? "", isDraft: o.isDraft === true, url: s(o.url, 300) ?? "", mergedAt: s(o.mergedAt, 40), headRefName: s(o.headRefName, 300) ?? "", baseRefName: s(o.baseRefName, 300) ?? "" };
+        }, 100),
+      );
+    }
+    case "get_git_identity": {
+      // Your git user.name / user.email, for "your commits" highlighting. Nothing else from git config.
+      const r = obj(await inv(name));
+      const s = (v: unknown) => (typeof v === "string" ? v.slice(0, 200) : null);
+      return { name: s(r.name), email: s(r.email) };
+    }
+    case "refresh_openclaw_workspace_mcp": {
+      const r = obj(await inv(name));
+      return { connected: r.connected === true, expiresAt: typeof r.expiresAt === "string" ? r.expiresAt : null, connectedViaRelay: r.connectedViaRelay === true };
+    }
     case "get_global_agent_config":
       return sanitizeGlobal(await inv(name));
     case "start_managed_agent":

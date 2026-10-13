@@ -5,6 +5,7 @@ export type ProjectRepoUnavailableReason =
   | "authentication"
   | "network"
   | "ref"
+  | "desktop"
   | "unknown";
 
 /** User-facing copy for a classified repository availability failure. */
@@ -47,6 +48,11 @@ const PROJECT_REPO_UNAVAILABLE_PRESENTATIONS: Record<
       "The selected branch is advertised by the project but is missing from its git remote.",
     title: "Branch unavailable",
   },
+  desktop: {
+    description:
+      "This repo lives on your Mac. It shows up here on its own once HulaBuzz is open there.",
+    title: "Open HulaBuzz on your Mac to browse this repo",
+  },
   unknown: {
     description:
       "Buzz could not load this repository. Try again or contact the project owner.",
@@ -71,6 +77,16 @@ export function projectRepoUnavailableReason(
         ? error.toLowerCase()
         : "";
 
+  // Web: OpenClaw checkouts are read from your Mac over Direct; these mean "needs the desktop", not a broken repository.
+  const code = (error as { code?: unknown } | null)?.code;
+  if (
+    code === "needs_direct" ||
+    /not available in the web app|needs a direct connection|couldn't reach your desktop|reload your desktop|older version of the app|remote agent management is off/.test(
+      message,
+    )
+  ) {
+    return "desktop";
+  }
   if (!message) return "missing";
   if (
     /\b(?:401|403)\b|authenticat|authoriz|permission denied|access denied/.test(

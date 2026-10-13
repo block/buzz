@@ -1,4 +1,5 @@
 import type { ProjectPullRequest, Repository } from "@/features/projects/hooks";
+import { DesktopRepoCard } from "./DesktopRepoCard";
 import { AlertTriangle } from "lucide-react";
 import {
   projectRepoUnavailablePresentation,
@@ -53,6 +54,8 @@ export function ProjectHomeCommitsPanel({
     return <BuzzLoadingState label="Loading commits" />;
   }
   if (loaded.length === 0) {
+    if (firstFailure && projectRepoUnavailableReason(firstFailure.error) === "desktop")
+      return <DesktopRepoCard error={firstFailure.error} what="these commits" />;
     return (
       <ProjectPanelState
         description={

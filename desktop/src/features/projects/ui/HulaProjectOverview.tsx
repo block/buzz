@@ -12,6 +12,8 @@ import {
 import { openClawWorkspaceClient } from "@/features/projects/lib/openClawWorkspaceClient";
 import { syncMissingHulaRepositories } from "@/features/projects/syncHulaRepositories";
 import { Button } from "@/shared/ui/button";
+import { isWebBuild } from "@/features/bridge/ui/DesktopData";
+import { DesktopRepoCard, isDesktopRepoError, useDesktopRepoDirect } from "./DesktopRepoCard";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProjectRichContent } from "./ProjectRichContent";
 
@@ -62,13 +64,22 @@ export function HulaProjectOverview({
     }
   }, [added, queryClient]);
 
-  const rows = checkoutQuery.data ?? { repos: [], worktrees: [] };
+  const { live } = useDesktopRepoDirect();
+  // Web: the checkout is read from your Mac over Direct. Without it, a calm card instead of "unknown" rows or red errors.
+  const needsDesktop =
+    isWebBuild() &&
+    (!live || isDesktopRepoError(syncQuery.error) || isDesktopRepoError(readmeQuery.error));
+  const rows = needsDesktop
+    ? { repos: [], worktrees: [] }
+    : (checkoutQuery.data ?? { repos: [], worktrees: [] });
   const readme = readmeQuery.data;
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-6 px-4 py-4">
       <OverviewRailSection title="Repositories">
-        {rows.repos.length === 0 ? (
+        {needsDesktop ? (
+          <DesktopRepoCard compact error={syncQuery.error ?? readmeQuery.error} what="these repos" />
+        ) : rows.repos.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             {checkoutQuery.isLoading
               ? "Reading the OpenClaw checkout…"
@@ -109,7 +120,7 @@ export function HulaProjectOverview({
           </ul>
         </OverviewRailSection>
       ) : null}
-      {syncQuery.isError ? (
+      {syncQuery.isError && !needsDesktop && !isDesktopRepoError(syncQuery.error) ? (
         <div className="space-y-2">
           <p className="text-sm text-destructive">
             {syncQuery.error instanceof Error

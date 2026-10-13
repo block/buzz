@@ -78,6 +78,10 @@ async function slot<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Commands the connected desktop answered with unknown_op (it runs an older HulaBuzz). Cleared on the next success. */
+const staleCmds = new Set<string>();
+export const isCmdStale = (name: string) => staleCmds.has(name);
+
 export async function proxyCmd<T = unknown>(name: string, args?: Record<string, unknown>): Promise<T> {
   // Any screen may call before the shared Direct client is connected (e.g. an agent's profile Runtime tab): connect on demand
   // instead of failing straight away.
@@ -85,8 +89,11 @@ export async function proxyCmd<T = unknown>(name: string, args?: Record<string, 
   const d = current;
   if (!d || !d.live) throw new NeedsDirectError();
   try {
-    return (await slot(() => d.call("cmd", { name, args: args ?? {} }))) as T;
+    const v = (await slot(() => d.call("cmd", { name, args: args ?? {} }))) as T;
+    staleCmds.delete(name);
+    return v;
   } catch (e) {
+    if ((e as { code?: string })?.code === "unknown_op") staleCmds.add(name);
     const err = new Error(directErrorCopy(e)) as Error & { code?: string };
     err.code = (e as { code?: string })?.code;
     throw err;
@@ -101,6 +108,9 @@ export const PROXIED_READS: Record<string, () => unknown> = {
   discover_acp_providers: () => [],
   agent_access_owner_only: () => false,
   get_global_agent_config: () => ({ env_vars: {}, provider: null, model: null, preferred_runtime: null }),
+  // Project pages: quiet defaults while the desktop isn't reachable (the repo card explains why).
+  gh_pr_list: () => "[]",
+  get_git_identity: () => ({ name: null, email: null }),
 };
 
 /** Commands the web can answer itself: prefer the desktop's answer when Direct is live, else (or if that call fails) the web's own. */

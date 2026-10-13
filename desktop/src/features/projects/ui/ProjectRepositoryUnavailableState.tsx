@@ -18,6 +18,7 @@ import {
   projectRepoUnavailablePresentation,
 } from "@/features/projects/lib/projectRepoAvailability";
 import { Button } from "@/shared/ui/button";
+import { DesktopRepoCard } from "./DesktopRepoCard";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const UNAVAILABLE_ICONS = {
@@ -27,6 +28,7 @@ const UNAVAILABLE_ICONS = {
   unbound: LockKeyhole,
   network: CloudOff,
   ref: GitBranch,
+  desktop: CloudOff,
   unknown: CircleAlert,
 } satisfies Record<ProjectRepoUnavailableReason, typeof CircleAlert>;
 
@@ -138,6 +140,7 @@ export function ProjectRepositoryUnavailableState({
   reason?: ProjectRepoUnavailableReason;
   retryPending?: boolean;
 }) {
+  if (reason === "desktop") return <DesktopRepoCard error={{ code: "desktop" }} />;
   const unavailable = projectRepoUnavailablePresentation(reason);
   const UnavailableIcon = UNAVAILABLE_ICONS[reason];
 
