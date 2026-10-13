@@ -48,6 +48,7 @@ const PopoverContent = React.forwardRef<
       surface = "default",
       textureSize = "regular",
       textureTone = "light",
+      children,
       ...props
     },
     ref,
@@ -74,15 +75,19 @@ const PopoverContent = React.forwardRef<
           ...style,
         }}
         {...props}
-      />
+      >
+        {props.asChild || !portalled ? children : (
+          <>
+            {children}
+            {/* Park native webviews while open, INSIDE Content: Radix Portal needs a single element child. */}
+            <ParkNativeWebviewsWhileMounted />
+          </>
+        )}
+      </PopoverPrimitive.Content>
     );
 
     return portalled ? (
-      <PopoverPrimitive.Portal>
-        {content}
-        {/* Native pin / playground webviews paint above HTML; park while open. */}
-        <ParkNativeWebviewsWhileMounted />
-      </PopoverPrimitive.Portal>
+      <PopoverPrimitive.Portal>{content}</PopoverPrimitive.Portal>
     ) : (
       content
     );

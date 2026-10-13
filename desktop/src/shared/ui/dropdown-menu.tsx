@@ -69,7 +69,7 @@ DropdownMenuSubContent.displayName =
 const DropdownMenuContent = React.forwardRef<
   React.ElementRef<typeof DropdownMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(({ className, sideOffset = 4, style, ...props }, ref) => (
+>(({ className, sideOffset = 4, style, children, ...props }, ref) => (
   <DropdownMenuPrimitive.Portal>
     <DropdownMenuPrimitive.Content
       ref={ref}
@@ -85,9 +85,16 @@ const DropdownMenuContent = React.forwardRef<
       )}
       style={{ ...POPOVER_SHADOW_STYLE, ...style }}
       {...props}
-    />
-    {/* Native pin / playground webviews paint above HTML; park them while open. */}
-    <ParkNativeWebviewsWhileMounted />
+    >
+      {props.asChild ? children : (
+        <>
+          {children}
+      {/* Native pin / playground webviews paint above HTML; park them while open. Mounted INSIDE Content (not as a
+          Portal sibling): Radix Portal wraps its child in Presence/Slot, which needs exactly one element child. */}
+          <ParkNativeWebviewsWhileMounted />
+        </>
+      )}
+    </DropdownMenuPrimitive.Content>
   </DropdownMenuPrimitive.Portal>
 ));
 DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName;

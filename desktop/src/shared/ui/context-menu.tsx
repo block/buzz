@@ -67,7 +67,7 @@ ContextMenuSubContent.displayName = ContextMenuPrimitive.SubContent.displayName;
 const ContextMenuContent = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Content>
->(({ className, style, ...props }, ref) => (
+>(({ className, style, children, ...props }, ref) => (
   <ContextMenuPrimitive.Portal>
     <ContextMenuPrimitive.Content
       ref={ref}
@@ -82,9 +82,16 @@ const ContextMenuContent = React.forwardRef<
       )}
       style={{ ...POPOVER_SHADOW_STYLE, ...style }}
       {...props}
-    />
-    {/* Native pin / playground webviews paint above HTML; park them while open. */}
-    <ParkNativeWebviewsWhileMounted />
+    >
+      {props.asChild ? children : (
+        <>
+          {children}
+      {/* Native pin / playground webviews paint above HTML; park them while open. Mounted INSIDE Content (not as a
+          Portal sibling): Radix Portal wraps its child in Presence/Slot, which needs exactly one element child. */}
+          <ParkNativeWebviewsWhileMounted />
+        </>
+      )}
+    </ContextMenuPrimitive.Content>
   </ContextMenuPrimitive.Portal>
 ));
 ContextMenuContent.displayName = ContextMenuPrimitive.Content.displayName;
