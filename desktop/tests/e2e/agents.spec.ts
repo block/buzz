@@ -119,6 +119,92 @@ async function sharePersonaToCatalog(
     .click();
 }
 
+test("shows relay agents in a read-only community section", async ({
+  page,
+}) => {
+  const remotePubkey = "a7".repeat(32);
+  const localPubkey = "b7".repeat(32);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: localPubkey,
+        name: "Local Reviewer",
+        status: "running",
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: remotePubkey,
+        name: "Research Lead",
+        channelNames: ["general"],
+        status: "online",
+      },
+      {
+        pubkey: localPubkey,
+        name: "Local Reviewer",
+        channelNames: ["general"],
+        status: "online",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: remotePubkey,
+        displayName: "Research Lead",
+        isAgent: true,
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const section = page.getByTestId("community-agents");
+  const remoteCard = page.getByTestId(`community-agent-${remotePubkey}`);
+  await expect(section).toContainText("Community agents");
+  await expect(section).toContainText(
+    "Agents available in this community but not managed on this device.",
+  );
+  await expect(remoteCard).toContainText("Research Lead");
+  await expect(remoteCard).toContainText("#general");
+  await expect(
+    page.getByTestId(`community-agent-presence-${remotePubkey}`),
+  ).toHaveAttribute("aria-label", "Research Lead: Offline");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          channelName: "general",
+          kind: 20001,
+        }),
+      ),
+    )
+    .toBe(true);
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__?.({ pubkey, status: "online" });
+  }, remotePubkey);
+  await expect(
+    page.getByTestId(`community-agent-presence-${remotePubkey}`),
+  ).toHaveAttribute("aria-label", "Research Lead: Online");
+  await expect(page.getByTestId(`community-agent-${localPubkey}`)).toHaveCount(
+    0,
+  );
+
+  await remoteCard.click();
+  const profilePanel = page.getByTestId("user-profile-panel");
+  await expect(profilePanel).toBeVisible();
+  await expect(profilePanel).toContainText("Research Lead");
+  for (const label of [
+    /Start agent/i,
+    /Stop agent/i,
+    /Delete agent/i,
+    /Edit agent/i,
+    /View logs/i,
+  ]) {
+    await expect(profilePanel.getByRole("button", { name: label })).toHaveCount(
+      0,
+    );
+  }
+});
+
 async function waitForInvokeBridge(page: import("@playwright/test").Page) {
   await page.waitForFunction(
     () => {

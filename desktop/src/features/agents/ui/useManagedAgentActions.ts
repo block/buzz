@@ -39,6 +39,7 @@ import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "../lib/instanceInputForDefinition";
+import { selectCommunityAgents } from "./communityAgents";
 
 export function useManagedAgentActions() {
   const queryClient = useQueryClient();
@@ -102,13 +103,17 @@ export function useManagedAgentActions() {
     [managedAgents],
   );
 
-  const managedPubkeyList = React.useMemo(
-    () => managedAgents.map((agent) => agent.pubkey),
-    [managedAgents],
-  );
+  const communityAgents = React.useMemo(() => {
+    const localPubkeys = new Set(
+      managedAgents.map((agent) => normalizePubkey(agent.pubkey)),
+    );
+    return selectCommunityAgents(relayAgentsQuery.data ?? [], (pubkey) =>
+      localPubkeys.has(normalizePubkey(pubkey)),
+    );
+  }, [managedAgents, relayAgentsQuery.data]);
 
   const { query: managedPresenceQuery, getAvailability } =
-    useAgentAvailabilityLookup(managedPubkeyList);
+    useAgentAvailabilityLookup(managedAgents.map((agent) => agent.pubkey));
 
   function assertStartNotBlockedByPresence(agent: ManagedAgent) {
     const reason = agentPresenceStartBlockReason(
@@ -452,6 +457,7 @@ export function useManagedAgentActions() {
     managedPresenceQuery,
     getAvailability,
     managedAgents,
+    communityAgents,
     managedPubkeys,
     channelIdToName,
     channelsByPubkey,
