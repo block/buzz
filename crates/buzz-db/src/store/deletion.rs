@@ -6304,17 +6304,27 @@ mod postgres_tests {
             mismatched_approval.is_err(),
             "approval digest must remain database-bound to the frozen request digest"
         );
+        // PostgreSQL sends this rejection before it rolls the statement back
+        // and releases the request row lock, and sqlx returns on the error.
+        // The claim below uses SKIP LOCKED on another pooled connection, so
+        // finish a round trip on this connection before claiming.
+        let mut tamper_conn = db.pool.acquire().await.expect("acquire tamper connection");
         let mismatched_request = sqlx::query(
             "UPDATE community_deletion_requests SET inventory_digest = $2 WHERE id = $1",
         )
         .bind(request.id)
         .bind(vec![1_u8; 32])
-        .execute(&db.pool)
+        .execute(&mut *tamper_conn)
         .await;
         assert!(
             mismatched_request.is_err(),
             "the frozen request digest must remain bound to its approval"
         );
+        sqlx::query("SELECT 1")
+            .execute(&mut *tamper_conn)
+            .await
+            .expect("rejected update has rolled back");
+        drop(tamper_conn);
         assert!(store
             .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
             .await

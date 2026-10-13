@@ -17,7 +17,9 @@ jobs:
   changes:
     name: Detect Changed Paths
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # The steps take about 75 seconds, but GitHub can finish the job minutes
+    # after the last step. A 2-minute limit cancelled finished runs.
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
