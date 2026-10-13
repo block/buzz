@@ -1,3 +1,4 @@
+import { normalizeExternalHref } from "@/shared/lib/externalLinks";
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -26,10 +27,12 @@ import {
  * Right-click: optional "Open in Pinned Website", then Open link (RHS),
  * Open in browser, Copy link.
  */
+const IS_WEB = import.meta.env?.VITE_BUZZ_PLATFORM === "web";
+
 export function ExternalLinkAnchor({
   anchorProps,
   children,
-  href,
+  href: rawHref,
   isLinearLink,
   label,
 }: {
@@ -39,6 +42,8 @@ export function ExternalLinkAnchor({
   isLinearLink: boolean;
   label: string;
 }) {
+  // Web: bare domains get https://, desktop-only schemes (file:, tauri:, buzz:, blob:…) render as plain text.
+  const href = IS_WEB ? (normalizeExternalHref(rawHref) ?? undefined) : rawHref;
   const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
@@ -120,6 +125,8 @@ export function ExternalLinkAnchor({
     openInSidePanel,
   ]);
 
+  if (IS_WEB && !href) return <span>{children}</span>;
+
   const anchor = (
     <a
       {...anchorProps}
@@ -142,7 +149,7 @@ export function ExternalLinkAnchor({
         event.preventDefault();
         setMenu({ x: event.clientX, y: event.clientY });
       }}
-      rel="noreferrer"
+      rel="noopener noreferrer"
       target="_blank"
     >
       {children}

@@ -334,12 +334,19 @@
 [data-phone] .phone-search-screen {
   background: hsl(var(--background));
 }
+/* Phone search: full screen under the nav row, pinned to the VISUAL viewport (--phone-vv-top / --phone-vh, kept in sync
+   by phoneLayout.ts) so iOS panning the page for the focused input with the keyboard up can't push the input into
+   the notch. The input row never shrinks; only the results list scrolls, inside the space above the keyboard. */
 [data-phone] .phone-search-dialog {
   position: fixed !important;
-  top: calc(var(--phone-safe-top) + 48px) !important;
+  top: calc(var(--phone-vv-top, 0px) + var(--phone-safe-top) + 48px) !important;
   left: 0 !important;
   right: 0 !important;
-  bottom: var(--phone-tabbar-h) !important;
+  bottom: auto !important;
+  height: calc(var(--phone-vh, 100dvh) - var(--phone-safe-top) - 48px - var(--phone-tabbar-h)) !important;
+  max-height: none !important;
+  overflow: hidden !important;
+  overscroll-behavior: contain;
   width: 100% !important;
   max-width: none !important;
   margin: 0 !important;
@@ -353,7 +360,14 @@
   pointer-events: auto;
   z-index: 115;
 }
+[data-phone][data-phone-keyboard] .phone-search-dialog {
+  height: calc(var(--phone-vh, 100dvh) - var(--phone-safe-top) - 48px) !important;
+}
+[data-phone] .phone-search-dialog > :not([data-testid="search-results-list"]) {
+  flex-shrink: 0;
+}
 [data-phone] .phone-search-dialog [data-testid="search-results-list"] {
+  overscroll-behavior: contain;
   flex: 1 1 auto;
   min-height: 0;
   max-height: none !important;
@@ -572,4 +586,18 @@
 [data-phone] [data-phone-solo="repository"] [data-testid="project-context-rail-panel"] > * {
   width: 100% !important;
   max-width: none !important;
+}
+/* Phone composer, collapsed (unfocused + empty, see MessageComposer phoneCollapsed): a single-line field with the
+   placeholder. The toolbar (mention, attach, emoji, Aa, send…) appears on focus. The editor stays mounted so the first
+   tap focuses it and opens the iOS keyboard. */
+[data-phone] [data-testid="message-composer"][data-phone-collapsed="true"] {
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+}
+[data-phone] [data-testid="message-composer"][data-phone-collapsed="true"] [data-testid="message-composer-toolbar"] {
+  display: none !important;
+}
+[data-phone] [data-testid="message-composer"][data-phone-collapsed="true"] [data-testid="message-input-scroll"] {
+  max-height: 1.6em;
+  overflow: hidden;
 }

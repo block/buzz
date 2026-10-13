@@ -67,6 +67,7 @@ import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { useAddressedAgentMentionRestore } from "./useAddressedAgentMentionRestore";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
+import { usePhoneLayout } from "@/shared/lib/phoneLayout";
 function MessageComposerImpl({
   audienceContext = null,
   channelId = null,
@@ -818,6 +819,39 @@ function MessageComposerImpl({
     if (!voiceNote.hasAttachmentRef.current) void media.handlePaperclip();
   }, [media.handlePaperclip, voiceNote.hasAttachmentRef]);
   const acceptsDrop = ownsDropZone && voiceNote.acceptsAttachment;
+  // Phone ([data-phone]) only, Slack-mobile style: unfocused and empty, the composer is a one-line field with its
+  // placeholder; focus expands the full toolbar. It collapses on blur only when there is no draft, no attachment, no
+  // voice note and no picker/menu open. Toolbar taps preventDefault on pointer/mouse down so they never blur the editor.
+  // The editor itself is always mounted, so the first tap focuses it natively and iOS opens the keyboard (#208 untouched).
+  const isPhone = usePhoneLayout();
+  const [phoneFocused, setPhoneFocused] = React.useState(false);
+  const hasPhoneDraftExtras =
+    media.pendingImeta.length > 0 ||
+    media.queuedAttachments.length > 0 ||
+    media.isUploading ||
+    voiceNote.status !== "idle" ||
+    isEmojiPickerOpen ||
+    isFormattingOpen;
+  const phoneCollapsed = isPhone && !phoneFocused && isContentEmpty && !hasPhoneDraftExtras;
+  const phoneMenuOpen = () =>
+    Boolean(
+      document.querySelector(
+        "[data-radix-popper-content-wrapper] :is([role='menu'],[role='dialog'],[role='listbox']), [role='dialog'][data-state='open']",
+      ),
+    );
+  const phoneCheckBlur = React.useCallback(() => {
+    window.setTimeout(() => {
+      const form = formRef.current;
+      if (!form) return;
+      if (form.contains(document.activeElement)) return;
+      if (phoneMenuOpen()) return; // a picker/menu took focus: stay expanded until it closes
+      setPhoneFocused(false);
+    }, 0);
+  }, []);
+  // A picker/menu closed (or the draft emptied) while focus is elsewhere: re-check.
+  React.useEffect(() => {
+    if (isPhone && !isEmojiPickerOpen && !isFormattingOpen && phoneFocused) phoneCheckBlur();
+  }, [isPhone, isEmojiPickerOpen, isFormattingOpen, phoneFocused, phoneCheckBlur, isContentEmpty]);
   return (
     <>
       <footer
@@ -855,7 +889,27 @@ function MessageComposerImpl({
                 "backdrop-blur-md dark:backdrop-blur-xl",
             )}
             data-submit-locked={isSubmitLocked ? "true" : "false"}
+            data-phone-collapsed={phoneCollapsed ? "true" : undefined}
             data-testid="message-composer"
+            onFocusCapture={isPhone ? () => setPhoneFocused(true) : undefined}
+            onBlurCapture={isPhone ? phoneCheckBlur : undefined}
+            onPointerDownCapture={
+              isPhone
+                ? (e) => {
+                    // Toolbar buttons keep the editor focused (no blur → no collapse, keyboard stays up).
+                    const t = e.target as HTMLElement;
+                    if (t.closest('[data-testid="message-composer-toolbar"] button')) e.preventDefault();
+                  }
+                : undefined
+            }
+            onMouseDownCapture={
+              isPhone
+                ? (e) => {
+                    const t = e.target as HTMLElement;
+                    if (t.closest('[data-testid="message-composer-toolbar"] button')) e.preventDefault();
+                  }
+                : undefined
+            }
             onDragEnter={acceptsDrop ? media.handleDragEnter : undefined}
             onDragLeave={acceptsDrop ? media.handleDragLeave : undefined}
             onDragOver={acceptsDrop ? media.handleDragOver : undefined}

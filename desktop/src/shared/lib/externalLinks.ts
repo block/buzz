@@ -30,9 +30,40 @@ export function isIosStandalone(win: Window = window): boolean {
   return ios && (nav.standalone === true || win.matchMedia?.("(display-mode: standalone)").matches === true);
 }
 
-/** `x-safari-https://…` hands the URL to the Safari app (iOS 17+). Only http(s). */
+/** `x-safari-https://…` hands the URL to the Safari app (iOS 17+). Only well-formed http(s), re-serialized by URL so
+ *  spaces / unicode / stray characters are percent-encoded (Safari rejects them as "address is invalid"). */
 export function safariSchemeUrl(url: string): string | null {
-  return /^https?:\/\//i.test(url) ? `x-safari-${url}` : null;
+  if (!/^https?:\/\//i.test(url)) return null;
+  try {
+    return `x-safari-${new URL(url).href}`;
+  } catch {
+    return null;
+  }
+}
+
+const BARE_HOST = /^(?:www\.)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}(?::\d+)?(?:[/?#].*)?$/i;
+
+/**
+ * Web: the URL a message link may open, or null when it can't open in a browser. Bare domains ("www.google.com",
+ * "example.org/x") get https://; http(s), mailto and tel pass through (re-serialized); desktop-only or unsafe schemes
+ * (file:, tauri:, asset:, buzz:, blob:, javascript:, data:, about:…) return null so callers render plain text instead
+ * of handing iOS an address it rejects ("Safari cannot open the page because the address is invalid").
+ */
+export function normalizeExternalHref(href: string | null | undefined): string | null {
+  const raw = href?.trim();
+  if (!raw) return null;
+  if (/^(mailto|tel):/i.test(raw)) return raw;
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      return new URL(raw).href;
+    } catch {
+      return null;
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^[^:/]+:\d/.test(raw)) return null; // some other scheme
+  if (raw.startsWith("//")) return normalizeExternalHref(`https:${raw}`);
+  if (BARE_HOST.test(raw)) return normalizeExternalHref(`https://${raw}`);
+  return null;
 }
 
 let lastOpen = { url: "", at: 0 };
@@ -48,7 +79,9 @@ export function iosMajorVersion(ua: string): number | null {
  * x-safari-https:// (undocumented Apple scheme; iOS may ask "Open in Safari?" once). Older iOS ignores that scheme,
  * so there we fall back to window.open, which opens the in-app Safari sheet. Elsewhere: window.open(_blank).
  */
-export function openExternalUrl(url: string, win: Window = window): void {
+export function openExternalUrl(input: string, win: Window = window): void {
+  const url = normalizeExternalHref(input);
+  if (!url) return; // nothing a browser can open (desktop-only scheme, malformed): never hand iOS an invalid address
   const now = Date.now();
   if (lastOpen.url === url && now - lastOpen.at < 1200) return; // de-dupe guard + handler double fires
   lastOpen = { url, at: now };

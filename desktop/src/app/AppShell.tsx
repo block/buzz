@@ -243,8 +243,9 @@ export function AppShell() {
         return;
       }
     }
-    goBack();
-  }, [goBack, isPhoneInlineThread]);
+    handlePhoneNavHistoryRef.current(-1);
+  }, [isPhoneInlineThread]);
+  const handlePhoneNavHistoryRef = React.useRef<(dir: -1 | 1) => void>(() => goBack());
   // Phone list screens (Channels / Me / Search) are history entries: the overlay rides in the entry's state, so Back,
   // Forward and Settings' Back step through them (see phoneTabs.ts). Clearing an overlay is deferred a tick because a
   // navigation almost always follows (opening a channel from the list); that new entry already has no overlay.
@@ -281,6 +282,48 @@ export function AppShell() {
       write(next, Boolean(opts?.replace));
     });
   }, [isPhone, router]);
+  // Linear phone breadcrumb over the real browser history (same entries desktop's Back/Forward walk). Each entry's kind
+  // is remembered per history index in sessionStorage (survives reloads): "list" entries (the Channels / Search list
+  // screens) are pass-through, so Back from #design lands on #general rather than ping-ponging through the list
+  // between them; consecutive duplicates (same href + screen) are skipped too. A new navigation after Back replaces
+  // the entry at that index, which truncates the remembered forward entries (the browser already dropped them).
+  const navIndex = ((location.state as { __TSR_index?: number } | undefined)?.__TSR_index ?? 0) as number;
+  const navKey = String((location.state as { __TSR_key?: string } | undefined)?.__TSR_key ?? navIndex);
+  const navSig = `${router.history.location.href}|${historyOverlay ?? ""}`;
+  React.useEffect(() => {
+    if (!isPhone) return;
+    const map = readPhoneNavMap();
+    if (map[navIndex] && map[navIndex].key !== navKey) {
+      for (const k of Object.keys(map)) if (Number(k) >= navIndex) delete map[Number(k)];
+    }
+    map[navIndex] = {
+      key: navKey,
+      sig: navSig,
+      list: historyOverlay === "channels" || historyOverlay === "search",
+    };
+    writePhoneNavMap(map);
+  }, [historyOverlay, isPhone, navIndex, navKey, navSig]);
+  const phoneStep = React.useCallback(
+    (dir: -1 | 1): number => {
+      const map = readPhoneNavMap();
+      const here = map[navIndex]?.sig ?? navSig;
+      let t = navIndex + dir;
+      const limit = dir < 0 ? 0 : Math.max(...Object.keys(map).map(Number), navIndex);
+      while ((dir < 0 ? t > limit : t < limit) && (map[t]?.list || map[t]?.sig === here)) t += dir;
+      if (t < 0 || (dir > 0 && t > limit)) return 0;
+      return t - navIndex;
+    },
+    [navIndex, navSig],
+  );
+  const handlePhoneNavHistory = React.useCallback(
+    (dir: -1 | 1) => {
+      const steps = phoneStep(dir);
+      if (steps === 0) return dir < 0 ? goBack() : goForward();
+      router.history.go(steps);
+    },
+    [goBack, goForward, phoneStep, router],
+  );
+  handlePhoneNavHistoryRef.current = handlePhoneNavHistory;
   const handlePhoneNavHome = React.useCallback(() => {
     if (location.pathname === "/settings") {
       router.history.push("/", { phoneOverlay: "channels", phoneOverlayHref: "/" } as never);
@@ -970,7 +1013,7 @@ export function AppShell() {
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
                         onGoBack={handlePhoneNavBack}
-                        onGoForward={goForward}
+                        onGoForward={() => handlePhoneNavHistory(1)}
                         onHome={handlePhoneNavHome}
                       />
                     ) : null}
@@ -1318,4 +1361,21 @@ function PhoneFullscreen({
   ) : (
     <>{children}</>
   );
+}
+
+type PhoneNavEntry = { key: string; sig: string; list: boolean };
+const PHONE_NAV_KEY = "buzz-phone-nav-stack.v1";
+function readPhoneNavMap(): Record<number, PhoneNavEntry> {
+  try {
+    return JSON.parse(sessionStorage.getItem(PHONE_NAV_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+function writePhoneNavMap(map: Record<number, PhoneNavEntry>): void {
+  try {
+    sessionStorage.setItem(PHONE_NAV_KEY, JSON.stringify(map));
+  } catch {
+    /* storage denied */
+  }
 }
