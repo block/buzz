@@ -5,6 +5,7 @@ import { capabilityGroupFor, groupPolicy } from "./capabilities";
 import { chatHandlers } from "./chat";
 import { parityHandlers } from "./parity";
 import { parity2Handlers } from "./parity2";
+import { observedUnreadHandlers } from "./observedUnread";
 import { ownersFromProfiles } from "./nipOa";
 import { getFeed, type FeedArgs } from "./feed";
 import { queryRelay } from "./relayHttp";
@@ -224,6 +225,8 @@ installProxyHandlers(handlers);
 handlers.list_archived_identities = () => ({ archived: [] });
 // web parity round 2 (pure relay ports) take precedence over the placeholder lists above
 Object.assign(handlers, parity2Handlers);
+// Unread highlighting: web port of the desktop observed-unread store + unread catch-up (was proxied → unavailable).
+Object.assign(handlers, observedUnreadHandlers);
 // No huddles on web: there is never an active huddle to enroll mentioned agents into, so this is a successful no-op
 // (otherwise the mention send path toasts "not available in the web app" and aborts the send).
 handlers.sync_agents_to_active_huddle = () => ({ changed_channel_ids: [], error: null });
