@@ -273,3 +273,19 @@ test("profile reads: config surface hides secret fields, log and memories are re
   await assert.rejects(handleCmd("get_managed_agent_log", { pubkey: "f".repeat(64) }, { invokeRaw: inv }), /isn't on your desktop/);
   assert.equal(redactSecrets("plain line"), "plain line");
 });
+
+test("cmd: update permissionAsk flips only BUZZ_ACP_PERMISSION_MODE and keeps other env; list exposes permission_ask", async () => {
+  const d = cmdDeps({
+    invokeRaw: async (cmd, args) => {
+      d.raw.push([cmd, args]);
+      if (cmd === "list_managed_agents") return [rawAgent({ pubkey: PK, env_vars: { KEEP: "v", BUZZ_ACP_PERMISSION_MODE: "ask" } })];
+      if (cmd === "update_managed_agent") return { agent: rawAgent() };
+      return null;
+    },
+  });
+  await handleMgmt("cmd", { name: "update_managed_agent", args: { input: { pubkey: PK, permissionAsk: false } } }, d);
+  assert.deepEqual(d.raw.find((c) => c[0] === "update_managed_agent")[1].input, { pubkey: PK, envVars: { KEEP: "v" } });
+  const listed = await handleMgmt("cmd", { name: "list_managed_agents", args: {} }, d);
+  assert.equal(listed[0].permission_ask, true);
+  assert.equal(listed[0].env_vars.BUZZ_ACP_PERMISSION_MODE, "");
+});

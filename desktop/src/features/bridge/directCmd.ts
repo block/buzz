@@ -28,13 +28,18 @@ function pubkey(v: unknown): string {
   return HEX64.test(p) ? p : bad("Choose one of your agents.");
 }
 
+/** Per-agent opt-in for interactive permission prompts (read by buzz-acp at spawn). */
+export const PERMISSION_MODE_ENV = "BUZZ_ACP_PERMISSION_MODE";
 /** env var values never leave the desktop: keys stay (the UI shows which are set), values are blanked. */
 export function blankEnv(e: unknown): Record<string, string> {
   return Object.fromEntries(Object.keys(obj(e)).map((k) => [k, ""]));
 }
 export function sanitizeAgent(a: unknown): unknown {
   const r = { ...obj(a) };
-  if ("env_vars" in r) r.env_vars = blankEnv(r.env_vars);
+  if ("env_vars" in r) {
+    r.permission_ask = String(obj(r.env_vars)[PERMISSION_MODE_ENV] ?? "").trim() === "ask";
+    r.env_vars = blankEnv(r.env_vars);
+  }
   if ("private_key_nsec" in r) r.private_key_nsec = "";
   return r;
 }
@@ -369,6 +374,16 @@ export async function handleCmd(name: string, args: unknown, deps: CmdDeps): Pro
         out.harnessOverride = i.harnessOverride === true;
       }
       respondFields(i, out);
+      if (typeof i.permissionAsk === "boolean") {
+        // The only env change allowed over Direct: flip the agent's own permission-ask var, keeping its other env intact.
+        const raw = list(await deps.invokeRaw("list_managed_agents"), (x) => obj(x), 500) as Array<Record<string, unknown>>;
+        const rec = raw.find((x) => String(x.pubkey ?? "").toLowerCase() === out.pubkey);
+        if (!rec) bad("Unknown agent.");
+        const env = { ...(obj(rec?.env_vars) as Record<string, string>) };
+        if (i.permissionAsk) env[PERMISSION_MODE_ENV] = "ask";
+        else delete env[PERMISSION_MODE_ENV];
+        out.envVars = env;
+      }
       if (Object.keys(out).length === 1) bad("Nothing to change.");
       const r = obj(await inv(name, { input: out }));
       return { ...r, agent: sanitizeAgent(r.agent) };
