@@ -116,8 +116,24 @@ import Testing
 }
 
 @Test func `Thread destination keeps direct parent and broadcast semantics`() {
-  let tags = [["e", "outer-root", "", "root"], ["e", "direct-parent", "", "reply"]]
-  #expect(BuzzPushNavigationTarget.threadRootID(in: tags) == "direct-parent")
+  let parent = String(repeating: "a", count: 64)
+  let tags = [["e", "outer-root", "", "root"], ["e", parent, "", "reply"]]
+  #expect(BuzzPushNavigationTarget.threadRootID(in: tags) == parent)
   #expect(BuzzPushNavigationTarget.threadRootID(in: tags + [["broadcast", "1"]]) == nil)
   #expect(BuzzPushNavigationTarget.threadRootID(in: [["e", "outer-root", "", "root"]]) == nil)
+}
+
+@Test func `Last valid reply marker wins despite trailing malformed markers`() {
+  let first = String(repeating: "a", count: 64)
+  let last = String(repeating: "B", count: 64)
+  let invalidIDs = ["", "bad", String(repeating: "a", count: 63),
+    String(repeating: "a", count: 65), String(repeating: "g", count: 64),
+    String(repeating: "é", count: 64)]
+  for invalid in invalidIDs {
+    let invalidTag = ["e", invalid, "", "reply"]
+    #expect(BuzzPushNavigationTarget.threadRootID(in: [invalidTag]) == nil)
+    #expect(BuzzPushNavigationTarget.threadRootID(in: [
+      ["e", first, "", "reply"], ["e", last, "", "reply"], invalidTag,
+    ]) == last)
+  }
 }

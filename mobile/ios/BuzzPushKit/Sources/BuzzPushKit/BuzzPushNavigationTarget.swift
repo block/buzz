@@ -37,11 +37,15 @@ public struct BuzzPushNavigationTarget: Codable, Equatable, Sendable {
     if tags.contains(where: { $0.count >= 2 && $0[0] == "broadcast" && $0[1] == "1" }) {
       return nil
     }
-    let parent = tags.last(where: { $0.count >= 4 && $0[0] == "e" && $0[3] == "reply" })?[1]
-    // Relay ingest ignores malformed reply IDs. An empty marker must not
-    // invalidate the otherwise usable channel/event navigation payload.
-    guard let parent, !parent.isEmpty else { return nil }
-    return parent
+    // Match relay ingest: the last valid 64-character ASCII-hex reply ID wins.
+    // A later malformed marker must not hide an earlier valid parent.
+    return tags.last(where: { tag in
+      guard tag.count >= 4, tag[0] == "e", tag[3] == "reply" else { return false }
+      let bytes = tag[1].utf8
+      return bytes.count == 64 && bytes.allSatisfy {
+        (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+      }
+    })?[1]
   }
 
   /// Decodes a target without trusting other fields from the APNs payload.

@@ -163,17 +163,20 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
   }
 
   func testReplyNavigationUsesDirectParentAndKeepsExactEvent() throws {
+    let parent = String(repeating: "a", count: 64)
     let reply = event(id: "reply-id", content: "Reply preview", tags: [
       ["h", Self.channelID],
       ["e", "outer-root", "", "root"],
-      ["e", "direct-parent", "", "reply"],
+      ["e", parent, "", "reply"],
+      ["e", "bad", "", "reply"],
+      ["e", "", "", "reply"],
     ])
     let resolution = try XCTUnwrap(BuzzPushNotificationResolver.decodeResolution(
       events: [reply], community: community()
     )?.0)
     let target = try XCTUnwrap(resolution.navigationTarget)
     XCTAssertEqual(target.eventID, "reply-id")
-    XCTAssertEqual(target.userInfoValue["thread_root_id"], "direct-parent")
+    XCTAssertEqual(target.userInfoValue["thread_root_id"], parent)
   }
 
   func testNavigationKeepsTopLevelAndBroadcastMessagesInChannel() throws {
