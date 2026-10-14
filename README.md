@@ -138,6 +138,10 @@ To run a relay for your team without managing servers, you can deploy one to Rai
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz-relay-block)
 
+To run the relay on managed ZopCloud or in an AWS or GCP account you already own, deploy with ZopDay:
+
+[![Deploy to ZopDay](https://zop.dev/deploytozopday-inkhard.svg)](https://zop.dev/zopday/app/deploy?image=ghcr.io/block/buzz:main&port=3000&name=buzz-relay&utm_source=github&utm_medium=one_click&utm_content=buzz)
+
 See [here](https://engineering.block.xyz/blog/run-your-own-buzz-relay) for details.
 
 ### I work at Block
