@@ -332,7 +332,7 @@ A client stores config on the relay only when the relay's [NIP-11](11.md) docume
 - guest roles that are read-only: a guest cannot write artifacts and cannot add anyone to the channel;
 - exempting config channels from age-based retention (see "History");
 - artifact sync that can read an artifact's complete history;
-- confirming that an artifact address has never been used, even when every revision of it has been redacted.
+- telling an artifact address that has never been used apart from one whose revisions have all been redacted.
 
 How a relay advertises each one is defined by the specification of that feature. Otherwise the client MUST keep config local, and MUST NOT create config channels.
 
