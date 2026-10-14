@@ -12,7 +12,8 @@ Before changing anything in this directory, read
 - Make each change in every schema location: `migrations/`,
   `schema/tables/public/`, the `schema/` manifest and sibling directories,
   `scripts/reconcile-schema-after-pgschema.sql` where it applies, and, for
-  `push_gateway_*` tables, `crates/buzz-push-gateway/migrations/`.
+  existing `push_gateway_*` tables, `crates/buzz-push-gateway/migrations/`.
+  Do not add new gateway tables here.
 - Never edit a merged migration. Fix forward.
 - Adding a `community_id` table has its own checklist in that document. A
   tenant-owned one is blocked until deletion's catalog checks accept
@@ -20,6 +21,5 @@ Before changing anything in this directory, read
 - Keep every migration safe for the relay that is currently deployed, whether
   migrations run at startup or out of band. Ship in
   this order: new schema, then new code, then backfill, then constraints and
-  cleanup.
-- Bound every lock (`SET LOCAL lock_timeout`). Build indexes on populated
-  tables concurrently.
+  cleanup. A contract migration fails closed if its backfill has not run.
+- Bound every lock (`SET LOCAL lock_timeout`).
