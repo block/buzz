@@ -26,8 +26,6 @@
   },
   "filesystem": {
     "allow": [
-      "/tmp",
-      "$TMPDIR",
       "$HOME/.claude",
       "$HOME/.local/state/claude",
       "$HOME/.codex",
