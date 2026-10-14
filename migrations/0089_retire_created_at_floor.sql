@@ -5,6 +5,9 @@ SET LOCAL lock_timeout = '5s';
 -- and hold the replica breaker closed through this drop until replay catches
 -- up. Old pods that already started do not recheck the guard on each probe.
 -- Keep the 960-second application floor and the ordered heartbeat handshake.
+-- DROP TRIGGER takes ACCESS EXCLUSIVE on events and every partition, so it
+-- can stall events reads/writes for up to lock_timeout. Run off-peak; a lock
+-- timeout aborts the whole migration and is safe to retry.
 -- No other trigger, function, FK, or tenant fence is retired here.
 DROP TRIGGER IF EXISTS events_created_at_floor ON events;
 

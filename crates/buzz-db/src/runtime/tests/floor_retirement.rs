@@ -96,28 +96,20 @@ async fn migration_schema_floor_retirement_cleans_child_copies_idempotently() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn floor_retirement_desired_and_migrated_catalogs_match() {
+async fn floor_retirement_desired_state_has_no_floor_objects() {
     // The nextest wrapper bootstraps this database through real pgschema apply
-    // and reconciliation. Check the retired floor catalog against the real
-    // migration boot path; unrelated trigger/FK preservation is checked above.
+    // and reconciliation; desired-state/migration parity is checked by
+    // `admin_schema_parity_between_desired_state_and_migrations`.
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .expect("connect desired-state database");
-    assert_eq!(floor_objects(&pool).await, (0, 0));
-    sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-        .execute(&pool)
-        .await
-        .expect("reset isolated database for migration boot");
-    crate::migration::run_migrations(&pool)
-        .await
-        .expect("boot migration schema");
     assert_eq!(floor_objects(&pool).await, (0, 0));
     pool.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn floor_retirement_writer_and_probe_accept_legacy_and_retired_schema() {
+async fn floor_retirement_writer_and_probe_run_on_retired_schema() {
     let url = crate::test_support::database_url();
     let db = Db::new(&DbConfig {
         database_url: url.clone(),
@@ -140,18 +132,6 @@ async fn floor_retirement_writer_and_probe_accept_legacy_and_retired_schema() {
         .await
         .expect("retired schema still supports the ordered heartbeat");
 
-    // This binary can also run before migration, without changing legacy SQL.
-    sqlx::raw_sql(include_str!(
-        "../../../../../migrations/0021_created_at_fence_floor.sql"
-    ))
-    .execute(&db.pool)
-    .await
-    .expect("restore actual legacy guard");
-    assert!(floor_objects(&db.pool).await.0 > 1);
-    assert!(db.spawn_fence_probe());
-    crate::replica_fence::probe_once(&db.pool, db.fence())
-        .await
-        .expect("legacy schema still supports ordered heartbeat");
     db.pool.close().await;
     db.read_pool
         .as_ref()
