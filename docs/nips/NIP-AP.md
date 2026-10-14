@@ -280,24 +280,29 @@ A team id MUST be non-empty, MUST be at most 64 Unicode scalar values, and MUST 
 
 Clients SHOULD mint a new UUID for each new team, including a team created by importing or adopting another team. A client MUST NOT give a new team the id of a deleted team.
 
+### Ownership
+
+An agent's owner is the owner that the relay has verified from the agent's [NIP-OA](NIP-OA.md) owner attestation. A tag on an arbitrary event does not establish ownership. A team's owner is the creator of its team config channel, as named by the channel's NIP-CL `P` tag.
+
+Changing an agent's or a team's owner is not supported. Transferring a config channel's owner role to someone else does not change who owns the agent or team, and a second attestation does not move an agent's config or history.
+
 ### Membership
 
-A team's **members** are the agents in its team config channel that are owned by the team's owner. The team's owner is the channel's creator, as named by its NIP-CL `P` tag. An agent is owned by `pubkey_o` when its [NIP-OA](NIP-OA.md) owner attestation names `pubkey_o`. The owner, humans, and agents owned by anyone else can be in the channel but are not members. An agent's channel role does not affect membership: an agent made an admin or a guest of the channel is still a member.
+A team's **members** are the agents in its team config channel whose owner is the team's owner. The owner, humans, and agents owned by anyone else can be in the channel but are not members. An agent's channel role does not affect membership: an agent made an admin or a guest of the channel is still a member.
 
 Team membership is channel membership, so it is also access: every member can read the team's config. A member follows the team's current instructions; it does not pin the text in effect when it joined. An agent MAY be a member of more than one team.
 
 Changing who is on a team is a change to the channel's membership, under the channel's role rules:
 
-- any member of the channel can add someone;
-- only an owner or admin of the channel can remove someone else;
-- a guest can do neither;
-- anyone can leave.
+- a member of the channel, other than a guest, can add someone as a member or guest, unless the person added only accepts additions from their own owner;
+- only an owner or admin can add someone as an owner or admin;
+- only an owner or admin can remove someone else, except that a member can remove an agent they own;
+- a guest can add and remove no one;
+- anyone can leave, except the channel's last owner.
 
 ### Team instructions
 
-A team's current instructions are the `instructions` field of its current `buzz.team` artifact (see "Config artifacts"). If that artifact is invalid, the team's instructions are invalid.
-
-A team without a `buzz.team` artifact has no name and empty instructions.
+A team's current instructions are the `instructions` field of its current `buzz.team` artifact (see "Config artifacts"). A team whose `buzz.team` artifact is absent has no name and empty instructions. A team whose `buzz.team` artifact is invalid, deleted, or unavailable has invalid instructions (see "Artifact state").
 
 ### Launch with teams
 
@@ -309,7 +314,7 @@ An agent that is a member of no team has no team sections. Team sections are del
 
 ### Deleting a team
 
-A client deletes a team by archiving its team config channel. Archiving keeps the channel and its artifacts, so the team can be recovered by unarchiving it. Purging the channel is a separate action. A client MUST NOT treat a team whose channel is archived as having members.
+A client deletes a team by archiving its team config channel. Archiving keeps the channel and its artifacts, so the team can be recovered by unarchiving it. Purging the channel is a separate action. A team whose config channel is archived has no members.
 
 No later than each member's next session start, the client removes the deleted team's section and resolves the remaining teams' sections. An active session need not be interrupted, and a client MAY apply the removal sooner. A team config channel that cannot be read is not a deleted team.
 
@@ -319,7 +324,15 @@ An agent's config and a team's config are [NIP-AR](NIP-AR.md) artifacts. Each li
 
 ### Relay support
 
-A client stores config on the relay only when the relay's [NIP-11](11.md) document advertises both NIP-CL system channels (`"nip-cl"` in `supported_extensions`) and NIP-AR artifacts (the `artifacts` descriptor). Otherwise the client MUST keep config local, and MUST NOT create config channels.
+A client stores config on the relay only when the relay's [NIP-11](11.md) document shows that it supports all of these:
+
+- NIP-CL system channels and labels;
+- NIP-AR artifacts;
+- guest roles that are read-only: a guest cannot write artifacts and cannot add anyone to the channel;
+- exempting config channels from age-based retention (see "History");
+- artifact sync that can read an artifact's complete history.
+
+How a relay advertises each one is defined by the specification of that feature. Otherwise the client MUST keep config local, and MUST NOT create config channels.
 
 ### Config channels
 
@@ -330,9 +343,9 @@ A client stores config on the relay only when the relay's [NIP-11](11.md) docume
 
 The owner creates a config channel with a kind:9007 that carries `["channel_type", "system"]`, both labels as `t` tags, and no `visibility` or `ttl` tag. A config channel MUST be private and MUST NOT have a TTL. The owner MUST NOT change a config channel's labels.
 
-The subject label is a NIP-CL label in both cases: a team id can contain characters a label cannot, so the team label is derived from its hash. A subject label is 64 characters.
+Both subject labels are 64 characters. A team id can contain characters a label cannot, so the team label is derived from a hash; the team id itself is stored on the `buzz.team` artifact (see "Config artifacts").
 
-An agent config channel's members are the owner, the agent, and any other agents the owner adds. A team config channel holds the owner and the team's members, and can hold others who are not members (see "Membership").
+An agent config channel's members are the owner, the agent, and any others the owner adds. A team config channel holds the owner and the team's members, and can hold others who are not members (see "Membership").
 
 ### Discovery
 
@@ -343,42 +356,68 @@ Agent: {kinds: [39000], "#P": [pubkey_o], "#t": [<agent-pubkey>]}
 Team:  {kinds: [39000], "#P": [pubkey_o], "#t": [<team-label>]}
 ```
 
-The client keeps only channels whose type is `system` and whose labels include the family label. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none.
+To find the teams an agent is on, the agent's client queries the channels the agent belongs to, opting in to system channels:
+
+```
+{kinds: [39002], "#p": [<agent-pubkey>], "#t": ["system"]}
+```
+
+then reads those channels' kind:39000 by `#d`.
+
+In every case the client keeps only channels whose type is `system`, whose labels include the family label, and whose `P` is the expected owner. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains for one agent or team, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none. A client MUST NOT delete or archive a config channel because it was not selected.
 
 ### Config artifacts
 
-| Type | Channel | `title` | Content |
-| --- | --- | --- | --- |
-| `buzz.agent.settings` | agent config | `Agent settings` | `{"version": 1, "settings": { ... }}` |
-| `buzz.agent.instructions` | agent config | `Agent instructions` | `{"version": 1, "text": "<string>"}` |
-| `buzz.team` | team config | the team name | `{"version": 1, "name": "<string>", "instructions": "<string>"}` |
+| Type | Channel | `title` | Extra tags | Content |
+| --- | --- | --- | --- | --- |
+| `buzz.agent.settings` | agent config | `Agent settings` | | `{"version": 1, "settings": { ... }}` |
+| `buzz.agent.instructions` | agent config | `Agent instructions` | | `{"version": 1, "text": "<string>"}` |
+| `buzz.team` | team config | the team name | `["team", "<team-id>"]` | `{"version": 1, "name": "<string>", "instructions": "<string>"}` |
 
-A config channel holds at most one artifact of each of its types. Its `d` is the UUIDv5 of the type name in the namespace of the channel's UUID, so two clients creating the same artifact collide on `d` and one create fails. A `buzz.team` artifact has no member list; members come from the channel (see "Membership").
+A config channel holds at most one artifact of each of its types. Its `d` is the UUIDv5 of the type name in the namespace of the channel's UUID, so two clients creating the same artifact collide on `d` and one create fails. A client accepts a config artifact only when its `d`, `type`, and `h` match the config channel it was read from. A `buzz.team` artifact has no member list; members come from the channel (see "Membership").
 
-**Instructions.** `text` and `instructions` MAY be empty, which means "no instructions". They MUST be valid UTF-8, MUST NOT contain U+0000, and MUST NOT exceed 131,072 bytes.
+**Team id.** A `buzz.team` artifact carries exactly one `team` tag, whose value is the team id. A client MUST check that the team id's subject label equals the channel's subject label, and MUST treat the artifact as invalid otherwise.
 
-**Settings.** `settings` is a JSON object of the agent's launch configuration. It MUST NOT contain credentials, secrets, machine-local paths, or device state. The artifact's `content` MUST NOT exceed 65,535 bytes after encoding.
+**Team name.** `name` is also the artifact's `title`, so it MUST be nonblank and at most 512 UTF-8 bytes, and MUST equal the `title` tag.
 
-An artifact whose content does not parse, has an unknown `version`, or breaks these rules is **invalid**. Clients MUST show the error and MUST NOT substitute an older revision or a lower resolution source.
+**Instructions.** `text` and `instructions` MAY be empty, which means "no instructions". They MUST be valid UTF-8 and MUST NOT contain U+0000.
+
+**Settings.** `settings` is a JSON object of the agent's launch configuration. Its fields are defined by the client and harness that launch the agent, not by this NIP. It MUST NOT contain credentials, secrets, machine-local paths, or device state. A client MUST NOT launch an agent with a setting it does not support silently replaced by a default; it shows the error instead.
+
+**Size.** A config artifact's `content` MUST NOT exceed 131,072 bytes after JSON encoding, and `buzz.agent.settings` content MUST NOT exceed 65,535 bytes. The signed event MUST also fit within the relay's advertised event-size limits. Writers check these limits on the encoded content and the signed event, reject an edit that exceeds them, and MUST NOT truncate.
+
+An artifact whose content does not parse, has an unknown `version`, or breaks these rules is **invalid**.
+
+### Artifact state
+
+When a client reads a config artifact, the artifact is in one of these states:
+
+- **present:** its current revision was read and is valid;
+- **invalid:** its current revision was read and is invalid;
+- **absent:** the channel was read and a lookup by `d` returned nothing, and the client has never seen a revision of it nor moved that config to the relay;
+- **deleted:** a lookup by `d` returned a deletion;
+- **unavailable:** anything else, including a failed read, an unreadable channel, an artifact moved to another channel, a redacted current revision, or a lookup that returns nothing for an artifact the client has seen before or has moved local config into.
+
+Only an absent artifact lets a client fall back to another source (see "Launch composition"). An invalid, deleted, or unavailable artifact blocks the start: the client MUST show the error and MUST NOT substitute an older revision, another source, or local config. A deleted artifact is recovered with NIP-AR `restore`.
 
 ### Editing
 
-Members of a config channel can edit its artifacts. Guests can only read them. The owner makes an agent read-only for a config channel by giving it the guest role there.
+Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. Guests can only read them. The owner makes an agent read-only for a config channel by giving it the guest role there.
 
 Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires.
 
 ### History
 
-Every revision of a config artifact has a stable ID, its event ID. A config artifact's revisions are its history. A client MUST NOT configure a config artifact to keep only its latest revision. Revisions can still expire under the community's retention policy, or be redacted; a client shows a missing revision as a gap in history, not as the absence of history.
+Every revision of a config artifact has a stable ID, its event ID. A config artifact's revisions are its history. History is kept until the owner deliberately purges it or a moderator removes a revision. Config channels MUST be exempt from age-based community retention, and a client MUST NOT configure a config artifact to keep only its latest revision. A client shows a removed revision as a gap in history, not as the absence of history.
 
-**Restore** publishes an older revision's text as a new revision. Clients MUST NOT redact revisions to roll back.
+**Revert** publishes an older revision's content as an `op=update` revision carrying a complete, valid snapshot. Reverting a team's instructions keeps the team's current name. Clients MUST NOT redact revisions to roll back.
 
 ### Launch composition
 
 An agent's own instructions layer is the first of these that exists:
 
-1. the `text` of its current `buzz.agent.instructions` artifact. Empty text yields no instructions and stops resolution; an invalid artifact blocks the start;
-2. before the agent's instructions move to that artifact, instructions held in local configuration;
+1. the `text` of its current `buzz.agent.instructions` artifact. Empty text yields no instructions and stops resolution. An invalid, deleted, or unavailable artifact blocks the start (see "Artifact state");
+2. while that artifact is absent, instructions held in local configuration;
 3. the `system_prompt` of its linked `kind:30175` definition;
 4. for a definition-less instance, the `system_prompt` in its legacy `kind:30177` event.
 
@@ -393,16 +432,16 @@ A change to the agent's instructions or to any of its teams MUST take effect no 
 A client SHOULD record, for each session start, the config it used:
 
 - the revision ID of the agent's `buzz.agent.settings` artifact, or that it had none;
-- the revision ID of its `buzz.agent.instructions` artifact, or that the layer came from local configuration, came from a definition, came from a legacy event, or was empty;
+- the revision ID of its `buzz.agent.instructions` artifact; or the event ID of the `kind:30175` definition or legacy `kind:30177` event whose prompt it used; or that the layer came from local configuration or was empty;
 - the team id and `buzz.team` revision ID of every team section delivered;
-- the source of any local override;
+- a SHA-256 hash of the agent's own layer and of each team section as delivered, after composition and any local override, and the source of any override;
 - a run identifier and the start time.
 
 A launch record shows what the client handed to the harness, not that the harness used it.
 
 ### Deleting an agent
 
-A client deletes an agent by archiving its agent config channel. Archiving keeps the channel and its artifacts, so the agent can be recovered by unarchiving it. Purging the channel is a separate action.
+A client deletes an agent by archiving its agent config channel. A client MUST NOT start a new session for an agent whose config channel is archived. An active session need not be interrupted. The archived channel stays discoverable, so the agent can be recovered by unarchiving it. Purging the channel is a separate action. Deleting an agent never purges a team's config or history.
 
 ### Older clients
 
@@ -465,7 +504,7 @@ These rules are enforced at the following relay read surfaces (content and event
 - **Slug collision across pubkeys.** Two different owners can publish personas with the same slug. Clients MUST always scope queries by author pubkey, not just slug.
 - **Metadata exposure.** The `(pubkey, kind:30175, slug)` triple reveals persona existence. Event timestamps reveal edit history.
 - **No owner write authority over agents.** Persona events define *what* an agent should be; they do not grant runtime control over a running agent. The agent consumes the persona at spawn time. Updates to the persona event do not automatically propagate to running agents.
-- **Config is readable by every config channel member.** Agent settings, agent instructions, and team instructions are not encrypted. Every member and guest of a config channel can read its artifacts and their history, so adding someone to a config channel shares that config with them. The relay operator can read them too. Removing someone, archiving the channel, or redacting a revision does not revoke copies already read, exported, or shared.
+- **Config is readable by every config channel member.** Agent settings, agent instructions, and team instructions are not encrypted. Every member and guest of a config channel can read its artifacts and their history, so adding someone to a config channel shares that config with them. Every member who is not a guest can also edit it, including humans and agents that are not on the team. The relay operator can read them too. Removing someone, archiving the channel, or redacting a revision does not revoke copies already read, exported, or shared.
 - **Sharing a team shares every member's instructions.** A `kind:30178` head carrying `["shared","true"]` exposes the team's own fields *and* the embedded projection of every member — including members whose own `kind:30175` heads are unshared and therefore still private. Clients MUST make this explicit at the point of sharing; the relay cannot infer it.
 
 ## Reference test vectors
