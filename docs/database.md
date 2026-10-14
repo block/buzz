@@ -17,8 +17,8 @@ PostgreSQL stores data. The application owns behavior.
 
 | Concern | Today | Target |
 |---|---|---|
-| Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. SchemaBot plans each change from it in review and applies it. |
-| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | A reviewed external workflow. The serving relay runs no DDL, and its database role cannot. Monthly partition creation moves out of the relay under BUZZ-178. Changes to partitioned tables (`events`, `delivery_log`) are outside SchemaBot's envelope: it refuses `CREATE TABLE ... PARTITION OF` on a live parent and concurrent index builds on partitioned parents. |
+| Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. SchemaBot plans each change from it in review and applies it. `migrations/` stays, because auto-migration stays supported (next row). |
+| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. How the two modes share one schema source after SchemaBot adoption is still open. Monthly partition creation moves out of the relay under BUZZ-178. Changes to partitioned tables (`events`, `delivery_log`) are outside SchemaBot's envelope: it refuses `CREATE TABLE ... PARTITION OF` on a live parent and concurrent index builds on partitioned parents. |
 | Integrity between tables | Some foreign keys, including `ON DELETE CASCADE` and `ON DELETE SET NULL` | None in the database. The owning application transaction checks references and performs deletes explicitly. |
 | Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
@@ -37,9 +37,11 @@ moves away from the target.
   `CREATE INDEX`, and bounded `ALTER TABLE` statements. Every new trigger,
   function, or foreign key is another object that must be removed before
   adoption.
-- **Startup must not change the schema.** A relay that migrates at boot can
-  hold locks on hot tables during a rolling deploy. A relay that starts against
-  an already-compatible schema cannot.
+- **At scale, startup should not change the schema.** A relay that migrates at
+  boot can hold locks on hot tables during a rolling deploy. A relay that
+  starts against an already-compatible schema cannot. Auto-migration stays
+  supported for deployments where that risk is acceptable, so every change
+  must be safe in both modes (Rule 5).
 - **Behavior in the database is hard to see, test, and roll back.** Rust
   owns the rest of the write path. Logic split between Rust and PL/pgSQL is
   logic with two owners.
@@ -76,63 +78,74 @@ does. Put the behavior in the Rust transaction that owns the write:
 Dropping or narrowing an existing trigger or function is welcome. Follow the
 retirement sequence below.
 
-**Transitional exception: the community write fence.** Until the fence moves
-into application writers (BUZZ-315), every new *tenant-owned* table with a
-`community_id` column MUST be fenced by calling the existing helper,
-`SELECT attach_community_write_fence('<table>')`. The call attaches an
-existing, generic trigger; it defines no new behavior. No other trigger
-attachment is permitted. Follow the checklist below.
+**No exception for the community write fence.** A new table MUST NOT get a
+fence trigger, including by calling the existing helper
+`attach_community_write_fence`. Writers of a new tenant-owned table MUST be
+fenced in the application instead, by community admission: the transaction
+takes the shared community admission lock for its community before it writes.
+Today `AdmittedTx` (`crates/buzz-db/src/runtime/admitted_tx.rs`) does this for
+the `events`, `reactions`, and `event_mentions` writers, and the compiler
+rejects an unadmitted transaction. The design that extends admission to every
+fenced table and names a chokepoint for each writer is BUZZ-314; the
+implementation, which ends by dropping the fence triggers and functions, is
+BUZZ-315.
 
-A table whose `community_id` only records provenance, and whose rows must stay
-writable while that community is being deleted (the deletion control plane,
-`product_feedback`, `rate_limit_violations`, `operator_listener_outbox`), MUST
-NOT be fenced. Prefer naming the column something other than `community_id`,
-as `relay_admin_actions.report_community_id` does, so the catalog does not
-treat the table as scoped. If the column must be named `community_id`, the
-table MUST be added to `community_write_fence_excluded_table` in the same
-migration and in `schema/functions/`. That edit is part of this exception, and
-the only permitted change to an existing function. Either route removes the
-table from every automatic deletion surface, so it also needs the
-provenance-only checklist below. Without it, rows that name a deleted
-community survive deletion and no check fails.
+**Today this blocks new tenant-owned tables.** Community deletion's catalog
+checks still assume that every tenant-scoped table carries a trigger fence:
 
-**Nothing cheap catches a missing fence.** Know what actually fails:
+- The exact-set catalog check
+  (`community deletion catalog drift (missing=…, unknown=…)`) and the
+  write-fence drift check fail closed on a `community_id` table that has no
+  trigger.
+- Relay startup refuses a binary that lists the table in
+  `EXPECTED_SCOPED_TABLES` when the database has no live fence on it
+  (`community serving write fences missing`).
+- Desired-state bootstraps run `schema/community_write_fence.sql`, which
+  attaches a fence trigger to every `community_id` table automatically.
 
-- Community deletion's exact-set catalog check
-  (`community deletion catalog drift (missing=…, unknown=…)`) and its
-  write-fence drift check fail closed.
-- Relay startup fails only when the binary lists the table in
-  `EXPECTED_SCOPED_TABLES` and the database has no live fence on it. A binary
-  that does not list the table starts normally.
-- Postgres-gated, migration-mode tests that run catalog validation on a fully
-  migrated database fail.
-
-No static lint requires the attach call. Desired-state bootstraps run
-`schema/community_write_fence.sql`, which fences every `community_id` table
-automatically. Most tests use desired state, so a migration that forgets the
-call passes them. The PR MUST run the migration-mode tests.
+So before a feature can add a tenant-owned `community_id` table, these checks
+must recognise application-fenced tables, and the desired-state loop must stop
+attaching triggers to them. That change belongs to the BUZZ-314/BUZZ-315 work.
+Land it before the feature, or as the feature's first PR. Do not work around
+it with a trigger, or with an entry in `community_write_fence_excluded_table`
+for a table the community owns.
 
 #### Checklist: adding a tenant-owned `community_id` table
 
-All in the same PR:
+After the catalog change above has landed, all in the same PR:
 
-- [ ] `SELECT attach_community_write_fence('<table>')` in the migration.
-- [ ] `schema/triggers/<table>.sql` with the same call, plus its `\i` line.
-- [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`).
+- [ ] Every writer of the table goes through community admission
+      (`AdmittedTx`, or the chokepoint BUZZ-314 defines for its writer).
+      Nothing writes the table outside it.
+- [ ] No fence trigger: no `attach_community_write_fence` call in the
+      migration and no `schema/triggers/` file.
+- [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`),
+      plus any registration the catalog change introduces for
+      application-fenced tables.
 - [ ] The table in `PURGE_SCOPED_TABLES` in the same file, ordered child
       before parent. A table missing here keeps its rows after the purge, and
       deletion verification fails closed.
-- [ ] The hard-coded fence set in
-      `deletion_surface_parity_between_migration_0029_and_schema_sql`
-      (`crates/buzz-db/src/runtime/migration.rs`).
 - [ ] The migration count in `embedded_migrator_contains_consolidated_initial_schema`.
+- [ ] A Postgres-gated test showing that a write to the table is refused once
+      deletion of its community has started, and that the purge removes its
+      rows.
 - [ ] A run of the Postgres-gated migration-mode tests (see
-      [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md)).
+      [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md)). Most tests
+      use desired state, which builds the catalog differently.
 
 #### Checklist: adding a provenance-only table
 
-For a table that records which community a row came from but is not owned by
-that community. All in the same PR:
+A table whose `community_id` only records which community a row came from, and
+whose rows must stay writable while that community is being deleted (like the
+deletion control plane, `product_feedback`, `rate_limit_violations`, and
+`operator_listener_outbox`), is not owned by that community and is not fenced.
+Name its column something other than `community_id`, as
+`relay_admin_actions.report_community_id` does, so the catalog does not treat
+the table as scoped. Adding it to `community_write_fence_excluded_table`
+instead would change an existing function, which Rule 1 forbids. Renaming the
+column also removes the table from every automatic deletion surface, so rows
+that name a deleted community survive deletion and no check fails, unless the
+PR follows this checklist. All in the same PR:
 
 - [ ] Register it as operator-global in all three places: the
       `_operator_global_tables` seed row in the migration, `schema/seeds/`, and
@@ -149,8 +162,6 @@ that community. All in the same PR:
   - **retain on purpose:** add no deletion code, and state the reason in a
     comment beside the table's migration and in the PR, as
     `operator_listener_outbox` is retained. No check enforces this choice.
-- [ ] Use the `community_write_fence_excluded_table` edit only if the column
-      must be named `community_id`; otherwise give the column another name.
 - [ ] A Postgres-gated deletion test that seeds a row for the target community
       and asserts the chosen disposition. For delete and verify, call
       `purge_postgres` and `verify_postgres_logically_deleted`, following
@@ -191,6 +202,12 @@ write-blocking lock. Scans that do not block writes, such as
 - Historical data repair MUST be a backfill definition that conforms to
   [data-backfills.md](data-backfills.md): stable ID, finite upper bound,
   bounded batches, atomic mutation plus checkpoint, and validation.
+- **Until the backfill framework ships**, a repair MAY instead be a one-off
+  SQL script in `scripts/maintenance/`, reviewed in its own PR and run by an
+  operator. The script MUST be idempotent and safe to rerun, MUST work in
+  bounded batches that each commit on their own, and MUST end with a
+  validation query whose expected result the PR states. Once the framework
+  ships, new repairs MUST use it.
 - The normal write path that maintains the new invariant MUST be fully rolled
   out, with old writers drained, before the backfill starts. The backfill spec
   explains why and what breaks otherwise.
@@ -211,7 +228,7 @@ that changes the schema MUST update all of these that apply:
 | `migrations/NNNN_<name>.sql` | The forward migration for existing databases. Use the next free number; rebase and renumber on a collision. Never edit a merged migration: its checksum changes, and relays that run the migrator fail with sqlx `VersionMismatch`. Fix forward in a new migration. |
 | `schema/tables/public/<table>.sql` | The table's final `CREATE TABLE` and its `CREATE INDEX` statements, one table per file. This is the SchemaBot-readable source. |
 | `schema/schema.sql` | An `\i` line for each new file, after the tables it depends on. |
-| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here. Rule 1 forbids additions to `functions/` and `triggers/`, except the fence attachment and exclusion it describes. |
+| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here. Rule 1 forbids any addition to `functions/` and `triggers/`. |
 | `scripts/reconcile-schema-after-pgschema.sql` | Idempotent convergence, plus a live assertion, for anything `pgschema` does not preserve: seed rows, some storage parameters, partition attachment, and the shapes listed in AGENTS.md *Common Gotchas* #7. |
 | `crates/buzz-push-gateway/migrations/` **and** the relay copies | The six `push_gateway_*` tables have two homes. The gateway applies its own migration history to its own database, through a pre-install/pre-upgrade Helm Job ([push-gateway-deployment.md](push-gateway-deployment.md)). The relay schema also defines them: `migrations/` (`0015`, `0043`, `0045`, `0060`), `schema/tables/public/push_gateway_*.sql`, and `schema/seeds/push_gateway_*.sql`. A gateway schema change goes in both, as relay `0060` mirrors gateway `0006`. Every rule here applies to both. |
 
@@ -231,14 +248,17 @@ provenance-only checklist under Rule 1.
 
 ### 5. Every schema change is backward compatible with the running app
 
-These rules assume migrations are applied separately from deploys. The relay
-binary defaults `BUZZ_AUTO_MIGRATE` to off, but the Helm chart defaults
-`migrate.autoMigrate` to `true`. Production MUST set
-`migrate.autoMigrate=false`. With it on, the new pod migrates at boot, and
-`helm rollback` starts an old binary that runs the migrator against a newer
-schema and fails (see below). An operator applies the migrations while the
-current relay keeps serving traffic, then deploys the new relay.
-For a period, therefore, the **old relay runs against the new schema**. If the
+Buzz supports two ways of applying migrations, and every change MUST be safe
+under both:
+
+- **Auto-migration.** The relay binary defaults `BUZZ_AUTO_MIGRATE` to off,
+  but the Helm chart defaults `migrate.autoMigrate` to `true`. With it on, the
+  first new pod migrates at boot while old pods are still serving.
+- **Out of band.** An operator applies the migrations while the current relay
+  keeps serving traffic, then deploys the new relay. Block's hosted
+  deployment works this way at scale, with `migrate.autoMigrate=false`.
+
+Either way, for a period the **old relay runs against the new schema**. If the
 new relay is rolled back, the old relay runs against the new schema again.
 Every migration MUST be safe for the currently deployed release to read and
 write against.
@@ -247,8 +267,10 @@ The relay has no general schema-version compatibility check. It verifies only
 specific catalog surfaces, such as the deletion serving fence and the replica
 floor guard, so the ordering below is the main protection. When
 `BUZZ_AUTO_MIGRATE` is on, an older binary refuses a database that has
-migrations it does not know (sqlx `VersionMissing`). A rollback therefore
-depends on the older binary not running the migrator.
+migrations it does not know (sqlx `VersionMissing`), so `helm rollback` with
+auto-migration on fails at startup. A rollback therefore depends on the older
+binary not running the migrator. Making rollback work under auto-migration is
+part of supporting both modes.
 
 One feature therefore usually ships as several PRs, each deployed before the
 next starts:
@@ -357,7 +379,8 @@ description:
 - [ ] Which phase this is (expand, deploy, backfill, or contract), and which
       PRs or releases come before and after it.
 - [ ] That no trigger, function, procedure, rule, or foreign key is added.
-- [ ] That no migration mutates existing rows, and the backfill ID for any
+- [ ] That no migration mutates existing rows, and the backfill ID (or,
+      until the framework ships, the `scripts/maintenance/` script) for any
       repair.
 - [ ] That every location in Rule 4 is updated, with a catalog-level parity
       test for each changed table and index.
