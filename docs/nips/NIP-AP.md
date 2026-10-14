@@ -294,11 +294,12 @@ Team membership is channel membership, so it is also access: every member can re
 
 Changing who is on a team is a change to the channel's membership, under the channel's role rules:
 
-- a member of the channel, other than a guest, can add someone as a member or guest, unless the person added only accepts additions from their own owner;
-- only an owner or admin can add someone as an owner or admin;
+- a member of the channel, other than a guest, can add someone who is not yet in the channel as a member or guest, subject to that person's add policy: a policy of only their owner admits additions by their owner alone, and a policy of nobody rejects every addition by someone else, including their owner;
+- only an owner or admin can add someone as an owner or admin, or change an existing member's role, up or down;
 - only an owner or admin can remove someone else, except that a member can remove an agent they own;
 - a guest can add and remove no one;
-- anyone can leave, except the channel's last owner.
+- anyone can leave;
+- the channel's last owner cannot leave, be removed, or be demoted.
 
 ### Team instructions
 
@@ -330,7 +331,8 @@ A client stores config on the relay only when the relay's [NIP-11](11.md) docume
 - NIP-AR artifacts;
 - guest roles that are read-only: a guest cannot write artifacts and cannot add anyone to the channel;
 - exempting config channels from age-based retention (see "History");
-- artifact sync that can read an artifact's complete history.
+- artifact sync that can read an artifact's complete history;
+- confirming that an artifact address has never been used, even when every revision of it has been redacted.
 
 How a relay advertises each one is defined by the specification of that feature. Otherwise the client MUST keep config local, and MUST NOT create config channels.
 
@@ -394,9 +396,9 @@ When a client reads a config artifact, the artifact is in one of these states:
 
 - **present:** its current revision was read and is valid;
 - **invalid:** its current revision was read and is invalid;
-- **absent:** the channel was read and a lookup by `d` returned nothing, and the client has never seen a revision of it nor moved that config to the relay;
+- **absent:** the relay confirmed that the artifact's address has never been used;
 - **deleted:** a lookup by `d` returned a deletion;
-- **unavailable:** anything else, including a failed read, an unreadable channel, an artifact moved to another channel, a redacted current revision, or a lookup that returns nothing for an artifact the client has seen before or has moved local config into.
+- **unavailable:** anything else, including a failed read, an unreadable channel, an artifact moved to another channel, a redacted current revision, or a lookup that returns nothing without that confirmation.
 
 Only an absent artifact lets a client fall back to another source (see "Launch composition"). An invalid, deleted, or unavailable artifact blocks the start: the client MUST show the error and MUST NOT substitute an older revision, another source, or local config. A deleted artifact is recovered with NIP-AR `restore`.
 
