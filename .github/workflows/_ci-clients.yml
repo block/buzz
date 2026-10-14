@@ -122,7 +122,7 @@ jobs:
   mobile-swift:
     name: Mobile Swift
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     if: inputs.lane == 'mobile-swift' && inputs.mobile
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -139,7 +139,7 @@ jobs:
         run: /bin/bash scripts/test-mobile-pagination.sh
       - name: Build complete iOS simulator app
         run: cd mobile && flutter build ios --simulator --debug --no-pub
-      - name: Test native pagination accessibility
+      - name: Test native controls and push navigation bridge
         run: |
           device=$(xcrun simctl create "Pagination accessibility" "iPhone 16")
           trap 'xcrun simctl shutdown "$device"; xcrun simctl delete "$device"' EXIT
@@ -147,6 +147,11 @@ jobs:
           xcrun simctl bootstatus "$device" -b
           /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
           /bin/bash scripts/test-mobile-member-picker.sh "$device"
+          xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner \
+            -configuration Debug -destination "platform=iOS Simulator,id=$device" \
+            -parallel-testing-enabled NO \
+            -only-testing:RunnerTests/BuzzPushNavigationBridgeTests \
+            CODE_SIGNING_ALLOWED=NO test
       - name: Build complete unsigned iOS release
         run: |
           /bin/bash scripts/test-mobile-gateway-recipes.sh

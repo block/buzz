@@ -524,3 +524,27 @@ final class BuzzPushNotificationResponseTests: XCTestCase {
 private final class MissingAppGroupDelegate: AppDelegate {
   override var appGroupIdentifier: String? { nil }
 }
+
+final class BuzzPushNavigationBridgeTests: XCTestCase {
+  func testWarmAndColdNavigationCarryTheSameThreadArguments() throws {
+    let target = BuzzPushNavigationTarget(
+      eventID: String(repeating: "a", count: 64), communityID: "community",
+      channelID: "channel", threadRootID: String(repeating: "b", count: 64)
+    )
+    let expected = ["eventId": target.eventID, "communityId": "community",
+      "channelId": "channel", "threadRootId": String(repeating: "b", count: 64)]
+    XCTAssertEqual(target.flutterArguments, expected)
+    let buffer = BuzzPushNavigationBuffer()
+    buffer.record(target)
+    XCTAssertEqual(try XCTUnwrap(buffer.take()).flutterArguments, expected)
+    XCTAssertNil(buffer.take())
+  }
+
+  func testChannelNavigationOmitsOptionalThreadArgument() {
+    let target = BuzzPushNavigationTarget(
+      eventID: "event", communityID: "community", channelID: "channel"
+    )
+    XCTAssertEqual(target.flutterArguments,
+      ["eventId": "event", "communityId": "community", "channelId": "channel"])
+  }
+}
