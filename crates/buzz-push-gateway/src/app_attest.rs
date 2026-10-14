@@ -198,14 +198,32 @@ mod tests {
         app_id: String,
         challenge: String,
         aaguid: String,
+        #[serde(skip)]
         attestation_b64: String,
+        #[serde(skip)]
         key_id_b64: String,
         root_cert_pem: String,
     }
 
     fn fixture(json: &str) -> Fixture {
-        let fixture: Fixture = serde_json::from_str(json).expect("valid App Attest fixture JSON");
+        let mut fixture: Fixture =
+            serde_json::from_str(json).expect("valid App Attest fixture JSON");
         assert!(!fixture.description.is_empty());
+        // Sign a fresh leaf at test time instead of checking in a certificate
+        // whose one-year validity will eventually break positive tests.
+        let generated = super::testing::build_test_attestation_with_auth_data(
+            &fixture.challenge,
+            &fixture.app_id,
+            |auth| {
+                if fixture.aaguid == "appattestdevelop" {
+                    auth[37..53].copy_from_slice(b"appattestdevelop");
+                } else {
+                    assert_eq!(fixture.aaguid, "appattest");
+                }
+            },
+        );
+        fixture.attestation_b64 = STANDARD.encode(generated.cbor);
+        fixture.key_id_b64 = generated.key_id;
         fixture
     }
 
@@ -267,18 +285,18 @@ mod tests {
         let good = fixture(GOOD_FIXTURE_JSON);
         let wrong_root = fixture(WRONG_ROOT_FIXTURE_JSON);
         assert!(verify_proof(
-            &wrong_root,
-            &wrong_root.app_id,
-            &wrong_root.challenge,
-            &wrong_root.key_id_b64,
-            good.root_cert_pem.as_bytes(),
+            &good,
+            &good.app_id,
+            &good.challenge,
+            &good.key_id_b64,
+            wrong_root.root_cert_pem.as_bytes(),
         )
         .is_err());
-        assert!(verifier(&wrong_root.app_id, good.root_cert_pem.as_bytes())
+        assert!(verifier(&good.app_id, wrong_root.root_cert_pem.as_bytes())
             .verify_attestation(
-                &wrong_root.attestation_b64,
-                &wrong_root.key_id_b64,
-                wrong_root.challenge.as_bytes(),
+                &good.attestation_b64,
+                &good.key_id_b64,
+                good.challenge.as_bytes()
             )
             .is_err());
     }
