@@ -80,6 +80,7 @@ void main() {
     ValueChanged<double>? onSettingsTransitionProgress,
     ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
+    int homeGeneration = 0,
   }) {
     return ProviderScope(
       overrides: [
@@ -113,8 +114,10 @@ void main() {
           child: child!,
         ),
         home: Stack(
+          key: ValueKey(homeGeneration),
           children: [
             ChannelsPage(
+              key: const PageStorageKey('home-channels'),
               settingsPageBuilder: _buildSettingsPage,
               communityInvitePageBuilder: (_) =>
                   const Scaffold(body: Text('Invite destination')),
@@ -664,6 +667,70 @@ void main() {
     appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
     expect(appBar.frostedSurfaceOpacity, 0);
     expect(appBar.frostedBlurSigma, 23.12);
+  });
+
+  testWidgets('restores header frost with a saved Home scroll position', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 160);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final notifier = _FakeNotifier(testChannels);
+    Widget home(int generation) => buildTestable(
+      homeGeneration: generation,
+      topSectionGradient: const LinearGradient(
+        colors: [Colors.yellow, Colors.blue],
+      ),
+      overrides: [channelsProvider.overrideWith(() => notifier)],
+    );
+    await tester.pumpWidget(home(0));
+    await tester.pumpAndSettle();
+    ScrollPosition position() => tester
+        .state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byType(CustomScrollView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        )
+        .position;
+    position().jumpTo(Grid.xxl);
+    await tester.pumpAndSettle();
+    final navigator = tester.state<NavigatorState>(
+      find.byType(Navigator).first,
+    );
+    unawaited(
+      navigator.push<void>(
+        MaterialPageRoute(
+          builder: (_) => const Scaffold(body: Text('Channel route')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(position().pixels, Grid.xxl);
+    expect(
+      tester
+          .widget<FrostedAppBar>(find.byType(FrostedAppBar).last)
+          .frostedBlurSigma,
+      23.12,
+    );
+    await tester.pumpWidget(home(1));
+    await tester.pumpAndSettle();
+    expect(position().pixels, Grid.xxl);
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    expect(appBar.frosted, isTrue);
+    expect(appBar.frostedBlurSigma, 23.12);
+    position().jumpTo(0);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last).frosted,
+      isFalse,
+    );
   });
 
   testWidgets('scrolls Home to the top when its tab is selected again', (
