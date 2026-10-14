@@ -112,10 +112,12 @@ fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
 /// One probe database is bootstrapped from `schema/schema.sql` through the
 /// real `bin/pgschema apply` binary (the SchemaBot-equivalent desired-state
 /// path); another runs every gateway migration. Their `public` catalogs must
-/// match: the same tables, column shapes (keyed by name, since migrations drop
-/// and append columns), constraints, and index shapes including per-key
-/// `indoption`. The whole catalog is compared, so a new migration that is not
-/// mirrored in `schema/` fails here.
+/// match: the same tables, column shapes (full type with typmod, default,
+/// nullability, identity, generation, collation; keyed by name, since
+/// migrations drop and append columns), table options, constraints, and index
+/// shapes including per-key `indoption`. Neither side may hold functions,
+/// triggers, policies, views, sequences, or user types. The whole catalog is
+/// compared, so a new migration that is not mirrored in `schema/` fails here.
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
 async fn desired_state_schema_matches_migrations() {
@@ -135,10 +137,23 @@ async fn desired_state_schema_matches_migrations() {
     }
     const TABLES: &str = "SELECT tablename::text FROM pg_tables \
         WHERE schemaname = 'public' AND tablename <> '_sqlx_migrations' ORDER BY 1";
-    const COLUMNS: &str = "SELECT table_name::text, column_name::text, data_type::text, \
-        is_nullable::text, column_default::text, is_identity::text \
-        FROM information_schema.columns \
-        WHERE table_schema = 'public' AND table_name <> '_sqlx_migrations' ORDER BY 1, 2";
+    // `pg_attribute` rather than `information_schema.columns`: the latter's
+    // `data_type` drops typmods and array element types (`varchar(64)` and
+    // `varchar(128)` both read `character varying`).
+    const COLUMNS: &str = "SELECT t.relname::text, a.attname::text, \
+        format_type(a.atttypid, a.atttypmod), a.attnotnull::text, \
+        pg_get_expr(d.adbin, d.adrelid), a.attidentity::text, a.attgenerated::text, \
+        a.attcollation::regcollation::text \
+        FROM pg_attribute a JOIN pg_class t ON t.oid = a.attrelid \
+        JOIN pg_namespace n ON n.oid = t.relnamespace \
+        LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+        WHERE n.nspname = 'public' AND t.relkind = 'r' AND t.relname <> '_sqlx_migrations' \
+        AND a.attnum > 0 AND NOT a.attisdropped ORDER BY 1, 2";
+    const TABLE_OPTIONS: &str = "SELECT t.relname::text, t.relpersistence::text, \
+        t.relrowsecurity::text, t.relforcerowsecurity::text, t.reloptions::text \
+        FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace \
+        WHERE n.nspname = 'public' AND t.relkind = 'r' AND t.relname <> '_sqlx_migrations' \
+        ORDER BY 1";
     const CONSTRAINTS: &str = "SELECT t.relname::text, c.conname::text, c.contype::text, \
         pg_get_constraintdef(c.oid) \
         FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid \
@@ -150,6 +165,23 @@ async fn desired_state_schema_matches_migrations() {
         JOIN pg_class t ON t.oid = i.indrelid \
         JOIN pg_namespace n ON n.oid = t.relnamespace \
         WHERE n.nspname = 'public' AND t.relname <> '_sqlx_migrations' ORDER BY 1, 2";
+    // `schema/` may only declare tables and indexes, so neither path may
+    // create anything else in `public`: SchemaBot would never reproduce it.
+    const NON_TABLE_OBJECTS: &str = "SELECT 'function', p.proname::text FROM pg_proc p \
+            JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' \
+        UNION ALL SELECT 'trigger', tg.tgname::text FROM pg_trigger tg \
+            JOIN pg_class t ON t.oid = tg.tgrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+            WHERE n.nspname = 'public' AND NOT tg.tgisinternal \
+        UNION ALL SELECT 'policy', pol.polname::text FROM pg_policy pol \
+            JOIN pg_class t ON t.oid = pol.polrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+            WHERE n.nspname = 'public' \
+        UNION ALL SELECT 'relation', c.relname::text FROM pg_class c \
+            JOIN pg_namespace n ON n.oid = c.relnamespace \
+            WHERE n.nspname = 'public' AND c.relkind NOT IN ('r', 'i') \
+        UNION ALL SELECT 'type', ty.typname::text FROM pg_type ty \
+            JOIN pg_namespace n ON n.oid = ty.typnamespace \
+            WHERE n.nspname = 'public' AND ty.typtype IN ('d', 'e', 'r', 'm') \
+        ORDER BY 1, 2";
 
     let base_url = std::env::var("BUZZ_TEST_DATABASE_URL").expect("test database URL");
     let url = url::Url::parse(&base_url).expect("parse test database URL");
@@ -229,15 +261,28 @@ async fn desired_state_schema_matches_migrations() {
         .await
         .expect("apply gateway migrations");
 
-    let tables = catalog(&desired, TABLES).await;
+    let declared: BTreeSet<String> = catalog(&desired, TABLES)
+        .await
+        .into_iter()
+        .filter_map(|row| row.into_iter().next().flatten())
+        .collect();
+    let served: BTreeSet<String> = GATEWAY_TABLES.iter().map(|t| t.to_string()).collect();
     assert_eq!(
-        tables.len(),
-        6,
-        "desired state declares the six gateway tables"
+        declared, served,
+        "schema/ must declare exactly GATEWAY_TABLES, the set readiness probes and \
+         runtime grants cover"
     );
+    for pool in [&desired, &migrated] {
+        assert_eq!(
+            catalog(pool, NON_TABLE_OBJECTS).await,
+            Rows::new(),
+            "the gateway schema holds only tables and indexes"
+        );
+    }
     for (what, sql) in [
         ("table set", TABLES),
         ("column", COLUMNS),
+        ("table option", TABLE_OPTIONS),
         ("constraint", CONSTRAINTS),
         ("index", INDEXES),
     ] {

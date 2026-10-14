@@ -13,6 +13,9 @@
 -- namespace, so nothing else may live under it. The gateway has no types,
 -- functions, triggers, or seed rows. Its pre-migration bootstrap guard and
 -- runtime-role grants are operational steps in `src/postgres.rs`, not schema.
+-- It also has nothing pgschema cannot express (no seed DML, no storage
+-- parameters), so the relay's `scripts/reconcile-schema-after-pgschema.sql`
+-- step (root `AGENTS.md` gotcha #7) does not apply to it.
 --
 -- `./bin/pgschema apply --file crates/buzz-push-gateway/schema/schema.sql`
 -- resolves the `\i` includes relative to this file. Raw `psql` resolves `\i`
