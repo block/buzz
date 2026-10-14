@@ -135,3 +135,33 @@ fn enrolled_key_verifies_following_assertion() {
     )
     .is_err());
 }
+
+#[test]
+fn apple_historical_fixture_has_structural_extensions_with_ed_clear() {
+    // Apple's public example is historical, not evidence of current chain validity.
+    // https://developer.apple.com/documentation/devicecheck/attestation-object-validation-guide
+    let bytes = STANDARD
+        .decode(include_str!("../../tests/fixtures/apple-structural-attestation.b64").trim())
+        .unwrap();
+    let envelope = super::cbor::complete(&bytes).unwrap();
+    let auth = envelope.field("authData").unwrap().bytes().unwrap();
+    assert_eq!(auth.len(), 226);
+    assert_eq!(auth[32], 0x40);
+    let super::cbor::Value::Array(chain) = envelope.field("attStmt").unwrap().field("x5c").unwrap()
+    else {
+        panic!("certificate chain")
+    };
+    let leaf = chain[0].bytes().unwrap();
+    let public_key = super::certificate::public_key(leaf).unwrap();
+    let key_id = super::certificate::key_id(&public_key);
+    let parsed = super::authenticator::enrollment(
+        auth,
+        "1234567890.com.example.myapp",
+        &key_id,
+        &public_key,
+        false,
+    )
+    .unwrap();
+    assert_eq!(parsed.counter, 0);
+    assert_eq!(parsed.flags, 0x40);
+}

@@ -274,4 +274,48 @@ mod tests {
             assert!(complete(&huge_length).is_err());
         }
     }
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(512))]
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=MAX_BYTES)) {
+            let _ = complete(&bytes);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual resource characterization, not a timing-sensitive CI gate"]
+    fn characterize_capacity_work() {
+        use std::{hint::black_box, time::Instant};
+        let mut at_items = vec![0x9f];
+        at_items.extend(std::iter::repeat_n(0, MAX_ITEMS - 1));
+        at_items.push(0xff);
+        let mut at_bytes = vec![0x59, 0xff, 0xfd];
+        at_bytes.resize(MAX_BYTES, 0);
+        let mut at_depth = vec![0x81; MAX_DEPTH];
+        at_depth.push(0);
+        let mut map = minicbor::Encoder::new(Vec::new());
+        map.map(((MAX_ITEMS - 1) / 2) as u64).unwrap();
+        for index in 0..(MAX_ITEMS - 1) / 2 {
+            map.str(&format!("shared-prefix-{index:08}"))
+                .unwrap()
+                .u8(0)
+                .unwrap();
+        }
+        for (name, bytes) in [
+            ("map", map.into_writer()),
+            ("items", at_items),
+            ("bytes", at_bytes),
+            ("depth", at_depth),
+        ] {
+            let start = Instant::now();
+            for _ in 0..1000 {
+                black_box(complete(black_box(&bytes)).unwrap());
+            }
+            eprintln!(
+                "{name}: {} input bytes, {} ns/parse (1000 iterations)",
+                bytes.len(),
+                start.elapsed().as_nanos() / 1000
+            );
+        }
+    }
 }

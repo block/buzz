@@ -79,3 +79,27 @@ Both upstream MIT notices are retained in the module's
 [LICENSE](../crates/buzz-push-gateway/src/app_attest/LICENSE).
 The gateway owns its verification policy and tracks Apple protocol and underlying
 cryptographic-library updates directly. There is no remaining appattest dependency.
+
+## Resource characterization
+
+A manual debug-build run on arm64 macOS (1,000 parses per case) measured about
+1.61 ms for a 49,131-byte map near the 4,096-node limit, 247 microseconds for a
+4,097-byte array at that node limit, 0.93 microseconds for a 65,536-byte byte
+string, and 3.8 microseconds for depth 32. The test process peaked at 10.4 MB
+resident memory; that includes the test harness and is not a parser-allocation
+measurement. These are local observations, not latency guarantees or production
+benchmarks. The manual `characterize_capacity_work` test reproduces the cases
+without imposing a timing-sensitive CI assertion.
+
+Node and depth limits bound traversal and key-comparison work; byte limits bound
+copied payloads. Container capacity grows only after successfully decoding each
+item, never from an untrusted declared length. The gateway's smaller transport
+caps apply before these parser limits. Future valid objects can exceed service
+capacity and receive the distinct internal capacity diagnostic; raising limits
+requires review and repeating this characterization.
+
+Generated tests cover 256 nested optional-value/signature-mutation cases and
+512 arbitrary byte inputs per run. They complement the explicit boundary and
+encoding-equivalence corpus. Apple's public historical attestation fixture also
+exercises a complete credential key and extension tail with ED clear; its
+certificate is not treated as a currently valid enrollment.

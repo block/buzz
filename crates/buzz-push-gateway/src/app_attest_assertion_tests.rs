@@ -386,3 +386,80 @@ fn sdk26_and_sdk27_device_enrollments_verify_with_exact_environment() {
             .is_err());
     }
 }
+
+mod properties {
+    use super::*;
+    use ciborium::Value;
+    use proptest::prelude::*;
+
+    fn optional_value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            any::<i64>().prop_map(|v| Value::Integer(v.into())),
+            any::<bool>().prop_map(Value::Bool),
+            proptest::collection::vec(any::<u8>(), 0..16).prop_map(Value::Bytes),
+            "[a-z]{0,12}".prop_map(Value::Text),
+        ]
+        .prop_recursive(4, 32, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+                proptest::collection::btree_map("[a-z]{1,6}", inner.clone(), 0..4).prop_map(|m| {
+                    Value::Map(m.into_iter().map(|(k, v)| (Value::Text(k), v)).collect())
+                }),
+                inner.prop_map(|v| Value::Tag(1000, Box::new(v))),
+            ]
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn signed_optional_values_preserve_byte_authentication(v in optional_value(), selector in any::<usize>()) {
+            let mut tail = Vec::new();
+            ciborium::into_writer(&Value::Map(vec![(Value::Text("future".into()), v)]), &mut tail).unwrap();
+            prop_assert!(tail.len() < 800);
+            let auth = auth_data(&tail);
+            let signed = signed_assertion(&auth);
+            prop_assert!(verify(&signed).is_ok());
+            // Mutate an authenticated extension byte while retaining its original signature.
+            let mut envelope: Value = ciborium::from_reader(signed.as_slice()).unwrap();
+            let Value::Map(fields) = &mut envelope else { unreachable!() };
+            for (key, value) in fields {
+                if key.as_text() == Some("authenticatorData") {
+                    let Value::Bytes(bytes) = value else { unreachable!() };
+                    bytes[37 + selector % tail.len()] ^= 1;
+                }
+            }
+            let mut changed = Vec::new();
+            ciborium::into_writer(&envelope, &mut changed).unwrap();
+            prop_assert!(verify(&changed).is_err());
+            prop_assert!(verify(&signed[..selector % signed.len()]).is_err());
+        }
+    }
+
+    #[test]
+    fn maximum_counter_is_accepted_once_and_cannot_wrap() {
+        let key = signing_key().verifying_key().to_encoded_point(false);
+        let mut auth = auth_data(b"\xa0");
+        auth[33..37].copy_from_slice(&u32::MAX.to_be_bytes());
+        let signed = signed_assertion(&auth);
+        assert_eq!(
+            super::super::proof::assert(&signed, TRANSCRIPT, APP_ID, key.as_ref(), u32::MAX - 1)
+                .unwrap()
+                .counter,
+            u32::MAX
+        );
+        assert!(
+            super::super::proof::assert(&signed, TRANSCRIPT, APP_ID, key.as_ref(), u32::MAX)
+                .is_err()
+        );
+        auth[33..37].copy_from_slice(&0u32.to_be_bytes());
+        assert!(super::super::proof::assert(
+            &signed_assertion(&auth),
+            TRANSCRIPT,
+            APP_ID,
+            key.as_ref(),
+            u32::MAX
+        )
+        .is_err());
+    }
+}
