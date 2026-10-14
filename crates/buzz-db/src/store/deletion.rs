@@ -1914,51 +1914,52 @@ impl DeletionStore {
         .await?;
         transaction_timer
             .observe(async {
-        verify_lease(&mut tx, token, DeletionStage::Approved).await?;
-        lock_community_deletion(&mut tx, token.community_id).await?;
-        verify_lease(&mut tx, token, DeletionStage::Approved).await?;
-        let active_serving_writes = sqlx::query(
-            "SELECT count(*)::BIGINT AS active_count, \
-                    COALESCE(array_agg(DISTINCT operation ORDER BY operation), ARRAY[]::TEXT[]) AS operations \
-             FROM community_serving_write_leases \
-             WHERE community_id = $1 AND lease_until >= now()",
-        )
-        .bind(token.community_id.as_uuid())
-        .fetch_one(&mut *tx)
-        .await?;
-        let active_count: i64 = active_serving_writes.try_get("active_count")?;
-        if active_count > 0 {
-            return Err(DbError::ServingWritesNotDrained {
-                community_id: *token.community_id.as_uuid(),
-                active_count,
-                operations: active_serving_writes.try_get("operations")?,
-            });
-        }
-        let community = lock_community_lifecycle(&mut tx, token.community_id).await?;
-        let generation = transition_community(
-            &mut tx,
-            token.community_id,
-            community,
-            CommunityTransition::Fence,
-        ).await?;
-        advance_request_tx(
-            &mut tx,
-            token,
-            DeletionStage::Approved,
-            DeletionStage::Fenced,
-            Some(generation),
-        )
-        .await?;
-        checkpoint_completed_tx(
-            &mut tx,
-            token,
-            DeletionStage::Approved,
-            "activate_fence",
-            serde_json::json!({"fence_generation": generation}),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(generation)
+                verify_lease(&mut tx, token, DeletionStage::Approved).await?;
+                lock_community_deletion(&mut tx, token.community_id).await?;
+                verify_lease(&mut tx, token, DeletionStage::Approved).await?;
+                let active_serving_writes = sqlx::query(
+                    "SELECT count(*)::BIGINT AS active_count, \
+                            COALESCE(array_agg(DISTINCT operation ORDER BY operation), ARRAY[]::TEXT[]) AS operations \
+                     FROM community_serving_write_leases \
+                     WHERE community_id = $1 AND lease_until >= now()",
+                )
+                .bind(token.community_id.as_uuid())
+                .fetch_one(&mut *tx)
+                .await?;
+                let active_count: i64 = active_serving_writes.try_get("active_count")?;
+                if active_count > 0 {
+                    return Err(DbError::ServingWritesNotDrained {
+                        community_id: *token.community_id.as_uuid(),
+                        active_count,
+                        operations: active_serving_writes.try_get("operations")?,
+                    });
+                }
+                let community = lock_community_lifecycle(&mut tx, token.community_id).await?;
+                let generation = transition_community(
+                    &mut tx,
+                    token.community_id,
+                    community,
+                    CommunityTransition::Fence,
+                )
+                .await?;
+                advance_request_tx(
+                    &mut tx,
+                    token,
+                    DeletionStage::Approved,
+                    DeletionStage::Fenced,
+                    Some(generation),
+                )
+                .await?;
+                checkpoint_completed_tx(
+                    &mut tx,
+                    token,
+                    DeletionStage::Approved,
+                    "activate_fence",
+                    serde_json::json!({"fence_generation": generation}),
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(generation)
             })
             .await
     }
@@ -2702,9 +2703,9 @@ impl DeletionStore {
         .await?
         .map(CommunityId::from_uuid)
         .ok_or_else(|| DbError::NotFound(format!("community deletion {request_id}")))?;
-        // Every lifecycle transition takes the community advisory lock before any
+        // Quiesce, fence, and abort take the community advisory lock before any
         // row lock, then the community row before the request row. Inverting
-        // either order lets abort and the executor deadlock each other.
+        // either order lets abort and those executor transitions deadlock.
         lock_community_deletion(&mut tx, community_id).await?;
         let community = lock_community_lifecycle(&mut tx, community_id).await?;
         let row = sqlx::query("SELECT * FROM community_deletion_requests WHERE id = $1 FOR UPDATE")
@@ -3368,8 +3369,10 @@ async fn lock_community_deletion(
     Ok(())
 }
 
-/// The row snapshot is taken under `FOR UPDATE` after the community deletion
-/// advisory lock. All lifecycle writers use it in the same transaction.
+/// The lifecycle row is locked `FOR UPDATE` in the caller's transaction.
+/// Quiesce, fence, and abort also hold the community deletion advisory lock.
+/// `purge_postgres` does not; its tombstone transition fails if a concurrent
+/// abort won the row lock and changed the lifecycle state.
 struct CommunityLifecycle {
     state: String,
     generation: i64,
@@ -5021,6 +5024,81 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .abort(request.id, "operator", "too late")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn single_table_guard_abort_invalidates_generation_without_trigger() {
+        let (db, store) = store().await;
+        sqlx::query("ALTER TABLE communities DISABLE TRIGGER communities_deletion_tombstone")
+            .execute(&db.pool)
+            .await
+            .expect("disable only tombstone trigger");
+        for pre_archived in [false, true] {
+            for fenced in [false, true] {
+                let (request, _) = inventoried_request(&db, &store).await;
+                if pre_archived {
+                    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+                        .bind(request.community_id.as_uuid())
+                        .execute(&db.pool)
+                        .await
+                        .expect("pre-archive fixture");
+                }
+                let pre_quiesce_archived_at: Option<DateTime<Utc>> =
+                    sqlx::query_scalar("SELECT archived_at FROM communities WHERE id = $1")
+                        .bind(request.community_id.as_uuid())
+                        .fetch_one(&db.pool)
+                        .await
+                        .expect("original archive state");
+                assert_eq!(pre_quiesce_archived_at.is_some(), pre_archived);
+                store
+                    .approve(request.id, "approver", None)
+                    .await
+                    .expect("approve");
+                let claim = store
+                    .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+                    .await
+                    .expect("claim")
+                    .expect("won claim");
+                store.begin_quiescing(&claim.lease).await.expect("quiesce");
+                if fenced {
+                    store.fence(&claim.lease).await.expect("fence");
+                }
+                let (state, fenced_gen): (String, i64) = sqlx::query_as(
+                    "SELECT deletion_state, deletion_fence_generation FROM communities WHERE id = $1",
+                )
+                .bind(request.community_id.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("pre-abort lifecycle");
+                assert_eq!(state, if fenced { "fenced" } else { "quiescing" });
+                assert_eq!(fenced_gen, if fenced { 1 } else { 0 });
+                let aborted = store
+                    .abort(request.id, "operator", "generation regression")
+                    .await
+                    .expect("abort through app path");
+                assert_eq!(aborted.stage, DeletionStage::Aborted);
+                assert_eq!(aborted.pre_quiesce_archived_at, pre_quiesce_archived_at);
+                assert_eq!(aborted.fence_generation, Some(fenced_gen + 1));
+                let (state, generation, archived_at, deleted_at): (
+                    String,
+                    i64,
+                    Option<DateTime<Utc>>,
+                    Option<DateTime<Utc>>,
+                ) = sqlx::query_as(
+                    "SELECT deletion_state, deletion_fence_generation, archived_at, deleted_at \
+                         FROM communities WHERE id = $1",
+                )
+                .bind(request.community_id.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("post-abort lifecycle");
+                assert_eq!(state, "active");
+                assert_eq!(generation, fenced_gen + 1);
+                assert_eq!(archived_at, pre_quiesce_archived_at);
+                assert_eq!(deleted_at, None);
+            }
+        }
     }
 
     #[tokio::test]
