@@ -121,6 +121,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
     );
+    final relaySelfPubkey = ref.watch(relaySelfProvider).value;
     // Relay thread queries are keyed by the outermost root, even when this
     // page displays a nested branch. Query that root, then select this head's
     // direct children from the returned subtree below.
@@ -148,6 +149,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         : formatTimeline(
             mergeThreadEvents(replyEvents, liveChannelEvents),
             currentPubkey: currentPubkey,
+            relaySelfPubkey: relaySelfPubkey,
           );
     final hasFetchedReplies = fetchedReplies != null;
     // A terminal query error cannot produce a more authoritative list. Keep
@@ -164,7 +166,11 @@ class ThreadDetailPage extends HookConsumerWidget {
         ? _provisionalThreadMessages(
             allMessages,
             fetchedReplies ??
-                formatTimeline(liveChannelEvents, currentPubkey: currentPubkey),
+                formatTimeline(
+                  liveChannelEvents,
+                  currentPubkey: currentPubkey,
+                  relaySelfPubkey: relaySelfPubkey,
+                ),
             liveChannelEvents,
           )
         : [
