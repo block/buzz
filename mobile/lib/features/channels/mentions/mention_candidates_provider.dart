@@ -41,9 +41,7 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       if (disposed) return const [];
 
       final session = ref.read(relaySessionProvider.notifier);
-      final events = await session.queryRelay([
-        NostrFilters.searchUsers(trimmed),
-      ]);
+      final events = await session.searchProfiles(trimmed);
 
       // Keep only the latest kind:0 event per pubkey (the bridge does not
       // honor the `kinds` filter under search, and may return several

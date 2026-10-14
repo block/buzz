@@ -58,6 +58,13 @@ class _HeldSearchSession extends RelaySessionNotifier {
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
+  }) => throw StateError('name search must use searchProfiles');
+
+  @override
+  Future<List<NostrEvent>> searchProfiles(
+    String query, {
+    int limit = 50,
+    Duration timeout = const Duration(seconds: 8),
   }) {
     final search = Completer<List<NostrEvent>>();
     searches.add(search);

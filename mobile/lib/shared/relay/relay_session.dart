@@ -12,6 +12,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../features/age_gate/age_signal_provider.dart';
 import '../auth/auth.dart';
+import 'nostr_filters.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
 import 'relay_closed_policy.dart';
@@ -157,16 +158,81 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
+  }) => _postForEvents(
+    '/query',
+    filters.map((filter) => filter.toJson()).toList(),
+    timeout: timeout,
+  );
+
+  /// Finds people by profile name, for typeahead surfaces.
+  ///
+  /// NIP-50 search over kind:0 matches the whole profile JSON, so text in
+  /// avatar data URLs, `about` or `nip05` can fill every result page and hide
+  /// a real name match. The relay's `POST /profiles/search` applies the same
+  /// prefix rule to just `name` and `display_name` and puts exact and prefix
+  /// name matches first.
+  ///
+  /// A relay without that endpoint answers 404 or 405. The search then uses
+  /// NIP-50 ([NostrFilters.searchUsers]), and so do later searches on that
+  /// relay for [profileSearchRetry]; after that the endpoint is tried again.
+  /// A query or limit the endpoint does not accept also uses NIP-50.
+  Future<List<NostrEvent>> searchProfiles(
+    String query, {
+    int limit = 50,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final text = query.trim();
+    final relay = ref.read(relayConfigProvider).baseUrl;
+    final fallback = _profileSearchFallback;
+    if (text.isNotEmpty &&
+        text.runes.length <= _profileSearchQueryMax &&
+        limit >= 1 &&
+        limit <= _profileSearchLimitMax &&
+        (fallback == null ||
+            fallback.relay != relay ||
+            !_now().isBefore(fallback.until))) {
+      try {
+        final events = await _postForEvents('/profiles/search', {
+          'query': text,
+          'limit': limit,
+        }, timeout: timeout);
+        return [
+          for (final event in events)
+            if (event.kind == 0) event,
+        ];
+      } on RelayException catch (error) {
+        if (error.statusCode != 404 && error.statusCode != 405) rethrow;
+        _profileSearchFallback = (
+          relay: relay,
+          until: _now().add(profileSearchRetry),
+        );
+      }
+    }
+    return queryRelay([
+      NostrFilters.searchUsers(text, limit: limit),
+    ], timeout: timeout);
+  }
+
+  /// How long a relay's 404 or 405 keeps [searchProfiles] on NIP-50.
+  static const profileSearchRetry = Duration(minutes: 5);
+  static const _profileSearchQueryMax = 100;
+  static const _profileSearchLimitMax = 100;
+  ({String relay, DateTime until})? _profileSearchFallback;
+
+  /// POSTs [payload] as JSON to relay [path] with NIP-98 auth and decodes
+  /// the event array it answers.
+  Future<List<NostrEvent>> _postForEvents(
+    String path,
+    Object payload, {
+    required Duration timeout,
   }) async {
     if (_disposed || _ageRestricted) {
       throw StateError('Relay session is unavailable');
     }
     final generation = _contextGeneration;
     final config = ref.read(relayConfigProvider);
-    final url = Uri.parse(config.baseUrl).resolve('/query').toString();
-    final bodyBytes = utf8.encode(
-      jsonEncode(filters.map((filter) => filter.toJson()).toList()),
-    );
+    final url = Uri.parse(config.baseUrl).resolve(path).toString();
+    final bodyBytes = utf8.encode(jsonEncode(payload));
     // Reuse the session transport on success. A timeout rotates immediately
     // for new queries, then closes the retired client after its peers finish.
     final response = await _httpQueryClient.post(

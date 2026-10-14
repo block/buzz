@@ -850,10 +850,19 @@ class _DirectoryFakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (filters.any((filter) => filter.search != null)) {
-      searchQueryCount++;
-    } else {
-      directoryQueryCount++;
+      throw StateError('name search must use searchProfiles');
     }
+    directoryQueryCount++;
+    return profileEvents;
+  }
+
+  @override
+  Future<List<NostrEvent>> searchProfiles(
+    String query, {
+    int limit = 50,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    searchQueryCount++;
     return profileEvents;
   }
 

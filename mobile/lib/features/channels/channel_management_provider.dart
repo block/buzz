@@ -455,9 +455,7 @@ final relayDirectorySearchProvider = FutureProvider.autoDispose
       ref.watch(relayConfigProvider);
       final session = ref.watch(relaySessionProvider.notifier);
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
-      final events = await session.queryRelay([
-        NostrFilters.searchUsers(trimmed, limit: 50),
-      ]);
+      final events = await session.searchProfiles(trimmed, limit: 50);
       return directoryUsersFromProfileEvents(
         events,
       ).where((user) => user.pubkey.toLowerCase() != currentPubkey).toList();
