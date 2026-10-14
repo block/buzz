@@ -2641,14 +2641,27 @@ fn sql_update_sets<'a>(source: &'a str, table: &str) -> Vec<(&'a str, &'a str)> 
 const DESTRUCTIVE_FROZEN_OR_EQUAL: &str =
     "destructive_storage_frozen_at is null or destructive_storage_manifest =";
 
-/// A guard admits a statement only as a plain conjunct of its own WHERE: no
-/// `OR` outside the known frozen-or-equal groups, and no subquery.
+/// A guard admits a statement only as a plain conjunct of its own WHERE: it
+/// follows the WHERE start or an `AND` (never `NOT`), and there is no `OR`
+/// word outside the known frozen-or-equal groups, and no subquery.
 fn plain_guard(predicate: &str, guard: &str) -> bool {
+    let conjunct = predicate.match_indices(guard).any(|(at, _)| {
+        let before = &predicate[..at];
+        // Allow a table qualifier: `communities.deletion_state = ...`.
+        let before = before
+            .strip_suffix('.')
+            .map_or(before, |qualified| {
+                qualified.trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+            })
+            .trim_end_matches([' ', '(']);
+        before.is_empty() || before.ends_with(" and")
+    });
     let rest = predicate.replace(DESTRUCTIVE_FROZEN_OR_EQUAL, "").replace(
         "destructive_storage_manifest is null or destructive_storage_manifest =",
         "",
     );
-    predicate.contains(guard) && !rest.contains(" or ") && !rest.contains("select ")
+    let words = || rest.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
+    conjunct && !words().any(|word| word == "or" || word == "select")
 }
 
 fn sql_assigned_columns(set: &str) -> Vec<&str> {
@@ -2931,6 +2944,9 @@ fn single_table_policy_rejects_weakened_guards() {
         "UPDATE communities SET icon = NULL WHERE id = $1 AND (deletion_state = 'active' OR true)",
         "UPDATE communities SET icon = NULL WHERE id = $1 OR deletion_state = 'active'",
         "UPDATE communities SET icon = NULL WHERE id IN (SELECT id FROM communities WHERE deletion_state = 'active')",
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND NOT deletion_state = 'active'",
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND NOT communities.deletion_state = 'active'",
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND (deletion_state = 'active')OR(true)",
         "UPDATE community_deletion_requests SET inventory_digest = NULL WHERE id = $1 AND (inventory_frozen_at IS NULL OR true)",
         "UPDATE community_deletion_requests SET destructive_storage_manifest = COALESCE(destructive_storage_manifest, $2) WHERE id = $1 AND (destructive_storage_frozen_at IS NULL OR destructive_storage_manifest = $2 OR true)",
     ] {
