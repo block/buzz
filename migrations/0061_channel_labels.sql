@@ -1,6 +1,6 @@
 -- Channel labels: creator- or admin-chosen tags that group channels across
 -- channel types. The relay publishes each label as a ["t", <label>] tag on
--- the channel's group-state events (kinds 39000-39003), after the channel
+-- the channel's group-state events (kinds 39000-39002), after the channel
 -- type tag. kind:9007 sets them and kind:9002 replaces them; the relay
 -- validates their shape (1-64 of a-z 0-9 . : -, not a channel type name).
 --

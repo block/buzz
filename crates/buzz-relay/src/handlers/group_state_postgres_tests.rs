@@ -425,7 +425,10 @@ async fn invalid_labels_are_refused() {
 }
 
 /// Only an owner or admin may change labels; a plain member may not.
-/// Mutation: drop `t` from the privileged tag list → RED.
+/// The join must be accepted, so the refusal comes from the label rule and
+/// not from "not a member".
+/// Mutation: drop `t` from the privileged tag list → RED (the member's
+/// edit is accepted).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn members_cannot_change_labels() {
@@ -438,9 +441,10 @@ async fn members_cannot_change_labels() {
         .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
         .sign_with_keys(&member)
         .unwrap();
-    ingest_event(&state, &tenant, join, http_auth(&member))
+    let joined = ingest_event(&state, &tenant, join, http_auth(&member))
         .await
         .expect("member joins");
+    assert!(joined.accepted, "join refused: {}", joined.message);
 
     assert!(
         edit_channel(&state, &tenant, &member, channel_id, &[&["t", "mine"]])
@@ -451,5 +455,37 @@ async fn members_cannot_change_labels() {
     assert_eq!(
         t_values(&state, &tenant, channel_id, 39000).await,
         vec!["stream", "keep"]
+    );
+}
+
+/// An admin who is not the owner may change labels.
+/// Mutation: allow only the owner role to set labels → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn admins_can_change_labels() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-label-admin").await;
+    let owner = Keys::generate();
+    let admin = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["t", "keep"]]).await;
+    let grant = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([
+            Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            Tag::parse(["p", &admin.public_key().to_hex()]).unwrap(),
+            Tag::parse(["role", "admin"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let granted = ingest_event(&state, &tenant, grant, http_auth(&owner))
+        .await
+        .expect("owner adds admin");
+    assert!(granted.accepted, "admin grant refused: {}", granted.message);
+
+    edit_channel(&state, &tenant, &admin, channel_id, &[&["t", "theirs"]])
+        .await
+        .expect("an admin may set labels");
+    assert_eq!(
+        t_values(&state, &tenant, channel_id, 39000).await,
+        vec!["stream", "theirs"]
     );
 }

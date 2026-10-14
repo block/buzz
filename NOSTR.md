@@ -128,12 +128,13 @@ edit, so use the tag to find the older of two channels.
 
 **Channel labels.** A label groups channels across channel types, for
 example `["t", "workspace"]`. Set labels with `["t", <label>]` tags on
-kind:9007. On kind:9002 the `t` tags replace the whole set, and a lone
-`["t", ""]` clears it; a kind:9002 without `t` tags leaves the labels as
-they are. Only an owner or admin may change labels. The relay refuses a
-label set with more than 8 labels, a label that is not 1-64 characters
-from `a-z`, `0-9`, `.`, `:` and `-`, or a label equal to a channel type
-name (`stream`, `forum`, `dm`, `workflow`, `system`).
+kind:9007. On kind:9002 the `t` tags replace the whole set, and
+`["t", ""]` with no other `t` tag clears it; a kind:9002 without `t` tags
+leaves the labels as they are. Only an owner or admin may change labels.
+The relay refuses a label set with more than 8 distinct labels, a label
+that is not 1-64 characters from `a-z`, `0-9`, `.`, `:` and `-`, or a
+label equal to a channel type name (`stream`, `forum`, `dm`, `workflow`,
+`system`).
 
 Events are stored **channel-scoped** so access control applies — private channel member lists are
 only visible to members. Discover groups via historical REQ:

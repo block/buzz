@@ -48,8 +48,10 @@ pub enum ChannelLabelError {
 /// Validate the values of a channel's `["t", <label>]` tags and return the
 /// label set to store, in first-seen order without duplicates.
 ///
-/// A single `""` means "no labels" and returns an empty set; kind:9002 uses
-/// it to clear the labels, the same convention as `["ttl", ""]`.
+/// `""` alone (one or more times) means "no labels" and returns an empty
+/// set; kind:9002 uses it to clear the labels, the same convention as
+/// `["ttl", ""]`. Repeated labels are stored once and count once toward
+/// [`MAX_CHANNEL_LABELS`].
 pub fn parse_channel_labels<'a>(
     values: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<String>, ChannelLabelError> {
@@ -297,8 +299,35 @@ impl FromStr for MemberRole {
 mod tests {
     use super::{
         canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
-        parse_channel_labels, ChannelLabelError, MAX_CHANNEL_LABELS,
+        parse_channel_labels, ChannelLabelError, ChannelType, MAX_CHANNEL_LABELS,
+        RESERVED_CHANNEL_LABELS,
     };
+
+    /// Every channel type name is reserved, so a label cannot pose as a type.
+    /// The `match` has no wildcard: a new `ChannelType` variant does not
+    /// compile until it is added to `ALL` here, and then this test fails
+    /// until its name is in `RESERVED_CHANNEL_LABELS`.
+    #[test]
+    fn every_channel_type_name_is_a_reserved_label() {
+        const ALL: [ChannelType; 4] = [
+            ChannelType::Stream,
+            ChannelType::Forum,
+            ChannelType::Dm,
+            ChannelType::Workflow,
+        ];
+        for channel_type in ALL {
+            match channel_type {
+                ChannelType::Stream
+                | ChannelType::Forum
+                | ChannelType::Dm
+                | ChannelType::Workflow => {}
+            }
+            assert!(
+                RESERVED_CHANNEL_LABELS.contains(&channel_type.as_str()),
+                "{channel_type:?} is not a reserved label"
+            );
+        }
+    }
 
     #[test]
     fn group_state_identity_tags_put_the_type_first_then_labels_then_the_creator() {
@@ -363,11 +392,22 @@ mod tests {
                 .map(|labels| labels.len()),
             Ok(MAX_CHANNEL_LABELS)
         );
+        // Nine tags with one repeat are 8 distinct labels.
+        let mut repeated: Vec<&str> = names[..MAX_CHANNEL_LABELS]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        repeated.push(repeated[0]);
+        assert_eq!(
+            parse_channel_labels(repeated).map(|labels| labels.len()),
+            Ok(MAX_CHANNEL_LABELS)
+        );
     }
 
     #[test]
-    fn a_lone_empty_label_clears_and_cannot_mix_with_labels() {
+    fn empty_labels_clear_and_cannot_mix_with_labels() {
         assert_eq!(parse_channel_labels([""]), Ok(Vec::new()));
+        assert_eq!(parse_channel_labels(["", ""]), Ok(Vec::new()));
         assert_eq!(
             parse_channel_labels(["", "workspace"]),
             Err(ChannelLabelError::ClearWithOthers)

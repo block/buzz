@@ -88,11 +88,11 @@ mean that a key did not create the channel.
 A label groups channels across channel types, for example `workspace` or
 `agent-config`. Labels have no meaning to the relay.
 
-**Set labels.** A kind:9007 (create group) MAY carry up to 8 `["t", <label>]`
-tags. On kind:9002 (edit metadata):
+**Set labels.** A kind:9007 (create group) MAY carry up to 8 distinct
+labels as `["t", <label>]` tags. On kind:9002 (edit metadata):
 
 - `t` tags replace the whole label set;
-- one `["t", ""]` tag and no other `t` tag clears the set;
+- `["t", ""]` tags and no other `t` tag clear the set;
 - no `t` tag leaves the labels as they are.
 
 Only an owner or admin of the channel MAY change its labels.
@@ -101,8 +101,9 @@ Only an owner or admin of the channel MAY change its labels.
 label MUST NOT be `stream`, `forum`, `dm`, `workflow` or `system`. These are
 channel type names, so this rule stops a label from making a channel look like
 another type. The relay MUST reject the whole event if it has more than 8
-labels, an invalid label, a reserved name, or `["t", ""]` together with other
-labels. The relay stores repeated labels once.
+distinct labels, an invalid label, a reserved name, or `["t", ""]` together
+with other labels. The relay stores repeated labels once, so a repeat does
+not count toward the 8, and repeated `["t", ""]` tags clear the set like one.
 
 ## Finding channels
 
