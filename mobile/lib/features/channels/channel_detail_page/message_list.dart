@@ -54,7 +54,7 @@ class _MessageList extends HookConsumerWidget {
     final timelineViewportHeight = useRef(MediaQuery.sizeOf(context).height);
     final isLoadingOlder = useState(false);
     final navigatingOldest = useRef(false);
-    final olderFetchFailed = useRef(false);
+    final olderFetchPaused = useRef(false);
     final oldestNavigationGeneration = useRef(0);
     final isAtLatest = useState(true);
     final settledImeBottomInset = useState(
@@ -519,7 +519,7 @@ class _MessageList extends HookConsumerWidget {
               oldestVisible < displayEntries.length - 3 ||
               isLoadingOlder.value ||
               navigatingOldest.value ||
-              olderFetchFailed.value) {
+              olderFetchPaused.value) {
             return;
           }
           final notifier = ref.read(
@@ -530,7 +530,7 @@ class _MessageList extends HookConsumerWidget {
           notifier
               .fetchOlder()
               .then((loaded) {
-                olderFetchFailed.value = !loaded && !notifier.reachedOldest;
+                olderFetchPaused.value = !loaded && !notifier.reachedOldest;
               })
               .whenComplete(() {
                 if (context.mounted) isLoadingOlder.value = false;
@@ -700,7 +700,7 @@ class _MessageList extends HookConsumerWidget {
       displayCount: displayEntries.length,
       isLoadingOlder: isLoadingOlder,
       navigatingOldest: navigatingOldest,
-      olderFetchFailed: olderFetchFailed,
+      olderFetchPaused: olderFetchPaused,
       oldestNavigationGeneration: oldestNavigationGeneration,
       onStart: () {
         followsLatest.value = false;
@@ -780,7 +780,7 @@ class _MessageList extends HookConsumerWidget {
                 notification.direction != ScrollDirection.idle) {
               navigatingOldest.value = false;
               oldestNavigationGeneration.value++;
-              olderFetchFailed.value = false;
+              olderFetchPaused.value = false;
               hasUserScrolled.value = true;
               followsLatest.value = false;
               if (showUnreadNavigation) {

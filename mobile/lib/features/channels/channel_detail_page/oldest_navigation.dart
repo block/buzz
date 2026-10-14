@@ -1,5 +1,8 @@
 part of '../channel_detail_page.dart';
 
+// Each provider page is bounded; a gesture must also bound its page count.
+const _oldestNavigationPageLimit = 3;
+
 // Owns pagination for one status-bar gesture without changing list layout.
 void _useChannelScrollToOldest(
   BuildContext context, {
@@ -8,7 +11,7 @@ void _useChannelScrollToOldest(
   required int displayCount,
   required ValueNotifier<bool> isLoadingOlder,
   required ObjectRef<bool> navigatingOldest,
-  required ObjectRef<bool> olderFetchFailed,
+  required ObjectRef<bool> olderFetchPaused,
   required ObjectRef<int> oldestNavigationGeneration,
   required VoidCallback onStart,
 }) {
@@ -21,27 +24,32 @@ void _useChannelScrollToOldest(
       return;
     }
     navigatingOldest.value = true;
-    olderFetchFailed.value = false;
+    olderFetchPaused.value = false;
     final generation = ++oldestNavigationGeneration.value;
     bool isCurrent() =>
         navigatingOldest.value &&
         oldestNavigationGeneration.value == generation;
     var ownsFetch = false;
+    var pagesFetched = 0;
     onStart();
     try {
       // Wait for an already-running edge fetch before owning pagination.
       while (isLoadingOlder.value && context.mounted && isCurrent()) {
         await WidgetsBinding.instance.endOfFrame;
       }
-      while (context.mounted && isCurrent() && !notifier.reachedOldest) {
+      while (context.mounted &&
+          isCurrent() &&
+          !notifier.reachedOldest &&
+          pagesFetched < _oldestNavigationPageLimit) {
         isLoadingOlder.value = true;
         ownsFetch = true;
+        pagesFetched++;
         final loaded = await notifier.fetchOlder();
         if (!context.mounted) return;
         isLoadingOlder.value = false;
         ownsFetch = false;
         if (!loaded) {
-          olderFetchFailed.value = !notifier.reachedOldest;
+          olderFetchPaused.value = !notifier.reachedOldest;
           break;
         }
         await WidgetsBinding.instance.endOfFrame;
@@ -50,6 +58,12 @@ void _useChannelScrollToOldest(
           !isCurrent() ||
           !itemScrollController.isAttached) {
         return;
+      }
+      // Landing at the loaded edge must not trigger automatic extra pages.
+      // The next status-bar tap or manual scroll resumes pagination.
+      if (pagesFetched == _oldestNavigationPageLimit &&
+          !notifier.reachedOldest) {
+        olderFetchPaused.value = true;
       }
       final index = currentDisplayCount.value - 1;
       if (index < 0) return;

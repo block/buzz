@@ -1,6 +1,118 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  testWidgets('large activity members build and fetch only visible rows', (
+    tester,
+  ) async {
+    final loaded = <String>{};
+    final cache = _FakeUserCacheNotifier(
+      {},
+      preload: (pubkeys) async {
+        loaded.addAll(pubkeys);
+        return true;
+      },
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          for (var index = 0; index < 1000; index++)
+            _systemMsg(
+              id: 'bulk-${index.toString().padLeft(4, '0')}',
+              payload: {
+                'type': 'member_removed',
+                'actor': 'alice',
+                'target': 'target-$index',
+              },
+            ),
+        ],
+        userCacheNotifier: cache,
+      ),
+    );
+    await tester.pumpAndSettle();
+    loaded.clear();
+    await tester.tap(find.text('See all'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('activity-member-target-999')),
+      findsNothing,
+    );
+    expect(loaded.length, allOf(greaterThan(0), lessThan(20)));
+    final list = find.byKey(const ValueKey('activity-members-list'));
+    final scrollable = find.descendant(
+      of: list,
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('activity-member-target-50')),
+      300,
+      scrollable: scrollable,
+    );
+    await tester.pumpAndSettle();
+    expect(loaded, contains('target-50'));
+    expect(loaded.length, lessThan(100));
+    final beforeUpdate = {...loaded};
+    cache.replace(
+      const UserProfile(pubkey: 'target-50', displayName: 'Updated target'),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Updated target'), findsOneWidget);
+    expect(loaded, beforeUpdate);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'status bar pagination is capped and later taps continue',
+    (tester) async {
+      final notifier = _FakeMessagesNotifier(
+        [
+          for (var index = 0; index < 30; index++)
+            _textMsg(
+              id: 'recent-$index',
+              pubkey: 'alice',
+              content: 'Recent $index',
+              createdAt: 3000 + index,
+            ),
+        ],
+        olderPages: [
+          for (var index = 1; index <= 10; index++)
+            [
+              _textMsg(
+                id: 'page-$index',
+                pubkey: 'alice',
+                content: 'Older page $index',
+                createdAt: 3000 - index * 100,
+              ),
+            ],
+        ],
+      );
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], messagesNotifier: notifier),
+      );
+      await tester.pumpAndSettle();
+      expect(notifier.fetchOlderCalls, 0);
+      for (final expected in [3, 6, 9, 10]) {
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          'flutter/status_bar',
+          const JSONMethodCodec().encodeMethodCall(
+            const MethodCall('handleScrollToTop'),
+          ),
+          (_) {},
+        );
+        await tester.pumpAndSettle();
+        expect(notifier.fetchOlderCalls, expected);
+        expect(find.text('Older page $expected').hitTestable(), findsOneWidget);
+        await tester.pumpAndSettle();
+        expect(
+          notifier.fetchOlderCalls,
+          expected,
+          reason: 'landing must not bypass the gesture cap',
+        );
+      }
+      expect(notifier.reachedOldest, isTrue);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
   testWidgets(
     'grouped removal quick reactions remove reactions on later events',
     (tester) async {
@@ -54,7 +166,7 @@ void bubbleLayoutTests() {
   );
 
   testWidgets(
-    'status bar navigation fetches every older page and stops on failure',
+    'status bar navigation fetches short history and stops on failure',
     (tester) async {
       for (final fail in [false, true]) {
         final notifier = _FakeMessagesNotifier(
