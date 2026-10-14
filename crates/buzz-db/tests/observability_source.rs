@@ -2638,6 +2638,19 @@ fn sql_update_sets<'a>(source: &'a str, table: &str) -> Vec<(&'a str, &'a str)> 
         .collect()
 }
 
+const DESTRUCTIVE_FROZEN_OR_EQUAL: &str =
+    "destructive_storage_frozen_at is null or destructive_storage_manifest =";
+
+/// A guard admits a statement only as a plain conjunct of its own WHERE: no
+/// `OR` outside the known frozen-or-equal groups, and no subquery.
+fn plain_guard(predicate: &str, guard: &str) -> bool {
+    let rest = predicate.replace(DESTRUCTIVE_FROZEN_OR_EQUAL, "").replace(
+        "destructive_storage_manifest is null or destructive_storage_manifest =",
+        "",
+    );
+    predicate.contains(guard) && !rest.contains(" or ") && !rest.contains("select ")
+}
+
 fn sql_assigned_columns(set: &str) -> Vec<&str> {
     set.match_indices('=')
         .flat_map(|(at, _)| -> Vec<&str> {
@@ -2738,7 +2751,7 @@ fn single_table_guard_violations(
             rule_hits[3].push(name.to_owned());
             if community_sets
                 .iter()
-                .any(|(_, predicate)| !predicate.contains("deletion_state = 'active'"))
+                .any(|(_, predicate)| !plain_guard(predicate, "deletion_state = 'active'"))
             {
                 reject("community UPDATE requires an active predicate in its statement");
             }
@@ -2798,7 +2811,7 @@ fn single_table_guard_violations(
                 .contains(column)
             }) {
                 freezes_inventory = true;
-                if !predicate.contains("inventory_frozen_at is null") {
+                if !plain_guard(predicate, "inventory_frozen_at is null") {
                     reject(
                         "request inventory UPDATE requires inventory_frozen_at IS NULL in WHERE",
                     );
@@ -2809,10 +2822,15 @@ fn single_table_guard_violations(
                 .any(|column| column.starts_with("destructive_storage_"))
             {
                 freezes_destructive_storage = true;
-                if !predicate.contains(
-                    "destructive_storage_frozen_at is null or destructive_storage_manifest =",
-                ) {
+                if !plain_guard(predicate, DESTRUCTIVE_FROZEN_OR_EQUAL) {
                     reject("request destructive storage UPDATE requires the frozen-or-equal guard in WHERE");
+                }
+                if columns
+                    .iter()
+                    .filter(|column| column.starts_with("destructive_storage_"))
+                    .any(|column| !set.contains(&format!("{column} = coalesce({column},")))
+                {
+                    reject("request destructive storage UPDATE must preserve a frozen value with COALESCE");
                 }
             }
         }
@@ -2908,6 +2926,25 @@ fn single_table_policy_requires_active_community_updates() {
 }
 
 #[test]
+fn single_table_policy_rejects_weakened_guards() {
+    for sql in [
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND (deletion_state = 'active' OR true)",
+        "UPDATE communities SET icon = NULL WHERE id = $1 OR deletion_state = 'active'",
+        "UPDATE communities SET icon = NULL WHERE id IN (SELECT id FROM communities WHERE deletion_state = 'active')",
+        "UPDATE community_deletion_requests SET inventory_digest = NULL WHERE id = $1 AND (inventory_frozen_at IS NULL OR true)",
+        "UPDATE community_deletion_requests SET destructive_storage_manifest = COALESCE(destructive_storage_manifest, $2) WHERE id = $1 AND (destructive_storage_frozen_at IS NULL OR destructive_storage_manifest = $2 OR true)",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{sql}"
+        );
+    }
+}
+
+#[test]
 fn single_table_policy_requires_inventory_freeze_predicate() {
     for column in [
         "schema_manifest",
@@ -2941,7 +2978,7 @@ fn single_table_policy_requires_destructive_freeze_predicate() {
         "destructive_storage_manifest",
         "destructive_storage_frozen_at",
     ] {
-        let source = format!("async fn bypass() {{ query(\"UPDATE community_deletion_requests SET {column} = NULL WHERE id = $1\"); }}");
+        let source = format!("async fn bypass() {{ query(\"UPDATE community_deletion_requests SET {column} = COALESCE({column}, $2) WHERE id = $1\"); }}");
         assert_eq!(
             single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
                 .len(),
@@ -2953,6 +2990,14 @@ fn single_table_policy_requires_destructive_freeze_predicate() {
             single_table_guard_violations(DELETION_STORE_PATH, &guarded, &mut Default::default())
                 .is_empty(),
             "{column}"
+        );
+        // The guard keeps an equal manifest admissible, so SET must not overwrite it.
+        let overwrite = guarded.replace(&format!("COALESCE({column}, $2)"), "NULL");
+        let violations =
+            single_table_guard_violations(DELETION_STORE_PATH, &overwrite, &mut Default::default());
+        assert!(
+            violations.len() == 1 && violations[0].contains("preserve a frozen value"),
+            "{column}: {violations:?}"
         );
     }
 }
@@ -2973,7 +3018,7 @@ fn single_table_policy_checks_conflict_updates() {
     let source = r#"async fn guarded() {
         query("INSERT INTO communities (host) VALUES ($1) ON CONFLICT (host) DO UPDATE SET host = communities.host WHERE communities.deletion_state = 'active'");
         query("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET inventory_digest = $2 WHERE inventory_frozen_at IS NULL");
-        query("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET destructive_storage_manifest = $2 WHERE destructive_storage_frozen_at IS NULL OR destructive_storage_manifest = $2");
+        query("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET destructive_storage_manifest = COALESCE(destructive_storage_manifest, $2) WHERE destructive_storage_frozen_at IS NULL OR destructive_storage_manifest = $2");
     }"#;
     assert!(
         single_table_guard_violations(DELETION_STORE_PATH, source, &mut Default::default())
