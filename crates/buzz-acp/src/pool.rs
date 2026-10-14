@@ -1112,6 +1112,43 @@ impl AgentPool {
         self.agents[idx] = Some(agent);
     }
 
+    /// Whether another worker can still own this scope's in-flight guard.
+    /// Invalidation may remove the session owner during cancellation; until
+    /// overlapping tasks settle, absence of ownership is not permission to clear.
+    pub(crate) fn has_newer_scope_owner(&self, scope: &SessionScope, agent_index: usize) -> bool {
+        match self.session_owners.get(scope) {
+            Some(owner) => owner.agent_index != agent_index,
+            None => self
+                .task_map
+                .values()
+                .any(|meta| meta.scope.as_ref() == Some(scope) && meta.agent_index != agent_index),
+        }
+    }
+
+    fn current_scope_task(&self, scope: &SessionScope) -> Option<&TaskMeta> {
+        let mut tasks = self
+            .task_map
+            .values()
+            .filter(|meta| meta.scope.as_ref() == Some(scope));
+        if let Some(owner) = self.session_owners.get(scope) {
+            tasks.find(|meta| meta.agent_index == owner.agent_index)
+        } else {
+            let only = tasks.next()?;
+            tasks.next().is_none().then_some(only)
+        }
+    }
+
+    /// The exact current task, or none when invalidation left ownership ambiguous.
+    pub(crate) fn current_scope_turn(&self, scope: &SessionScope) -> Option<&str> {
+        self.current_scope_task(scope)
+            .map(|meta| meta.turn_id.as_str())
+    }
+
+    /// Whether a steering acknowledgement still refers to the current task.
+    pub(crate) fn is_current_scope_turn(&self, scope: &SessionScope, turn_id: &str) -> bool {
+        self.current_scope_turn(scope) == Some(turn_id)
+    }
+
     /// Whether any agent is currently idle (sitting in its slot).
     pub fn any_idle(&self) -> bool {
         self.agents.iter().any(|slot| slot.is_some())
@@ -1202,7 +1239,7 @@ impl AgentPool {
     /// Try to send a goose-native steer request to the in-flight task for
     /// `channel_id`.
     ///
-    /// Returns `Ok(())` if the request was accepted by the read loop's
+    /// Returns `Ok(turn_id)` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
     /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
     /// (already-in-flight write, or read loop torn down); the `Transport`
@@ -1227,18 +1264,16 @@ impl AgentPool {
         &mut self,
         scope: &SessionScope,
         request: SteerRequest,
-    ) -> Result<(), SteerError> {
+    ) -> Result<String, SteerError> {
         let meta = self
-            .task_map
-            .values_mut()
-            .find(|m| m.scope.as_ref() == Some(scope))
+            .current_scope_task(scope)
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
             .as_ref()
             .ok_or_else(|| SteerAdmissionReason::SenderAbsent.transport_refusal())?;
         match tx.try_send(request) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(meta.turn_id.clone()),
             // Capacity-1 mailbox already holds one in-flight steer write.
             // The refused request (including its oneshot ack) comes back
             // inside the error and is dropped here, exactly as before.
@@ -1259,13 +1294,14 @@ impl AgentPool {
     pub fn record_successful_steer(
         &mut self,
         scope: &SessionScope,
+        turn_id: &str,
         event_id: String,
         session_id: String,
     ) -> bool {
         if let Some(meta) = self
             .task_map
             .values_mut()
-            .find(|meta| meta.scope.as_ref() == Some(scope))
+            .find(|meta| meta.scope.as_ref() == Some(scope) && meta.turn_id == turn_id)
         {
             meta.successful_steer_deliveries
                 .insert(SuccessfulSteerDelivery {
@@ -7908,6 +7944,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let mut pool = AgentPool::from_slots(vec![Some(agent)]);
         assert!(pool.record_successful_steer(
             &conv(channel_id),
+            "t",
             steered_event_id.clone(),
             "live-session".into(),
         ));
