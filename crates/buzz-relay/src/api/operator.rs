@@ -70,6 +70,17 @@ struct ListenerPubkeysRequest {
     pubkeys: Vec<String>,
 }
 
+/// Registration body: one proof signed by each target pubkey.
+#[derive(Debug, Deserialize)]
+struct ListenerRegistrationRequest {
+    registrations: Vec<nostr::Event>,
+}
+
+const MAX_LISTENER_PUBKEYS: usize = 1_000;
+const LISTENER_PUBKEYS_PATH: &str = "/operator/listener/pubkeys";
+/// Matches the NIP-98 request window: proofs are signed just before sending.
+const REGISTRATION_PROOF_MAX_SKEW_SECS: u64 = 60;
+
 fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
     let request: ListenerPubkeysRequest = serde_json::from_slice(body).map_err(|e| {
         api_error(
@@ -77,7 +88,7 @@ fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json
             &format!("invalid operator-listener pubkeys JSON: {e}"),
         )
     })?;
-    if request.pubkeys.is_empty() || request.pubkeys.len() > 1_000 {
+    if request.pubkeys.is_empty() || request.pubkeys.len() > MAX_LISTENER_PUBKEYS {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "pubkeys must contain between 1 and 1000 entries",
@@ -101,6 +112,75 @@ fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json
             })
         })
         .collect()
+}
+
+/// Parse a registration body and return the target pubkeys whose proofs
+/// verify for `listener` at `url`.
+fn parse_listener_registrations(
+    body: &[u8],
+    listener: &nostr::PublicKey,
+    url: &str,
+    now: u64,
+) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
+    let request: ListenerRegistrationRequest = serde_json::from_slice(body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid operator-listener registration JSON: {e}"),
+        )
+    })?;
+    if request.registrations.is_empty() || request.registrations.len() > MAX_LISTENER_PUBKEYS {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "registrations must contain between 1 and 1000 entries",
+        ));
+    }
+    request
+        .registrations
+        .iter()
+        .map(|proof| verify_registration_proof(proof, listener, url, now))
+        .collect::<Result<_, _>>()
+        .map_err(|reason| api_error(StatusCode::BAD_REQUEST, reason))
+}
+
+/// Verify one target-signed registration proof and return the target pubkey.
+///
+/// The proof binds the target's consent to this listener (`p`) and this
+/// deployment's registration endpoint (`u`). The outer NIP-98 request is
+/// replay-checked; within the skew window a proof can only re-register the
+/// pair it was signed for.
+fn verify_registration_proof(
+    proof: &nostr::Event,
+    listener: &nostr::PublicKey,
+    url: &str,
+    now: u64,
+) -> Result<Vec<u8>, &'static str> {
+    if u32::from(proof.kind.as_u16()) != buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION {
+        return Err("registration proof has the wrong kind");
+    }
+    if proof.verify().is_err() {
+        return Err("registration proof signature is invalid");
+    }
+    if proof.created_at.as_secs().abs_diff(now) > REGISTRATION_PROOF_MAX_SKEW_SECS {
+        return Err("registration proof is outside the timestamp window");
+    }
+    let listener_hex = listener.to_hex();
+    let tag_values = |name: &str| {
+        proof
+            .tags
+            .iter()
+            .filter_map(|tag| match tag.as_slice() {
+                [tag_name, value, ..] if tag_name == name => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    if tag_values("p") != [listener_hex.as_str()] {
+        return Err("registration proof must name exactly this listener in one p tag");
+    }
+    if tag_values("u") != [url] {
+        return Err("registration proof must name this endpoint in one u tag");
+    }
+    Ok(proof.pubkey.to_bytes().to_vec())
 }
 
 /// Shared deployment-global operator auth prelude. The canonical management
@@ -187,15 +267,20 @@ pub async fn register_listener_pubkeys(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let listener = authorize_operator_listener_request(
-        &state,
-        &headers,
-        "POST",
-        "/operator/listener/pubkeys",
+    let listener =
+        authorize_operator_listener_request(&state, &headers, "POST", LISTENER_PUBKEYS_PATH, &body)
+            .await?;
+    let origin = state
+        .config
+        .relay_operator_api_origin
+        .as_deref()
+        .ok_or_else(|| internal_error("operator API origin is not configured"))?;
+    let target_pubkeys = parse_listener_registrations(
         &body,
-    )
-    .await?;
-    let target_pubkeys = parse_listener_pubkeys(&body)?;
+        &listener,
+        &format!("{origin}{LISTENER_PUBKEYS_PATH}"),
+        nostr::Timestamp::now().as_secs(),
+    )?;
     state
         .db
         .register_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
@@ -214,7 +299,7 @@ pub async fn remove_listener_pubkeys(
         &state,
         &headers,
         "DELETE",
-        "/operator/listener/pubkeys",
+        LISTENER_PUBKEYS_PATH,
         &body,
     )
     .await?;
@@ -814,6 +899,130 @@ pub async fn community_availability(
         "available": existing.is_none(),
         "community_id": existing.map(|record| record.id.to_string()),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
+
+    use super::*;
+
+    const URL: &str = "https://operator.example/operator/listener/pubkeys";
+    const NOW: u64 = 1_800_000_000;
+
+    fn proof(target: &Keys, kind: u16, created_at: u64, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(target)
+            .expect("sign registration proof")
+    }
+
+    fn proof_tags(listener: &Keys, url: &str) -> Vec<Tag> {
+        vec![
+            Tag::public_key(listener.public_key()),
+            Tag::custom(TagKind::custom("u"), [url]),
+        ]
+    }
+
+    const PROOF_KIND: u16 = buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION as u16;
+
+    #[test]
+    fn registration_proof_returns_signing_target() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let valid = proof(&target, PROOF_KIND, NOW - 30, proof_tags(&listener, URL));
+
+        assert_eq!(
+            verify_registration_proof(&valid, &listener.public_key(), URL, NOW),
+            Ok(target.public_key().to_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn registration_proof_rejects_unbound_or_forged_consent() {
+        let listener = Keys::generate();
+        let other_listener = Keys::generate();
+        let target = Keys::generate();
+        let mut forged = proof(&target, PROOF_KIND, NOW, proof_tags(&listener, URL));
+        forged.pubkey = Keys::generate().public_key();
+        let mut two_listeners = proof_tags(&listener, URL);
+        two_listeners.push(Tag::public_key(other_listener.public_key()));
+
+        for (case, event) in [
+            ("forged signer", forged),
+            (
+                "wrong kind",
+                proof(&target, 27235, NOW, proof_tags(&listener, URL)),
+            ),
+            (
+                "stale",
+                proof(&target, PROOF_KIND, NOW - 61, proof_tags(&listener, URL)),
+            ),
+            (
+                "future",
+                proof(&target, PROOF_KIND, NOW + 61, proof_tags(&listener, URL)),
+            ),
+            (
+                "other listener",
+                proof(&target, PROOF_KIND, NOW, proof_tags(&other_listener, URL)),
+            ),
+            (
+                "ambiguous listener",
+                proof(&target, PROOF_KIND, NOW, two_listeners),
+            ),
+            (
+                "other endpoint",
+                proof(
+                    &target,
+                    PROOF_KIND,
+                    NOW,
+                    proof_tags(&listener, "https://other.example/operator/listener/pubkeys"),
+                ),
+            ),
+            (
+                "missing endpoint",
+                proof(
+                    &target,
+                    PROOF_KIND,
+                    NOW,
+                    vec![Tag::public_key(listener.public_key())],
+                ),
+            ),
+        ] {
+            assert!(
+                verify_registration_proof(&event, &listener.public_key(), URL, NOW).is_err(),
+                "{case} proof was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_body_requires_signed_proofs() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let valid = proof(&target, PROOF_KIND, NOW, proof_tags(&listener, URL));
+        let parse = |body: serde_json::Value| {
+            parse_listener_registrations(
+                body.to_string().as_bytes(),
+                &listener.public_key(),
+                URL,
+                NOW,
+            )
+        };
+
+        assert_eq!(
+            parse(serde_json::json!({"registrations": [valid]})).expect("signed registration"),
+            vec![target.public_key().to_bytes().to_vec()]
+        );
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"registrations": []}),
+            serde_json::json!({"pubkeys": [target.public_key().to_hex()]}),
+        ] {
+            assert!(parse(body.clone()).is_err(), "accepted {body}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2200,7 +2409,28 @@ mod postgres_tests {
             .iter()
             .map(|target| target.public_key().to_hex())
             .collect::<Vec<_>>();
-        let register_body = serde_json::json!({"pubkeys": target_hex}).to_string();
+        let registration_proof = |target: &Keys, listener: &Keys| {
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION as u16),
+                "",
+            )
+            .tags([
+                Tag::public_key(listener.public_key()),
+                Tag::custom(
+                    nostr::TagKind::custom("u"),
+                    [format!("http://{INGRESS_HOST}/operator/listener/pubkeys")],
+                ),
+            ])
+            .sign_with_keys(target)
+            .expect("sign registration proof")
+        };
+        let register_body = serde_json::json!({
+            "registrations": targets
+                .iter()
+                .map(|target| registration_proof(target, &listener))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
         let response = signed_operator_request(
             Arc::clone(&state),
             &listener,
@@ -2227,6 +2457,26 @@ mod postgres_tests {
         .expect("count other listener targets");
         assert_eq!(listener_count, 2);
         assert_eq!(other_listener_count, 0);
+
+        // A proof signed for another listener, and the old unsigned form.
+        for rejected_body in [
+            serde_json::json!({"registrations": [registration_proof(&targets[1], &other_listener)]}),
+            serde_json::json!({"pubkeys": [target_hex[1]]}),
+        ] {
+            let rejected = signed_operator_request(
+                Arc::clone(&state),
+                &listener,
+                "POST",
+                "/operator/listener/pubkeys",
+                Some(rejected_body.to_string()),
+            )
+            .await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{rejected_body}"
+            );
+        }
 
         let body = serde_json::json!({"pubkeys": [target_hex[0]]}).to_string();
         let missing_payload_auth = nip98_auth_header_without_payload(
@@ -2259,7 +2509,7 @@ mod postgres_tests {
             &listener,
             "POST",
             "/operator/listener/pubkeys",
-            Some(r#"{"pubkeys":["not-a-pubkey"]}"#.to_string()),
+            Some(r#"{"registrations":["not-an-event"]}"#.to_string()),
         )
         .await;
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
