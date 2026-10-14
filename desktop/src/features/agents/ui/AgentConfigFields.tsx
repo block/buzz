@@ -47,7 +47,10 @@ import {
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
 import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
-import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
+import {
+  isUnadvertisedModelSelection,
+  usePersonaModelDiscovery,
+} from "@/features/agents/ui/usePersonaModelDiscovery";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
@@ -356,12 +359,6 @@ export function AgentConfigFields({
     runtimeFileConfig,
     runtimeId: credentialRuntimeId,
   });
-  const configIsValid =
-    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
-  React.useEffect(() => {
-    onValidityChange?.(configIsValid);
-  }, [configIsValid, onValidityChange]);
-
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
@@ -375,6 +372,27 @@ export function AgentConfigFields({
     provider: providerForDiscovery,
     selectedRuntime,
   });
+  const modelCatalogMismatch = isUnadvertisedModelSelection({
+    discoveredModelOptions: dependentFieldsDisabled
+      ? null
+      : discoveredModelOptions,
+    model: config.model,
+  });
+  const effectiveModelDiscoveryStatus = modelCatalogMismatch
+    ? {
+        message:
+          "The current adapter did not advertise this model for the signed-in account. Choose an advertised model before saving.",
+        tone: "warning" as const,
+      }
+    : modelDiscoveryStatus;
+  const configIsValid =
+    selectedRuntimeId.length > 0 &&
+    modelIsValid &&
+    credentialsValid &&
+    !modelCatalogMismatch;
+  React.useEffect(() => {
+    onValidityChange?.(configIsValid);
+  }, [configIsValid, onValidityChange]);
   const modelControlVisible = shouldRenderModelControl({
     discoveredModelOptions: dependentFieldsDisabled
       ? null
@@ -828,7 +846,7 @@ export function AgentConfigFields({
               dependentFieldsDisabled ? false : modelDiscoveryLoading
             }
             modelDiscoveryStatus={
-              dependentFieldsDisabled ? null : modelDiscoveryStatus
+              dependentFieldsDisabled ? null : effectiveModelDiscoveryStatus
             }
             onIsCustomModelEditingChange={onCustomModelEditingChange}
             onModelChange={handleModelChange}
@@ -841,7 +859,7 @@ export function AgentConfigFields({
             showCustomModelOption={showCustomModelOption}
             showStatusMessage={shouldShowModelStatusMessage(
               showDescriptions,
-              dependentFieldsDisabled ? null : modelDiscoveryStatus,
+              dependentFieldsDisabled ? null : effectiveModelDiscoveryStatus,
             )}
             testId="global-agent-model"
             useCustomSelect={useCustomSelect}

@@ -684,7 +684,7 @@ fn codex_adapter_availability_available_for_minimum_supported_binary() {
     let bin = dir.join("codex-acp");
     std::fs::write(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.10.0'\nexit 0\n",
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 2.1.1'\nexit 0\n",
     )
     .expect("write script");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");

@@ -54,7 +54,7 @@ fn codex_adapter_availability_outdated_for_older_1x_binary() {
     use crate::managed_agents::AcpAvailabilityStatus;
     use std::os::unix::fs::PermissionsExt;
 
-    for version in ["1.1.5", "1.1.7", "1.6.2", "1.9.0"] {
+    for version in ["1.1.5", "1.6.2", "1.9.0", "1.10.0", "1.13.1", "2.1.0"] {
         let dir = tempfile::tempdir().expect("temp dir");
         let bin = dir.path().join("codex-acp");
         std::fs::write(

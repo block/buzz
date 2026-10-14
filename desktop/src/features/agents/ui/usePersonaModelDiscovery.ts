@@ -197,6 +197,26 @@ export function isSuccessfulEmptyDiscovery({
   );
 }
 
+/**
+ * Reject an explicit model only after live discovery successfully returned a
+ * usable catalog that does not contain it. Pending or failed discovery remains
+ * non-destructive: callers preserve the saved value and can retry discovery.
+ */
+export function isUnadvertisedModelSelection({
+  discoveredModelOptions,
+  model,
+}: {
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  model: string | null | undefined;
+}): boolean {
+  const selected = model?.trim() ?? "";
+  return (
+    selected.length > 0 &&
+    discoveredModelOptions !== null &&
+    !discoveredModelOptions.some((option) => option.id.trim() === selected)
+  );
+}
+
 export function usePersonaModelDiscovery({
   envVars,
   isCustomProviderEditing,

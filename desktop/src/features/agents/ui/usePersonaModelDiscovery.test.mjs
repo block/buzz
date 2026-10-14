@@ -7,8 +7,37 @@ import {
   getDiscoveredPersonaModelOptions,
   isCacheableDiscoveryResponse,
   isSuccessfulEmptyDiscovery,
+  isUnadvertisedModelSelection,
   synthesizeEmptyDiscoveryStatus,
 } from "./usePersonaModelDiscovery.ts";
+
+test("successful discovery rejects an explicit model absent from the account catalog", () => {
+  const options = [{ id: "gpt-6-sol", label: "GPT-6 Sol" }];
+  assert.equal(
+    isUnadvertisedModelSelection({
+      discoveredModelOptions: options,
+      model: "gpt-6.1-sol",
+    }),
+    true,
+  );
+  assert.equal(
+    isUnadvertisedModelSelection({
+      discoveredModelOptions: options,
+      model: "gpt-6-sol",
+    }),
+    false,
+  );
+});
+
+test("failed or pending discovery preserves an explicit model", () => {
+  assert.equal(
+    isUnadvertisedModelSelection({
+      discoveredModelOptions: null,
+      model: "gpt-6.1-sol",
+    }),
+    false,
+  );
+});
 
 function response(overrides = {}) {
   return {

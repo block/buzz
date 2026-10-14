@@ -108,20 +108,58 @@ pub(crate) fn resolve_session_title(display_name: Option<&str>, name: &str) -> O
         .find(|value| !value.is_empty())
 }
 
-/// Build the `RUST_LOG` value forwarded to the agent child: keep an existing
-/// filter that already mentions `buzz_acp`, append `buzz_acp=info` to any other
-/// non-empty filter, and default to `buzz_acp=info` when unset.
+/// Build the `RUST_LOG` value forwarded to the agent child.
+///
+/// `pool::prompt` is an explicit tracing target rather than a child of the
+/// `buzz_acp` crate target. Keep it independently visible so per-turn provider
+/// failures cannot disappear behind Desktop's otherwise narrow child filter.
 pub(crate) fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
+    child_rust_log_filter_from(std::env::var("RUST_LOG").ok().as_deref())
+}
+
+fn child_rust_log_filter_from(existing: Option<&str>) -> String {
+    let mut directives = existing
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_default();
+    for required in ["buzz_acp=info", "pool::prompt=info"] {
+        let target = required.split('=').next().unwrap_or(required);
+        if !directives
+            .split(',')
+            .any(|directive| directive.trim().split('=').next() == Some(target))
+        {
+            if !directives.is_empty() {
+                directives.push(',');
+            }
+            directives.push_str(required);
+        }
     }
+    directives
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_replay_floor_env, resolve_session_title, REPLAY_FLOOR_ENV_VAR};
+    use super::{
+        apply_replay_floor_env, child_rust_log_filter_from, resolve_session_title,
+        REPLAY_FLOOR_ENV_VAR,
+    };
+
+    #[test]
+    fn child_log_filter_always_exposes_prompt_failures() {
+        assert_eq!(
+            child_rust_log_filter_from(None),
+            "buzz_acp=info,pool::prompt=info"
+        );
+        assert_eq!(
+            child_rust_log_filter_from(Some("buzz_acp=debug")),
+            "buzz_acp=debug,pool::prompt=info"
+        );
+        assert_eq!(
+            child_rust_log_filter_from(Some("warn,pool::prompt=debug")),
+            "warn,pool::prompt=debug,buzz_acp=info"
+        );
+    }
 
     fn replay_floor_of(cmd: &std::process::Command) -> Option<String> {
         cmd.get_envs()
