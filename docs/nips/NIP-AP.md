@@ -8,13 +8,11 @@ Agent Personas
 
 This NIP defines `kind:30175` persona events — public, addressable definitions that describe how to instantiate an AI agent. A persona carries identity (display name, avatar), behavioral configuration (system prompt, model, runtime), and an optional name pool. It is the "blueprint" from which agents are spawned.
 
-This NIP also defines teams of agents (see "Teams") and `kind:44300` instructions versions, an owner-private history of each agent's and each team's instructions (see "Instructions versions: kind:44300").
+This NIP also defines teams of agents (see "Teams") and how an agent's and a team's config are stored as [NIP-AR](NIP-AR.md) artifacts in [NIP-CL](NIP-CL.md) system channels (see "Agent and team config").
 
 ## Kind
 
 This NIP claims `kind:30175` for agent persona definitions and `kind:30178` for the shareable team-catalog projection (see "Team catalog projection: kind:30178"). Both are in the NIP-33 parameterized replaceable range (30000–39999) per [NIP-01](01.md): addressed by `(pubkey, kind, d_tag)`, with only the latest event per address retained.
-
-This NIP also claims `kind:44300` for instructions versions (see "Instructions versions: kind:44300"). It is a regular event: stored, append-only, and never replaced.
 
 A dedicated kind (rather than encoding personas as NIP-78 `kind:30078` "Application-specific Data") is taken for the same reasons as [NIP-AE](NIP-AE.md): (1) it isolates this NIP's address space from any other application using the same pubkey — persona slugs cannot collide with another app's `d` tag choices; (2) it lets observers, indexers, and unknown-kind viewers identify persona events from the kind alone, without parsing content as a namespace demultiplexer.
 
@@ -227,7 +225,7 @@ to carry only instance-level state:
 - Readers SHOULD continue to accept legacy "fat" kind:30177 events
   during the transition. Where the linked 30175 head and a legacy 30177
   event both carry a field, the 30175 head is authoritative. For an
-  agent's instructions, a current `kind:44300` version for that agent is
+  agent's instructions, its current `buzz.agent.instructions` artifact is
   authoritative over both (see "Launch composition").
 - Deletion/retention rules for kind:30177 are unchanged so historical
   tombstones keep working.
@@ -268,173 +266,147 @@ Kind `30178` is the **shareable projection of a team**: owner-authored, paramete
 
 **Content carries only sanitized fields.** No environment variables, no `respond_to` allowlist pubkeys, no source or local ids, no filesystem paths, no secrets. Sharing a team makes the team's and every member's instructions community-readable plaintext.
 
-**A share is a snapshot, never history.** A writer embeds the team's current instructions at the time it publishes (see "Team instructions") and no `kind:44300` versions. Saving a version does not change an existing share; the owner updates a share by publishing a new head. A client MAY show the owner that a share is older than the team's current instructions. A reader that adopts a shared team creates a new team with a new id; the adopted team starts its own instructions history.
+**A share is a snapshot, never history.** A writer embeds the team's current instructions at the time it publishes (see "Team instructions") and no earlier revisions. Editing the team does not change an existing share; the owner updates a share by publishing a new head. A client MAY show the owner that a share is older than the team's current instructions. A reader that adopts a shared team creates a new team with a new id; the adopted team starts its own instructions history.
 
 ## Teams
 
-A **team** is an owner-defined group of agents that share optional **team instructions**. This section defines what a team is, what membership means, and how team instructions reach an agent at launch.
-
-A client stores its own team records (name, members, other settings) in a client-defined, owner-private form. This NIP does not define that storage, so it does not let one client discover another client's private teams or memberships. The shareable form of a team is `kind:30178`.
+A **team** is an owner-defined group of agents that share optional **team instructions**. A team's name and instructions live in its team config channel (see "Agent and team config"), and its members are agents in that channel. The shareable form of a team is `kind:30178`.
 
 ### Team identity
 
-A team is identified by `(pubkey_o, community, team-id)`: the owner, the relay community holding the team's events, and the team id.
+A team is identified by `(pubkey_o, community, team-id)`: the owner, the relay community holding the team's config channel, and the team id.
 
 A team id MUST be non-empty, MUST be at most 64 Unicode scalar values, and MUST NOT contain Unicode control or whitespace characters. This is the same grammar as the `kind:30178` `d` tag. Team ids are compared byte for byte, with no trimming, case folding, or Unicode normalization.
 
 Clients SHOULD mint a new UUID for each new team, including a team created by importing or adopting another team. A client MUST NOT give a new team the id of a deleted team.
 
-A client MUST NOT publish instructions versions for a team whose id does not match this grammar. Such a team keeps its client-defined instructions and has no version history.
-
 ### Membership
 
-An agent is a **member** of a team when its owner binds it to that team. A binding is scoped by owner and community. It is not channel membership and grants no relay access. A binding follows the team's current instructions; it does not pin the text in effect when the agent joined. An agent MAY be a member of more than one team.
+A team's **members** are the agents in its team config channel that are owned by the team's owner. The team's owner is the channel's creator, as named by its NIP-CL `P` tag. An agent is owned by `pubkey_o` when its [NIP-OA](NIP-OA.md) owner attestation names `pubkey_o`. The owner, humans, and agents owned by anyone else can be in the channel but are not members. An agent's channel role does not affect membership: an agent made an admin or a guest of the channel is still a member.
+
+Team membership is channel membership, so it is also access: every member can read the team's config. A member follows the team's current instructions; it does not pin the text in effect when it joined. An agent MAY be a member of more than one team.
+
+Changing who is on a team is a change to the channel's membership, under the channel's role rules:
+
+- any member of the channel can add someone;
+- only an owner or admin of the channel can remove someone else;
+- a guest can do neither;
+- anyone can leave.
 
 ### Team instructions
 
-A team's current instructions are its current team-subject version (see "Instructions versions: kind:44300"). An invalid current version makes the team's instructions invalid.
+A team's current instructions are the `instructions` field of its current `buzz.team` artifact (see "Config artifacts"). If that artifact is invalid, the team's instructions are invalid.
 
-Before a team has any version, a client MAY use instructions held in its private team record. A client moving those instructions into versions MUST publish the first version and confirm that the relay stored it before removing the private copy. After that, the private copy is not authoritative. A client that cannot fetch or decrypt a team's versions MUST NOT treat that failure as the team having no versions.
+A team without a `buzz.team` artifact has no name and empty instructions.
 
 ### Launch with teams
 
-When an agent starts, the client resolves the current instructions of every team the agent is a member of and compares them after trimming leading and trailing whitespace. A team without instructions has empty instructions, which is a value like any other.
+At each session start, the client resolves the current instructions of every team the agent is a member of. Each team reaches the agent as its own **team section**, which carries the team's name, its members, and its instructions. A team without instructions has empty instructions; its section still names the team and its members.
 
-- If every team's instructions are equal, the agent receives the trimmed text once, as its team layer.
-- If any differ, or any are invalid, the client MUST NOT start the agent, and SHOULD name the teams involved. A running agent is not affected. The owner resolves a conflict by changing a team's instructions or removing a membership.
+The client MUST NOT merge, deduplicate, or compare the instructions of different teams, and MUST NOT refuse to start an agent because its teams' instructions differ. If a team's instructions are invalid, the client MUST NOT start the session, and SHOULD name the team. An active session need not be interrupted.
 
-An agent that is a member of no team has no team layer. The team layer is delivered after the agent's own instructions (see "Launch composition").
+An agent that is a member of no team has no team sections. Team sections are delivered after the agent's own instructions (see "Launch composition").
 
 ### Deleting a team
 
-A client that deletes a team SHOULD also delete the team's instructions versions (see "Deletion: kind:44300"). It MUST first confirm that the deletion of its private team record is durable in the store that is authoritative for that record (for a record held on a relay, that the relay stored the deletion), so the team never appears with an older version as current while versions are being deleted. After that, a client MUST NOT publish a version for the deleted team, including a save that was pending when the team was deleted.
+A client deletes a team by archiving its team config channel. Archiving keeps the channel and its artifacts, so the team can be recovered by unarchiving it. Purging the channel is a separate action. A client MUST NOT treat a team whose channel is archived as having members.
 
-At each member's next start, the client removes the deleted team's membership and resolves the team layer from the remaining teams. A running agent is not affected. Missing versions alone never mean that a team was deleted.
+No later than each member's next session start, the client removes the deleted team's section and resolves the remaining teams' sections. An active session need not be interrupted, and a client MAY apply the removal sooner. A team config channel that cannot be read is not a deleted team.
 
-## Instructions versions: kind:44300
+## Agent and team config
 
-Kind `44300` records one saved version of an agent's own instructions or of a team's instructions. Every save is a new event, so a subject's events are its full history.
+An agent's config and a team's config are [NIP-AR](NIP-AR.md) artifacts. Each lives in its own private [NIP-CL](NIP-CL.md) system channel, the **config channel**, so channel membership decides who can read and edit it.
 
-### Event envelope
+### Relay support
 
-```jsonc
-{
-  "kind": 44300,
-  "pubkey": "<pubkey_o>",
-  "created_at": <unix_seconds>,
-  "tags": [
-    ["p", "<agent-pubkey>"]   // agent subject, or:
-    // ["t", "<team-id>"]     // team subject
-  ],
-  "content": "<NIP-44 v2 ciphertext>"
-}
-```
+A client stores config on the relay only when the relay's [NIP-11](11.md) document advertises both NIP-CL system channels (`"nip-cl"` in `supported_extensions`) and NIP-AR artifacts (the `artifacts` descriptor). Otherwise the client MUST keep config local, and MUST NOT create config channels.
 
-- The owner authors every version. Agents do not author instructions versions.
-- An event MUST carry exactly one **subject tag**: either one `p` tag whose value is the agent's 64-character lowercase hex pubkey, or one `t` tag whose value is a team id (see "Team identity"). A subject tag MUST have exactly two elements. Tags are counted by their first element, so an event with both a `p` and a `t` tag, two `p` tags, two `t` tags, or a valueless `["p"]` or `["t"]` is invalid.
-- `t` values are case-sensitive. Clients and relays MUST NOT lowercase them, unlike [NIP-24](24.md) hashtags.
-- The event MUST NOT carry an `h` tag; it belongs to no channel.
+### Config channels
 
-Implementations MAY include a [NIP-31](31.md) `["alt", "agent instructions version"]` tag. Other tags are not defined by this NIP and, apart from the prohibited `h` tag, have no effect on validity.
+| Channel | One per | Created by | Family label | Subject label |
+| --- | --- | --- | --- | --- |
+| Agent config channel | agent | the agent's owner | `agent-config` | the agent's 64-character lowercase hex pubkey |
+| Team config channel | team | the team's owner | `team-config` | `team-` followed by the first 59 lowercase hex characters of the SHA-256 hash of the team id's UTF-8 bytes |
 
-### Content
+The owner creates a config channel with a kind:9007 that carries `["channel_type", "system"]`, both labels as `t` tags, and no `visibility` or `ttl` tag. A config channel MUST be private and MUST NOT have a TTL. The owner MUST NOT change a config channel's labels.
 
-`content` MUST be [NIP-44](44.md) v2 ciphertext encrypted with the conversation key of `(seckey_o, pubkey_o)`: the owner encrypts to themselves.
+The subject label is a NIP-CL label in both cases: a team id can contain characters a label cannot, so the team label is derived from its hash. A subject label is 64 characters.
 
-The plaintext is the three ASCII bytes `v1:` followed by the instructions text in UTF-8. The prefix lets an empty text be encrypted; NIP-44 cannot encrypt an empty plaintext.
+An agent config channel's members are the owner, the agent, and any other agents the owner adds. A team config channel holds the owner and the team's members, and can hold others who are not members (see "Membership").
 
-- The text MAY be empty. An empty version means "no instructions" for its subject.
-- The text MUST be valid UTF-8, MUST NOT contain U+0000, and MUST NOT exceed 131,072 bytes.
-- A plaintext of 65,536 bytes or more uses NIP-44 v2's extended length prefix: two zero bytes followed by the plaintext length as a 32-bit big-endian integer. An implementation that supports only the two-byte prefix cannot decrypt such a version and MUST treat it as invalid, not absent.
-- With these bounds, `content` is at most 218,548 bytes.
+### Discovery
 
-Writers MUST enforce the text rules before encrypting. Readers MUST check, in this order:
-
-1. `content` is at most 218,548 bytes, before decoding or decrypting it;
-2. it decrypts under NIP-44 v2;
-3. the plaintext starts with `v1:`;
-4. the text after the prefix is valid UTF-8, contains no U+0000, and is at most 131,072 bytes.
-
-A version that fails any check is **invalid**. Ciphertext length cannot enforce the text bound by itself: a maximum-length text and a text one byte longer produce `content` of the same length.
-
-### Current version and history
-
-A subject's **current version** is its event with the greatest `created_at`; ties are broken by lowest event `id`, as in [NIP-01](01.md).
+To find a config channel, a client queries by creator and subject label:
 
 ```
-Agent: {kinds: [44300], authors: [pubkey_o], "#p": [<agent-pubkey>]}
-Team:  {kinds: [44300], authors: [pubkey_o], "#t": [<team-id>]}
+Agent: {kinds: [39000], "#P": [pubkey_o], "#t": [<agent-pubkey>]}
+Team:  {kinds: [39000], "#P": [pubkey_o], "#t": [<team-label>]}
 ```
 
-With `limit: 1`, these filters return the current version. Clients query one subject per filter.
+The client keeps only channels whose type is `system` and whose labels include the family label. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none.
 
-History is the same filter, ordered by `created_at` descending and then by `id` ascending, and paged with a composite cursor: the `created_at` and `id` of the last event on the previous page, sent as `until` and `before_id`. The next page holds events with `created_at < until`, or with `created_at = until` and `id > before_id`. `before_id` is an extension to the NIP-01 filter, not a standard field. A timestamp-only cursor is not sufficient: concurrent saves on different devices can give several versions of one subject the same `created_at`, and paging by `until` alone either repeats or skips them. A relay MAY return fewer events than `limit`, so a client has read a subject's complete history only when a page returns no events.
+### Config artifacts
 
-If a subject's current version is invalid, clients MUST show the error and MUST NOT substitute an older version, a definition's prompt, or a legacy copy.
+| Type | Channel | `title` | Content |
+| --- | --- | --- | --- |
+| `buzz.agent.settings` | agent config | `Agent settings` | `{"version": 1, "settings": { ... }}` |
+| `buzz.agent.instructions` | agent config | `Agent instructions` | `{"version": 1, "text": "<string>"}` |
+| `buzz.team` | team config | the team name | `{"version": 1, "name": "<string>", "instructions": "<string>"}` |
 
-### Writing
+A config channel holds at most one artifact of each of its types. Its `d` is the UUIDv5 of the type name in the namespace of the channel's UUID, so two clients creating the same artifact collide on `d` and one create fails. A `buzz.team` artifact has no member list; members come from the channel (see "Membership").
 
-To save text `x` for a subject:
+**Instructions.** `text` and `instructions` MAY be empty, which means "no instructions". They MUST be valid UTF-8, MUST NOT contain U+0000, and MUST NOT exceed 131,072 bytes.
 
-1. Validate `x` against the text rules. Reject if invalid.
-2. Fetch the subject's current version and let `T` be its `created_at` (or 0 if none). Set `created_at := max(now, T + 1)`.
-3. Encrypt `v1:` followed by `x` (see "Content"). Tag the event with the subject.
-4. Sign with `seckey_o` and publish.
+**Settings.** `settings` is a JSON object of the agent's launch configuration. It MUST NOT contain credentials, secrets, machine-local paths, or device state. The artifact's `content` MUST NOT exceed 65,535 bytes after encoding.
 
-There is no compare-and-swap. If two devices save concurrently, the relay stores both, the newer becomes current, and the other remains in history. A client SHOULD fetch the current version again after publishing and tell the user when its save was stored but is not current.
+An artifact whose content does not parse, has an unknown `version`, or breaks these rules is **invalid**. Clients MUST show the error and MUST NOT substitute an older revision or a lower resolution source.
 
-Before a subject's first version, a client SHOULD publish the text the subject currently resolves to (see "Launch composition" and "Team instructions"), so the text from before the first edit can be restored.
+### Editing
 
-- **Restore** publishes an older version's text as a new version.
-- **Reset to template**, for an agent, publishes its linked definition's current `system_prompt` as a new version, or empty text when it has none.
+Members of a config channel can edit its artifacts. Guests can only read them. The owner makes an agent read-only for a config channel by giving it the guest role there.
 
-Clients MUST NOT delete versions to roll back. Deleting the current version makes the previous version current; it is not a restore.
+Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires.
+
+### History
+
+Every revision of a config artifact has a stable ID, its event ID. A config artifact's revisions are its history. A client MUST NOT configure a config artifact to keep only its latest revision. Revisions can still expire under the community's retention policy, or be redacted; a client shows a missing revision as a gap in history, not as the absence of history.
+
+**Restore** publishes an older revision's text as a new revision. Clients MUST NOT redact revisions to roll back.
 
 ### Launch composition
 
 An agent's own instructions layer is the first of these that exists:
 
-1. its current agent-subject version. An empty version yields no instructions and stops resolution; an invalid version blocks the start;
-2. the `system_prompt` of its linked `kind:30175` definition;
-3. for a definition-less instance, the `system_prompt` in its legacy `kind:30177` event.
+1. the `text` of its current `buzz.agent.instructions` artifact. Empty text yields no instructions and stops resolution; an invalid artifact blocks the start;
+2. before the agent's instructions move to that artifact, instructions held in local configuration;
+3. the `system_prompt` of its linked `kind:30175` definition;
+4. for a definition-less instance, the `system_prompt` in its legacy `kind:30177` event.
 
-The team layer is resolved independently (see "Launch with teams"). The client delivers both layers to the agent's harness as separate layers, the agent's own first.
+A client moving local instructions to the relay MUST create the `buzz.agent.instructions` artifact and confirm that the relay accepted it before it stops using the local copy.
 
-A version takes effect at the agent's next start; a running agent is unchanged. A client MAY restart an agent to apply a new version. A client that lets local configuration override the resolved instructions SHOULD show the owner that an override is in effect.
+Team sections are resolved independently (see "Launch with teams"). The client delivers the agent's own layer and each team section to the agent's harness separately, the agent's own first.
 
-This NIP does not define how `kind:44300` relates to the private managed-agent aggregate reserved by [NIP-PMA](NIP-PMA.md). That integration is left to NIP-PMA.
+A change to the agent's instructions or to any of its teams MUST take effect no later than the agent's next session start. A client MAY apply it sooner, including to an active session between turns, and MAY start a new session to apply it. An active session need not be interrupted. A client that lets local configuration override the resolved instructions SHOULD show the owner that an override is in effect.
 
 ### Launch records
 
-A client SHOULD record, for each agent start, which instructions it used:
+A client SHOULD record, for each session start, the config it used:
 
-- the agent-subject version id, or that the layer came from a definition, came from a legacy event, or was empty;
-- the team id and version id of every team that contributed;
-- a SHA-256 hash of each layer's text as delivered, after any local override, and the source of any override;
+- the revision ID of the agent's `buzz.agent.settings` artifact, or that it had none;
+- the revision ID of its `buzz.agent.instructions` artifact, or that the layer came from local configuration, came from a definition, came from a legacy event, or was empty;
+- the team id and `buzz.team` revision ID of every team section delivered;
+- the source of any local override;
 - a run identifier and the start time.
 
-A client that records launches SHOULD write the record once the agent has started and retry until the relay stores it. The record MUST be encrypted to the owner, for example as a [NIP-AE](NIP-AE.md) engram. Version ids and hashes MUST NOT appear in plaintext tags. A launch record shows what the client handed to the harness, not that the harness used it.
+A launch record shows what the client handed to the harness, not that the harness used it.
 
-### Privacy
+### Deleting an agent
 
-Instructions versions are readable only by their author. The agent's key has no access to them; the client decrypts the agent's instructions and hands them to the agent at start. The `p` tag names the subject, not a reader, and grants the agent nothing.
-
-The relay still sees each event's subject tag, timestamp, and padded size, so it can observe how often each agent's or team's instructions change and roughly how long they are.
-
-Clients MUST publish instructions versions, and deletion requests for them, only to the relay community that holds the subject.
-
-### Deletion: kind:44300
-
-Owners MAY publish [NIP-09](09.md) deletion requests for instructions versions, one `e` tag per version. A deletion request for a `kind:44300` event MUST carry `["k", "44300"]`; the relay classifies it by that tag, so it stays private after its target is removed (see "Access control: kind:44300 author-only"). A relay MAY accept only one target per request. Clients SHOULD publish one request per version, retry until every version is deleted, and MUST NOT report a subject's history deleted after deleting only part of it.
-
-- A client that deletes an agent SHOULD delete all of that agent's versions. It MUST NOT delete any team's versions.
-- A client that deletes a team follows "Deleting a team".
-
-Deletion withholds versions from readers. It does not erase copies held by the relay operator, and it does not reach copies in exports, `kind:30178` shares, or launch records.
+A client deletes an agent by archiving its agent config channel. Archiving keeps the channel and its artifacts, so the agent can be recovered by unarchiving it. Purging the channel is a separate action.
 
 ### Older clients
 
-Clients that do not implement `kind:44300` ignore it. They resolve an agent's instructions from `kind:30175` and `kind:30177` as before, so they launch agents with the definition's prompt rather than the agent's current version, and they do not see team versions.
+Clients that do not implement config channels do not see them, because NIP-CL leaves system channels out of reads that do not name them. They resolve an agent's instructions from `kind:30175` and `kind:30177` as before, so they launch agents with the definition's prompt rather than the agent's current instructions, and they do not see teams stored on the relay.
 
 ## Relay behavior
 
@@ -453,26 +425,6 @@ Kind `30178` is stored globally and its content is unvalidated, exactly as for `
 - The relay MUST enforce the same `shared`-tag exact shape as `30175`, for the same reason: the read gate and the SQL containment clause must agree on every stored event.
 - The relay MUST enforce **exactly one** `d` tag whose value is non-empty, at most 64 characters, and free of Unicode control characters and whitespace. Tags are counted by their first element, so a valueless `["d"]` counts toward the total and fails the value check on its own — otherwise `["d"]` alongside `["d","<team-id>"]` would pass, and a consumer that reads `["d"]` as an empty-valued first `d` tag would address the event at `""` while this relay addresses it at `<team-id>`. Without the non-empty check, generic NIP-33 storage maps a missing or empty `d` to the empty coordinate, collapsing every team into the single `(pubkey_o, 30178, "")` slot — last-write-wins data loss. The character bound keeps the value usable as a NIP-33 coordinate and as a log field.
 - The relay MUST NOT apply the persona slug grammar to a `30178` `d` tag; team ids legitimately contain characters (notably `:`) that the slug grammar forbids.
-
-### Ingest validation: kind:44300
-
-- The relay MUST reject, with `invalid:`, a `kind:44300` event that does not carry exactly one subject tag as defined in "Event envelope", whose `p` value is not 64-character lowercase hex, or whose `t` value does not match the team id grammar.
-- The relay MUST reject a `kind:44300` event with an empty `content` or a `content` longer than 218,548 bytes. It cannot validate the plaintext; that is a client responsibility.
-- The relay MUST reject a `kind:44300` event that carries an `h` tag.
-- The relay MUST reject a `kind:5` deletion request that targets a stored `kind:44300` event and does not carry `["k", "44300"]`.
-- The relay stores `kind:44300` events globally, outside any channel.
-
-### Access control: kind:44300 author-only
-
-The relay MUST withhold `kind:44300` events, and their existence, from every reader except their authenticated author, on every read surface: historical REQ delivery, NIP-01 `ids` lookup, live fan-out, COUNT, and the HTTP bridge's query and count endpoints.
-
-The relay MUST apply the same rule, on the same read surfaces and in search results, to every `kind:5` deletion request that carries `["k", "44300"]`, whether or not its target is still stored. A deletion request reveals a version's id and the time it was deleted.
-
-The relay MUST exclude `kind:44300` from full-text search results for every reader, including the author.
-
-The relay MUST apply a `#p` or `#t` filter on `kind:44300` before `ORDER BY … LIMIT`, so that `limit: 1` returns a subject's current version even when the owner has newer versions for other subjects.
-
-The relay MUST support the composite history cursor (see "Current version and history") for `kind:44300`. A filter carrying `before_id` without `until`, or a `before_id` that is not 64 hexadecimal characters, MUST be rejected rather than ignored.
 
 ### Access control: author-only-unless-shared
 
@@ -507,13 +459,13 @@ These rules are enforced at the following relay read surfaces (content and event
 
 ## Security considerations
 
-- **No encryption for definitions.** Persona and team-catalog events store system prompts, model names, runtime identifiers, and all configuration unencrypted. `kind:44300` instructions versions are the exception: they are encrypted to the owner. Shared persona events are readable community-wide. Operators MUST NOT store secrets in persona event content.
+- **No encryption for definitions.** Persona and team-catalog events store system prompts, model names, runtime identifiers, and all configuration unencrypted. Shared persona events are readable community-wide. Operators MUST NOT store secrets in persona event content.
 - **System prompt protection.** System prompts and `respond_to_allowlist` pubkeys are sensitive. The relay's author-only-unless-shared gate ensures they are not visible to other community members unless the owner explicitly opts in by publishing a `["shared", "true"]` head. Shared persona events are readable community-wide; operators who need additional confidentiality should use relay-level access controls or choose not to share.
 - **Write authority.** Only the holder of `seckey_o` can publish or replace persona events. NIP-33 replacement is scoped by pubkey — no spoofing risk from other relay members.
 - **Slug collision across pubkeys.** Two different owners can publish personas with the same slug. Clients MUST always scope queries by author pubkey, not just slug.
 - **Metadata exposure.** The `(pubkey, kind:30175, slug)` triple reveals persona existence. Event timestamps reveal edit history.
 - **No owner write authority over agents.** Persona events define *what* an agent should be; they do not grant runtime control over a running agent. The agent consumes the persona at spawn time. Updates to the persona event do not automatically propagate to running agents.
-- **Instructions history is owner-private, not secret from the owner's clients.** `kind:44300` versions are encrypted to the owner and withheld from other readers. Any client holding `seckey_o` can read every version; deleting versions does not revoke copies already exported, shared, or recorded at launch.
+- **Config is readable by every config channel member.** Agent settings, agent instructions, and team instructions are not encrypted. Every member and guest of a config channel can read its artifacts and their history, so adding someone to a config channel shares that config with them. The relay operator can read them too. Removing someone, archiving the channel, or redacting a revision does not revoke copies already read, exported, or shared.
 - **Sharing a team shares every member's instructions.** A `kind:30178` head carrying `["shared","true"]` exposes the team's own fields *and* the embedded projection of every member — including members whose own `kind:30175` heads are unshared and therefore still private. Clients MUST make this explicit at the point of sharing; the relay cannot infer it.
 
 ## Reference test vectors
