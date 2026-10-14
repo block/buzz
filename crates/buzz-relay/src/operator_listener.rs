@@ -214,6 +214,7 @@ async fn run_delivery_once_with_transport<T: DeliveryTransport>(
         admission: buzz_db::operator_listener::DeliveryAdmission {
             require_membership: state.config.require_relay_membership,
             allow_owner_membership: state.config.allow_nip_oa_auth,
+            require_allowlist: state.config.pubkey_allowlist_enabled,
         },
     };
     join_all(claimed.into_iter().map(|delivery| {

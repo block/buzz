@@ -263,12 +263,15 @@ pub struct DeliveryAdmission {
     pub require_membership: bool,
     /// An agent whose recorded owner is a member counts as a member (NIP-OA).
     pub allow_owner_membership: bool,
+    /// The target must be in the community's pubkey allowlist.
+    pub require_allowlist: bool,
 }
 
 /// Load the event for a claimed delivery if the target may still receive it.
 ///
-/// Returns `None` when the registration was removed, the event was deleted,
-/// the target or its recorded owner is banned, the target fails `admission`,
+/// Returns `None` when the registration was removed, the community is no
+/// longer active, the event was deleted, the target or its recorded owner is
+/// banned, the target fails `admission`,
 /// or the target cannot read the event's channel: the channel was deleted, or
 /// it is private (including DMs) and the target is not an active member. Runs
 /// on the writer, which committed the outbox row with the event.
@@ -288,9 +291,14 @@ pub async fn load_deliverable_event(
          SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, \
                 e.received_at, e.channel_id \
          FROM operator_listener_pubkeys r \
+         JOIN communities co ON co.id = $3 AND co.archived_at IS NULL \
+             AND co.deleted_at IS NULL AND co.deletion_state = 'active' \
          JOIN events e ON e.community_id = $3 AND e.created_at = $4 AND e.id = $5 \
          WHERE r.listener_pubkey = $1 AND r.target_pubkey = $2 \
            AND e.deleted_at IS NULL \
+           AND (NOT $8 OR EXISTS ( \
+               SELECT 1 FROM pubkey_allowlist a \
+               WHERE a.community_id = $3 AND a.pubkey = $2)) \
            AND NOT EXISTS ( \
                SELECT 1 FROM community_bans b \
                WHERE b.community_id = $3 AND b.pubkey IN (SELECT pubkey FROM principals) \
@@ -316,6 +324,7 @@ pub async fn load_deliverable_event(
     .bind(&delivery.event_id)
     .bind(admission.require_membership)
     .bind(admission.allow_owner_membership)
+    .bind(admission.require_allowlist)
     .fetch_optional(&mut *connection)
     .await?;
     match row {
@@ -1214,6 +1223,7 @@ mod postgres_tests {
         const OPEN_RELAY: DeliveryAdmission = DeliveryAdmission {
             require_membership: false,
             allow_owner_membership: false,
+            require_allowlist: false,
         };
         let load_with = |delivery: ClaimedDelivery, admission: DeliveryAdmission| {
             let pool = pool.clone();
@@ -1251,7 +1261,7 @@ mod postgres_tests {
         // Closed community: direct membership, or a member owner when NIP-OA is on.
         let closed = DeliveryAdmission {
             require_membership: true,
-            allow_owner_membership: false,
+            ..OPEN_RELAY
         };
         let closed_with_owner = DeliveryAdmission {
             allow_owner_membership: true,
@@ -1308,7 +1318,7 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("lift ban");
-        assert!(load_with(open_delivery, OPEN_RELAY).await.is_some());
+        assert!(load_with(open_delivery.clone(), OPEN_RELAY).await.is_some());
 
         sqlx::query(
             "UPDATE channel_members SET removed_at = now() \
@@ -1350,6 +1360,48 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("restore open event");
+
+        // The allowlist gate requires the target itself to be allowlisted.
+        let allowlisted = DeliveryAdmission {
+            require_allowlist: true,
+            ..OPEN_RELAY
+        };
+        assert!(load_with(open_delivery.clone(), allowlisted)
+            .await
+            .is_none());
+        sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&target_pubkey)
+            .execute(&pool)
+            .await
+            .expect("allowlist target");
+        assert!(load_with(open_delivery.clone(), allowlisted)
+            .await
+            .is_some());
+
+        // An archived community delivers nothing. Deletion is one-way, so
+        // only the archive predicate is exercised here.
+        for (statement, expected) in [
+            (
+                "UPDATE communities SET archived_at = now() WHERE id = $1",
+                false,
+            ),
+            (
+                "UPDATE communities SET archived_at = NULL WHERE id = $1",
+                true,
+            ),
+        ] {
+            sqlx::query(statement)
+                .bind(community.as_uuid())
+                .execute(&pool)
+                .await
+                .expect("update community archive state");
+            assert_eq!(
+                load_with(open_delivery.clone(), OPEN_RELAY).await.is_some(),
+                expected,
+                "{statement}"
+            );
+        }
         remove_pubkeys(
             &pool,
             &listener_pubkey,
