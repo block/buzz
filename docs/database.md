@@ -394,12 +394,18 @@ parity assertion on the table for that window.
   `SET LOCAL statement_timeout` when a statement can scan. A migration that
   cannot get its lock fails and is retried. It MUST NOT queue behind
   traffic on a hot table.
-- An index on an existing populated table MUST be built with
-  `CREATE INDEX CONCURRENTLY`. CONCURRENTLY cannot run inside the migration
-  transaction, so follow the prebuild-then-verify procedure in
-  [thread-window-deployment.md](thread-window-deployment.md). Partitioned
-  parents need per-partition concurrent builds attached to an `ON ONLY` parent
-  index.
+- In `migrations/`, an index on an existing populated table MUST be built
+  with `CREATE INDEX CONCURRENTLY`, because auto-migrating deployments have no
+  online schema change tool to build it for them. CONCURRENTLY cannot run
+  inside the migration transaction, so follow the prebuild-then-verify
+  procedure in [thread-window-deployment.md](thread-window-deployment.md).
+  Partitioned parents need per-partition concurrent builds attached to an
+  `ON ONLY` parent index.
+- The declarative schema source declares indexes with plain `CREATE INDEX`.
+  The tool that applies it out of band decides how to build them online, so
+  `schema/` files MUST NOT add `CONCURRENTLY`. SchemaBot refuses it, and
+  `desired_state_schema_layout_is_complete_and_schemabot_shaped` enforces
+  plain `CREATE INDEX`.
 - A change MUST NOT rewrite or fully scan a large table under a
   write-blocking lock. That includes column type changes, volatile defaults,
   `SET NOT NULL` without a validated check, and changes to the generated
@@ -435,8 +441,8 @@ description:
       test for each changed table and index.
 - [ ] That the currently deployed relay works against the new schema, and how
       that was checked.
-- [ ] Lock and statement timeouts, concurrent index builds, and any operator
-      prebuild step.
+- [ ] Lock and statement timeouts, concurrent index builds in `migrations/`,
+      and any operator prebuild step.
 
 ## Related documents
 
