@@ -259,8 +259,9 @@ no fixed context-count ceiling.
 Leaving/rejoining does not erase progress; revoked access hides it. Soft-deleted
 channels are inaccessible, while hard channel deletion cascades their frontiers.
 Deleting an account row cascades that actor's frontiers in the same community;
-community erasure inventories both tables under the existing write fence. There
-is no new public account export/reset endpoint. Operator-assisted erasure/export
+community erasure inventories both tables, with serving writes fenced by the
+app-side admission guard and the community deletion-lock protocol. There is no
+new public account export/reset endpoint. Operator-assisted erasure/export
 must use the established authenticated operational process and explicitly scope
 both community and actor; never equate the read-time horizon with data erasure.
 
