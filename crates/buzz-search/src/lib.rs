@@ -29,7 +29,8 @@ pub mod query;
 pub use buzz_core::CommunityId;
 pub use error::SearchError;
 pub use query::{
-    search, ChannelScope, SearchHit, SearchMode, SearchQuery, SearchResult, SearchSort,
+    search, search_profile_names, ChannelScope, SearchHit, SearchMode, SearchQuery, SearchResult,
+    SearchSort, PROFILE_NAMES_PER_PAGE_MAX,
 };
 
 use sqlx::PgPool;
@@ -52,5 +53,17 @@ impl SearchService {
     /// Execute a community-scoped FTS query.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
         query::search(&self.pool, query).await
+    }
+
+    /// Find current profiles by `name` and `display_name`; see
+    /// [`search_profile_names`].
+    pub async fn search_profile_names(
+        &self,
+        community: CommunityId,
+        q: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<SearchResult, SearchError> {
+        query::search_profile_names(&self.pool, community, q, page, per_page).await
     }
 }

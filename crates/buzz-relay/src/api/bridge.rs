@@ -27,6 +27,65 @@ use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_
 mod thread_roots;
 mod thread_window;
 
+/// Authenticate a relay-owned JSON `POST` endpoint for a community member.
+///
+/// Binds the community from the request host, runs NIP-FI admission over a
+/// NIP-98 proof with a required payload hash, then applies the shared API rate
+/// limit, replay guard and relay membership check, in that order.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+pub(crate) async fn authenticate_member_post(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+) -> Result<(TenantContext, nostr::PublicKey), Response> {
+    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
+        .await
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+            .into_response()
+        })?;
+
+    let expected_url = nip98_expected_url(&state.config.relay_url, &tenant, path);
+
+    // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let admission = admit_nip_fi_http_on_state(
+        state,
+        headers,
+        make_nip98_closure_for_admission(
+            headers.clone(),
+            "POST",
+            expected_url,
+            Some(body.to_vec()),
+            true,
+            true,
+        ),
+    )?;
+    let pubkey = *admission.proven_pubkey();
+    let (event_id_bytes, signed_created_at) = admission.into_extra();
+
+    enforce_http_admission(state, &tenant, &pubkey)
+        .await
+        .map_err(|e| e.into_response())?;
+    check_nip98_replay(state, &tenant, event_id_bytes)
+        .await
+        .map_err(|e| e.into_response())?;
+    super::relay_members::enforce_relay_membership(
+        state,
+        tenant.community(),
+        &pubkey.to_bytes(),
+        super::relay_members::extract_auth_tag_header(headers),
+        signed_created_at,
+    )
+    .await
+    .map_err(|e| e.into_response())?;
+
+    Ok((tenant, pubkey))
+}
+
 pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
@@ -5872,7 +5931,7 @@ pub(crate) mod postgres_tests {
     // 401 `authentication required\n`.
     //
     // Note: removing only the outer guard does NOT change this test — the
-    // handler's own `admit_nip_fi_http_on_state` in `gifs::authenticate` also
+    // handler's own `admit_nip_fi_http_on_state` in `authenticate_member_post` also
     // fires 401 on missing assertion.  This test witnesses the outer guard fires
     // first and its error path is exercised; it does not claim the outer guard is
     // the sole denial point.  The same-key positive (below) is the complement witness.
@@ -6076,6 +6135,72 @@ pub(crate) mod postgres_tests {
             "GIF search same-key positive: exact 404 body must be JSON \
              {{\"error\":\"GIF search is not configured\"}}. \
              Falsifying mutation: make handler always-deny → 403 body differs."
+        );
+    }
+
+    // ── Profile name search — Enforce mode, end to end ─────────────────────
+    //
+    // An admitted member gets signed kind:0 events whose `name` or
+    // `display_name` matches. A profile that carries the query only in its
+    // avatar data URL, `about` or `nip05` is not returned.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn profile_search_same_key_returns_only_name_matches() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let Some(state) = rt.block_on(nip_fi_enforce_test_state_with_verifier()) else {
+            panic!("local Postgres not reachable");
+        };
+        let host = format!(
+            "nip-fi-profile-search-{}.local",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = rt
+            .block_on(state.db.ensure_configured_community(&host))
+            .expect("ensure community")
+            .id;
+
+        let store = |content: &str| {
+            let event = nostr::EventBuilder::new(nostr::Kind::Metadata, content)
+                .sign_with_keys(&Keys::generate())
+                .expect("sign profile");
+            rt.block_on(state.db.replace_addressable_event(community, &event, None))
+                .expect("store profile");
+            event
+        };
+        let named = store(r#"{"name":"wes","display_name":"Wes Anderson"}"#);
+        store(r#"{"name":"pollen","picture":"data:image/png;base64,P7+Wes+dYL"}"#);
+        store(r#"{"name":"pollen","about":"Wes' bestie","nip05":"wes@example.com"}"#);
+
+        let keys = Keys::generate();
+        let body = br#"{"query":"WES"}"#;
+        let url = format!("https://{host}{}", crate::api::profiles::SEARCH_PATH);
+        let headers = same_key_nip98_and_assertion_headers(&keys, &url, "POST", body);
+
+        let (status, _resp_headers, resp) = rt.block_on(oneshot_request_full(
+            state,
+            "POST",
+            crate::api::profiles::SEARCH_PATH,
+            &host,
+            headers,
+            body,
+        ));
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "body: {:?}",
+            String::from_utf8_lossy(&resp)
+        );
+        let events: Vec<nostr::Event> =
+            serde_json::from_slice(&resp).expect("response is a JSON array of events");
+        assert_eq!(events, vec![named]);
+        assert!(
+            events[0].verify().is_ok(),
+            "returned event keeps its signature"
         );
     }
 

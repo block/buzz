@@ -329,6 +329,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Relay-owned third-party GIF metadata proxy (NIP-98 auth).
         .route(api::gifs::SEARCH_PATH, post(api::gifs::search))
         .route(api::gifs::SHARE_PATH, post(api::gifs::share))
+        // Profile search over `name` and `display_name` only (NIP-98 auth).
+        .route(api::profiles::SEARCH_PATH, post(api::profiles::search))
         .route(
             "/workflows/{workflow_id}/runs",
             get(api::workflows::workflow_runs),
@@ -2893,6 +2895,11 @@ mod tests {
                     br#"{"q":"cat"}"#.to_vec(),
                 ),
                 ("POST", "/gifs/share".to_owned(), br#"{"id":"x"}"#.to_vec()),
+                (
+                    "POST",
+                    "/profiles/search".to_owned(),
+                    br#"{"query":"wes"}"#.to_vec(),
+                ),
                 ("POST", "/api/invites".to_owned(), b"{}".to_vec()),
                 (
                     "GET",
@@ -3281,6 +3288,10 @@ mod tests {
         assert!(
             !is_exempt("/gifs/share"),
             "POST /gifs/share must be protected"
+        );
+        assert!(
+            !is_exempt("/profiles/search"),
+            "POST /profiles/search must be protected"
         );
         assert!(
             !is_exempt("/workflows/abc/runs"),
@@ -3835,7 +3846,7 @@ mod tests {
     // ── NIP-FI S4 deny witnesses ──
     // ES256 key pair — same as command.rs / api/nip_fi.rs test material.
     const DENY_TEST_PRIVATE_KEY_PEM: &str =
-        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n";
+        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- public ES256 test fixture
 
     const DENY_TEST_ISS: &str = "https://nip-fi-deny-test.example.com";
     const DENY_TEST_AUD: &str = "https://relay.example";
@@ -4214,6 +4225,7 @@ mod tests {
             ("GET", git, Some("Nostr !!not-base64!!")),
             ("POST", "/gifs/search".to_owned(), Some(&signed)),
             ("POST", "/gifs/share".to_owned(), Some(&signed)),
+            ("POST", "/profiles/search".to_owned(), Some(&signed)),
             ("GET", branch.clone(), Some(&signed)),
             ("POST", branch, Some(&signed)),
             ("POST", "/api/invites".to_owned(), Some(&signed)),

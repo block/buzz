@@ -16,7 +16,7 @@ use buzz_search::{ChannelScope, SearchQuery, SearchService};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
-const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
     // The PostgreSQL lane supplies an isolated desired-state database. Outside
@@ -1610,5 +1610,125 @@ async fn artifact_search_uses_only_live_current_head() {
         .unwrap();
     let result = svc.search(&query).await.unwrap();
     assert!(result.hits.is_empty());
+    teardown(pool, &schema).await;
+}
+
+/// Insert a current kind:0 profile; returns its event id.
+async fn put_profile(pool: &PgPool, community: CommunityId, content: &str, at: i64) -> [u8; 32] {
+    let id = rand_bytes32();
+    insert_event(pool, community, id, rand_bytes32(), 0, content, None, at).await;
+    id
+}
+
+async fn profile_names(
+    pool: &PgPool,
+    community: CommunityId,
+    q: &str,
+    page: u32,
+    per_page: u32,
+) -> Vec<[u8; 32]> {
+    SearchService::new(pool.clone())
+        .search_profile_names(community, q, page, per_page)
+        .await
+        .expect("profile name search")
+        .hits
+        .into_iter()
+        .map(|hit| hit.event_id)
+        .collect()
+}
+
+/// Profile name search keeps the NIP-50 prefix rule (whole words in any
+/// order, last word a prefix) but only `name` and `display_name` count. An
+/// equal name ranks first, then a name prefix, then a later word prefix, then
+/// other matches; ties stay newest first.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_names_match_name_words_only() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "profile-names.example").await;
+    let other = mk_community(&pool, "profile-names-other.example").await;
+
+    let exact = put_profile(
+        &pool,
+        c,
+        r#"{"display_name":"Wes","picture":"data:image/png;base64,P7+Wes+dYL"}"#,
+        1_700_000_000,
+    )
+    .await;
+    let westie_old = put_profile(&pool, c, r#"{"name":"Westie"}"#, 1_700_000_010).await;
+    let westie_new = put_profile(&pool, c, r#"{"display_name":"Westie"}"#, 1_700_000_020).await;
+    let word = put_profile(
+        &pool,
+        c,
+        r#"{"name":"carl","display_name":"Carl (borrowed from Wes)"}"#,
+        1_700_000_030,
+    )
+    .await;
+    let full = put_profile(
+        &pool,
+        c,
+        r#"{"name":"wjohnson","display_name":"Wes  Johnson"}"#,
+        1_700_000_040,
+    )
+    .await;
+    // Words split across the two fields still match, as in NIP-50 search.
+    let split = put_profile(
+        &pool,
+        c,
+        r#"{"name":"johnson","display_name":"Wes"}"#,
+        1_700_000_050,
+    )
+    .await;
+    // A word that only contains the query is not a match: same as NIP-50.
+    put_profile(&pool, c, r#"{"name":"Dwes"}"#, 1_700_000_060).await;
+
+    for (i, noise) in [
+        r#"{"display_name":"Blueberry","picture":"data:image/png;base64,P7+Wes+dYL"}"#,
+        r#"{"display_name":"Pollen","about":"Wes Johnson's bestie"}"#,
+        r#"{"display_name":"Pollen","nip05":"wes@example.com"}"#,
+        r#"{"display_name":"Pollen","banner":"https://wes.example/b.png"}"#,
+        r#"{"name":["wes"],"display_name":{"text":"wes"}}"#,
+        r#"not json wes"#,
+        r#"["wes"]"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_profile(&pool, c, noise, 1_700_000_100 + i as i64).await;
+    }
+    // A replaced profile (soft-deleted) no longer matches.
+    let replaced = put_profile(&pool, c, r#"{"name":"wes"}"#, 1_699_000_000).await;
+    sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = $2")
+        .bind(c.as_uuid())
+        .bind(&replaced[..])
+        .execute(&pool)
+        .await
+        .expect("replace profile");
+    put_profile(&pool, other, r#"{"name":"Wes"}"#, 1_700_000_000).await;
+
+    // Tier 0: exact (Wes; "Wes" display name of `split`), newest first.
+    // Tier 1: name prefix (Wes Johnson, Westie x2). Tier 2: later word (Carl).
+    let all = vec![split, exact, full, westie_new, westie_old, word];
+    assert_eq!(profile_names(&pool, c, "WES", 1, 100).await, all);
+    // Pages split the same order without overlap or gaps.
+    assert_eq!(profile_names(&pool, c, "wes", 1, 4).await, all[..4]);
+    assert_eq!(profile_names(&pool, c, "wes", 2, 4).await, all[4..]);
+    assert!(profile_names(&pool, c, "wes", 3, 4).await.is_empty());
+
+    // Word order does not matter; completed words must be whole words.
+    assert_eq!(
+        profile_names(&pool, c, "johnson wes", 1, 100).await,
+        vec![split, full]
+    );
+    assert_eq!(
+        profile_names(&pool, c, "wes  jo", 1, 100).await,
+        vec![full, split]
+    );
+    assert!(profile_names(&pool, c, "estie", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "bestie", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "example", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "%", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "   ", 1, 100).await.is_empty());
+
     teardown(pool, &schema).await;
 }

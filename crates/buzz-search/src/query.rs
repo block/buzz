@@ -356,6 +356,120 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     Ok(SearchResult { hits, page })
 }
 
+/// Largest page size [`search_profile_names`] accepts.
+pub const PROFILE_NAMES_PER_PAGE_MAX: u32 = 100;
+
+/// Find current kind:0 profiles whose `name` or `display_name` matches `q`.
+///
+/// Matching is the NIP-50 [`SearchMode::Prefix`] rule (every completed query
+/// word must equal a word, the last may be a prefix, in any order), applied to
+/// the two name fields only. Other profile fields, such as `picture` data URLs,
+/// `about` and `nip05`, cannot satisfy a word. The result set is therefore the
+/// prefix-mode kind:0 result set minus profiles that match only outside their
+/// names; the existing `search_tsv` index stays the access path.
+///
+/// Order: a name equal to the query, then a name that starts with it, then a
+/// name with a word that starts with it, then any other match. Ties keep the
+/// NIP-50 order (rank, newest first, id), so pages are stable. Pages are
+/// 1-based, like [`SearchQuery::page`].
+#[datastore_span(name = "search_profile_names", system = "postgresql")]
+pub async fn search_profile_names(
+    pool: &PgPool,
+    community: CommunityId,
+    q: &str,
+    page: u32,
+    per_page: u32,
+) -> Result<SearchResult, SearchError> {
+    let page = page.clamp(1, PAGE_MAX);
+    let Some(search_text) = normalized_search_text(q) else {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page,
+        });
+    };
+    let per_page = per_page.clamp(1, PROFILE_NAMES_PER_PAGE_MAX);
+    let offset = ((page - 1) as i64) * (per_page as i64);
+    // Tiers compare the query as typed, with whitespace runs collapsed, to
+    // each lower-cased name (spaces collapsed too).
+    let typed = search_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT id, kind, pubkey, channel_id, created_at_s, rank FROM (\
+         SELECT e.id, e.kind, e.pubkey, e.channel_id, \
+         EXTRACT(EPOCH FROM e.created_at)::bigint AS created_at_s, e.created_at, \
+         ts_rank_cd(names.tsv, search_query.query) AS rank, \
+         LEAST(",
+    );
+    for field in ["names.name", "names.display_name"] {
+        qb.push(format!("CASE WHEN {field} = "));
+        qb.push_bind(typed.clone());
+        qb.push(format!(" THEN 0 WHEN starts_with({field}, "));
+        qb.push_bind(typed.clone());
+        qb.push(format!(") THEN 1 WHEN strpos({field}, ' ' || "));
+        qb.push_bind(typed.clone());
+        qb.push(") > 0 THEN 2 ELSE 3 END");
+        if field == "names.name" {
+            qb.push(", ");
+        }
+    }
+    qb.push(
+        ") AS tier \
+         FROM events e CROSS JOIN LATERAL (SELECT ",
+    );
+    push_tsquery(&mut qb, SearchMode::Prefix, &search_text);
+    qb.push(
+        " AS query) AS search_query \
+         CROSS JOIN LATERAL (SELECT CASE WHEN e.content IS JSON OBJECT \
+           THEN e.content::jsonb END AS doc) AS parsed \
+         CROSS JOIN LATERAL (SELECT \
+           CASE WHEN jsonb_typeof(parsed.doc -> 'name') = 'string' \
+             THEN parsed.doc ->> 'name' END AS name, \
+           CASE WHEN jsonb_typeof(parsed.doc -> 'display_name') = 'string' \
+             THEN parsed.doc ->> 'display_name' END AS display_name) AS fields \
+         CROSS JOIN LATERAL (SELECT \
+           to_tsvector('simple', concat_ws(' ', fields.name, fields.display_name)) AS tsv, \
+           regexp_replace(lower(btrim(fields.name)), '\\s+', ' ', 'g') AS name, \
+           regexp_replace(lower(btrim(fields.display_name)), '\\s+', ' ', 'g') AS display_name) AS names \
+         WHERE e.community_id = ",
+    );
+    qb.push_bind(*community.as_uuid());
+    qb.push(
+        " AND e.kind = 0 AND e.channel_id IS NULL AND e.deleted_at IS NULL \
+         AND e.search_tsv @@ search_query.query \
+         AND names.tsv @@ search_query.query\
+         ) AS matched ORDER BY tier, rank DESC, created_at DESC, id LIMIT ",
+    );
+    qb.push_bind(per_page as i64);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
+
+    let rows = qb.build().fetch_all(pool).await?;
+    let mut hits = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id_bytes: Vec<u8> = row.try_get("id")?;
+        let pk_bytes: Vec<u8> = row.try_get("pubkey")?;
+        let id: [u8; 32] = id_bytes.try_into().map_err(|v: Vec<u8>| {
+            sqlx::Error::Decode(format!("event id column is {} bytes, expected 32", v.len()).into())
+        })?;
+        let pubkey: [u8; 32] = pk_bytes.try_into().map_err(|v: Vec<u8>| {
+            sqlx::Error::Decode(format!("pubkey column is {} bytes, expected 32", v.len()).into())
+        })?;
+        hits.push(SearchHit {
+            event_id: id,
+            kind: row.try_get("kind")?,
+            pubkey,
+            channel_id: row.try_get("channel_id")?,
+            created_at: row.try_get("created_at_s")?,
+            rank: row.try_get("rank")?,
+        });
+    }
+    Ok(SearchResult { hits, page })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
