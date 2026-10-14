@@ -52,7 +52,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-openssl = "0.10"
+openssl = { version = "0.10", features = ["vendored"] }
 ciborium = "0.2"
 proptest = { workspace = true }
 reqwest = { workspace = true }
