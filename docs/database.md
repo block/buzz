@@ -18,7 +18,7 @@ PostgreSQL stores data. The application owns behavior.
 | Concern | Today | Target |
 |---|---|---|
 | Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. Deployments that apply schema out of band plan each change from it; Block's hosted deployment uses SchemaBot for this, but the source does not depend on any one tool. `migrations/` stays, because auto-migration stays supported (next row). Each app owns its own migrations and declarative schema: the relay's copies of the push gateway's tables are debt to remove (Rule 4). |
-| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, and how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade (Rule 5). Monthly partition creation moves out of the relay under BUZZ-178. Changes to partitioned tables (`events`, `delivery_log`) are outside SchemaBot's envelope: it refuses `CREATE TABLE ... PARTITION OF` on a live parent and concurrent index builds on partitioned parents. |
+| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation moves out of the relay under BUZZ-178. Changes to partitioned tables (`events`, `delivery_log`) are outside SchemaBot's envelope: it refuses `CREATE TABLE ... PARTITION OF` on a live parent and concurrent index builds on partitioned parents. |
 | Integrity between tables | Some foreign keys, including `ON DELETE CASCADE` and `ON DELETE SET NULL` | None in the database. The owning application transaction checks references and performs deletes explicitly. |
 | Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
@@ -65,7 +65,8 @@ only one table.
 A change MUST NOT add `CREATE TRIGGER`, `CREATE FUNCTION`, `CREATE PROCEDURE`,
 or `CREATE RULE`. It MUST NOT widen what an existing trigger or function
 does; this document treats any edit to an existing function's body, other
-than dropping or narrowing it, as widening. Put the behavior in the Rust transaction that owns the write:
+than dropping or narrowing it, as widening. Put the behavior in the Rust
+transaction that owns the write:
 
 - **Validation or guards:** check inside the writer's transaction before
   committing. Use the existing community-write and replica-floor lock helpers
@@ -223,9 +224,11 @@ write-blocking lock. Scans that do not block writes, such as
   [ARCHITECTURE.md](../ARCHITECTURE.md) § *Supported Writer Contract*
   requires of operator maintenance. Each batch MUST take
   `pg_advisory_xact_lock_shared(community_deletion_lock_key(<community>))` for
-  every community it touches, and MUST touch only rows whose community has
-  `deletion_state = 'active'` and `deleted_at IS NULL`, as
-  `DeletionStore::guard_transaction` does. Otherwise the PR MUST document a
+  every community it touches. After taking the lock, in the same
+  transaction, it MUST read the community's state and touch only rows whose
+  community has `deletion_state = 'active'` and `deleted_at IS NULL`, as
+  `DeletionStore::guard_transaction` does. Selecting active communities
+  before taking the lock races with deletion. Otherwise the PR MUST document a
   reviewed procedure that keeps the routing fences closed. A script MUST NOT
   disable triggers or set `session_replication_role`.
 - The normal write path that maintains the new invariant MUST be fully rolled
@@ -240,8 +243,9 @@ write-blocking lock. Scans that do not block writes, such as
 
 ### 4. Change every schema location
 
-Until the declarative schema is the only source, one logical change spans several files. A PR
-that changes the schema MUST update all of these that apply:
+Until the declarative schema is the only source, one logical change spans
+several files. A PR that changes the schema MUST update all of these that
+apply:
 
 | Location | What goes there |
 |---|---|
@@ -289,9 +293,9 @@ floor guard, so the ordering below is the main protection. When
 `BUZZ_AUTO_MIGRATE` is on, an older binary refuses a database that has
 migrations it does not know (sqlx `VersionMissing`), so `helm rollback` with
 auto-migration on fails at startup, and so does any old pod that restarts
-mid-rollout after a new pod has migrated. A rollback therefore depends on the older
-binary not running the migrator. Making rollback work under auto-migration is
-part of supporting both modes.
+mid-rollout after a new pod has migrated. A rollback therefore depends on the
+older binary not running the migrator. Making rollback work under
+auto-migration is part of supporting both modes.
 
 One feature therefore usually ships as several PRs, each deployed before the
 next starts:
@@ -328,9 +332,12 @@ MUST fail closed when the step it depends on has not run:
   migrations in one run against unrepaired rows and asserts the migration
   errors without dropping data.
 
-A failed contract stops the relay from starting, which is an outage but not
-data loss. The release notes MUST tell auto-migrating operators which repair
-to run before upgrading past that release.
+A failed contract stops the relay from starting. That is an outage, not data
+loss, but recovery is not clean: the expand migrations before the contract
+have already committed, so an old pod that restarts hits `VersionMissing`.
+Because a repair needs the new writer fully rolled out (Rule 3), the release
+notes MUST name the release to stop at (the one that ships the writer) and the
+repair to run there before upgrading past the contract release.
 
 #### What breaks the old relay
 
