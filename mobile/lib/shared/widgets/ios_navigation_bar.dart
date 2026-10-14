@@ -9,6 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
 import 'avatar_image.dart';
+import 'app_route_observer.dart';
 import 'ios_navigation_metrics.dart';
 export 'ios_navigation_metrics.dart';
 
@@ -343,12 +344,17 @@ class IosNavigationBar extends HookConsumerWidget {
       return () => offset?.removeListener(sync);
     }, [channel.value, offset, collapseRange]);
 
-    final coveringRoute = ModalRoute.of(context)?.secondaryAnimation;
+    final route = ModalRoute.of(context);
     useEffect(() {
       var active = true;
       Future<void> restoreOnReveal() async {
         final current = channel.value;
-        if (current == null) return;
+        if (!active ||
+            !context.mounted ||
+            route?.isCurrent != true ||
+            current == null) {
+          return;
+        }
         try {
           // Home stays mounted while another route covers its platform view.
           // Returning does not emit a scroll notification, so replay the live
@@ -357,25 +363,27 @@ class IosNavigationBar extends HookConsumerWidget {
             'scroll',
             (offset?.value ?? 0).clamp(0.0, collapseRange),
           );
-          if (!active) return;
+          if (!active || route?.isCurrent != true) return;
           await current.invokeMethod<void>('prepareForReveal');
         } on PlatformException catch (error) {
           debugPrint('Native navigation reveal failed: $error');
         }
       }
 
-      void onStatus(AnimationStatus status) {
-        if (status == AnimationStatus.dismissed) {
+      final observer = _NavigationRevealObserver(() {
+        // didPopNext is independent of route transition compatibility. Defer
+        // until Flutter has painted the uncovered platform view for this frame.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
           unawaited(restoreOnReveal());
-        }
-      }
-
-      coveringRoute?.addStatusListener(onStatus);
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      });
+      if (route != null) appRouteObserver.subscribe(observer, route);
       return () {
         active = false;
-        coveringRoute?.removeStatusListener(onStatus);
+        appRouteObserver.unsubscribe(observer);
       };
-    }, [channel.value, offset, collapseRange, coveringRoute]);
+    }, [channel.value, offset, collapseRange, route]);
 
     return UiKitView(
       key: viewKey,
@@ -387,4 +395,13 @@ class IosNavigationBar extends HookConsumerWidget {
       },
     );
   }
+}
+
+class _NavigationRevealObserver extends RouteAware {
+  _NavigationRevealObserver(this.onReveal);
+
+  final VoidCallback onReveal;
+
+  @override
+  void didPopNext() => onReveal();
 }

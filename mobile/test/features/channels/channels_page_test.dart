@@ -1,4 +1,5 @@
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
@@ -102,6 +103,7 @@ void main() {
         ...overrides,
       ],
       child: MaterialApp(
+        navigatorObservers: [appRouteObserver],
         theme: brightness == Brightness.dark
             ? AppTheme.dark()
             : AppTheme.light(topSectionGradient: topSectionGradient),
@@ -673,132 +675,150 @@ void main() {
     expect(appBar.frostedBlurSigma, 23.12);
   });
 
-  testWidgets('Home replays native scroll state when a channel route returns', (
-    tester,
-  ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    tester.view.physicalSize = const Size(390, 600);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
-    final messenger = tester.binding.defaultBinaryMessenger;
-    final calls = <int, List<MethodCall>>{};
-    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
-      call,
-    ) async {
-      if (call.method == 'create') {
-        final args = call.arguments as Map;
-        if (args['viewType'] == IosNavigationBar.viewType) {
-          final id = args['id'] as int;
-          calls[id] = [];
+  for (final customRoute in [false, true]) {
+    testWidgets(
+      'Home replays native scroll state on return: custom=$customRoute',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.view.physicalSize = const Size(390, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final messenger = tester.binding.defaultBinaryMessenger;
+        final calls = <int, List<MethodCall>>{};
+        messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+          call,
+        ) async {
+          if (call.method == 'create') {
+            final args = call.arguments as Map;
+            if (args['viewType'] == IosNavigationBar.viewType) {
+              final id = args['id'] as int;
+              calls[id] = [];
+              messenger.setMockMethodCallHandler(
+                MethodChannel('${IosNavigationBar.viewType}/$id'),
+                (call) async {
+                  calls[id]!.add(call);
+                  return null;
+                },
+              );
+            }
+          }
+          return null;
+        });
+        addTearDown(() {
           messenger.setMockMethodCallHandler(
-            MethodChannel('${IosNavigationBar.viewType}/$id'),
-            (call) async {
-              calls[id]!.add(call);
-              return null;
-            },
+            SystemChannels.platform_views,
+            null,
           );
-        }
-      }
-      return null;
-    });
-    addTearDown(() {
-      messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
-      for (final id in calls.keys) {
-        messenger.setMockMethodCallHandler(
-          MethodChannel('${IosNavigationBar.viewType}/$id'),
-          null,
-        );
-      }
-    });
-    await tester.pumpWidget(
-      buildTestable(
-        realHome: true,
-        overrides: [
-          channelsProvider.overrideWith(
-            () => _FakeNotifier(
-              List.generate(
-                40,
-                (i) => Channel(
-                  id: 'channel-$i',
-                  description: '',
-                  createdBy: 'test',
-                  createdAt: DateTime(2026),
-                  memberCount: 1,
-                  visibility: 'open',
-                  name: 'channel-$i',
-                  channelType: 'stream',
-                  isMember: true,
+          for (final id in calls.keys) {
+            messenger.setMockMethodCallHandler(
+              MethodChannel('${IosNavigationBar.viewType}/$id'),
+              null,
+            );
+          }
+        });
+        await tester.pumpWidget(
+          buildTestable(
+            realHome: true,
+            overrides: [
+              channelsProvider.overrideWith(
+                () => _FakeNotifier(
+                  List.generate(
+                    40,
+                    (i) => Channel(
+                      id: 'channel-$i',
+                      description: '',
+                      createdBy: 'test',
+                      createdAt: DateTime(2026),
+                      memberCount: 1,
+                      visibility: 'open',
+                      name: 'channel-$i',
+                      channelType: 'stream',
+                      isMember: true,
+                    ),
+                  ),
                 ),
               ),
-            ),
+            ],
           ),
-        ],
-      ),
+        );
+        await tester.pumpAndSettle();
+        final homeCalls = calls.values.single;
+        final position = tester
+            .state<ScrollableState>(
+              find
+                  .descendant(
+                    of: find.byType(CustomScrollView),
+                    matching: find.byType(Scrollable),
+                  )
+                  .first,
+            )
+            .position;
+        position.jumpTo(200);
+        await tester.pumpAndSettle();
+        final scrolledOffset =
+            homeCalls.where((call) => call.method == 'scroll').last.arguments
+                as double;
+        expect(scrolledOffset, greaterThan(0));
+        final navigator = tester.state<NavigatorState>(
+          find.byType(Navigator).first,
+        );
+        unawaited(
+          navigator.push<void>(
+            customRoute
+                ? PageRouteBuilder<void>(
+                    opaque: true,
+                    pageBuilder: (_, _, _) =>
+                        const Scaffold(body: Text('Custom route')),
+                  )
+                : MaterialPageRoute<void>(
+                    builder: (_) => const Scaffold(body: Text('Channel')),
+                  ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        homeCalls.clear();
+        navigator.pop();
+        await tester.pumpAndSettle();
+        expect(position.pixels, 200);
+        expect(
+          homeCalls
+              .where((call) => call.method == 'scroll')
+              .map((call) => call.arguments),
+          contains(scrolledOffset),
+        );
+        expect(homeCalls.last.method, 'prepareForReveal');
+        // The replay must use the live offset, including returning at the top.
+        position.jumpTo(0);
+        await tester.pumpAndSettle();
+        unawaited(
+          navigator.push<void>(
+            customRoute
+                ? PageRouteBuilder<void>(
+                    opaque: true,
+                    pageBuilder: (_, _, _) =>
+                        const Scaffold(body: Text('Custom route')),
+                  )
+                : MaterialPageRoute<void>(
+                    builder: (_) => const Scaffold(body: Text('Channel')),
+                  ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        homeCalls.clear();
+        navigator.pop();
+        await tester.pumpAndSettle();
+        expect(
+          homeCalls
+              .where((call) => call.method == 'scroll')
+              .map((call) => call.arguments),
+          contains(0.0),
+        );
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
     );
-    await tester.pumpAndSettle();
-    final homeCalls = calls.values.single;
-    final position = tester
-        .state<ScrollableState>(
-          find
-              .descendant(
-                of: find.byType(CustomScrollView),
-                matching: find.byType(Scrollable),
-              )
-              .first,
-        )
-        .position;
-    position.jumpTo(200);
-    await tester.pumpAndSettle();
-    final scrolledOffset =
-        homeCalls.where((call) => call.method == 'scroll').last.arguments
-            as double;
-    expect(scrolledOffset, greaterThan(0));
-    final navigator = tester.state<NavigatorState>(
-      find.byType(Navigator).first,
-    );
-    unawaited(
-      navigator.push<void>(
-        MaterialPageRoute(
-          builder: (_) => const Scaffold(body: Text('Channel')),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    homeCalls.clear();
-    navigator.pop();
-    await tester.pumpAndSettle();
-    expect(position.pixels, 200);
-    expect(
-      homeCalls
-          .where((call) => call.method == 'scroll')
-          .map((call) => call.arguments),
-      contains(scrolledOffset),
-    );
-    expect(homeCalls.last.method, 'prepareForReveal');
-    // The replay must use the live offset, including returning at the top.
-    position.jumpTo(0);
-    await tester.pumpAndSettle();
-    unawaited(
-      navigator.push<void>(
-        MaterialPageRoute(
-          builder: (_) => const Scaffold(body: Text('Channel')),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    homeCalls.clear();
-    navigator.pop();
-    await tester.pumpAndSettle();
-    expect(
-      homeCalls
-          .where((call) => call.method == 'scroll')
-          .map((call) => call.arguments),
-      contains(0.0),
-    );
-    await tester.pumpWidget(const SizedBox());
-    debugDefaultTargetPlatformOverride = null;
-  });
+  }
 
   testWidgets('scrolls Home to the top when its tab is selected again', (
     tester,
