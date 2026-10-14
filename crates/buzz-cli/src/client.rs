@@ -60,20 +60,231 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
+const MIME_DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const MIME_XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const MIME_PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
+/// Image MIME types accepted on the image upload path (matches relay `ALLOWED_MIME_TYPES`).
+const ALLOWED_IMAGE_MIMES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// Deny list aligned with relay `BLOCKED_FILE_MIME_TYPES` in `buzz-media` validation.
+const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
 ];
 
-/// Maximum file size for image uploads (50 MB).
+/// Maximum file size for image uploads (50 MB). Matches relay `max_image_bytes` default.
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Maximum file size for video uploads (500 MB).
+/// Maximum file size for video uploads (500 MB). Matches relay `max_video_bytes` default.
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum size for generic (non-image, non-video) files (100 MB).
+/// Matches relay `MediaConfig::max_file_bytes` default (`default_max_file_bytes` = 104_857_600).
+const MAX_FILE_BYTES: u64 = 104_857_600;
+
+const OOXML_MAX_ZIP_ENTRIES: usize = 8_192;
+const OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED: u64 = 256 * 1024;
+const OOXML_MAX_CONTENT_TYPES_COMPRESSED: u64 = 256 * 1024;
+const OOXML_MAX_COMPRESSION_RATIO: u64 = 100;
+
+fn looks_like_iso_bmff(bytes: &[u8]) -> bool {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    true
+}
+
+/// Keep in lockstep with `buzz-media` `validation.rs` `refine_ooxml_from_zip`
+/// (same PartName + sibling-entry rule and the same size/ratio caps).
+/// Sharing a crate is a separate task; do not drift these constants independently.
+fn refine_ooxml_from_zip(bytes: &[u8]) -> Option<&'static str> {
+    use std::io::{Cursor, Read};
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+    if archive.len() > OOXML_MAX_ZIP_ENTRIES {
+        return None;
+    }
+    let mut has_ppt = false;
+    let mut has_word = false;
+    let mut has_xl = false;
+    let mut content_types_index: Option<usize> = None;
+    for i in 0..archive.len() {
+        let name = archive.name_for_index(i)?;
+        let n = name.replace('\\', "/");
+        if n == "[Content_Types].xml" {
+            content_types_index = Some(i);
+        } else if n == "ppt/presentation.xml" || n.starts_with("ppt/") {
+            has_ppt = true;
+        } else if n == "word/document.xml" || n.starts_with("word/") {
+            has_word = true;
+        } else if n == "xl/workbook.xml" || n.starts_with("xl/") {
+            has_xl = true;
+        }
+    }
+    let ct_index = content_types_index?;
+    let file = archive.by_index(ct_index).ok()?;
+    if file.size() > OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED
+        || file.compressed_size() > OOXML_MAX_CONTENT_TYPES_COMPRESSED
+    {
+        return None;
+    }
+    if file.compressed_size() > 0
+        && file.size() / file.compressed_size() > OOXML_MAX_COMPRESSION_RATIO
+    {
+        return None;
+    }
+    let mut buf = Vec::new();
+    file.take(OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED)
+        .read_to_end(&mut buf)
+        .ok()?;
+    let xml = String::from_utf8_lossy(&buf);
+    let claims_ppt = xml.contains("PartName=\"/ppt/presentation.xml\"")
+        || xml.contains("PartName='/ppt/presentation.xml'");
+    let claims_word = xml.contains("PartName=\"/word/document.xml\"")
+        || xml.contains("PartName='/word/document.xml'");
+    let claims_xl = xml.contains("PartName=\"/xl/workbook.xml\"")
+        || xml.contains("PartName='/xl/workbook.xml'");
+    let claim_count = [claims_ppt, claims_word, claims_xl]
+        .into_iter()
+        .filter(|v| *v)
+        .count();
+    if claim_count != 1 {
+        return None;
+    }
+    if claims_ppt && has_ppt {
+        Some(MIME_PPTX)
+    } else if claims_word && has_word {
+        Some(MIME_DOCX)
+    } else if claims_xl && has_xl {
+        Some(MIME_XLSX)
+    } else {
+        None
+    }
+}
+
+/// Extension-based OOXML correction (same rule as prior CLI `normalize_upload_mime`).
+fn ooxml_mime_for_path(path: &str, bytes: &[u8]) -> Option<&'static str> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())?;
+    let names = {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+        let mut names = Vec::with_capacity(archive.len());
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).ok()?.name().replace('\\', "/"));
+        }
+        names
+    };
+    let has = |n: &str| names.iter().any(|e| e == n);
+    if !has("[Content_Types].xml") {
+        return None;
+    }
+    match ext.as_str() {
+        "pptx" if has("ppt/presentation.xml") => Some(MIME_PPTX),
+        "docx" if has("word/document.xml") => Some(MIME_DOCX),
+        "xlsx" if has("xl/workbook.xml") => Some(MIME_XLSX),
+        _ => None,
+    }
+}
+
+fn extra_blocked_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 4 && bytes.starts_with(b"\x7fELF") {
+        return Some("application/x-elf");
+    }
+    if bytes.len() >= 2 && bytes.starts_with(b"MZ") {
+        return Some("application/x-msdownload");
+    }
+    if bytes.len() >= 4
+        && (bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xce])
+            || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
+            || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+            || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]))
+    {
+        return Some("application/x-mach-binary");
+    }
+    let n = bytes.len().min(512);
+    let head = String::from_utf8_lossy(&bytes[..n]);
+    let trimmed = head.trim_start();
+    if trimmed.starts_with("<svg")
+        || (trimmed.starts_with("<?xml") && trimmed.to_ascii_lowercase().contains("<svg"))
+    {
+        return Some("image/svg+xml");
+    }
+    None
+}
+
+fn classify_upload_mime(path: &str, bytes: &[u8]) -> Result<String, CliError> {
+    if let Some(blocked) = extra_blocked_mime(bytes) {
+        return Err(CliError::Usage(format!("unsupported file type: {blocked}")));
+    }
+    if looks_like_iso_bmff(bytes) {
+        let mime = infer::get(bytes)
+            .map(|k| k.mime_type().to_string())
+            .unwrap_or_else(|| "application/iso-bmff".to_string());
+        if mime == "video/mp4" {
+            return Ok(mime);
+        }
+        return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+    }
+
+    match infer::get(bytes) {
+        Some(kind) => {
+            let mut mime = kind.mime_type().to_string();
+            if ALLOWED_IMAGE_MIMES.contains(&mime.as_str()) || mime == "video/mp4" {
+                return Ok(mime);
+            }
+            if mime.starts_with("image/")
+                || mime.starts_with("video/")
+                || mime.starts_with("audio/")
+            {
+                return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+            }
+            if BLOCKED_FILE_MIME_TYPES.contains(&mime.as_str()) {
+                return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+            }
+            if mime == "application/zip" {
+                mime = refine_ooxml_from_zip(bytes)
+                    .or_else(|| ooxml_mime_for_path(path, bytes))
+                    .unwrap_or("application/zip")
+                    .to_string();
+            }
+            Ok(mime)
+        }
+        None => Ok("application/octet-stream".to_string()),
+    }
+}
+
+fn max_upload_bytes(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
+
+fn check_upload_size(len: u64, mime: &str) -> Result<(), CliError> {
+    let max = max_upload_bytes(mime);
+    if len > max {
+        return Err(CliError::Usage(format!(
+            "file too large: {len} bytes (max {max})"
+        )));
+    }
+    Ok(())
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1129,28 +1340,12 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
+        // 2. Classify MIME: images/mp4 allowlist, generic files use relay deny-list
+        //    (no CLI allowlist). Unknown signatures (txt/csv/json/md) are octet-stream.
+        let mime = classify_upload_mime(file_path, &bytes)?;
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
-        if bytes.len() as u64 > max {
-            return Err(CliError::Usage(format!(
-                "file too large: {} bytes (max {})",
-                bytes.len(),
-                max
-            )));
-        }
+        // 3. Size check — image 50MB / video 500MB / generic 100MB (relay defaults).
+        check_upload_size(bytes.len() as u64, &mime)?;
 
         // 4. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
@@ -2328,8 +2523,9 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient,
+        advance_query_cursor, check_upload_size, classify_upload_mime,
+        create_response_with_id_if_accepted, extract_relay_response_field, max_upload_bytes,
+        normalize_events, BuzzClient, MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, MIME_PPTX,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -2552,5 +2748,159 @@ mod tests {
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut cursor);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, data) in entries {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(data).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    fn pptx_zip(content_types_first: bool) -> Vec<u8> {
+        let ct = br#"<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+</Types>"#;
+        let ppt = b"<xml/>";
+        if content_types_first {
+            zip_bytes(&[
+                ("[Content_Types].xml", ct.as_slice()),
+                ("ppt/presentation.xml", ppt),
+            ])
+        } else {
+            zip_bytes(&[
+                ("docProps/app.xml", b"<xml/>"),
+                ("ppt/presentation.xml", ppt),
+                ("[Content_Types].xml", ct.as_slice()),
+            ])
+        }
+    }
+
+    #[test]
+    fn classify_accepts_pdf_zip_and_text_without_magic() {
+        let pdf = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF";
+        assert_eq!(
+            classify_upload_mime("a.pdf", pdf).unwrap(),
+            "application/pdf"
+        );
+        let zip = zip_bytes(&[("readme.txt", b"hi")]);
+        assert_eq!(
+            classify_upload_mime("a.zip", &zip).unwrap(),
+            "application/zip"
+        );
+        assert_eq!(
+            classify_upload_mime("notes.txt", b"hello world").unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            classify_upload_mime("data.csv", b"a,b\n1,2\n").unwrap(),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            classify_upload_mime("x.json", b"{\"a\":1}").unwrap(),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn classify_pptx_even_when_docprops_precedes_content_types() {
+        let bytes = pptx_zip(false);
+        assert_eq!(
+            classify_upload_mime("deck.pptx", &bytes).unwrap(),
+            MIME_PPTX
+        );
+        assert_eq!(classify_upload_mime("deck.bin", &bytes).unwrap(), MIME_PPTX);
+    }
+
+    #[test]
+    fn classify_pptx_extension_on_plain_zip_stays_zip() {
+        let zip = zip_bytes(&[("readme.txt", b"not office")]);
+        assert_eq!(
+            classify_upload_mime("fake.pptx", &zip).unwrap(),
+            "application/zip"
+        );
+    }
+
+    #[test]
+    fn classify_rejects_executables_and_svg() {
+        let elf = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let err = classify_upload_mime("a.bin", elf).unwrap_err().to_string();
+        assert!(err.contains("unsupported file type"), "elf: {err}");
+        let mz = b"MZ\x90\x00this is a pe stub............";
+        let err = classify_upload_mime("a.exe", mz).unwrap_err().to_string();
+        assert!(err.contains("unsupported file type"), "mz: {err}");
+        let svg = b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+        let err = classify_upload_mime("a.svg", svg).unwrap_err().to_string();
+        assert!(err.contains("unsupported file type"), "svg: {err}");
+        // 512-byte cut must not skip SVG when the last UTF-8 sequence is incomplete.
+        let mut split =
+            b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".to_vec();
+        while split.len() < 510 {
+            split.push(b'x');
+        }
+        split.extend_from_slice(&[0xe3, 0x81]); // incomplete UTF-8 at the 512-byte cut
+        let err = classify_upload_mime("cut.svg", &split)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsupported file type"), "split-svg: {err}");
+    }
+
+    #[test]
+    fn classify_html_matches_relay_file_path() {
+        // Relay `BLOCKED_FILE_MIME_TYPES` does not include text/html.
+        let html = b"<!DOCTYPE html><html><head></head><body>hi</body></html>";
+        let mime = classify_upload_mime("page.html", html).unwrap();
+        assert!(
+            mime == "text/html" || mime == "application/octet-stream",
+            "html mime was {mime}"
+        );
+    }
+
+    #[test]
+    fn classify_keeps_jpeg_and_size_caps() {
+        let jpeg = [
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xd9,
+        ];
+        assert_eq!(classify_upload_mime("a.jpg", &jpeg).unwrap(), "image/jpeg");
+        assert_eq!(max_upload_bytes("image/jpeg"), MAX_IMAGE_BYTES);
+        assert_eq!(max_upload_bytes("video/mp4"), MAX_VIDEO_BYTES);
+        assert_eq!(max_upload_bytes("application/pdf"), MAX_FILE_BYTES);
+        assert_eq!(max_upload_bytes("application/octet-stream"), MAX_FILE_BYTES);
+    }
+
+    #[test]
+    fn upload_path_rejects_generic_over_file_cap() {
+        const {
+            assert!(MAX_FILE_BYTES < MAX_VIDEO_BYTES);
+        }
+        assert_eq!(max_upload_bytes("application/zip"), 104_857_600);
+        check_upload_size(MAX_FILE_BYTES, "application/pdf").unwrap();
+        check_upload_size(MAX_FILE_BYTES, "application/octet-stream").unwrap();
+        let over = check_upload_size(MAX_FILE_BYTES + 1, "application/pdf")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            over.contains("file too large") && over.contains(&(MAX_FILE_BYTES + 1).to_string()),
+            "pdf over: {over}"
+        );
+        let zip_over = check_upload_size(MAX_FILE_BYTES + 1, "application/zip")
+            .unwrap_err()
+            .to_string();
+        assert!(zip_over.contains("file too large"), "zip over: {zip_over}");
+        check_upload_size(MAX_IMAGE_BYTES, "image/jpeg").unwrap();
+        assert!(check_upload_size(MAX_IMAGE_BYTES + 1, "image/jpeg").is_err());
+        check_upload_size(MAX_VIDEO_BYTES, "video/mp4").unwrap();
+        assert!(check_upload_size(MAX_VIDEO_BYTES + 1, "video/mp4").is_err());
     }
 }

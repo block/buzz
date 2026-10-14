@@ -1002,6 +1002,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1155,6 +1156,7 @@ dependencies = [
  "tracing",
  "ulid",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -2316,7 +2318,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]

@@ -62,6 +62,7 @@ bytes = "1"
 
 # MIME type detection via magic bytes — file upload validation
 infer = "0.19"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 # URL parsing — extract server domain for Blossom auth tag
 url = { workspace = true }

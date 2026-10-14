@@ -1,6 +1,6 @@
 //! Content validation — magic bytes, allowlist, size, image bomb protection, video metadata.
 
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::config::MediaConfig;
@@ -153,6 +153,105 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
     Some(ext)
 }
 
+/// Caps for inspecting a sniffed ZIP as a possible OOXML package.
+///
+/// Only `[Content_Types].xml` is decompressed, in memory. Limits exist so a
+/// zip-bomb or a huge central directory cannot stall the upload path. Values
+/// are well above real Office packages (V0.14 is ~400 entries / ~23 KiB
+/// Content_Types) and well below zip-bomb territory.
+const OOXML_MAX_ZIP_ENTRIES: usize = 8_192;
+const OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED: u64 = 256 * 1024;
+const OOXML_MAX_CONTENT_TYPES_COMPRESSED: u64 = 256 * 1024;
+const OOXML_MAX_COMPRESSION_RATIO: u64 = 100;
+
+const OOXML_PPTX: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+const OOXML_DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const OOXML_XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/// When `infer` reports a generic ZIP, look at `[Content_Types].xml` plus the
+/// matching main part so Office packages are classified regardless of ZIP
+/// local-header order. Uncertain or hostile archives stay `application/zip`.
+fn refine_ooxml_from_zip(bytes: &[u8]) -> Option<&'static str> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+    if archive.len() > OOXML_MAX_ZIP_ENTRIES {
+        return None;
+    }
+
+    let mut has_ppt = false;
+    let mut has_word = false;
+    let mut has_xl = false;
+    let mut content_types_index: Option<usize> = None;
+    for i in 0..archive.len() {
+        let name = archive.name_for_index(i)?;
+        let n = name.replace('\\', "/");
+        if n == "[Content_Types].xml" {
+            content_types_index = Some(i);
+        } else if n == "ppt/presentation.xml" || n.starts_with("ppt/") {
+            has_ppt = true;
+        } else if n == "word/document.xml" || n.starts_with("word/") {
+            has_word = true;
+        } else if n == "xl/workbook.xml" || n.starts_with("xl/") {
+            has_xl = true;
+        }
+    }
+    let ct_index = content_types_index?;
+
+    let mut file = archive.by_index(ct_index).ok()?;
+    if file.size() > OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED
+        || file.compressed_size() > OOXML_MAX_CONTENT_TYPES_COMPRESSED
+    {
+        return None;
+    }
+    if file.compressed_size() > 0
+        && file.size() / file.compressed_size() > OOXML_MAX_COMPRESSION_RATIO
+    {
+        return None;
+    }
+    let mut buf = Vec::new();
+    if buf
+        .try_reserve((file.size() as usize).min(OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED as usize))
+        .is_err()
+    {
+        return None;
+    }
+    (&mut file)
+        .take(OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() as u64 > OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED {
+        return None;
+    }
+    drop(file);
+
+    let xml = String::from_utf8_lossy(&buf);
+    let claims_ppt = xml_has_part(&xml, "/ppt/presentation.xml");
+    let claims_word = xml_has_part(&xml, "/word/document.xml");
+    let claims_xl = xml_has_part(&xml, "/xl/workbook.xml");
+    let claim_count = [claims_ppt, claims_word, claims_xl]
+        .into_iter()
+        .filter(|v| *v)
+        .count();
+    if claim_count != 1 {
+        return None;
+    }
+    if claims_ppt && has_ppt {
+        Some(OOXML_PPTX)
+    } else if claims_word && has_word {
+        Some(OOXML_DOCX)
+    } else if claims_xl && has_xl {
+        Some(OOXML_XLSX)
+    } else {
+        None
+    }
+}
+
+fn xml_has_part(xml: &str, part_name: &str) -> bool {
+    let dq = format!("PartName=\"{part_name}\"");
+    let sq = format!("PartName='{part_name}'");
+    xml.contains(&dq) || xml.contains(&sq)
+}
+
 /// Validate uploaded bytes for the **generic file** upload path.
 ///
 /// This is the catch-all path for non-media attachments (documents, archives,
@@ -209,6 +308,13 @@ pub fn validate_file_content(
             if BLOCKED_FILE_MIME_TYPES.contains(&mime.as_str()) {
                 return Err(MediaError::DisallowedContentType(mime));
             }
+            let mime = if mime == "application/zip" {
+                refine_ooxml_from_zip(bytes)
+                    .map(str::to_string)
+                    .unwrap_or(mime)
+            } else {
+                mime
+            };
             let ext = file_mime_to_ext(&mime)
                 .map(str::to_string)
                 .unwrap_or_else(|| kind.extension().to_string());
@@ -2723,5 +2829,186 @@ mod tests {
         assert!(!serve_inline("application/octet-stream"));
         assert!(!serve_inline("audio/mpeg"));
         assert!(!serve_inline("text/plain"));
+    }
+
+    fn zip_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, data) in entries {
+                writer.start_file(*name, opts).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    fn ct_xml(part: &str, content_type: &str) -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Override PartName="{part}" ContentType="{content_type}"/>
+</Types>"#
+        )
+        .into_bytes()
+    }
+
+    /// V0.14-like order: `[Content_Types].xml`, `_rels`, `docProps/*`, then `ppt/`.
+    fn ooxml_docprops_first(kind: &str) -> Vec<u8> {
+        let (part, mime, main, extra) = match kind {
+            "pptx" => (
+                "/ppt/presentation.xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+                "ppt/presentation.xml",
+                "ppt/slides/slide1.xml",
+            ),
+            "docx" => (
+                "/word/document.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+                "word/document.xml",
+                "word/styles.xml",
+            ),
+            "xlsx" => (
+                "/xl/workbook.xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                "xl/workbook.xml",
+                "xl/worksheets/sheet1.xml",
+            ),
+            _ => panic!("unknown kind"),
+        };
+        zip_entries(&[
+            ("[Content_Types].xml", &ct_xml(part, mime)),
+            ("_rels/.rels", b"<Relationships/>"),
+            ("docProps/app.xml", b"<Properties/>"),
+            ("docProps/core.xml", b"<cp:coreProperties/>"),
+            (main, b"<root/>"),
+            (extra, b"<root/>"),
+        ])
+    }
+
+    #[test]
+    fn test_ooxml_pptx_docprops_first_is_pptx() {
+        let bytes = ooxml_docprops_first("pptx");
+        assert_eq!(
+            infer::get(&bytes).map(|k| k.mime_type()),
+            Some("application/zip")
+        );
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, OOXML_PPTX);
+        assert_eq!(ext, "pptx");
+    }
+
+    #[test]
+    fn test_ooxml_docx_docprops_first_is_docx() {
+        let bytes = ooxml_docprops_first("docx");
+        assert_eq!(
+            infer::get(&bytes).map(|k| k.mime_type()),
+            Some("application/zip")
+        );
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, OOXML_DOCX);
+        assert_eq!(ext, "docx");
+    }
+
+    #[test]
+    fn test_ooxml_xlsx_docprops_first_is_xlsx() {
+        let bytes = ooxml_docprops_first("xlsx");
+        assert_eq!(
+            infer::get(&bytes).map(|k| k.mime_type()),
+            Some("application/zip")
+        );
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, OOXML_XLSX);
+        assert_eq!(ext, "xlsx");
+    }
+
+    #[test]
+    fn test_plain_zip_without_content_types_stays_zip() {
+        let bytes = zip_entries(&[("readme.txt", b"hello")]);
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, "application/zip");
+        assert_eq!(ext, "zip");
+    }
+
+    #[test]
+    fn test_content_types_without_office_parts_stays_zip() {
+        let xml = ct_xml(
+            "/ppt/presentation.xml",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+        );
+        let bytes = zip_entries(&[
+            ("[Content_Types].xml", &xml),
+            ("docProps/app.xml", b"<Properties/>"),
+        ]);
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, "application/zip");
+        assert_eq!(ext, "zip");
+    }
+
+    #[test]
+    fn test_truncated_zip_stays_zip() {
+        let (mime, ext) = validate_file_content(TINY_ZIP, &test_config()).unwrap();
+        assert_eq!(mime, "application/zip");
+        assert_eq!(ext, "zip");
+    }
+
+    #[test]
+    fn test_oversized_content_types_stays_zip() {
+        let huge = vec![b'x'; (OOXML_MAX_CONTENT_TYPES_UNCOMPRESSED as usize) + 1];
+        let bytes = zip_entries(&[
+            ("[Content_Types].xml", &huge),
+            ("ppt/presentation.xml", b"<p/>"),
+        ]);
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, "application/zip");
+        assert_eq!(ext, "zip");
+    }
+
+    #[test]
+    fn test_mixed_ooxml_claims_stays_zip() {
+        let xml = br#"<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#;
+        let bytes = zip_entries(&[
+            ("[Content_Types].xml", xml),
+            ("ppt/presentation.xml", b"<p/>"),
+            ("word/document.xml", b"<w/>"),
+        ]);
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, "application/zip");
+        assert_eq!(ext, "zip");
+    }
+
+    /// Read-only classification of the V0.14 canonical PPTX. Not uploaded.
+    /// Run: `cargo test -p buzz-media --lib -- --ignored test_ooxml_v014_canonical`
+    #[test]
+    #[ignore = "needs V0.14 canonical bytes on disk; not a CI fixture"]
+    fn test_ooxml_v014_canonical_pptx_classified() {
+        use sha2::{Digest, Sha256};
+        let path = std::env::var("NOBLE19_V014_PPTX").unwrap_or_else(|_| {
+            "/Volumes/OLYMPUS/projects/noble19/deliverables/NOBLE19_REVIEW_PPT_DRAFT_V0_14.pptx"
+                .to_string()
+        });
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let sha = hex::encode(Sha256::digest(&bytes));
+        assert_eq!(
+            sha, "f02062dea03542073badb78804ca2ee11063a8109f0b92ffbed37f5ca52432e6",
+            "refusing to classify a non-canonical file"
+        );
+        assert_eq!(bytes.len(), 32_430_601);
+        assert_eq!(
+            infer::get(&bytes).map(|k| k.mime_type()),
+            Some("application/zip"),
+            "V0.14 must still look like zip to infer (entry order)"
+        );
+        let (mime, ext) = validate_file_content(&bytes, &test_config()).unwrap();
+        assert_eq!(mime, OOXML_PPTX);
+        assert_eq!(ext, "pptx");
     }
 }
