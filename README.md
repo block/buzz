@@ -272,6 +272,13 @@ just reset          # ⚠️  Wipe data + recreate
 
 ---
 
+## Community
+
+- **[Buzz feedback community](https://feedback.communities.buzz.xyz)** — ask questions, share feedback, and connect with other Buzz users
+- **[@buzzdotxyz on X](https://x.com/buzzdotxyz)** — news and updates
+
+---
+
 ## What it is not
 
 - Not blockchain. Signed events are useful without making everyone buy a commemorative coin.
