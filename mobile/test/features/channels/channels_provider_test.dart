@@ -1801,6 +1801,56 @@ void main() {
     });
   });
 
+  test('channel batches stay within the relay explicit-channel cap', () async {
+    final ids = [
+      for (var i = 0; i <= kMaxExplicitChannelValues; i++) 'capped-channel-$i',
+    ];
+    final session = _FakeRelaySession(
+      memberships: [for (final id in ids) _membership(id, myPk)],
+      metadata: [for (final id in ids) _meta(id: id, name: id)],
+      recentMessages: [
+        NostrEvent(
+          id: 'last-chunk',
+          pubkey: 'alice',
+          createdAt: 30,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', ids.last],
+          ],
+          content: 'hi',
+          sig: 'sig',
+        ),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    final channels = await container.read(channelsProvider.future);
+    await _waitUntil(
+      () => session.queryBatches.any(
+        (batch) => batch.isNotEmpty && batch.every((f) => f.since != null),
+      ),
+    );
+    await _settle();
+
+    final batches = session.queryBatches.where((batch) => batch.isNotEmpty);
+    expect(
+      batches.map(_explicitChannelValues),
+      everyElement(lessThanOrEqualTo(kMaxExplicitChannelValues)),
+    );
+    expect(session.messageHistoryCount, 0);
+    expect(
+      channels.firstWhere((channel) => channel.id == ids.last).lastMessageAt,
+      DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+    );
+    final huddleIds = [
+      for (final filter in session.historyFilters)
+        if (filter.kinds.contains(EventKind.huddleStarted))
+          ...filter.tags['#h']!,
+    ];
+    expect(huddleIds, unorderedEquals(ids));
+  });
+
   group('deadline-unavailable channel batches', () {
     Object deadline() => RelayException(503, '{"error":"query timed out"}');
     bool isUnread(List<NostrFilter> batch) =>
@@ -2529,6 +2579,11 @@ Future<void> _waitUntil(bool Function() predicate) async {
 
 /// Fake [RelaySessionNotifier] that returns canned query results and records
 /// subscriptions.
+int _explicitChannelValues(List<NostrFilter> filters) => filters.fold(
+  0,
+  (total, filter) => total + (filter.tags['#h']?.length ?? 0),
+);
+
 class _FakeRelaySession extends RelaySessionNotifier {
   _FakeRelaySession({
     required this.memberships,
@@ -2782,6 +2837,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyFilters.add(filter);
+    if ((filter.tags['#h']?.length ?? 0) > kMaxExplicitChannelValues) {
+      throw Exception('restricted: too many explicit channels');
+    }
     if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
       final paused = _pausedMemberCount;
       if (paused != null) {
@@ -2928,6 +2986,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return filter.until == null ? directorySnapshot : const [];
     }
     queryBatches.add(filters);
+    if (_explicitChannelValues(filters) > kMaxExplicitChannelValues) {
+      throw RelayException(400, '{"error":"too many explicit channels"}');
+    }
     if (messageBatchError case final error?) throw error;
     // The unread catch-up is the only batch that carries `since` on every
     // filter; the latest-message batch leaves it null. Snapshot the messages at

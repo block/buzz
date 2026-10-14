@@ -478,13 +478,56 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   /// Returns null when the batch is unavailable: it hit a relay deadline.
+  ///
+  /// The relay rejects a request whose filters name more than
+  /// [kMaxExplicitChannelValues] channels in aggregate, so larger batches are
+  /// split into requests within that cap.
   Future<List<NostrEvent>?> _fetchChannelHistoryBatch(
     RelaySessionNotifier session,
     List<NostrFilter> filters, {
     required String operation,
   }) async {
-    if (filters.isEmpty) return const [];
+    final requests = <List<NostrFilter>>[];
+    var channelValues = 0;
+    for (final filter in filters) {
+      final values = filter.tags['#h']?.length ?? 0;
+      if (requests.isEmpty ||
+          channelValues + values > kMaxExplicitChannelValues) {
+        requests.add([]);
+        channelValues = 0;
+      }
+      requests.last.add(filter);
+      channelValues += values;
+    }
+    const requestConcurrency = 4;
+    final events = <NostrEvent>[];
+    for (var start = 0; start < requests.length; start += requestConcurrency) {
+      final end = min(start + requestConcurrency, requests.length);
+      final results = await Future.wait(
+        requests
+            .sublist(start, end)
+            .map(
+              (request) => _fetchChannelHistoryRequest(
+                session,
+                request,
+                operation: operation,
+              ),
+            ),
+      );
+      // A request that hit the deadline makes the whole batch unavailable.
+      if (results.contains(null)) return null;
+      for (final result in results) {
+        events.addAll(result!);
+      }
+    }
+    return events;
+  }
 
+  Future<List<NostrEvent>?> _fetchChannelHistoryRequest(
+    RelaySessionNotifier session,
+    List<NostrFilter> filters, {
+    required String operation,
+  }) async {
     try {
       return await session.queryRelay(filters);
     } catch (error) {
