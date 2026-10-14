@@ -3,6 +3,8 @@ import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../helpers/thread_ids.dart';
+
 FeedItem item({
   required String id,
   int createdAt = 100,
@@ -32,32 +34,42 @@ int? Function(String) markers(Map<String, int> map) =>
 void main() {
   group('resolveInboxItemReadAt', () {
     test('channel rows use the channel marker', () {
-      final row = buildInboxItems([item(id: 'a')]).single;
+      final row = buildInboxItems([item(id: threadIdInboxA)]).single;
       expect(resolveInboxItemReadAt(row, markerOf: markers({'ch1': 42})), 42);
     });
 
     test('thread rows use max of thread and msg markers', () {
       final row = buildInboxItems([
-        item(id: 'a', tags: replyTags('root1', 'root1')),
+        item(
+          id: threadIdInboxA,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ),
       ]).single;
       expect(
         resolveInboxItemReadAt(
           row,
-          markerOf: markers({'thread:root1': 10, 'msg:a': 25}),
+          markerOf: markers({
+            'thread:$threadIdInboxRoot1': 10,
+            'msg:$threadIdInboxA': 25,
+          }),
         ),
         25,
       );
     });
 
     test('channel-less rows have no marker', () {
-      final row = buildInboxItems([item(id: 'a', channelId: null)]).single;
+      final row = buildInboxItems([
+        item(id: threadIdInboxA, channelId: null),
+      ]).single;
       expect(resolveInboxItemReadAt(row, markerOf: markers({})), isNull);
     });
   });
 
   group('isInboxItemDone', () {
     test('done when no grouped activity is newer than the marker', () {
-      final row = buildInboxItems([item(id: 'a', createdAt: 50)]).single;
+      final row = buildInboxItems([
+        item(id: threadIdInboxA, createdAt: 50),
+      ]).single;
       expect(
         isInboxItemDone(
           row,
@@ -79,12 +91,14 @@ void main() {
     });
 
     test('a local unread override always wins', () {
-      final row = buildInboxItems([item(id: 'a', createdAt: 50)]).single;
+      final row = buildInboxItems([
+        item(id: threadIdInboxA, createdAt: 50),
+      ]).single;
       expect(
         isInboxItemDone(
           row,
           markerOf: markers({'ch1': 99}),
-          localUnreadOverrides: const {'a'},
+          localUnreadOverrides: const {threadIdInboxA},
           localDoneSet: const {},
         ),
         isFalse,
@@ -92,7 +106,9 @@ void main() {
     });
 
     test('channel-less rows fall back to the local done set', () {
-      final row = buildInboxItems([item(id: 'a', channelId: null)]).single;
+      final row = buildInboxItems([
+        item(id: threadIdInboxA, channelId: null),
+      ]).single;
       expect(
         isInboxItemDone(
           row,
@@ -107,7 +123,7 @@ void main() {
           row,
           markerOf: markers({}),
           localUnreadOverrides: const {},
-          localDoneSet: const {'a'},
+          localDoneSet: const {threadIdInboxA},
         ),
         isTrue,
       );
@@ -117,8 +133,16 @@ void main() {
   group('groupedChannelReadTimestamp', () {
     test('only counts top-level events in the channel', () {
       final row = buildInboxItems([
-        item(id: 'a', createdAt: 10, tags: replyTags('root1', 'root1')),
-        item(id: 'b', createdAt: 30, tags: replyTags('root1', 'a')),
+        item(
+          id: threadIdInboxA,
+          createdAt: 10,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ),
+        item(
+          id: 'b',
+          createdAt: 30,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxA),
+        ),
       ]).single;
       // Every grouped event is a thread reply, so marking the thread read
       // must not advance the channel marker.
@@ -127,8 +151,12 @@ void main() {
 
     test('returns the newest top-level timestamp', () {
       final row = buildInboxItems([
-        item(id: 'root1', createdAt: 10),
-        item(id: 'b', createdAt: 30, tags: replyTags('root1', 'root1')),
+        item(id: threadIdInboxRoot1, createdAt: 10),
+        item(
+          id: 'b',
+          createdAt: 30,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ),
       ]).single;
       final result = groupedChannelReadTimestamp(row);
       expect(result?.channelId, 'ch1');

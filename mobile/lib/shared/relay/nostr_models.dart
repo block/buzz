@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'thread_reference.dart';
+
 /// Nostr event kind constants.
 ///
 /// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
@@ -156,36 +158,9 @@ class NostrEvent {
   /// The channel/group ID from the `h` tag (NIP-29).
   String? get channelId => getTagValue('h');
 
-  /// Extract thread parent and root IDs from `e` tags.
-  ///
-  /// Matches the desktop's `getThreadReference` logic:
-  /// - Tags with marker `"reply"` identify the direct parent.
-  /// - Tags with marker `"root"` identify the thread root.
-  /// - If no markers are present, falls back to null (top-level message).
-  ({String? parentId, String? rootId}) get threadReference {
-    final eTags = [
-      for (final tag in tags)
-        if (tag.length >= 2 && tag[0] == 'e') tag,
-    ];
-
-    if (eTags.isEmpty) return (parentId: null, rootId: null);
-
-    // Find tagged root and reply markers (desktop convention).
-    List<String>? rootTag;
-    List<String>? replyTag;
-    for (final tag in eTags) {
-      if (tag.length >= 4) {
-        if (tag[3] == 'root') rootTag = tag;
-        if (tag[3] == 'reply') replyTag = tag;
-      }
-    }
-
-    if (replyTag == null) return (parentId: null, rootId: null);
-
-    final parentId = replyTag[1];
-    final rootId = rootTag?[1] ?? parentId;
-    return (parentId: parentId, rootId: rootId);
-  }
+  /// Validated, lowercase thread IDs shared by timeline and Inbox navigation.
+  ({String? parentId, String? rootId}) get threadReference =>
+      parseThreadReference(tags);
 
   /// The parent event ID from the `e` tag.
   String? get parentEventId => threadReference.parentId;

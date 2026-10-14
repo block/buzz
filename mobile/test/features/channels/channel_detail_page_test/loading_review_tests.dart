@@ -9,7 +9,7 @@ void _loadingReviewTests() {
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.reset);
         final root = _textMsg(
-          id: 'thread-root',
+          id: threadIdThreadDashRoot,
           pubkey: 'alice',
           content: 'Original message',
           createdAt: 1000,
@@ -22,7 +22,7 @@ void _loadingReviewTests() {
               content: 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
-                ['e', 'thread-root', '', 'reply'],
+                ['e', threadIdThreadDashRoot, '', 'reply'],
               ],
             ),
         ];
@@ -30,7 +30,7 @@ void _loadingReviewTests() {
         await tester.pumpWidget(
           _buildTestable(
             messages: [root],
-            pendingThreadReplies: {'thread-root': query.future},
+            pendingThreadReplies: {threadIdThreadDashRoot: query.future},
             home: target == null
                 ? null
                 : ThreadDetailPage(
@@ -181,7 +181,7 @@ void _loadingReviewTests() {
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.reset);
         final root = _textMsg(
-          id: 'thread-root',
+          id: threadIdThreadDashRoot,
           pubkey: 'alice',
           content: 'Original message',
           createdAt: 1000,
@@ -194,7 +194,7 @@ void _loadingReviewTests() {
               content: 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
-                ['e', 'thread-root', '', 'reply'],
+                ['e', threadIdThreadDashRoot, '', 'reply'],
               ],
             ),
         ];
@@ -203,7 +203,7 @@ void _loadingReviewTests() {
         await tester.pumpWidget(
           _buildTestable(
             messages: [root],
-            pendingThreadReplies: {'thread-root': query.future},
+            pendingThreadReplies: {threadIdThreadDashRoot: query.future},
             home: ThreadDetailPage(
               threadHead: provisional.first,
               allMessages: provisional,
@@ -267,7 +267,7 @@ void _loadingReviewTests() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     final root = _textMsg(
-      id: 'tall-root',
+      id: threadIdTallDashRoot,
       pubkey: 'alice',
       content:
           '${List.generate(70, (i) => 'Head line $i').join('\n')}\nEnd of original message',
@@ -276,7 +276,7 @@ void _loadingReviewTests() {
     await tester.pumpWidget(
       _buildTestable(
         messages: [root],
-        pendingThreadReplies: {'tall-root': replies.future},
+        pendingThreadReplies: {threadIdTallDashRoot: replies.future},
         home: ThreadDetailPage(
           threadHead: formatTimeline([root]).single,
           allMessages: formatTimeline([root]),
@@ -294,7 +294,7 @@ void _loadingReviewTests() {
         pubkey: 'bob',
         content: 'Reply after tall head',
         extraTags: const [
-          ['e', 'tall-root', '', 'reply'],
+          ['e', threadIdTallDashRoot, '', 'reply'],
         ],
       ),
     ]);
@@ -336,7 +336,7 @@ void _loadingReviewTests() {
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.reset);
         final root = _textMsg(
-          id: 'video-root',
+          id: threadIdVideoDashRoot,
           pubkey: 'alice',
           content: '![video](https://example.com/head.mp4)',
           extraTags: const [
@@ -355,7 +355,7 @@ void _loadingReviewTests() {
         await tester.pumpWidget(
           _buildTestable(
             messages: [root],
-            pendingThreadReplies: {'video-root': replies.future},
+            pendingThreadReplies: {threadIdVideoDashRoot: replies.future},
             videoPreviewLoader: (_) {
               loads++;
               return preview.future;
@@ -391,7 +391,7 @@ void _loadingReviewTests() {
             pubkey: 'bob',
             content: 'Reply to video',
             extraTags: const [
-              ['e', 'video-root', '', 'reply'],
+              ['e', threadIdVideoDashRoot, '', 'reply'],
             ],
           ),
         ]);

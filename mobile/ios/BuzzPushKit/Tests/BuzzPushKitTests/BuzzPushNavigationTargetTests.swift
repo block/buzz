@@ -134,6 +134,6 @@ import Testing
     #expect(BuzzPushNavigationTarget.threadRootID(in: [invalidTag]) == nil)
     #expect(BuzzPushNavigationTarget.threadRootID(in: [
       ["e", first, "", "reply"], ["e", last, "", "reply"], invalidTag,
-    ]) == last)
+    ]) == last.lowercased())
   }
 }

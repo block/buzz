@@ -231,7 +231,7 @@ void bubbleLayoutTests() {
           final events = [
             if (thread)
               _textMsg(
-                id: 'root',
+                id: threadIdRoot,
                 pubkey: 'bob',
                 content: 'Root',
                 createdAt: 900,
@@ -245,7 +245,7 @@ void bubbleLayoutTests() {
                     ? '![photo](https://example.com/photo.png)'
                     : 'Text $index',
                 extraTags: [
-                  if (thread) ['e', 'root', '', 'reply'],
+                  if (thread) ['e', threadIdRoot, '', 'reply'],
                   if (tagged && index == 1)
                     [
                       'imeta',
@@ -262,7 +262,7 @@ void bubbleLayoutTests() {
               home: thread
                   ? ThreadDetailPage(
                       threadHead: messages.firstWhere(
-                        (message) => message.id == 'root',
+                        (message) => message.id == threadIdRoot,
                       ),
                       allMessages: messages,
                       channelId: _channelId,
@@ -431,7 +431,7 @@ void bubbleLayoutTests() {
       (tester) async {
         final events = [
           _textMsg(
-            id: 'top-root',
+            id: threadIdTopDashRoot,
             pubkey: 'bob',
             content: 'Oldest content',
             createdAt: 900,
@@ -444,7 +444,7 @@ void bubbleLayoutTests() {
               createdAt: 1000 + index,
               extraTags: thread
                   ? const [
-                      ['e', 'top-root', '', 'reply'],
+                      ['e', threadIdTopDashRoot, '', 'reply'],
                     ]
                   : const [],
             ),
@@ -455,7 +455,9 @@ void bubbleLayoutTests() {
             messages: events,
             home: thread
                 ? ThreadDetailPage(
-                    threadHead: messages.firstWhere((m) => m.id == 'top-root'),
+                    threadHead: messages.firstWhere(
+                      (m) => m.id == threadIdTopDashRoot,
+                    ),
                     allMessages: messages,
                     channelId: _channelId,
                     currentPubkey: 'me',
@@ -518,7 +520,12 @@ void bubbleLayoutTests() {
     tester,
   ) async {
     final events = [
-      _textMsg(id: 'root', pubkey: 'bob', content: 'Root', createdAt: 900),
+      _textMsg(
+        id: threadIdRoot,
+        pubkey: 'bob',
+        content: 'Root',
+        createdAt: 900,
+      ),
       for (var index = 0; index < 3; index++)
         _textMsg(
           id: 'gap-$index',
@@ -526,7 +533,7 @@ void bubbleLayoutTests() {
           content: 'Short',
           createdAt: 1000 + index,
           extraTags: const [
-            ['e', 'root', '', 'reply'],
+            ['e', threadIdRoot, '', 'reply'],
           ],
         ),
     ];
@@ -535,7 +542,7 @@ void bubbleLayoutTests() {
       _buildTestable(
         messages: events,
         home: ThreadDetailPage(
-          threadHead: messages.firstWhere((m) => m.id == 'root'),
+          threadHead: messages.firstWhere((m) => m.id == threadIdRoot),
           allMessages: messages,
           channelId: _channelId,
           currentPubkey: 'me',
@@ -662,14 +669,14 @@ void bubbleLayoutTests() {
     'thread replies use the same bubble and group-end avatar layout',
     (tester) async {
       final events = [
-        _textMsg(id: 'root', pubkey: 'bob', content: 'Root'),
+        _textMsg(id: threadIdRoot, pubkey: 'bob', content: 'Root'),
         _textMsg(
           id: 'first',
           pubkey: 'alice',
           content: 'First reply',
           createdAt: 1010,
           extraTags: const [
-            ['e', 'root', '', 'reply'],
+            ['e', threadIdRoot, '', 'reply'],
           ],
         ),
         _textMsg(
@@ -678,7 +685,7 @@ void bubbleLayoutTests() {
           content: 'Last reply',
           createdAt: 1020,
           extraTags: const [
-            ['e', 'root', '', 'reply'],
+            ['e', threadIdRoot, '', 'reply'],
           ],
         ),
       ];
@@ -687,7 +694,7 @@ void bubbleLayoutTests() {
         _buildTestable(
           messages: events,
           home: ThreadDetailPage(
-            threadHead: messages.firstWhere((m) => m.id == 'root'),
+            threadHead: messages.firstWhere((m) => m.id == threadIdRoot),
             allMessages: messages,
             channelId: _channelId,
             currentPubkey: 'me',

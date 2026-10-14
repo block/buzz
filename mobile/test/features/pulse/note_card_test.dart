@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../helpers/thread_ids.dart';
+
 class _FakeUserCacheNotifier extends UserCacheNotifier {
   final Map<String, UserProfile> _users;
 
@@ -35,7 +37,7 @@ void main() {
       createdAt: DateTime.utc(2025, 9, 30, 12).millisecondsSinceEpoch ~/ 1000,
       content: 'A reply',
       tags: [
-        ['e', 'parent-note', '', 'reply'],
+        ['e', threadIdParentDashNote, '', 'reply'],
         ['p', second],
       ],
     );

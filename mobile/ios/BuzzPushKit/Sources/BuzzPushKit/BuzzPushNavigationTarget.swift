@@ -45,7 +45,7 @@ public struct BuzzPushNavigationTarget: Codable, Equatable, Sendable {
       return bytes.count == 64 && bytes.allSatisfy {
         (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
       }
-    })?[1]
+    })?[1].lowercased()
   }
 
   /// Decodes a target without trusting other fields from the APNs payload.

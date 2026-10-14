@@ -51,6 +51,8 @@ import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
+import '../../helpers/thread_ids.dart';
+
 part 'channels_page_test/presence_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
 
@@ -3600,13 +3602,13 @@ void main() {
                   _observed(
                     id: 'reply-1',
                     createdAt: 20,
-                    rootId: 'root',
+                    rootId: threadIdRoot,
                     isThreadedReply: true,
                   ),
                   _observed(
                     id: 'reply-2',
                     createdAt: 30,
-                    rootId: 'root',
+                    rootId: threadIdRoot,
                     isThreadedReply: true,
                   ),
                 ],
@@ -3633,7 +3635,7 @@ void main() {
         _observed(
           id: 'reply-1',
           createdAt: 30,
-          rootId: 'root',
+          rootId: threadIdRoot,
           isThreadedReply: true,
         ),
       ],
@@ -3667,7 +3669,11 @@ void main() {
         const ReadStateState(
           isReady: true,
           pubkey: 'pk',
-          contexts: {'1': 10, 'activity:1': 25, 'thread-activity:root': 30},
+          contexts: {
+            '1': 10,
+            'activity:1': 25,
+            'thread-activity:$threadIdRoot': 30,
+          },
           version: 0,
         ),
       );

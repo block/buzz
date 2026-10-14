@@ -6,6 +6,8 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../helpers/thread_ids.dart';
+
 class _FakeRelaySession extends RelaySessionNotifier {
   int queryCount = 0;
   bool honorDepthLimit = false;
@@ -47,14 +49,14 @@ NostrEvent _reply(String id, int createdAt) => NostrEvent(
   kind: EventKind.streamMessage,
   tags: const [
     ['h', 'chan'],
-    ['e', 'root', '', 'reply'],
+    ['e', threadIdRoot, '', 'reply'],
   ],
   content: 'reply $id',
   sig: '',
 );
 
 void main() {
-  const args = ThreadRepliesArgs(channelId: 'chan', rootId: 'root');
+  const args = ThreadRepliesArgs(channelId: 'chan', rootId: threadIdRoot);
 
   test('complete scan includes a legal 80-deep reply chain', () async {
     final session = _FakeRelaySession()
@@ -68,8 +70,13 @@ void main() {
             kind: EventKind.streamMessage,
             tags: [
               ['h', 'chan'],
-              ['e', 'root', '', 'root'],
-              ['e', depth == 1 ? 'root' : 'reply-${depth - 1}', '', 'reply'],
+              ['e', threadIdRoot, '', 'root'],
+              [
+                'e',
+                depth == 1 ? threadIdRoot : 'reply-${depth - 1}',
+                '',
+                'reply',
+              ],
             ],
             content: '',
             sig: '',

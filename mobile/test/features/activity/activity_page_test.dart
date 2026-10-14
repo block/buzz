@@ -29,6 +29,8 @@ import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/thread_ids.dart';
+
 void main() {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
@@ -53,8 +55,8 @@ void main() {
     channelId: 'ch2',
     channelName: 'engineering',
     tags: const [
-      ['e', 'root1', '', 'root'],
-      ['e', 'root1', '', 'reply'],
+      ['e', threadIdRoot1, '', 'root'],
+      ['e', threadIdRoot1, '', 'reply'],
     ],
     category: 'activity',
   );
@@ -711,7 +713,7 @@ void main() {
     await tester.pumpWidget(
       await buildTestable(
         // Mention (2m ago) and agent (1m ago) unread; thread (1h ago) read.
-        readContexts: {'thread:root1': now, 'ch2': now},
+        readContexts: {'thread:$threadIdRoot1': now, 'ch2': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -773,8 +775,8 @@ void main() {
       channelId: 'ch1',
       channelName: 'general',
       tags: const [
-        ['e', 'thread-root', '', 'root'],
-        ['e', 'parent-reply', '', 'reply'],
+        ['e', threadIdThreadDashRoot, '', 'root'],
+        ['e', threadIdParentDashReply, '', 'reply'],
       ],
       category: 'mention',
     );
@@ -795,7 +797,7 @@ void main() {
       find.byType(ChannelDetailPage),
     );
     expect(page.channel.id, 'ch1');
-    expect(page.initialThreadRootId, 'parent-reply');
+    expect(page.initialThreadRootId, threadIdParentDashReply);
     expect(page.initialMessageId, 'reply-event');
     expect(
       page.initialThreadRouteBehavior,
@@ -860,7 +862,7 @@ void main() {
   testWidgets('long-press mark unread reopens a read row', (tester) async {
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -885,7 +887,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -948,7 +950,7 @@ void main() {
 
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -1004,7 +1006,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();

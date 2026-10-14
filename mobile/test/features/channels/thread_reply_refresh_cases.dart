@@ -1,7 +1,10 @@
 part of 'channel_detail_page_test.dart';
 
 void threadReplyRefreshTests() {
-  const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'refresh-root');
+  const args = ThreadRepliesArgs(
+    channelId: _channelId,
+    rootId: threadIdRefreshDashRoot,
+  );
   final root = _textMsg(
     id: args.rootId,
     pubkey: 'alice',
