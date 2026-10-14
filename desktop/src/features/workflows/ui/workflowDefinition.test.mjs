@@ -177,6 +177,28 @@ test("builds a concise semantic trigger label for workflow cards", () => {
     }),
     "Schedule",
   );
+  assert.equal(
+    getWorkflowTriggerSummary({
+      trigger: {
+        on: "schedule",
+        cron: "30 9 * * *",
+        timezone: "America/Chicago",
+      },
+    }),
+    "Every day at 09:30 Central Time",
+  );
+  assert.equal(
+    getWorkflowTriggerSummary({
+      trigger: { on: "schedule", cron: "30 9 * * *", timezone: "UTC" },
+    }),
+    "Every day at 09:30 UTC",
+  );
+  assert.equal(
+    getWorkflowTriggerSummary({
+      trigger: { on: "schedule", cron: "30 9 * * *" },
+    }),
+    "Every day at 09:30 UTC",
+  );
 });
 
 test("counts configured steps for card stack presentation", () => {
@@ -304,10 +326,32 @@ test("summarizes common and custom schedules", () => {
   );
   assert.equal(
     getWorkflowCardLabel({
+      trigger: {
+        on: "schedule",
+        cron: "30 9 * * *",
+        timezone: "America/Chicago",
+      },
+      steps: [{ action: "request_approval" }],
+    }),
+    "Every day at 09:30 Central Time, request approval",
+  );
+  assert.equal(
+    getWorkflowCardLabel({
       trigger: { on: "schedule", cron: "*/5 8-17 * * 1-5" },
       steps: [],
     }),
-    "On a custom schedule",
+    "On a custom schedule (UTC)",
+  );
+  assert.equal(
+    getWorkflowCardLabel({
+      trigger: {
+        on: "schedule",
+        cron: "*/5 8-17 * * 1-5",
+        timezone: "Europe/London",
+      },
+      steps: [],
+    }),
+    "On a custom schedule (Europe/London)",
   );
 });
 

@@ -2,6 +2,7 @@ import type { Workflow } from "@/shared/api/types";
 import {
   scheduleFormFromTrigger,
   SCHEDULE_FREQUENCY_LABELS,
+  scheduleTimezoneLabel,
 } from "./workflowSchedule";
 import {
   ACTION_LABELS,
@@ -108,6 +109,7 @@ export function getWorkflowTriggerConfig(
     emoji: nonEmptyString(trigger.emoji) ?? undefined,
     cron: nonEmptyString(trigger.cron) ?? undefined,
     interval: nonEmptyString(trigger.interval) ?? undefined,
+    timezone: nonEmptyString(trigger.timezone) ?? undefined,
   };
 }
 
@@ -116,21 +118,23 @@ function getScheduleCardClause(trigger: Record<string, unknown>): string {
     on: "schedule",
     cron: nonEmptyString(trigger.cron) ?? undefined,
     interval: nonEmptyString(trigger.interval) ?? undefined,
+    timezone: nonEmptyString(trigger.timezone) ?? undefined,
   });
+  const timezoneLabel = scheduleTimezoneLabel(schedule.timezone);
 
   switch (schedule.frequency) {
     case "daily":
-      return `Every day at ${schedule.time} UTC`;
+      return `Every day at ${schedule.time} ${timezoneLabel}`;
     case "weekly":
-      return `Every week at ${schedule.time} UTC`;
+      return `Every week at ${schedule.time} ${timezoneLabel}`;
     case "monthly":
-      return `Every month at ${schedule.time} UTC`;
+      return `Every month at ${schedule.time} ${timezoneLabel}`;
     case "custom_interval":
       return schedule.customInterval
         ? `Every ${schedule.customInterval}`
         : "On a schedule";
     case "custom_cron":
-      return "On a custom schedule";
+      return `On a custom schedule (${timezoneLabel})`;
     default:
       return SCHEDULE_FREQUENCY_LABELS[schedule.frequency];
   }
@@ -443,10 +447,18 @@ export function getWorkflowTriggerSummary(
   definition: Record<string, unknown>,
 ): string | null {
   const trigger = getWorkflowTriggerConfig(definition);
-  if (trigger)
+  if (trigger?.on === "schedule" && trigger.cron) {
+    return getScheduleCardClause({
+      cron: trigger.cron,
+      interval: trigger.interval,
+      timezone: trigger.timezone,
+    });
+  }
+  if (trigger) {
     return workflowTriggerDescription(trigger, {
       omitUnresolvedReferences: true,
     });
+  }
 
   const rawTrigger = asRecord(definition.trigger);
   const triggerType = nonEmptyString(rawTrigger?.on);

@@ -59,12 +59,17 @@ pub enum TriggerDef {
     },
     /// Fires on a cron schedule.
     Schedule {
-        /// Cron expression (UTC). Mutually exclusive with `interval`.
+        /// Cron expression. Evaluated in `timezone`, or UTC when it is omitted.
+        /// Mutually exclusive with `interval`.
         #[serde(default)]
         cron: Option<String>,
         /// Simple interval string (e.g. "1h", "30m"). Mutually exclusive with `cron`.
         #[serde(default)]
         interval: Option<String>,
+        /// IANA timezone for cron evaluation. Omitted schedules retain UTC semantics.
+        /// Interval schedules cannot specify a timezone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
     },
     /// Fires when HTTP POST arrives at `/hooks/{id}`.
     Webhook,
@@ -241,7 +246,12 @@ impl WorkflowDef {
             }
         }
 
-        if let TriggerDef::Schedule { cron, interval } = &self.trigger {
+        if let TriggerDef::Schedule {
+            cron,
+            interval,
+            timezone,
+        } = &self.trigger
+        {
             if cron.is_none() && interval.is_none() {
                 return Err(WorkflowError::InvalidDefinition(
                     "schedule trigger requires either 'cron' or 'interval'".into(),
@@ -256,6 +266,24 @@ impl WorkflowDef {
 
             if let Some(expr) = cron {
                 validate_cron(expr)?;
+            }
+
+            if let Some(timezone_name) = timezone {
+                if interval.is_some() {
+                    return Err(WorkflowError::InvalidDefinition(
+                        "schedule trigger cannot specify 'timezone' with 'interval'; timezones only apply to cron schedules".into(),
+                    ));
+                }
+                if timezone_name.trim().is_empty() {
+                    return Err(WorkflowError::InvalidDefinition(
+                        "schedule timezone must not be empty".into(),
+                    ));
+                }
+                timezone_name.parse::<chrono_tz::Tz>().map_err(|_| {
+                    WorkflowError::InvalidDefinition(format!(
+                        "invalid schedule timezone '{timezone_name}': expected an IANA timezone name such as 'America/Chicago'"
+                    ))
+                })?;
             }
 
             if let Some(dur) = interval {
@@ -350,13 +378,31 @@ mod tests {
     #[test]
     fn parse_schedule_trigger() {
         let yaml = "name: Daily Standup\ntrigger:\n  on: schedule\n  cron: '0 9 * * 1-5'\nsteps:\n  - id: prompt\n    action: send_message\n    text: Standup time\n";
-        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
-            TriggerDef::Schedule { cron, .. } => {
+            TriggerDef::Schedule { cron, timezone, .. } => {
                 assert_eq!(cron.as_deref(), Some("0 9 * * 1-5"));
+                assert!(timezone.is_none(), "legacy schedules default to UTC");
             }
             other => panic!("unexpected trigger: {other:?}"),
         }
+        assert!(
+            !json.contains("timezone"),
+            "an omitted timezone should remain omitted in canonical JSON"
+        );
+    }
+
+    #[test]
+    fn parse_schedule_with_iana_timezone() {
+        let yaml = "name: Daily Standup\ntrigger:\n  on: schedule\n  cron: '0 9 * * 1-5'\n  timezone: America/Chicago\nsteps:\n  - id: prompt\n    action: send_message\n    text: Standup time\n";
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
+        match &def.trigger {
+            TriggerDef::Schedule { timezone, .. } => {
+                assert_eq!(timezone.as_deref(), Some("America/Chicago"));
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+        assert!(json.contains(r#""timezone":"America/Chicago""#));
     }
 
     #[test]
@@ -482,6 +528,32 @@ mod tests {
         let yaml = "name: Bad Cron\ntrigger:\n  on: schedule\n  cron: not-a-cron\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n";
         let err = parse_yaml(yaml).unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_or_empty_schedule_timezone() {
+        for timezone in ["Not/A_Zone", "   "] {
+            let yaml = format!(
+                "name: Bad Timezone\ntrigger:\n  on: schedule\n  cron: '0 9 * * *'\n  timezone: '{timezone}'\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n"
+            );
+            let err = parse_yaml(&yaml).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::InvalidDefinition(_)),
+                "timezone {timezone:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_timezone_on_interval_schedule() {
+        let yaml = "name: Misleading Interval\ntrigger:\n  on: schedule\n  interval: 1h\n  timezone: America/Chicago\nsteps:\n  - id: s1\n    action: send_message\n    text: tick\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        match err {
+            WorkflowError::InvalidDefinition(message) => {
+                assert!(message.contains("timezone") && message.contains("interval"));
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
     }
 
     #[test]
@@ -622,9 +694,14 @@ mod tests {
         let yaml = "name: Interval Schedule\ntrigger:\n  on: schedule\n  interval: 30m\nsteps:\n  - id: s1\n    action: send_message\n    text: tick\n";
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
-            TriggerDef::Schedule { cron, interval } => {
+            TriggerDef::Schedule {
+                cron,
+                interval,
+                timezone,
+            } => {
                 assert!(cron.is_none());
                 assert_eq!(interval.as_deref(), Some("30m"));
+                assert!(timezone.is_none());
             }
             other => panic!("unexpected trigger: {other:?}"),
         }

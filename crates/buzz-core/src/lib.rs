@@ -52,6 +52,9 @@ pub use presence::PresenceStatus;
 pub use tenant::{normalize_host, CommunityId, TenantContext};
 pub use verification::verify_event;
 
+/// NIP-11 extension advertising IANA timezone support for workflow cron schedules.
+pub const WORKFLOW_TIMEZONE_EXTENSION: &str = "buzz-workflow-timezone-v1";
+
 #[cfg(any(test, feature = "test-utils"))]
 /// Test helper utilities for creating events and stored events.
 pub mod test_helpers {

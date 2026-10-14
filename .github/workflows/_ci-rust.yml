@@ -66,6 +66,10 @@ jobs:
           tool: cargo-nextest@0.9.136
       - name: Unit tests
         run: just test-unit
+      - name: Workflow unit tests
+        run: |
+          cargo test -p buzz-workflow --lib
+          cargo test -p buzz-relay --lib nip11::tests
 
   server-cross-compile:
     name: Server Cross-Compile

@@ -14,10 +14,12 @@ import type { CronFields } from "./cronExpression";
 export function CronExpressionInput({
   disabled,
   onChange,
+  timezoneLabel,
   value,
 }: {
   disabled?: boolean;
   onChange: (value: string) => void;
+  timezoneLabel: string;
   value: string;
 }) {
   const [fields, setFields] = React.useState<CronFields>(() =>
@@ -162,7 +164,7 @@ export function CronExpressionInput({
         role={firstError ? "alert" : undefined}
       >
         {firstError ??
-          "UTC · Paste all 5 fields, or use wildcards, lists, ranges, and steps."}
+          `${timezoneLabel} · Paste all 5 fields, or use wildcards, lists, ranges, and steps.`}
       </p>
     </fieldset>
   );

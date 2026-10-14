@@ -22,6 +22,7 @@ cron        = "0.16"
 nostr       = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
+chrono-tz   = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }

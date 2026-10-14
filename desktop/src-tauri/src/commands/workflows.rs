@@ -1,3 +1,4 @@
+use buzz_core_pkg::WORKFLOW_TIMEZONE_EXTENSION;
 use std::collections::HashSet;
 
 use serde::Serialize;
@@ -7,7 +8,11 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    relay::{get_relay_json, parse_command_response, query_relay, submit_event},
+    relay::{
+        assert_expected_relay_scope, assert_expected_signer, get_relay_json,
+        parse_command_response, query_relay, query_relay_at_with_keys,
+        relay_api_base_url_with_override, submit_event, submit_event_at_with_keys,
+    },
 };
 
 // ── Wire shapes (snake_case, consumed by tauriWorkflows.ts) ──────────────────
@@ -213,6 +218,130 @@ pub async fn get_workflow_runs(
 
 // ── Writes ───────────────────────────────────────────────────────────────────
 
+const WORKFLOW_CAPABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const WORKFLOW_CAPABILITY_BODY_CAP: u64 = 65_536;
+const WORKFLOW_TIMEZONE_UNSUPPORTED_ERROR: &str = "This server does not support workflow timezones. Update the server, or use a legacy UTC schedule without a timezone.";
+const WORKFLOW_TIMEZONE_CHECK_ERROR: &str = "Could not verify whether this server supports workflow timezones. Check the server connection and try again.";
+
+#[derive(serde::Deserialize)]
+struct RelayWorkflowCapabilities {
+    #[serde(default)]
+    supported_extensions: Option<Vec<String>>,
+}
+
+/// Whether a workflow definition would rely on relay-side timezone handling.
+///
+/// Malformed definitions remain the relay's validation responsibility. Any
+/// explicit `timezone` field on a schedule trigger needs the mixed-version
+/// safety gate: an older relay may otherwise ignore an unfamiliar value.
+fn workflow_uses_schedule_timezone(yaml_definition: &str) -> bool {
+    let Ok(Value::Object(definition)) = serde_yaml::from_str::<Value>(yaml_definition) else {
+        return false;
+    };
+    let Some(Value::Object(trigger)) = definition.get("trigger") else {
+        return false;
+    };
+    trigger.get("on").and_then(Value::as_str) == Some("schedule")
+        && trigger.contains_key("timezone")
+}
+
+async fn read_workflow_capability_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+
+    if let Some(length) = response.content_length() {
+        if length > WORKFLOW_CAPABILITY_BODY_CAP {
+            return Err("relay capability document is too large".to_string());
+        }
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| crate::relay::classify_request_error(&error))?;
+        if body.len() as u64 + chunk.len() as u64 > WORKFLOW_CAPABILITY_BODY_CAP {
+            return Err("relay capability document is too large".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn require_workflow_timezone_capability_at(
+    yaml_definition: &str,
+    relay_api_base: &str,
+    client: &reqwest::Client,
+) -> Result<(), String> {
+    if !workflow_uses_schedule_timezone(yaml_definition) {
+        return Ok(());
+    }
+
+    let expected_origin = url::Url::parse(relay_api_base)
+        .map_err(|_| WORKFLOW_TIMEZONE_CHECK_ERROR.to_string())?
+        .origin()
+        .ascii_serialization();
+    let response = client
+        .get(format!("{}/info", relay_api_base.trim_end_matches('/')))
+        .header(reqwest::header::ACCEPT, "application/nostr+json")
+        .timeout(WORKFLOW_CAPABILITY_TIMEOUT)
+        .send()
+        .await
+        .map_err(|_| WORKFLOW_TIMEZONE_CHECK_ERROR.to_string())?;
+
+    let status = response.status();
+    if response.url().origin().ascii_serialization() != expected_origin || !status.is_success() {
+        return Err(WORKFLOW_TIMEZONE_CHECK_ERROR.to_string());
+    }
+
+    let body = read_workflow_capability_body(response)
+        .await
+        .map_err(|_| WORKFLOW_TIMEZONE_CHECK_ERROR.to_string())?;
+    let capabilities: RelayWorkflowCapabilities =
+        serde_json::from_slice(&body).map_err(|_| WORKFLOW_TIMEZONE_CHECK_ERROR.to_string())?;
+
+    let supported = capabilities
+        .supported_extensions
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|extension| extension == WORKFLOW_TIMEZONE_EXTENSION);
+    if !supported {
+        return Err(WORKFLOW_TIMEZONE_UNSUPPORTED_ERROR.to_string());
+    }
+    Ok(())
+}
+
+async fn build_workflow_definition_for_save(
+    workflow_id: &str,
+    channel_id: &str,
+    yaml_definition: &str,
+    expected_revision: Option<&str>,
+    relay_api_base: &str,
+    client: &reqwest::Client,
+) -> Result<nostr::EventBuilder, String> {
+    let builder = events::build_workflow_definition(
+        workflow_id,
+        channel_id,
+        yaml_definition,
+        expected_revision,
+    )?;
+    require_workflow_timezone_capability_at(yaml_definition, relay_api_base, client).await?;
+    Ok(builder)
+}
+
+fn assert_workflow_save_scope_current(
+    state: &AppState,
+    relay_api_base: &str,
+    signing_keys: &nostr::Keys,
+) -> Result<(), String> {
+    let active_relay = relay_api_base_url_with_override(state);
+    assert_expected_relay_scope(Some(relay_api_base), &active_relay)?;
+    let active_keys = state.signing_keys()?;
+    assert_expected_signer(
+        Some(&signing_keys.public_key().to_hex()),
+        &active_keys.public_key().to_hex(),
+    )
+}
+
 #[tauri::command]
 pub async fn create_workflow(
     channel_id: String,
@@ -220,9 +349,19 @@ pub async fn create_workflow(
     state: State<'_, AppState>,
 ) -> Result<WorkflowSaveWire, String> {
     let workflow_id = uuid::Uuid::new_v4().to_string();
-    let builder =
-        events::build_workflow_definition(&workflow_id, &channel_id, &yaml_definition, None)?;
-    let result = submit_event(builder, &state).await?;
+    let relay_api_base = relay_api_base_url_with_override(&state);
+    let signing_keys = state.signing_keys()?;
+    let builder = build_workflow_definition_for_save(
+        &workflow_id,
+        &channel_id,
+        &yaml_definition,
+        None,
+        &relay_api_base,
+        &state.media_fetch_client,
+    )
+    .await?;
+    assert_workflow_save_scope_current(&state, &relay_api_base, &signing_keys)?;
+    let result = submit_event_at_with_keys(builder, &state, &relay_api_base, &signing_keys).await?;
 
     // The relay returns `webhook_secret` in the OK response message for
     // webhook-triggered workflows. Everything else in the save record is built
@@ -241,7 +380,7 @@ pub async fn create_workflow(
         workflow_id,
         result.event_id,
         Some(channel_id),
-        current_pubkey_hex(&state)?,
+        signing_keys.public_key().to_hex(),
         &yaml_definition,
         now,
         now,
@@ -260,16 +399,21 @@ pub async fn update_workflow(
     expected_revision: String,
     state: State<'_, AppState>,
 ) -> Result<WorkflowSaveWire, String> {
+    let relay_api_base = relay_api_base_url_with_override(&state);
+    let signing_keys = state.signing_keys()?;
     // Find the channel id (and creation time) from the existing workflow event
     // so the new event carries the same `h` tag — kind:30620 is replaceable by
     // (pubkey, d-tag).
-    let prior = query_relay(
+    let prior = query_relay_at_with_keys(
         &state,
+        &relay_api_base,
         &[serde_json::json!({
             "kinds": [30620],
             "#d": [workflow_id.clone()],
             "limit": 1
         })],
+        &signing_keys,
+        None,
     )
     .await?;
 
@@ -282,20 +426,24 @@ pub async fn update_workflow(
     let channel_id = tag_value(prior_event, "h").ok_or_else(|| "workflow not found".to_string())?;
     let created_at = prior_event.created_at.as_secs() as i64;
 
-    let builder = events::build_workflow_definition(
+    let builder = build_workflow_definition_for_save(
         &workflow_id,
         &channel_id,
         &yaml_definition,
         Some(&expected_revision),
-    )?;
-    let result = submit_event(builder, &state).await?;
+        &relay_api_base,
+        &state.media_fetch_client,
+    )
+    .await?;
+    assert_workflow_save_scope_current(&state, &relay_api_base, &signing_keys)?;
+    let result = submit_event_at_with_keys(builder, &state, &relay_api_base, &signing_keys).await?;
 
     let updated_at = now_secs();
     let workflow = workflow_record(
         workflow_id,
         result.event_id,
         Some(channel_id),
-        current_pubkey_hex(&state)?,
+        signing_keys.public_key().to_hex(),
         &yaml_definition,
         created_at,
         updated_at,
@@ -403,11 +551,6 @@ fn trigger_wire_from_message(
         workflow_id,
         status: "pending".to_string(),
     })
-}
-
-fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    Ok(keys.public_key().to_hex())
 }
 
 fn now_secs() -> i64 {
