@@ -1045,9 +1045,15 @@ pub enum WorkflowsCmd {
     },
     /// Approve or deny a workflow step
     #[command(
-        after_help = "Examples:\n  buzz workflows approve --token <UUID>\n  buzz workflows approve --token <UUID> --approved false --note \"needs revision\""
+        after_help = "Examples:\n  buzz workflows approve --workflow <UUID> --run <UUID> --token <UUID>\n  buzz workflows approve --workflow <UUID> --run <UUID> --token <UUID> --approved false --note \"needs revision\""
     )]
     Approve {
+        /// Workflow UUID the approval belongs to
+        #[arg(long)]
+        workflow: String,
+        /// Run UUID that is waiting for the approval
+        #[arg(long)]
+        run: String,
         /// The approval token UUID (from the approval request)
         #[arg(long)]
         token: String,

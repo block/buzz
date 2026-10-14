@@ -705,7 +705,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations.len(), 61);
+        assert_eq!(migrations[60].version, 61);
+        assert!(migrations[60]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE platform_approval_resume_claims"));
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[59].version, 60);
@@ -2273,7 +2278,14 @@ mod postgres_tests {
             );
         }
         expected_fences.extend(personal.fence_attachments);
-        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
+        expected_fences.extend(
+            [
+                "artifact_heads",
+                "artifact_revisions",
+                "platform_approval_resume_claims",
+            ]
+            .map(str::to_owned),
+        );
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

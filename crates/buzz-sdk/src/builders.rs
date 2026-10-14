@@ -1845,16 +1845,27 @@ pub fn build_workflow_trigger(workflow_id: Uuid) -> Result<EventBuilder, SdkErro
 ///
 /// - `token_hash`: hex-encoded SHA-256 of the approval token UUID (d-tag).
 ///   Must be exactly 64 hex characters.
+/// - `action_digest`: the `action_digest` the relay returned for this approval
+///   from `GET /workflows/{id}/runs/{run_id}/approvals` (action-digest tag).
+///   The relay refuses a decision whose digest does not match the continuation
+///   it computes for the pending approval. Must be exactly 64 hex characters.
 /// - `approved`: `true` emits kind 46030 (grant), `false` emits kind 46031 (deny)
 /// - `note`: optional human-readable note as event content
 pub fn build_workflow_approval(
     token_hash: &str,
+    action_digest: &str,
     approved: bool,
     note: &str,
 ) -> Result<EventBuilder, SdkError> {
-    if token_hash.len() != 64 || !token_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+    let is_sha256_hex = |s: &str| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if !is_sha256_hex(token_hash) {
         return Err(SdkError::InvalidInput(
             "token_hash must be a 64-character hex SHA-256 digest".into(),
+        ));
+    }
+    if !is_sha256_hex(action_digest) {
+        return Err(SdkError::InvalidInput(
+            "action_digest must be a 64-character hex SHA-256 digest".into(),
         ));
     }
     let kind = if approved {
@@ -1862,7 +1873,10 @@ pub fn build_workflow_approval(
     } else {
         KIND_APPROVAL_DENY
     };
-    let tags = vec![tag(&["d", token_hash])?];
+    let tags = vec![
+        tag(&["d", token_hash])?,
+        tag(&["action-digest", action_digest])?,
+    ];
     Ok(EventBuilder::new(Kind::Custom(kind as u16), note).tags(tags))
 }
 
@@ -4526,30 +4540,45 @@ mod tests {
     #[test]
     fn workflow_approval_grant() {
         let hash = "a".repeat(64);
-        let ev = sign(build_workflow_approval(&hash, true, "lgtm").unwrap());
+        let digest = "c".repeat(64);
+        let ev = sign(build_workflow_approval(&hash, &digest, true, "lgtm").unwrap());
         assert_eq!(ev.kind.as_u16(), 46030);
         assert!(has_tag(&ev, "d", &hash));
+        assert!(has_tag(&ev, "action-digest", &digest));
         assert_eq!(ev.content, "lgtm");
     }
 
     #[test]
     fn workflow_approval_deny() {
         let hash = "b".repeat(64);
-        let ev = sign(build_workflow_approval(&hash, false, "").unwrap());
+        let digest = "d".repeat(64);
+        let ev = sign(build_workflow_approval(&hash, &digest, false, "").unwrap());
         assert_eq!(ev.kind.as_u16(), 46031);
+        assert!(has_tag(&ev, "action-digest", &digest));
     }
 
     #[test]
     fn workflow_approval_rejects_bad_token_hash() {
-        let err = build_workflow_approval("not-hex", true, "").unwrap_err();
+        let digest = "c".repeat(64);
+        let err = build_workflow_approval("not-hex", &digest, true, "").unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
     #[test]
     fn workflow_approval_rejects_short_hash() {
         let short = "a".repeat(32);
-        let err = build_workflow_approval(&short, true, "").unwrap_err();
+        let digest = "c".repeat(64);
+        let err = build_workflow_approval(&short, &digest, true, "").unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn workflow_approval_rejects_bad_action_digest() {
+        let hash = "a".repeat(64);
+        for digest in ["", "not-hex", &"c".repeat(63), &"c".repeat(65)] {
+            let err = build_workflow_approval(&hash, digest, true, "").unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)), "{digest:?}");
+        }
     }
 
     #[test]

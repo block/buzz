@@ -93,6 +93,8 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/workflows.sql
 \i tables/public/workflow_runs.sql
 \i tables/public/workflow_approvals.sql
+\i tables/public/platform_approval_resume_claims.sql
+\i functions/platform_claim_approval.sql
 \i tables/public/scheduled_workflow_fires.sql
 \i tables/public/api_tokens.sql
 \i tables/public/rate_limit_violations.sql
@@ -175,6 +177,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i triggers/thread_metadata.sql
 \i triggers/users.sql
 \i triggers/workflow_approvals.sql
+\i triggers/platform_approval_resume_claims.sql
 \i triggers/workflow_runs.sql
 \i triggers/workflows.sql
 \i triggers/artifact_heads.sql

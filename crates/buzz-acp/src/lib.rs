@@ -5948,7 +5948,8 @@ fn default_heartbeat_prompt() -> String {
             high-priority requests addressed to you.\n\
          2. Run `buzz feed get --types mentions` to check for unanswered @mentions.\n\
          3. If you find actionable items, address them using the appropriate CLI commands\n\
-            (e.g., `buzz workflows approve --token <UUID>`, `buzz messages send`,\n\
+            (e.g., `buzz workflows approve --workflow <UUID> --run <UUID> --token <UUID>`,\n\
+            `buzz messages send`,\n\
             `buzz messages send --reply-to <event-id>`).\n\
          4. If there are no pending actions or mentions, end your turn immediately.\n\n\
          Do not run `buzz channels list` or `buzz messages search` unless you have a specific reason.\n\

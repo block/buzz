@@ -1,0 +1,1 @@
+SELECT attach_community_write_fence('platform_approval_resume_claims');

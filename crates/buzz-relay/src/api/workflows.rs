@@ -246,8 +246,17 @@ async fn run_approvals_inner(
         .get_run_approvals(tenant.community(), workflow_id, run_id)
         .await
         .map_err(|error| internal_error(&format!("list run approvals: {error}")).into_response())?;
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), workflow_id)
+        .await
+        .map_err(|error| internal_error(&format!("approval workflow: {error}")).into_response())?;
     Ok(Json(serde_json::json!({
-        "approvals": approvals.iter().map(approval_json).collect::<Vec<_>>(),
+        "approvals": approvals.iter().map(|approval| {
+            let mut value = approval_json(approval);
+            value["action_digest"] = Value::String(crate::handlers::command_executor::approval_action_digest(approval, &workflow, &run));
+            value
+        }).collect::<Vec<_>>(),
     })))
 }
 

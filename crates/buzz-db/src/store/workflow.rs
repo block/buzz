@@ -15,13 +15,13 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
 
 use crate::error::{DbError, Result};
-use crate::Db;
+use crate::{AdmittedTx, Db};
 use buzz_datastore_tracing::datastore_span;
 
 // -- Token hashing ------------------------------------------------------------
@@ -1047,6 +1047,57 @@ pub struct CreateApprovalParams<'a> {
 /// The `token` parameter is the raw (plaintext) token. It is hashed with
 /// SHA-256 before storage so the DB never holds the raw value.
 pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        params.community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    insert_approval(tx.conn(), params).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Atomically persist a hashed approval and suspend its running workflow.
+/// A rejected transition rolls back the approval, including on cancellation.
+pub async fn suspend_for_approval(
+    pool: &PgPool,
+    params: CreateApprovalParams<'_>,
+    trace: &serde_json::Value,
+) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        params.community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let changed = sqlx::query(
+        "UPDATE workflow_runs SET status='waiting_approval', current_step=$4,
+         execution_trace=execution_trace || $5::jsonb
+         WHERE community_id=$1 AND id=$2 AND workflow_id=$3 AND status='running'",
+    )
+    .bind(params.community_id.as_uuid())
+    .bind(params.run_id)
+    .bind(params.workflow_id)
+    .bind(params.step_index)
+    .bind(trace)
+    .execute(tx.conn())
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(DbError::InvalidData(
+            "approval requires a running run".into(),
+        ));
+    }
+    insert_approval(tx.conn(), params).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn insert_approval(
+    connection: &mut PgConnection,
+    params: CreateApprovalParams<'_>,
+) -> Result<()> {
     let CreateApprovalParams {
         community_id,
         token,
@@ -1058,12 +1109,6 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
         expires_at,
     } = params;
     let token_hash = hash_approval_token(token);
-    let mut tx = crate::begin_community_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
 
     sqlx::query(
         r#"
@@ -1080,9 +1125,8 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     .bind(step_index)
     .bind(approver_spec)
     .bind(expires_at)
-    .execute(tx.conn())
+    .execute(connection)
     .await?;
-    tx.commit().await?;
 
     Ok(())
 }
@@ -1340,6 +1384,134 @@ pub async fn find_by_owner_and_name(
 }
 
 // -- Run and approval Db API --------------------------------------------------
+
+/// Lock the approval, its run and its workflow, in the order the durable
+/// claim takes them, so a decision snapshots those rows while locked.
+pub async fn lock_approval_for_decision(
+    tx: &mut AdmittedTx,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    run_id: Uuid,
+    workflow_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "SELECT token FROM workflow_approvals WHERE community_id=$1 AND token=$2 FOR UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(token_hash)
+    .fetch_one(tx.conn())
+    .await?;
+    sqlx::query("SELECT id FROM workflow_runs WHERE community_id=$1 AND id=$2 FOR UPDATE")
+        .bind(community_id.as_uuid())
+        .bind(run_id)
+        .fetch_one(tx.conn())
+        .await?;
+    sqlx::query("SELECT id FROM workflows WHERE community_id=$1 AND id=$2 FOR UPDATE")
+        .bind(community_id.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// Consume a pending approval once and leave a durable recovery marker.
+/// Only the winning caller may dispatch the continuation. The marker must not
+/// be retried automatically: a crash can happen after an external side effect.
+///
+/// `note` is the approver's optional note; it is stored with the granted
+/// approval by the winning caller only.
+pub async fn claim_approval_resume(
+    tx: &mut AdmittedTx,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    signer: &[u8],
+    note: Option<&str>,
+) -> Result<bool> {
+    let won: bool = sqlx::query_scalar("SELECT platform_claim_approval($1,$2,$3)")
+        .bind(community_id.as_uuid())
+        .bind(token_hash)
+        .bind(signer)
+        .fetch_one(tx.conn())
+        .await?;
+    if won && note.is_some() {
+        sqlx::query("UPDATE workflow_approvals SET note=$3 WHERE community_id=$1 AND token=$2")
+            .bind(community_id.as_uuid())
+            .bind(token_hash)
+            .bind(note)
+            .execute(tx.conn())
+            .await?;
+    }
+    Ok(won)
+}
+
+/// Mark a claimed approval's continuation as finished, so the durable
+/// recovery marker no longer reports an interrupted resume.
+pub async fn complete_approval_resume_claim(
+    pool: &PgPool,
+    community_id: CommunityId,
+    token_hash: &[u8],
+) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE platform_approval_resume_claims SET state='completed'
+         WHERE community_id=$1 AND token=$2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(token_hash)
+    .execute(tx.conn())
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Deny a pending approval for its designated signer and cancel its run with
+/// `cancel_message`. `note` is the approver's optional note.
+/// Returns `false` when the approval is no longer pending, has expired, or
+/// belongs to another signer; nothing is changed in that case.
+pub async fn deny_approval(
+    tx: &mut AdmittedTx,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    signer: &[u8],
+    note: Option<&str>,
+    run_id: Uuid,
+    cancel_message: &str,
+) -> Result<bool> {
+    let changed = sqlx::query(
+        // The trim and comparison mirror the relay's check_approver_spec (Rust
+        // str::trim = Unicode White_Space) and platform_claim_approval.
+        r#"UPDATE workflow_approvals SET status='denied', approver_pubkey=$3, denied_at=now(), note=$4
+         WHERE community_id=$1 AND token=$2 AND status='pending' AND expires_at>clock_timestamp()
+           AND (regexp_replace(approver_spec, '^[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$', '', 'g') IN ('', 'any')
+                OR lower(regexp_replace(approver_spec, '^[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$', '', 'g')) = encode($3::bytea,'hex'))"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(token_hash)
+    .bind(signer)
+    .bind(note)
+    .execute(tx.conn())
+    .await?
+    .rows_affected()
+        == 1;
+    if changed {
+        sqlx::query(
+            "UPDATE workflow_runs SET status='cancelled', completed_at=now(),
+             error_code='approval_denied', error_message=$3
+             WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community_id.as_uuid())
+        .bind(run_id)
+        .bind(cancel_message)
+        .execute(tx.conn())
+        .await?;
+    }
+    Ok(changed)
+}
 
 impl Db {
     /// Create a new workflow run.

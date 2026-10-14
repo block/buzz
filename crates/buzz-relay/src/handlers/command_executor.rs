@@ -1014,116 +1014,32 @@ fn check_approver_spec(approver_spec: &str, requester_hex: &str) -> Result<(), I
     )))
 }
 
+/// Digest of the exact continuation shown to an approver, including its inputs.
+pub(crate) fn approval_action_digest(
+    approval: &buzz_db::workflow::ApprovalRecord,
+    workflow: &buzz_db::workflow::WorkflowRecord,
+    run: &buzz_db::workflow::WorkflowRunRecord,
+) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::json!({
+            "community": run.community_id.as_uuid(), "token": hex::encode(&approval.token),
+            "workflow": workflow.id, "run": run.id, "step": approval.step_index,
+            "approver": approval.approver_spec, "expires": approval.expires_at,
+            "definition": workflow.definition, "trigger": run.trigger_context,
+            "trace": run.execution_trace,
+        })
+        .to_string()
+        .as_bytes(),
+    ))
+}
+
 async fn handle_approval_grant(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
-    let self_bytes = auth.pubkey().to_bytes().to_vec();
-    let self_hex = hex::encode(&self_bytes);
-
-    // 1. Extract approval reference from `e` tag (references the approval-requested event)
-    //    or `d` tag (contains the token hash hex)
-    let token_hash_hex = extract_d_tag(event)
-        .or_else(|| extract_e_tag(event))
-        .ok_or_else(|| {
-            IngestError::Rejected("invalid: missing approval reference (d or e tag)".into())
-        })?;
-
-    let token_hash = hex::decode(&token_hash_hex)
-        .map_err(|_| IngestError::Rejected("invalid: bad approval token hash hex".into()))?;
-
-    // 2. Look up the approval record
-    let approval = state
-        .db
-        .get_approval_by_stored_hash(tenant.community(), &token_hash)
-        .await
-        .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
-
-    // 3. Validate approval is pending and not expired
-    if approval.status != ApprovalStatus::Pending {
-        return Err(IngestError::Rejected(format!(
-            "invalid: approval already {}",
-            approval.status
-        )));
-    }
-    if Utc::now() > approval.expires_at {
-        return Err(IngestError::Rejected(
-            "invalid: approval token has expired".into(),
-        ));
-    }
-
-    // 4. Validate caller is authorized approver
-    check_approver_spec(&approval.approver_spec, &self_hex)?;
-
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
-        PersistResult::Duplicate => {
-            return Ok(IngestResult {
-                event_id: event.id.to_hex(),
-                accepted: true,
-                message: "duplicate: already processed".into(),
-            });
-        }
-        PersistResult::Inserted(tx) => tx,
-    };
-
-    // 5. Execute: update approval status to granted
-    let note = if event.content.is_empty() {
-        None
-    } else {
-        Some(event.content.as_str())
-    };
-
-    let updated = state
-        .db
-        .update_approval_by_stored_hash(
-            tenant.community(),
-            &token_hash,
-            ApprovalStatus::Granted,
-            Some(&self_bytes),
-            note,
-        )
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db update_approval: {e}")))?;
-
-    if !updated {
-        return Err(IngestError::Rejected(
-            "invalid: approval already acted on (race)".into(),
-        ));
-    }
-
-    // Finalize the idempotency record after the separate approval update succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 6. Resume workflow execution (post-commit, async)
-    let community_id = tenant.community();
-    let run_id = approval.run_id;
-    let workflow_id = approval.workflow_id;
-    let resume_index = approval.step_index as usize + 1;
-    let engine = Arc::clone(&state.workflow_engine);
-    let db = state.db.clone();
-
-    tokio::spawn(async move {
-        resume_workflow_after_approval(engine, db, community_id, run_id, workflow_id, resume_index)
-            .await;
-    });
-
-    // 7. Return response
-    Ok(IngestResult {
-        event_id: event.id.to_hex(),
-        accepted: true,
-        message: format!(
-            "response:{}",
-            serde_json::json!({
-                "status": "granted",
-                "run_id": run_id.to_string(),
-            })
-        ),
-    })
+    decide_approval(tenant, state, event, auth, true).await
 }
 
 async fn handle_approval_deny(
@@ -1132,27 +1048,28 @@ async fn handle_approval_deny(
     event: &Event,
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
-    let self_bytes = auth.pubkey().to_bytes().to_vec();
-    let self_hex = hex::encode(&self_bytes);
+    decide_approval(tenant, state, event, auth, false).await
+}
 
-    // 1. Extract approval reference
-    let token_hash_hex = extract_d_tag(event)
+async fn decide_approval(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+    grant: bool,
+) -> Result<IngestResult, IngestError> {
+    let community_id = tenant.community();
+    let signer = auth.pubkey().to_bytes();
+    let token = extract_d_tag(event)
         .or_else(|| extract_e_tag(event))
-        .ok_or_else(|| {
-            IngestError::Rejected("invalid: missing approval reference (d or e tag)".into())
-        })?;
-
-    let token_hash = hex::decode(&token_hash_hex)
-        .map_err(|_| IngestError::Rejected("invalid: bad approval token hash hex".into()))?;
-
-    // 2. Look up the approval record
+        .and_then(|value| hex::decode(value).ok())
+        .filter(|value| value.len() == 32)
+        .ok_or_else(|| IngestError::Rejected("invalid: approval reference".into()))?;
     let approval = state
         .db
-        .get_approval_by_stored_hash(tenant.community(), &token_hash)
+        .get_approval_by_stored_hash(community_id, &token)
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
-
-    // 3. Validate approval is pending and not expired
     if approval.status != ApprovalStatus::Pending {
         return Err(IngestError::Rejected(format!(
             "invalid: approval already {}",
@@ -1164,12 +1081,9 @@ async fn handle_approval_deny(
             "invalid: approval token has expired".into(),
         ));
     }
-
-    // 4. Validate caller is authorized approver
-    check_approver_spec(&approval.approver_spec, &self_hex)?;
-
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    // The durable claim and denial repeat this predicate in SQL.
+    check_approver_spec(&approval.approver_spec, &hex::encode(signer))?;
+    let mut tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1179,127 +1093,135 @@ async fn handle_approval_deny(
         }
         PersistResult::Inserted(tx) => tx,
     };
-
-    // 5. Execute: update approval status to denied
-    let note = if event.content.is_empty() {
-        None
-    } else {
-        Some(event.content.as_str())
-    };
-
-    let updated = state
+    let note = (!event.content.is_empty()).then_some(event.content.as_str());
+    // Lock in the same order as the durable claim. Snapshot these rows while locked.
+    buzz_db::workflow::lock_approval_for_decision(
+        &mut tx,
+        community_id,
+        &token,
+        approval.run_id,
+        approval.workflow_id,
+    )
+    .await
+    .map_err(|e| IngestError::Internal(e.to_string()))?;
+    let run = state
         .db
-        .update_approval_by_stored_hash(
-            tenant.community(),
-            &token_hash,
-            ApprovalStatus::Denied,
-            Some(&self_bytes),
+        .get_workflow_run(community_id, approval.run_id)
+        .await
+        .map_err(|e| IngestError::Internal(e.to_string()))?;
+    let workflow = state
+        .db
+        .get_workflow(community_id, approval.workflow_id)
+        .await
+        .map_err(|e| IngestError::Internal(e.to_string()))?;
+    let digest = approval_action_digest(&approval, &workflow, &run);
+    let digests: Vec<_> = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let fields = tag.as_slice();
+            (fields.first().map(String::as_str) == Some("action-digest"))
+                .then(|| fields.get(1))
+                .flatten()
+        })
+        .collect();
+    if digests.len() != 1 || digests[0] != &digest || run.status != RunStatus::WaitingApproval {
+        return Err(IngestError::Rejected(
+            "invalid: action digest or waiting state mismatch".into(),
+        ));
+    }
+    let changed = if grant {
+        let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
+            .map_err(|e| IngestError::Rejected(e.to_string()))?;
+        let channel = workflow
+            .channel_id
+            .ok_or_else(|| IngestError::Rejected("invalid: unscoped workflow".into()))?;
+        state
+            .workflow_engine
+            .check_owner_authority(community_id, channel, &workflow.owner_pubkey, &def)
+            .await
+            .map_err(|e| IngestError::Rejected(e.to_string()))?;
+        buzz_db::workflow::claim_approval_resume(&mut tx, community_id, &token, &signer, note)
+            .await
+            .map_err(|e| IngestError::Internal(e.to_string()))?
+    } else {
+        buzz_db::workflow::deny_approval(
+            &mut tx,
+            community_id,
+            &token,
+            &signer,
             note,
+            run.id,
+            &format!(
+                "workflow cancelled: approval denied by {}",
+                hex::encode(signer)
+            ),
         )
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db update_approval: {e}")))?;
-
-    if !updated {
+        .map_err(|e| IngestError::Internal(e.to_string()))?
+    };
+    if !changed {
         return Err(IngestError::Rejected(
             "invalid: approval already acted on (race)".into(),
         ));
     }
-
-    // Finalize the idempotency record after the separate approval denial succeeds.
     tx.commit()
         .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
-
-    // 6. Cancel the workflow run (post-commit, async)
-    let community_id = tenant.community();
-    let run_id = approval.run_id;
-    let pubkey_hex = self_hex.clone();
-    let db = state.db.clone();
-
-    tokio::spawn(async move {
-        let run = match db.get_workflow_run(community_id, run_id).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("approval_deny: failed to fetch run {run_id}: {e}");
-                return;
-            }
-        };
-
-        if run.status != RunStatus::WaitingApproval {
-            tracing::warn!(
-                "approval_deny: run {run_id} has status '{}', expected 'waiting_approval'",
-                run.status
-            );
-            return;
-        }
-
-        let cancel_msg = format!("workflow cancelled: approval denied by {pubkey_hex}");
-        if let Err(e) = db
-            .update_workflow_run(
+        .map_err(|e| IngestError::Internal(e.to_string()))?;
+    let run_id = run.id;
+    if grant {
+        let engine = Arc::clone(&state.workflow_engine);
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            resume_workflow_after_approval(
+                engine,
+                db.clone(),
                 community_id,
-                run_id,
-                RunStatus::Cancelled,
-                run.current_step,
-                &run.execution_trace,
-                Some(buzz_db::workflow::WorkflowRunFailure {
-                    code: "approval_denied",
-                    message: &cancel_msg,
-                }),
+                run,
+                workflow,
+                approval.step_index as usize + 1,
             )
-            .await
-        {
-            tracing::error!("approval_deny: failed to cancel run {run_id}: {e}");
-        }
-    });
-
-    // 7. Return response
+            .await;
+            // Only a persisted outcome resolves the interrupted-continuation marker.
+            if let Ok(after) = db.get_workflow_run(community_id, run_id).await {
+                if matches!(
+                    after.status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+                ) || (after.status == RunStatus::WaitingApproval
+                    && after.current_step > approval.step_index)
+                {
+                    if let Err(error) = buzz_db::workflow::complete_approval_resume_claim(
+                        db.pool(),
+                        community_id,
+                        &token,
+                    )
+                    .await
+                    {
+                        tracing::error!(%run_id, %error, "approval claim remains recovery_required");
+                    }
+                }
+            }
+        });
+    }
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
         message: format!(
             "response:{}",
-            serde_json::json!({
-                "status": "denied",
-                "run_id": run_id.to_string(),
-            })
+            serde_json::json!({"status":if grant {"granted"} else {"denied"}, "run_id":run_id})
         ),
     })
 }
-
 /// Resume a suspended workflow run after an approval gate has been granted.
 async fn resume_workflow_after_approval(
     engine: Arc<buzz_workflow::WorkflowEngine>,
     db: buzz_db::Db,
     community_id: CommunityId,
-    run_id: Uuid,
-    workflow_id: Uuid,
+    run: buzz_db::workflow::WorkflowRunRecord,
+    workflow: buzz_db::workflow::WorkflowRecord,
     resume_index: usize,
 ) {
-    let run = match db.get_workflow_run(community_id, run_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("resume_workflow: failed to fetch run {run_id}: {e}");
-            return;
-        }
-    };
-
-    // Guard: only resume runs that are actually waiting for approval
-    if run.status != RunStatus::WaitingApproval {
-        tracing::warn!(
-            "resume_workflow: run {run_id} has status '{}', expected 'waiting_approval'",
-            run.status
-        );
-        return;
-    }
-
-    let workflow = match db.get_workflow(community_id, workflow_id).await {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::error!("resume_workflow: failed to fetch workflow {workflow_id}: {e}");
-            return;
-        }
-    };
-
+    let run_id = run.id;
     let def: buzz_workflow::WorkflowDef = match serde_json::from_value(workflow.definition.clone())
     {
         Ok(d) => d,

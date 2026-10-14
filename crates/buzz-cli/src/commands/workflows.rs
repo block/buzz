@@ -203,25 +203,59 @@ pub async fn cmd_trigger_workflow(
 }
 
 /// Approve or deny a workflow step — sign and submit a kind:46030 (grant) or 46031 (deny) event.
+///
+/// The relay binds each decision to the exact continuation it shows the
+/// approver, so the command first reads the run's approvals and copies the
+/// `action_digest` of the one matching `approval_token` into an
+/// `action-digest` tag.
 pub async fn cmd_approve_step(
     client: &BuzzClient,
+    workflow_id: &str,
+    run_id: &str,
     approval_token: &str,
     approved: bool,
     note: Option<&str>,
 ) -> Result<(), CliError> {
+    validate_uuid(workflow_id)?;
+    validate_uuid(run_id)?;
     validate_uuid(approval_token)?;
 
     let content = note.unwrap_or("");
 
     // The relay expects d-tag = hex(SHA256(token)), not the raw token UUID.
     let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
-    let builder =
-        buzz_sdk::build_workflow_approval(&token_hash, approved, content).map_err(sdk_err)?;
+    let resp = client
+        .get_authed(&format!("/workflows/{workflow_id}/runs/{run_id}/approvals"))
+        .await?;
+    let action_digest = action_digest_for(&resp, &token_hash)?;
+    let builder = buzz_sdk::build_workflow_approval(&token_hash, &action_digest, approved, content)
+        .map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
+}
+
+/// Pick the `action_digest` of the approval whose `approval_ref` equals
+/// `token_hash` from a `GET .../runs/{run_id}/approvals` response body.
+fn action_digest_for(resp: &str, token_hash: &str) -> Result<String, CliError> {
+    let body: serde_json::Value = serde_json::from_str(resp)
+        .map_err(|e| CliError::Other(format!("approvals response is not JSON: {e}")))?;
+    let approval = body
+        .get("approvals")
+        .and_then(|approvals| approvals.as_array())
+        .and_then(|approvals| {
+            approvals.iter().find(|approval| {
+                approval.get("approval_ref").and_then(|v| v.as_str()) == Some(token_hash)
+            })
+        })
+        .ok_or_else(|| CliError::NotFound("no approval for this token on that run".into()))?;
+    approval
+        .get("action_digest")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| CliError::Other("relay returned no action_digest for this approval".into()))
 }
 
 pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(), CliError> {
@@ -245,12 +279,62 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             cmd_get_workflow_runs(client, &workflow, limit).await
         }
         WorkflowsCmd::Approve {
+            workflow,
+            run,
             token,
             approved,
             note,
         } => {
             // approved is already a bool — no parse_bool_flag needed
-            cmd_approve_step(client, &token, approved, note.as_deref()).await
+            cmd_approve_step(client, &workflow, &run, &token, approved, note.as_deref()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_digest_for;
+    use crate::error::CliError;
+
+    fn body(entries: &[(&str, Option<&str>)]) -> String {
+        let approvals: Vec<_> = entries
+            .iter()
+            .map(|(approval_ref, digest)| {
+                let mut value = serde_json::json!({ "approval_ref": approval_ref });
+                if let Some(digest) = digest {
+                    value["action_digest"] = serde_json::json!(digest);
+                }
+                value
+            })
+            .collect();
+        serde_json::json!({ "approvals": approvals }).to_string()
+    }
+
+    #[test]
+    fn picks_the_digest_of_the_matching_approval() {
+        let resp = body(&[("aa", Some("d1")), ("bb", Some("d2"))]);
+        assert_eq!(action_digest_for(&resp, "bb").unwrap(), "d2");
+    }
+
+    #[test]
+    fn unknown_token_is_not_found() {
+        let resp = body(&[("aa", Some("d1"))]);
+        assert!(matches!(
+            action_digest_for(&resp, "zz"),
+            Err(CliError::NotFound(_))
+        ));
+        assert!(matches!(
+            action_digest_for("{}", "aa"),
+            Err(CliError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn missing_digest_is_refused() {
+        let resp = body(&[("aa", None)]);
+        assert!(matches!(
+            action_digest_for(&resp, "aa"),
+            Err(CliError::Other(_))
+        ));
     }
 }
