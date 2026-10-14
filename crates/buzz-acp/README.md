@@ -105,7 +105,7 @@ treats both Claude ACP command names as the same zero-arg runtime.
 
 ## Configuration
 
-All configuration is via environment variables (or CLI flags — every env var has a matching flag).
+Configuration is via environment variables or CLI flags. The host-only delivery journal uses an environment variable.
 
 ### Core
 
@@ -133,6 +133,36 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `--heartbeat-interval` | `BUZZ_ACP_HEARTBEAT_INTERVAL` | `0` | Seconds between heartbeat prompts. `0` = disabled. Must be `0` or ≥10 when enabled. |
 | `--heartbeat-prompt` | `BUZZ_ACP_HEARTBEAT_PROMPT` | (built-in) | Custom heartbeat prompt text. Conflicts with `--heartbeat-prompt-file`. |
 | `--heartbeat-prompt-file` | `BUZZ_ACP_HEARTBEAT_PROMPT_FILE` | — | Read heartbeat prompt from a file. Conflicts with `--heartbeat-prompt`. |
+
+### Restart recovery
+
+A managed host can set `BUZZ_ACP_DELIVERY_JOURNAL` to an absolute JSON path in
+an existing private directory (`0700` on Unix). The harness exclusively locks
+this file, writes private atomic snapshots before acknowledging admission, and
+binds it to the exact agent public key and relay URL. The host must protect the
+journal directory from worker writes; the path is removed from worker environments.
+The journal contains message payloads and must remain private.
+
+Queued, in-flight, and accepted native follow-up requests survive process exit.
+Restored events pass current channel membership, author, and subscription rules
+before dispatch. Unavailable authorization leaves records pending for a later
+retry. Recovery is at least once: a killed worker may have performed side effects
+before its terminal result was persisted. An acknowledgement alone does not prove
+a follow-up completed.
+
+For controlled restarts, the host captures `BUZZ_ACP_REPLAY_FLOOR` before stopping
+the old process and allows at least the runtime's 30-second drain period before
+forcing it down. Completed IDs suppress the replay overlap (15-minute maximum
+floor plus the relay's five-second margin). The journal retains these IDs for the
+whole overlap; its 10,000-record / 16 MiB limits fail closed instead of evicting
+needed replay protection. Persistence failures stop admission and dispatch with
+an explicit error. An orphaned in-flight deadline likewise stops the process so
+its successor can recover without an old worker concurrently executing the work.
+
+This covers accepted work and the bounded controlled restart gap. It does not
+provide a durable relay ingress cursor or recover arbitrary unobserved messages
+from a long offline interval. Explicitly cancelled, rejected, or exhausted work
+remains terminal under the existing retry policy.
 
 ### Inbound Author Gate
 

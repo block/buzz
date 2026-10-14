@@ -13,6 +13,7 @@
 //!   still queue normally.
 //! - **Queue** — all events accumulate; batched on the next flush cycle.
 
+pub(crate) mod delivery_journal;
 mod native_steer;
 use native_steer::WithheldSteer;
 
@@ -330,6 +331,7 @@ pub struct FlushBatch {
 ///     else: push_front with original received_at, set exponential backoff retry_after with jitter
 /// ```
 pub struct EventQueue {
+    journal: Option<delivery_journal::DeliveryJournal>,
     queues: HashMap<SessionScope, VecDeque<QueuedEvent>>,
     in_flight_scopes: HashSet<SessionScope>,
     /// Per-scope deadline for auto-expiring stuck in-flight entries.
@@ -376,6 +378,7 @@ impl EventQueue {
     /// derive the deadline from the configured `max_turn_duration`.
     pub fn new(dedup_mode: DedupMode) -> Self {
         Self {
+            journal: None,
             queues: HashMap::new(),
             in_flight_scopes: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
@@ -429,6 +432,18 @@ impl EventQueue {
     ///
     /// Returns `true` if the event was accepted, `false` if dropped.
     pub fn push(&mut self, event: QueuedEvent) -> bool {
+        if self.check_persistence().is_err()
+            || self.delivery_already_accepted(&event.event.id.to_hex())
+        {
+            return false;
+        }
+        if self.journal_at_capacity(&event) {
+            if let Some(journal) = &mut self.journal {
+                journal.error = Some("accepted event capacity exhausted".into());
+            }
+            return false;
+        }
+        let event_id = event.event.id.to_hex();
         debug_assert_eq!(
             event.scope.channel_id(),
             event.channel_id,
@@ -461,7 +476,14 @@ impl EventQueue {
         // Enforce the aggregate per-channel cap across all scopes so thread
         // partitioning cannot multiply the admitted backlog.
         self.enforce_channel_cap(channel_id);
-        true
+        let recovered = self
+            .journal
+            .as_mut()
+            .is_some_and(|journal| journal.restoring.remove(&event_id).is_some());
+        self.checkpoint();
+        let accepted = self.check_persistence().is_ok();
+        tracing::info!(%event_id, accepted, recovered, "event admission");
+        accepted
     }
 
     /// Total pending events across both queued and retained native follow-ups.
@@ -536,6 +558,9 @@ impl EventQueue {
     /// across channels), drains ALL events for that channel into a single batch,
     /// inserts into `in_flight_channels`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
+        if self.check_persistence().is_err() {
+            return None;
+        }
         let now = Instant::now();
 
         // Auto-expire any stuck in-flight entries that missed mark_complete.
@@ -546,6 +571,9 @@ impl EventQueue {
             .map(|(scope, _)| scope.clone())
             .collect();
         for scope in expired {
+            if self.journal_expired(&scope) {
+                return None;
+            }
             let lost_events = self.in_flight_batch_sizes.remove(&scope).unwrap_or(0);
             tracing::error!(
                 channel_id = %scope.channel_id(),
@@ -602,6 +630,7 @@ impl EventQueue {
                         self.in_flight_batch_sizes
                             .insert(scope.clone(), cancelled.len());
                         self.record_in_flight_reply_route(&scope, &cancelled);
+                        self.remember_in_flight(&scope, cancelled.iter());
                         return Some(FlushBatch {
                             channel_id: scope.channel_id(),
                             scope,
@@ -650,6 +679,7 @@ impl EventQueue {
             self.cancel_reasons.remove(&scope)
         };
 
+        self.remember_in_flight(&scope, events.iter().chain(&cancelled_events));
         Some(FlushBatch {
             channel_id,
             scope,
@@ -707,6 +737,10 @@ impl EventQueue {
                 self.retry_counts.remove(&scope);
             }
         }
+        if let Some(journal) = &mut self.journal {
+            journal.in_flight.remove(&scope);
+        }
+        self.checkpoint();
     }
 
     /// Re-queue a batch of events that failed to process.
@@ -900,6 +934,9 @@ impl EventQueue {
             .map(|(scope, _)| scope.clone())
             .collect();
         for scope in expired {
+            if self.journal_expired(&scope) {
+                return false;
+            }
             let lost_events = self.in_flight_batch_sizes.remove(&scope).unwrap_or(0);
             tracing::error!(
                 channel_id = %scope.channel_id(),
@@ -1058,6 +1095,15 @@ impl EventQueue {
         // will expire (auto-cleaning the scope). Removing deadlines without
         // removing in_flight_scopes would disable auto-expiry and leave a
         // wedged task permanently blocking the scope.
+        if let Some(journal) = &mut self.journal {
+            journal
+                .restoring
+                .retain(|_, event| event.channel_id != channel_id);
+            journal
+                .in_flight
+                .retain(|scope, _| scope.channel_id() != channel_id);
+        }
+        self.checkpoint();
         ids
     }
 
@@ -1178,7 +1224,7 @@ impl Default for EventQueue {
 }
 
 /// Parsed thread relationship from NIP-10 `e` tags.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadTags {
     /// Root event ID (hex). Present for all thread replies.
     pub root_event_id: Option<String>,
@@ -1189,7 +1235,7 @@ pub struct ThreadTags {
 }
 
 /// Original-message routing recovered for a kind:40003 edit event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedEdit {
     /// Id of the edited original message, taken from the edit's `e` tag and
     /// verified against the fetched original's id and signature.

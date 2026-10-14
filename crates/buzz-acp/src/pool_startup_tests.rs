@@ -30,7 +30,13 @@ for line in sys.stdin:
         effort_level: None,
         observer: None,
     };
-    let mut pool = initialize_agent_pool(&startup, None).await.unwrap();
+    let mut pool = tokio::time::timeout(
+        Duration::from_secs(5),
+        initialize_agent_pool(&startup, None),
+    )
+    .await
+    .expect("first worker must initialize within fixture deadline")
+    .unwrap();
     let started = std::fs::read_to_string(&launches).unwrap();
     let live = pool.live_count();
     let ready = pool.any_idle();

@@ -188,6 +188,7 @@ impl EventQueue {
                 self.queues.remove(&scope);
             }
         }
+        self.checkpoint();
     }
 
     /// Bulk-release every withheld event for `channel_id` back to the queue

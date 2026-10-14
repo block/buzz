@@ -895,13 +895,22 @@ impl NormalListenerIngress {
     /// failure notices all share one routing authority. The lookup is bounded
     /// and only runs for kind:40003 events that already matched a rule (by
     /// default: edits that newly mention this agent).
-    async fn resolve_edit_routing(mut self, rest_client: &relay::RestClient) -> Self {
-        self.edit = edit_routing::resolve_edit(
-            &self.buzz_event.event,
-            self.buzz_event.channel_id,
-            rest_client,
-        )
-        .await;
+    async fn resolve_edit_routing(
+        mut self,
+        rest_client: &relay::RestClient,
+        queue: &EventQueue,
+    ) -> Self {
+        self.edit = match queue.restored_edit(&self.buzz_event.event) {
+            Some(edit) => Some(edit),
+            None => {
+                edit_routing::resolve_edit(
+                    &self.buzz_event.event,
+                    self.buzz_event.channel_id,
+                    rest_client,
+                )
+                .await
+            }
+        };
         self
     }
 
@@ -3079,6 +3088,14 @@ async fn run_harness(
     let dedup_mode = config.dedup_mode;
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    if let Some(path) = std::env::var_os(queue::delivery_journal::ENV) {
+        queue = queue.with_delivery_journal(
+            std::path::Path::new(&path),
+            &pubkey_hex,
+            &config.relay_url,
+        )?;
+    }
+    let mut restored_events = queue.restore_events(&subscribed_channel_ids);
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -3271,6 +3288,10 @@ async fn run_harness(
     }
 
     loop {
+        if let Err(error) = queue.check_persistence() {
+            tracing::error!(%error, "stopping after delivery persistence failure");
+            break;
+        }
         // Whether buffered work is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
@@ -3307,15 +3328,20 @@ async fn run_harness(
             }
         }
 
-        if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
+        if (pool_ready || queue.has_restore_pending())
+            && last_maintenance.elapsed() >= maintenance_interval
+        {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
+            if restored_events.is_empty() {
+                restored_events = queue.restore_events(&subscribed_channel_ids);
+            }
 
             // Slot refill: spawn background tasks for empty slots whose
             // circuit breaker allows it. spawn_and_init runs off the main
             // loop so it never blocks event processing.
             for (idx, slot) in crash_history.iter_mut().enumerate() {
-                if pool.slot_alive(idx) || slot.respawn_in_flight {
+                if !pool_ready || pool.slot_alive(idx) || slot.respawn_in_flight {
                     continue;
                 }
                 if !slot.can_refill() {
@@ -3380,7 +3406,8 @@ async fn run_harness(
         } else {
             None
         };
-        let maintenance_at = pool_ready.then_some(last_maintenance + maintenance_interval);
+        let maintenance_at = (pool_ready || queue.has_restore_pending())
+            .then_some(last_maintenance + maintenance_interval);
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         pool.retain_held_scopes(|scope| queue.has_pending_scope(scope));
@@ -3487,10 +3514,16 @@ async fn run_harness(
                     None
                 }
                 // Remaining branches don't touch pool — evaluated when pool is idle.
-                buzz_event = relay.next_event() => {
+                buzz_event = async {
+                    if let Some(event) = restored_events.pop_front() { Some(event) }
+                    else { relay.next_event().await }
+                } => {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
                         Some(buzz_event) => {
+                            if queue.delivery_already_accepted(&buzz_event.event.id.to_hex()) {
+                                continue;
+                            }
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
@@ -3782,7 +3815,7 @@ async fn run_harness(
                                 tracing::debug!("authorized event matched no rule — dropping");
                                 continue;
                             };
-                            let ingress = ingress.resolve_edit_routing(&ctx.rest_client).await;
+                            let ingress = ingress.resolve_edit_routing(&ctx.rest_client, &queue).await;
                             // Derive the session scope once, at admission, from
                             // the operator policy, DM status, and NIP-10 thread
                             // tags. Under the default `channel` policy this is
@@ -4214,6 +4247,8 @@ async fn run_harness(
                 maybe_result = rx_ref.recv() => {
                     if let Some(mut pr) = maybe_result {
                         let idx = pr.agent.index;
+                        settle_shutdown_steer_acks(&mut queue, &mut steer_ack_rx);
+                        queue.settle_shutdown_result(&pr);
                         pr.agent.acp.shutdown().await;
                         tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
                     }
@@ -4231,9 +4266,12 @@ async fn run_harness(
     // before tasks were aborted.
     while let Ok(mut pr) = pool.result_rx_try_recv() {
         let idx = pr.agent.index;
+        settle_shutdown_steer_acks(&mut queue, &mut steer_ack_rx);
+        queue.settle_shutdown_result(&pr);
         pr.agent.acp.shutdown().await;
         tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
     }
+    settle_shutdown_steer_acks(&mut queue, &mut steer_ack_rx);
     // Explicitly shut down idle agents still sitting in their slots.
     for slot in pool.agents_mut().iter_mut() {
         if let Some(agent) = slot.take() {
@@ -4288,7 +4326,24 @@ async fn run_harness(
     relay.shutdown().await;
 
     tracing::info!("buzz-acp stopped");
-    Ok(())
+    queue.check_persistence()
+}
+
+fn settle_shutdown_steer_acks(
+    queue: &mut EventQueue,
+    receiver: &mut mpsc::UnboundedReceiver<SteerAckEvent>,
+) {
+    while let Ok(event) = receiver.try_recv() {
+        if !queue.owns_native_steer(&event.scope, &event.event_id, &event.turn_id) {
+            continue;
+        }
+        match event.ack {
+            Ok(pool::SteerAck::Success { .. }) => {
+                queue.acknowledge_native_steer(&event.scope, &event.event_id);
+            }
+            _ => queue.release_native_steer(&event.scope, &event.event_id),
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -5054,6 +5109,9 @@ fn dispatch_pending(
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
+        for event in batch.cancelled_events.iter().chain(&batch.events) {
+            tracing::info!(event_id = %event.event.id, %turn_id, "event dispatched");
+        }
 
         // Assign ownership before moving the worker into the task. If this is
         // a bounded-hold fork, the new generation immediately invalidates the
@@ -5435,6 +5493,7 @@ fn handle_prompt_result(
         .unwrap_or("<none>")
         .to_string();
     let harness_pid = std::process::id();
+    tracing::info!(turn_id = %result.turn_id, outcome = outcome_label, "turn delivery result");
 
     let channel_id = result.source.channel_id();
     let turn_id = result.turn_id.clone();

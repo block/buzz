@@ -957,6 +957,7 @@ dependencies = [
  "chrono",
  "clap",
  "evalexpr",
+ "fs2",
  "futures-util",
  "git-credential-nostr",
  "git-sign-nostr",

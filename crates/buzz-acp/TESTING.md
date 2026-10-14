@@ -59,3 +59,20 @@ Goose and uses its provider to invoke the native developer shell. Both operate
 only on temporary local repositories, verify commit/tag signatures and identity,
 check unrelated-remote credential scoping, and assert keyfile removal. They do
 not replace authenticated relay clone/push/readback testing.
+
+## Delivery recovery
+
+`cargo test -p buzz-acp delivery_journal -- --test-threads=1` exercises the private
+journal, including killing a separate queue-owning process after durable admission
+of an original request and an acknowledged follow-up. Its replacement must recover
+exactly those unfinished requests, suppress a completed request, and suppress live
+relay duplicates. Additional cases cover controlled reopen, expired in-flight work,
+authority uncertainty, old accepted events, identity mismatch, symlinks, capacity,
+and failed atomic writes. No live agent or provider is used.
+
+For a managed-host smoke test, send a slow request followed by a second mention,
+change a saved agent setting while the first request runs, and verify the restarted
+agent completes the unfinished work. Send a fast request immediately before another
+settings restart and verify it does not execute again. Check logs for matching event
+IDs and turn IDs; never copy the journal's message payloads into diagnostic reports.
+Side effects already begun before a forced kill can repeat under at-least-once recovery.

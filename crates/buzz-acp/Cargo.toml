@@ -25,6 +25,7 @@ buzz-persona = { path = "../buzz-persona" }
 git-credential-nostr = { path = "../git-credential-nostr" }
 git-sign-nostr = { path = "../git-sign-nostr" }
 tempfile = "3"
+fs2 = "0.4"
 zeroize = { workspace = true }
 
 # Nostr
