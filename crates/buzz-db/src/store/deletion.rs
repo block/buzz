@@ -395,7 +395,7 @@ pub struct SchemaManifest {
     /// Per-table row counts for the target.
     pub row_counts: BTreeMap<String, i64>,
     /// Legacy fence snapshot retained for existing frozen inventory digests.
-    /// Populated from the live catalog while mixed-version executors need it.
+    /// New inventories leave it empty after trigger retirement.
     #[serde(default)]
     pub fenced_tables: Vec<String>,
 }
@@ -1280,7 +1280,6 @@ impl DeletionStore {
     pub async fn inventory_schema(&self, community: CommunityId) -> Result<SchemaManifest> {
         self.validate_catalog().await?;
         let live_tables = self.live_scoped_tables().await?;
-        let fenced_tables = self.live_fenced_tables().await?;
         let mut row_counts = BTreeMap::new();
         for table in &live_tables {
             let sql = format!("SELECT count(*)::BIGINT FROM {table} WHERE community_id = $1");
@@ -1296,7 +1295,7 @@ impl DeletionStore {
         Ok(SchemaManifest {
             scoped_tables: live_tables.into_iter().collect(),
             row_counts,
-            fenced_tables: fenced_tables.into_iter().collect(),
+            fenced_tables: Vec::new(),
         })
     }
 
@@ -3357,11 +3356,6 @@ impl DeletionStore {
         let mut conn = self.pool.acquire().await?;
         live_scoped_tables_on(&mut conn).await
     }
-
-    async fn live_fenced_tables(&self) -> Result<BTreeSet<String>> {
-        let mut conn = self.pool.acquire().await?;
-        live_fenced_tables_on(&mut conn).await
-    }
 }
 
 async fn lock_community_deletion(
@@ -3506,32 +3500,6 @@ async fn live_scoped_tables_on(conn: &mut PgConnection) -> Result<BTreeSet<Strin
         "#,
     )
     .bind(EXCLUDED_SCOPED_TABLES)
-    .fetch_all(conn)
-    .await?;
-    Ok(rows.into_iter().collect())
-}
-
-async fn live_fenced_tables_on(conn: &mut PgConnection) -> Result<BTreeSet<String>> {
-    let rows: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT c.relname
-        FROM pg_trigger trigger
-        JOIN pg_class c ON c.oid = trigger.tgrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid
-        WHERE n.nspname = 'public'
-          AND NOT trigger.tgisinternal
-          AND NOT c.relispartition
-          AND procedure.proname = 'enforce_community_write_fence'
-          AND trigger.tgenabled = 'O'
-          AND (trigger.tgtype & 1) = 1
-          AND (trigger.tgtype & 2) = 2
-          AND (trigger.tgtype & 4) = 4
-          AND (trigger.tgtype & 8) = 8
-          AND (trigger.tgtype & 16) = 16
-        ORDER BY c.relname
-        "#,
-    )
     .fetch_all(conn)
     .await?;
     Ok(rows.into_iter().collect())
@@ -3981,24 +3949,6 @@ fn bound_text(input: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn scoped_table_exclusions_match_sql_during_transition() {
-        let sql =
-            include_str!("../../../../schema/functions/community_write_fence_excluded_table.sql");
-        let sql_names = sql
-            .split("ARRAY[")
-            .nth(1)
-            .expect("SQL exclusion array")
-            .split(']')
-            .next()
-            .expect("SQL exclusion names")
-            .split(',')
-            .map(|name| name.trim().trim_matches('\''))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(sql_names.len(), 8);
-        assert_eq!(sql_names, EXCLUDED_SCOPED_TABLES.iter().copied().collect());
-    }
 
     fn empty_prefix(prefix: &str) -> PrefixManifest {
         PrefixManifest {
@@ -4582,6 +4532,39 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn desired_state_catalog_has_no_universal_fence_and_still_boots() {
+        let (db, store) = store().await;
+        store
+            .validate_serving_catalog()
+            .await
+            .expect("serving startup catalog");
+        store.validate_catalog().await.expect("deletion catalog");
+        let retired_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("count retired triggers");
+        assert_eq!(retired_count, 0);
+        let retired_function: bool = sqlx::query_scalar(
+            "SELECT to_regprocedure('community_write_allowed(uuid)') IS NOT NULL",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("lookup retired function");
+        assert!(!retired_function);
+        let retained: (bool, bool) = sqlx::query_as(
+            "SELECT to_regprocedure('community_deletion_lock_key(uuid)') IS NOT NULL, \
+             EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = 'communities_deletion_tombstone')",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("lookup retained guards");
+        assert_eq!(retained, (true, true));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn migration_schema_fence_objects_are_optional_for_serving_and_deletion() {
         let db = Db::new(&DbConfig {
             database_url: crate::test_support::database_url(),
@@ -4591,16 +4574,12 @@ mod postgres_tests {
         })
         .await
         .expect("connect isolated migration DB");
-        crate::migration::run_migrations_through(&db.pool, 66)
+        // Stop just before the retirement migration so every current table
+        // exists and the universal fence objects are still present.
+        crate::migration::run_migrations_through(&db.pool, 65)
             .await
             .expect("migrate with fence objects present");
         let store = db.deletion_store();
-        let legacy_fenced_tables = store.live_fenced_tables().await.expect("legacy fences");
-        // Include current tables without requiring new application-admitted
-        // tables to acquire legacy database fence triggers.
-        db.migrate()
-            .await
-            .expect("migrate current deletion catalog");
         let community = db
             .ensure_configured_community("optional-fences.example")
             .await
@@ -4668,14 +4647,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             store.validate_catalog().await.expect("deletion catalog");
             let inventory = store.inventory_schema(community).await.expect("inventory");
             assert_eq!(inventory.scoped_tables.len(), EXPECTED_SCOPED_TABLES.len());
-            assert_eq!(
-                inventory.fenced_tables.into_iter().collect::<BTreeSet<_>>(),
-                if objects_present {
-                    legacy_fenced_tables.clone()
-                } else {
-                    BTreeSet::new()
-                }
-            );
+            assert!(inventory.fenced_tables.is_empty());
             let lease = store
                 .acquire_serving_write_lease(
                     community,
@@ -7439,15 +7411,19 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("claim")
             .expect("won claim");
 
-        // A raw writer transaction on purpose: this pins that the fenced-table
-        // trigger itself takes the shared deletion lock, not the chokepoint.
-        let mut open_write = db.pool.begin().await.expect("open write transaction");
+        let mut open_write = crate::begin_community_write_transaction(
+            &db.pool,
+            request.community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("admit open write transaction");
         sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")
             .bind(request.community_id.as_uuid())
             .bind(vec![7_u8; 32])
-            .execute(&mut *open_write)
+            .execute(open_write.conn())
             .await
-            .expect("write acquires shared deletion lock");
+            .expect("admitted write");
 
         let store_for_fence = store.clone();
         let lease = claim.lease.clone();
@@ -8472,12 +8448,10 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let probe_table = format!("deletion_probe_{}", Uuid::new_v4().simple());
         let create_probe =
             format!("CREATE TABLE {probe_table} (community_id UUID NOT NULL, payload TEXT)");
-        let attach_probe =
-            format!("SELECT attach_community_write_fence('{probe_table}'::regclass)");
         let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
         let migration_pool = db.pool.clone();
-        let (create_probe_sql, attach_probe_sql) = (create_probe.clone(), attach_probe.clone());
+        let create_probe_sql = create_probe.clone();
         let migration_run = tokio::spawn(async move {
             crate::migration::with_exclusive_schema_destruction_lock(
                 &migration_pool,
@@ -8489,9 +8463,6 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                     let outcome: Result<()> = async {
                         let mut ddl = sqlx::Connection::begin(&mut conn).await?;
                         sqlx::query(AssertSqlSafe(create_probe_sql))
-                            .execute(&mut *ddl)
-                            .await?;
-                        sqlx::query(AssertSqlSafe(attach_probe_sql))
                             .execute(&mut *ddl)
                             .await?;
                         ddl.commit().await?;
@@ -8511,7 +8482,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             "purge must wait for the in-flight migration instead of validating a stale surface"
         );
 
-        // The migration commits its new fenced scoped table, then finishes.
+        // The migration commits its new scoped table, then finishes.
         release_tx.send(()).expect("unpark migration");
         migration_run
             .await
@@ -8551,10 +8522,6 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .execute(&db.pool)
             .await
             .expect("recreate probe scoped table");
-        sqlx::query(AssertSqlSafe(attach_probe))
-            .execute(&db.pool)
-            .await
-            .expect("attach probe fence again");
         let verify_denied = store.verify_postgres_logically_deleted(&token).await;
         let verify_denied_on_probe = matches!(
             &verify_denied,
