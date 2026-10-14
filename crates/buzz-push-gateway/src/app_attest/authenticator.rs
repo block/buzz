@@ -30,6 +30,8 @@ fn header(bytes: &[u8], app_id: &str) -> Result<Checked, Error> {
 }
 
 fn properties(tail: &[u8]) -> Result<ClientProperties, Error> {
+    // Frame by operation and parsed CBOR, not AT/ED flags: Apple's published
+    // enrollment sample includes extensions with ED clear.
     if tail.is_empty() {
         return Ok(ClientProperties::default());
     }
@@ -65,8 +67,12 @@ pub(super) fn enrollment(
     if &credential_prefix[37..53] != expected {
         return Err(Error::InvalidAAGUID);
     }
-    let length = u16::from_be_bytes([credential_prefix[53], credential_prefix[54]]) as usize;
-    let end = 55 + length;
+    // App Attest credential IDs are SHA-256 hashes, always 32 bytes. Preserve
+    // appattest 0.1.1's workaround for reported iOS 26.x nonstandard length
+    // fields. The original length bytes remain authenticated by the nonce;
+    // the credential, supplied key ID, COSE key and certificate must agree.
+    const END: usize = 55 + 32;
+    let end = END;
     if bytes.get(55..end).ok_or(Error::AuthenticatorDataTooShort)? != key_id {
         return Err(Error::InvalidCredentialID);
     }

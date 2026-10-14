@@ -13,6 +13,15 @@ remaining bytes form one complete extension map. Assertions require the fixed
 37-byte prefix and, when present, one complete extension map. Neither operation
 uses a total length or flags allowlist to recognize an Apple SDK version.
 
+Credential IDs use the fixed 32-byte SHA-256 size, preserving appattest 0.1.1's
+workaround for reported iOS 26.x nonstandard credential-length fields. The two
+length bytes remain authenticated; the credential ID must match the supplied
+key ID and the certificate key hash, and the COSE key at offset 87 must match
+the certificate. Signed synthetic tests cover nonstandard lengths, actual
+missing/extra credential bytes, key mismatch, and unsigned length mutations.
+No enrollment captured on iOS 26.x has yet validated this reported OS variant.
+SDK 26.5 tests on iOS 27.0.1 do not substitute for that evidence.
+
 Every original authenticator byte participates in the certificate nonce or
 assertion signature. Verification does not truncate or re-encode that byte
 string. Assertion signatures and enrollment certificate nonces are checked

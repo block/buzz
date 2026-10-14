@@ -52,10 +52,28 @@ fn signed_enrollment_accepts_optional_extensions_and_cose_variants() {
 }
 
 #[test]
+fn signed_enrollment_preserves_fixed_hash_credential_framing() {
+    // Upstream reports nonstandard length fields on iOS 26.x. These are
+    // synthetic compatibility vectors, not captures from that OS version.
+    for length in [0_u16, 31, 32, 33, 0x89f4, u16::MAX] {
+        verify(|auth| auth[53..55].copy_from_slice(&length.to_be_bytes())).unwrap();
+        assert!(verify(|auth| {
+            auth[53..55].copy_from_slice(&length.to_be_bytes());
+            auth[55] ^= 1;
+        })
+        .is_err());
+    }
+    // Actual missing/extra credential bytes must not shift the COSE boundary.
+    assert!(verify(|auth| {
+        auth.remove(55);
+    })
+    .is_err());
+    assert!(verify(|auth| auth.insert(55, 0)).is_err());
+}
+
+#[test]
 fn signed_enrollment_rejects_incomplete_or_inconsistent_credential_data() {
     assert!(verify(|auth| auth.truncate(87)).is_err()); // Old fixture omitted COSE.
-    assert!(verify(|auth| auth[54] = 31).is_err());
-    assert!(verify(|auth| auth[54] = 33).is_err());
     assert!(verify(|auth| auth[55] ^= 1).is_err());
     assert!(verify(|auth| auth[36] = 1).is_err());
     assert!(verify(|auth| auth.extend_from_slice(b"\xa0\x00")).is_err());
@@ -81,23 +99,27 @@ fn certificate_nonce_authenticates_every_extension_byte() {
     let fixture = build_test_attestation_with_auth_data(TRANSCRIPT, APP, |a| {
         a.extend_from_slice(b"\xa1\x61x\x01")
     });
-    let mut envelope: ciborium::Value = ciborium::from_reader(fixture.cbor.as_slice()).unwrap();
-    if let ciborium::Value::Map(fields) = &mut envelope {
-        for (key, value) in fields {
-            if key == &ciborium::Value::Text("authData".into()) {
-                let ciborium::Value::Bytes(auth) = value else {
-                    panic!("authData")
-                };
-                *auth.last_mut().unwrap() = 2;
+    // Even the compatibility length field must remain nonce-authenticated.
+    for offset in [None, Some(53), Some(54)] {
+        let mut envelope: ciborium::Value = ciborium::from_reader(fixture.cbor.as_slice()).unwrap();
+        if let ciborium::Value::Map(fields) = &mut envelope {
+            for (key, value) in fields {
+                if key == &ciborium::Value::Text("authData".into()) {
+                    let ciborium::Value::Bytes(auth) = value else {
+                        panic!("authData")
+                    };
+                    let index = offset.unwrap_or(auth.len() - 1);
+                    auth[index] ^= 1;
+                }
             }
         }
+        let mut changed = Vec::new();
+        ciborium::into_writer(&envelope, &mut changed).unwrap();
+        assert!(matches!(
+            enroll(&changed, &fixture.key_id),
+            Err(Error::InvalidNonce)
+        ));
     }
-    let mut changed = Vec::new();
-    ciborium::into_writer(&envelope, &mut changed).unwrap();
-    assert!(matches!(
-        enroll(&changed, &fixture.key_id),
-        Err(Error::InvalidNonce)
-    ));
     assert!(enroll(&fixture.cbor, &STANDARD.encode([0; 32])).is_err());
 }
 
