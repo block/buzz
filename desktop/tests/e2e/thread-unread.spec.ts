@@ -13,20 +13,26 @@ async function waitForMockLiveSubscription(
   channelName: string,
 ) {
   await expect
-    .poll(async () => {
-      return page.evaluate(
-        ({ ch }) =>
-          (
-            window as Window & {
-              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                channelName: string;
-              }) => boolean;
-            }
-          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
-          false,
-        { ch: channelName },
-      );
-    })
+    .poll(
+      async () => {
+        return page.evaluate(
+          ({ ch }) =>
+            (
+              window as Window & {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                  kind: number;
+                }) => boolean;
+              }
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName: ch,
+              kind: 9,
+            }) ?? false,
+          { ch: channelName },
+        );
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }
 
@@ -778,12 +784,16 @@ test.describe("thread unread indicator", () => {
       mentionPubkeys: [SELF_PUBKEY],
       createdAt: unreadTimestamp(),
     });
-    // The reply mentions the user, so the row shows the numeric mention badge
-    // (which subsumes the thread-activity dot).
-    await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
+    // A thread reply keeps the channel bold and retains the thread-activity dot;
+    // the room itself does not show a numeric badge.
+    await expect(page.getByTestId("channel-all-replies")).toHaveCSS(
+      "font-weight",
+      "700",
+    );
+    await expect(page.getByTestId("channel-unread-all-replies")).toHaveCount(0);
     await expect(
       page.getByTestId("channel-unread-dot-all-replies"),
-    ).toHaveCount(0);
+    ).toBeVisible();
 
     // View all-replies while the reply is unread.
     await page.getByTestId("channel-all-replies").click();
@@ -793,7 +803,13 @@ test.describe("thread unread indicator", () => {
     // a channel sidebar unread indicator until the thread itself is read.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
-    await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
+    await expect(page.getByTestId("channel-all-replies")).toHaveCSS(
+      "font-weight",
+      "700",
+    );
+    await expect(
+      page.getByTestId("channel-unread-dot-all-replies"),
+    ).toBeVisible();
   });
 
   // Regression guard for BUG-2 (clear-on-read): opening an unread thread marks

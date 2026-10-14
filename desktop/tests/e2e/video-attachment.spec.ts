@@ -1513,12 +1513,14 @@ test("right-click menus expose distinct selectors for links, relay video, and of
 
   // ── Relay video menu: Download video + Copy link, appearing only once the
   // relay origin resolves (the reactivity fix) ─────────────────────────────
-  await emitVideoMessage(page, {
+  const relayMessage = (await emitVideoMessage(page, {
     url: MENU_RELAY_VIDEO_URL,
     sha: MENU_RELAY_VIDEO_SHA,
     filename: "relay-clip.mp4",
-  });
-  const relayPlayer = page.getByTestId("video-player").last();
+  })) as { id: string };
+  const relayPlayer = page
+    .locator(`[data-message-id="${relayMessage.id}"]`)
+    .getByTestId("video-player");
   await expect(relayPlayer).toBeVisible();
   // Right-click the player surface. `force` skips the actionability guard: the
   // Play-button overlay sits above the video, but the contextmenu event still
@@ -1559,12 +1561,14 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await expect(page.locator("[data-video-context-menu]")).toHaveCount(0);
 
   // ── Off-relay video control: renders and offers Copy link, never Download ─
-  await emitVideoMessage(page, {
+  const offRelayMessage = (await emitVideoMessage(page, {
     url: MENU_OFF_RELAY_VIDEO_URL,
     sha: MENU_OFF_RELAY_VIDEO_SHA,
     filename: "external-clip.mp4",
-  });
-  const offRelayPlayer = page.getByTestId("video-player").last();
+  })) as { id: string };
+  const offRelayPlayer = page
+    .locator(`[data-message-id="${offRelayMessage.id}"]`)
+    .getByTestId("video-player");
   await expect(offRelayPlayer).toBeVisible();
   await offRelayPlayer.click({ button: "right", force: true });
 
@@ -1578,4 +1582,92 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await expect(
     offRelayMenu.getByRole("button", { name: "Download video" }),
   ).toHaveCount(0);
+});
+
+test("playback speed persists across videos and reloads", async ({ page }) => {
+  await installVideoReviewHarness(page);
+
+  const openGeneralWithVideo = async (
+    url: string,
+    sha: string,
+    filename: string,
+  ) => {
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+    const emitted = (await emitMockMessage(
+      page,
+      "general",
+      `![video](${url})`,
+      {
+        extraTags: [
+          [
+            "imeta",
+            `url ${url}`,
+            "m video/mp4",
+            `x ${sha}`,
+            "size 987654",
+            "dim 160x80",
+            "duration 12.5",
+            `image ${POSTER_DATA_URL}`,
+            `filename ${filename}`,
+          ],
+        ],
+      },
+    )) as { id: string };
+    const player = page
+      .locator(`[data-message-id="${emitted.id}"]`)
+      .getByTestId("video-player");
+    await expect(player).toBeVisible();
+    await player.getByRole("button", { name: "Play video" }).click();
+    return player;
+  };
+
+  await page.goto("/");
+  const firstPlayer = await openGeneralWithVideo(
+    VIDEO_URL,
+    VIDEO_SHA,
+    "launch-demo.mp4",
+  );
+  const firstSpeedButton = firstPlayer.getByTestId("video-inline-speed");
+  await expect(firstSpeedButton).toHaveText("1x");
+  await firstSpeedButton.click();
+  await page
+    .getByTestId("video-inline-speed-menu")
+    .getByRole("button", { name: "2x", exact: true })
+    .click();
+  await expect(firstSpeedButton).toHaveText("2x");
+
+  // A different video in the same session starts at the chosen speed.
+  const secondPlayer = await openGeneralWithVideo(
+    MENU_RELAY_VIDEO_URL,
+    MENU_RELAY_VIDEO_SHA,
+    "second-demo.mp4",
+  );
+  const secondVideo = secondPlayer.locator("video");
+  await expect(secondPlayer.getByTestId("video-inline-speed")).toHaveText("2x");
+  await expect
+    .poll(() =>
+      secondVideo.evaluate((video) => (video as HTMLVideoElement).playbackRate),
+    )
+    .toBe(2);
+
+  // And the preference survives an app restart.
+  await page.reload();
+  const reloadedPlayer = await openGeneralWithVideo(
+    VIDEO_URL,
+    VIDEO_SHA,
+    "launch-demo.mp4",
+  );
+  const reloadedVideo = reloadedPlayer.locator("video");
+  await expect(reloadedPlayer.getByTestId("video-inline-speed")).toHaveText(
+    "2x",
+  );
+  await expect
+    .poll(() =>
+      reloadedVideo.evaluate(
+        (video) => (video as HTMLVideoElement).playbackRate,
+      ),
+    )
+    .toBe(2);
 });

@@ -6,6 +6,8 @@ import importlib.util
 from pathlib import Path
 from types import ModuleType
 
+from harbor_buzz_orchestra.task_fixtures import fixture_for
+
 DATASET_ROOT = Path(__file__).resolve().parents[2] / "buzz-dataset"
 AGENT = "a" * 64
 USER = "u" * 64
@@ -236,3 +238,102 @@ def test_ambiguous_user_mention_targets_only_profile_match():
     metrics, _ = verifier.score_evidence(evidence)
     assert metrics["other_not_notified"] == 0.0
     assert metrics["reward"] == 0.0
+
+
+def test_memory_retrieval_requires_correct_threaded_answer():
+    verifier = _verifier("memory-retrieval")
+    evidence = _base("memory-retrieval", "Amelia Rose Bennett")
+    question_id = "memory-question"
+    evidence["task_event_id"] = question_id
+    answer = _message(
+        "answer",
+        "We had 352,345 total customers in April 2024.",
+        reply_to=question_id,
+        mentions=[USER],
+    )
+    evidence["messages"] = [answer]
+
+    for correct_answer in (
+        "352,345",
+        "We had 352,345 total customers in April 2024.",
+        "April 2024 total customers: 352345",
+    ):
+        evidence["messages"][0]["content"] = correct_answer
+        metrics, _ = verifier.score_evidence(evidence)
+        assert all(value == 1.0 for value in metrics.values())
+
+    for answer_without_exact_total in (
+        "361,250",
+        "351,340",
+        "$2,400 revenue per customer",
+        "325,401",
+        "3,710",
+        "21,604",
+        "352,344",
+        "352,346",
+        "352,000",
+        "About 352 thousand",
+        "Approximately 352.3 thousand",
+    ):
+        evidence["messages"][0]["content"] = answer_without_exact_total
+        metrics, _ = verifier.score_evidence(evidence)
+        assert metrics["answer_correct"] == 0.0
+        assert metrics["reward"] == 0.0
+
+    for distractor in verifier.DISTRACTOR_NUMBERS:
+        evidence["messages"][0]["content"] = (
+            f"We had 352,345 total customers. Another relevant count was {distractor:,}."
+        )
+        metrics, details = verifier.score_evidence(evidence)
+        assert details["mentions_expected"] is True
+        assert details["mentions_distractor"] is True
+        assert metrics["answer_correct"] == 0.0
+        assert metrics["reward"] == 0.0
+
+    for noise_count in (352_000, 999_999):
+        evidence["messages"][0]["content"] = (
+            f"We had 352,345 total customers, approximately {noise_count:,}."
+        )
+        metrics, details = verifier.score_evidence(evidence)
+        assert details["mentions_expected"] is True
+        assert details["mentions_distractor"] is False
+        assert details["noise_numbers"] == [float(noise_count)]
+        assert metrics["answer_correct"] == 0.0
+        assert metrics["reward"] == 0.0
+
+    evidence["messages"][0]["content"] = "352,345"
+    evidence["messages"][0]["reply_to_event_id"] = "wrong-question"
+    metrics, _ = verifier.score_evidence(evidence)
+    assert metrics["answer_correct"] == 0.0
+    assert metrics["threaded_reply"] == 0.0
+    assert metrics["reward"] == 0.0
+
+
+def test_memory_retrieval_answer_exists_only_in_harness_seed():
+    verifier = _verifier("memory-retrieval")
+    fixture = fixture_for("memory-retrieval")
+    instruction = (DATASET_ROOT / "memory-retrieval" / "instruction.md").read_text(
+        encoding="utf-8"
+    )
+
+    seeds = {seed.slug: seed.value for seed in fixture.memory_seeds}
+    assert set(seeds) == {
+        "total-customers-per-month",
+        "customer-value-metric",
+        "customers-metrics-spring-24",
+        "new-customers-april-2024",
+        "total-customers-metric",
+    }
+    assert "352,345" in seeds["total-customers-metric"]
+    assert sum("352,345" in value for value in seeds.values()) == 1
+    seeded_distractors = frozenset(
+        number
+        for slug, value in seeds.items()
+        if slug != "total-customers-metric"
+        for number in verifier._numbers(value)
+        if number != 2024
+    )
+    assert verifier.EXPECTED_CUSTOMERS == 352_345
+    assert verifier.DISTRACTOR_NUMBERS == seeded_distractors
+    assert "352,345" not in instruction
+    assert "352345" not in instruction.replace(",", "")

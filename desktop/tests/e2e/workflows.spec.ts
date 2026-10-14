@@ -642,8 +642,13 @@ test("deleting the open workflow closes its editor", async ({ page }) => {
   await expect(detailDialog).toBeVisible();
   await detailDialog.getByRole("button", { name: "Workflow actions" }).click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
-  await expect(page.getByRole("alertdialog")).toContainText(workflowName);
-  await page.getByRole("button", { name: "Delete" }).click();
+  const confirmation = page.getByRole("alertdialog");
+  await expect(confirmation).toContainText(workflowName);
+  await expect(confirmation).toContainText(
+    "Publishing its definition again, even an older version, can recreate it.",
+  );
+  await expect(confirmation).not.toContainText("permanently");
+  await confirmation.getByRole("button", { name: "Delete" }).click();
 
   await expect(detailDialog).toHaveCount(0);
   await expect(page).toHaveURL(/#\/workflows(?:\?|$)/);

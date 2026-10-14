@@ -10,6 +10,7 @@ const FULL_HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 export type WorkflowAuthorPresentation = {
   avatarUrl: string | null;
   description: string;
+  isAgent: boolean;
   label: string | null;
   loading: boolean;
   pubkey: string | null;
@@ -50,6 +51,7 @@ export function useWorkflowAuthorPresentation(
       authorLabel: label ?? undefined,
       authorLoading: loading,
     }),
+    isAgent: profile?.isAgent === true,
     label,
     loading,
     pubkey,

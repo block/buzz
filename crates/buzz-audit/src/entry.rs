@@ -16,10 +16,12 @@ pub struct AuditEntry {
     pub community_id: Uuid,
     /// Sequence number, monotonic within `community_id` (starts at 1).
     pub seq: i64,
+    /// Hash encoding: 1 for historical concatenation, 2 for TLV.
+    pub hash_version: i16,
     /// SHA-256 of this entry's fields including `community_id` and `prev_hash`.
     pub hash: Vec<u8>,
     /// SHA-256 of the previous entry in *this community's* chain, or `None` for
-    /// the community's first entry (hashed as [`crate::hash::GENESIS_HASH`]).
+    /// the community's first entry.
     pub prev_hash: Option<Vec<u8>>,
     /// Action that was performed.
     pub action: AuditAction,

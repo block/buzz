@@ -22,6 +22,10 @@ class ComposeDraft {
   final String channelId;
   final String? threadHeadId;
   final String text;
+
+  /// Literal picker labels bound to exact keys, never authorization metadata.
+  /// An empty key/value is a malformed-record tombstone; send must refuse it.
+  final Map<String, String> mentionKeys;
   final int updatedAt; // unix seconds
 
   const ComposeDraft({
@@ -30,6 +34,7 @@ class ComposeDraft {
     required this.threadHeadId,
     required this.text,
     required this.updatedAt,
+    this.mentionKeys = const {},
   });
 
   Map<String, dynamic> toJson() => {
@@ -37,6 +42,7 @@ class ComposeDraft {
     'channel_id': channelId,
     if (threadHeadId != null) 'thread_head_id': threadHeadId,
     'text': text,
+    'mention_keys': mentionKeys,
     'updated_at': updatedAt,
   };
 
@@ -48,10 +54,32 @@ class ComposeDraft {
     final updatedAt = raw['updated_at'];
     if (key is! String || channelId is! String || text is! String) return null;
     if (text.trim().isEmpty) return null;
+    final bindings = raw['mention_keys'];
+    final mentionKeys = <String, String>{};
+    if (raw.containsKey('mention_keys')) {
+      if (bindings is! Map<String, dynamic>) {
+        mentionKeys[''] = '';
+      } else {
+        final labels = <String>{};
+        for (final entry in bindings.entries) {
+          if (!labels.add(entry.key.toLowerCase())) mentionKeys[''] = '';
+          final value = entry.value;
+          mentionKeys[entry.key] =
+              entry.key.isNotEmpty &&
+                  value is String &&
+                  RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value)
+              ? value.toLowerCase()
+              : '';
+        }
+      }
+    }
     return ComposeDraft(
       key: key,
       channelId: channelId,
-      threadHeadId: raw['thread_head_id'] as String?,
+      threadHeadId: raw['thread_head_id'] is String
+          ? raw['thread_head_id'] as String
+          : null,
+      mentionKeys: Map.unmodifiable(mentionKeys),
       text: text,
       updatedAt: updatedAt is int ? updatedAt : 0,
     );
@@ -108,18 +136,23 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     required String channelId,
     String? threadHeadId,
     required String text,
+    Map<String, String> mentionKeys = const {},
   }) {
     if (text.trim().isEmpty) {
       remove(key);
       return;
     }
     final existing = state.where((d) => d.key == key).firstOrNull;
-    if (existing?.text == text) return;
+    if (existing?.text == text &&
+        mapEquals(existing?.mentionKeys, mentionKeys)) {
+      return;
+    }
     final draft = ComposeDraft(
       key: key,
       channelId: channelId,
       threadHeadId: threadHeadId,
       text: text,
+      mentionKeys: Map.unmodifiable(mentionKeys),
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...state.where((d) => d.key != key)];
@@ -131,8 +164,11 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     _persist([...state.where((d) => d.key != key)]);
   }
 
-  String? textFor(String key) =>
-      state.where((d) => d.key == key).firstOrNull?.text;
+  /// Read text and selected identities from the same persisted snapshot.
+  ComposeDraft? draftFor(String key) =>
+      state.where((d) => d.key == key).firstOrNull;
+
+  String? textFor(String key) => draftFor(key)?.text;
 
   void _persist(List<ComposeDraft> drafts) {
     state = List.unmodifiable(drafts);

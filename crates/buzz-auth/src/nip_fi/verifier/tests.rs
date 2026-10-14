@@ -11,7 +11,9 @@
 //! issuer→JWKS authority entirely crate-owned.
 
 use super::*;
-use crate::nip_fi::{IssuerPolicyError, SubjectClassContract, CLIENT_ATTACHED_HEADER};
+use crate::nip_fi::{
+    CommunityBindingError, IssuerPolicyError, SubjectClassContract, CLIENT_ATTACHED_HEADER,
+};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{json, Value};
@@ -27,6 +29,20 @@ const TEST_JWK_Y: &str = "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA";
 const TEST_KID: &str = "test-key-1";
 const ISSUER: &str = "https://issuer.example";
 const AUDIENCE: &str = "https://relay.example";
+/// A canonical lowercase-hex nostr pubkey for tokens that are not testing
+/// the nostr_pubkey claim specifically. Spec v2 requires the claim unconditionally.
+const TEST_NOSTR_PUBKEY: &str = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+/// A canonical JWKS contract for the default test issuer. Used wherever a
+/// `JwksSourceContract` is required but JWKS behavior is not under test.
+fn test_jwks_contract() -> crate::nip_fi::jwks::JwksSourceContract {
+    crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", ISSUER),
+        300,
+        3600,
+    )
+    .expect("valid test contract")
+}
 
 // A second, independent P-256 key: issuer B's real signing key, used to prove
 // that a token signed by B and claiming `iss=A` cannot mint an A identity.
@@ -98,25 +114,31 @@ fn access_token_policy_with(subject_class: SubjectClassContract) -> IssuerPolicy
         TokenClass::AccessTokenAtJwt { subject_class },
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .expect("valid policy")
 }
 
 fn dedicated_policy(issuer: &str) -> IssuerPolicy {
+    let contract = crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/')),
+        300,
+        3600,
+    )
+    .expect("valid test contract");
     IssuerPolicy::new(
         issuer.to_owned(),
         vec![AUDIENCE.to_owned()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
+        contract,
     )
     .expect("valid policy")
 }
@@ -128,10 +150,10 @@ fn dedicated_policy_with_audiences(audiences: Vec<String>) -> IssuerPolicy {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .expect("valid policy")
 }
@@ -143,10 +165,10 @@ fn dedicated_policy_with_algorithms(algorithms: Vec<Algorithm>) -> IssuerPolicy 
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         algorithms,
-        false,
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .expect("valid policy")
 }
@@ -177,11 +199,35 @@ fn mint_signed_by(pkcs8_pem: &str, typ: Option<&str>, kid: &str, mut claims: Val
         obj.entry("aud").or_insert(json!(AUDIENCE));
         obj.entry("iat").or_insert(json!(now()));
         obj.entry("exp").or_insert(json!(now() + 600));
+        // Spec v2 requires nostr_pubkey unconditionally; inject a canonical
+        // test pubkey so tokens that test other behaviours pass the claim check.
+        obj.entry(NOSTR_PUBKEY_CLAIM)
+            .or_insert(json!(TEST_NOSTR_PUBKEY));
     }
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(kid.to_owned());
     header.typ = typ.map(str::to_owned);
     let key = EncodingKey::from_ec_pem(pkcs8_pem.as_bytes()).expect("valid EC PEM");
+    jsonwebtoken::encode(&header, &claims, &key).expect("sign")
+}
+
+/// Mint a valid, signed token that deliberately omits `nostr_pubkey`.  Used
+/// only to exercise the unconditional missing-claim rejection path; the normal
+/// `mint`/`mint_signed_by` helpers always inject the claim via `or_insert` so
+/// they cannot produce an absent-claim token.
+fn mint_no_pubkey(typ: Option<&str>, kid: &str, mut claims: Value) -> String {
+    {
+        let obj = claims.as_object_mut().expect("claims object");
+        obj.entry("iss").or_insert(json!(ISSUER));
+        obj.entry("aud").or_insert(json!(AUDIENCE));
+        obj.entry("iat").or_insert(json!(now()));
+        obj.entry("exp").or_insert(json!(now() + 600));
+        // Intentionally does NOT inject nostr_pubkey.
+    }
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(kid.to_owned());
+    header.typ = typ.map(str::to_owned);
+    let key = EncodingKey::from_ec_pem(TEST_EC_PKCS8_PEM.as_bytes()).expect("valid EC PEM");
     jsonwebtoken::encode(&header, &claims, &key).expect("sign")
 }
 
@@ -216,10 +262,11 @@ fn tamper_signature(token: &str) -> String {
 fn valid_access_token_verifies() {
     let verifier = verifier_with(access_token_policy());
     let token = mint(Some("at+jwt"), TEST_KID, resource_owner_claims());
-    let assertion = verifier.verify(&token).expect("verifies");
+    let assertion = verifier.verify_for_aud(&token, AUDIENCE).expect("verifies");
     assert_eq!(assertion.identity().issuer(), ISSUER);
     assert_eq!(assertion.identity().subject(), "user-123");
-    assert!(assertion.asserted_key().is_none());
+    // Spec v2: nostr_pubkey is injected by mint() and unconditionally required.
+    assert!(assertion.asserted_key().is_some());
     assert!(!assertion.authority_deadlines().is_empty());
     assert_eq!(assertion.assertion_policy_id(), access_token_policy().id());
 }
@@ -234,7 +281,7 @@ fn id_token_denies_even_when_iss_aud_sub_match() {
         TEST_KID,
         json!({ "sub": "user-123", "client_id": "app-1", "sub_type": "user", "nonce": "n" }),
     );
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::TokenTypeRejected);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
@@ -253,7 +300,7 @@ fn generic_typ_with_client_id_denies() {
         TEST_KID,
         json!({ "sub": "user-123", "client_id": "app-1", "sub_type": "user" }),
     );
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::TokenTypeRejected);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
@@ -263,11 +310,11 @@ fn dedicated_class_rejects_at_jwt_typ_and_accepts_nip_fi() {
     let verifier = verifier_with(dedicated_policy(ISSUER));
     let wrong = mint(Some("at+jwt"), TEST_KID, json!({ "sub": "u" }));
     assert_eq!(
-        verifier.verify(&wrong).unwrap_err(),
+        verifier.verify_for_aud(&wrong, AUDIENCE).unwrap_err(),
         VerifierError::TokenTypeRejected
     );
     let ok = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
-    assert!(verifier.verify(&ok).is_ok());
+    assert!(verifier.verify_for_aud(&ok, AUDIENCE).is_ok());
 }
 
 #[test]
@@ -279,7 +326,7 @@ fn access_token_without_client_id_denies() {
         json!({ "sub": "user-123", "sub_type": "user" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::ClaimContractRejected
     );
 }
@@ -294,7 +341,7 @@ fn resource_owner_marker_verifies() {
         TEST_KID,
         json!({ "sub": "user-123", "client_id": "app-1", "sub_type": "user" }),
     );
-    assert!(verifier.verify(&token).is_ok());
+    assert!(verifier.verify_for_aud(&token, AUDIENCE).is_ok());
 }
 
 #[test]
@@ -306,7 +353,7 @@ fn client_subject_marker_denies_under_reject_posture() {
         json!({ "sub": "svc-1", "client_id": "app-1", "sub_type": "client" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::ClaimContractRejected
     );
 }
@@ -326,7 +373,7 @@ fn client_subject_marker_verifies_under_accept_non_colliding_posture() {
         TEST_KID,
         json!({ "sub": "svc-1", "client_id": "app-1", "sub_type": "client" }),
     );
-    assert!(verifier.verify(&token).is_ok());
+    assert!(verifier.verify_for_aud(&token, AUDIENCE).is_ok());
 }
 
 #[test]
@@ -340,7 +387,7 @@ fn unclassifiable_subject_marker_denies() {
         json!({ "sub": "user-123", "client_id": "app-1", "sub_type": "mystery" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::ClaimContractRejected
     );
 }
@@ -371,7 +418,7 @@ fn hs256_symmetric_algorithm_denies() {
     let token = format!("{header}.{payload}.AAAA");
     let verifier = verifier_with(access_token_policy());
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::UnsupportedAlgorithm
     );
 }
@@ -385,7 +432,7 @@ fn alg_none_denies() {
     let token = format!("{header}.{payload}.");
     let verifier = verifier_with(access_token_policy());
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::UnsupportedAlgorithm
     );
 }
@@ -399,7 +446,7 @@ fn unknown_kid_denies() {
         json!({ "sub": "u", "client_id": "a" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::AmbiguousKeyId
     );
 }
@@ -416,7 +463,7 @@ fn tampered_signature_denies() {
     // rejection, not the pre-lookup signature-shape gate.
     let token = tamper_signature(&token);
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidSignatureOrClaims
     );
 }
@@ -430,7 +477,7 @@ fn wrong_audience_denies() {
         json!({ "sub": "u", "client_id": "a", "aud": "https://other.example" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidSignatureOrClaims
     );
 }
@@ -463,7 +510,7 @@ fn key_restricted_to_encrypt_key_ops_denies() {
         json!({ "sub": "u", "client_id": "a", "sub_type": "user" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidKey
     );
 }
@@ -507,7 +554,7 @@ fn es256_token_against_p384_curve_material_denies() {
     );
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidKey
     );
 }
@@ -529,7 +576,7 @@ fn es256_token_against_rsa_family_material_denies() {
     );
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidKey
     );
 }
@@ -549,7 +596,7 @@ fn es256_token_against_ed25519_okp_material_denies() {
     );
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidKey
     );
 }
@@ -657,7 +704,7 @@ fn lowercase_hex_nostr_pubkey_is_accepted() {
         TEST_KID,
         json!({ "sub": "u", "client_id": "a", "sub_type": "user", NOSTR_PUBKEY_CLAIM: real }),
     );
-    let assertion = verifier.verify(&token).expect("verifies");
+    let assertion = verifier.verify_for_aud(&token, AUDIENCE).expect("verifies");
     assert!(assertion.asserted_key().is_some());
 }
 
@@ -671,29 +718,26 @@ fn uppercase_nostr_pubkey_denies() {
         json!({ "sub": "u", "client_id": "a", "sub_type": "user", NOSTR_PUBKEY_CLAIM: upper }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::ClaimRejected
     );
 }
 
 #[test]
-fn missing_nostr_pubkey_denies_under_attested_key_policy() {
-    let policy = IssuerPolicy::new(
-        ISSUER.to_owned(),
-        vec![AUDIENCE.to_owned()],
-        TokenClass::DedicatedNipFi,
-        FreshnessClass::OfflineJwt,
-        vec![Algorithm::ES256],
-        true, // require attested key
-        60,
-        3600,
-        None,
-    )
-    .unwrap();
-    let verifier = verifier_with(policy);
-    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+fn absent_nostr_pubkey_claim_denies() {
+    // `nostr_pubkey` absence must unconditionally reject — NIP-FI v2 dropped
+    // the per-issuer `require_attested_key` knob that previously made it
+    // optional.  This is a direct falsifiable regression test: removing the
+    // `None => Err(VerifierError::ClaimRejected)` arm from
+    // `parse_nostr_pubkey_claim` must turn this test red.
+    let verifier = verifier_with(access_token_policy());
+    let token = mint_no_pubkey(
+        Some("at+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "client_id": "a", "sub_type": "user" }),
+    );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::ClaimRejected
     );
 }
@@ -708,7 +752,10 @@ fn expired_assertion_denies() {
         TEST_KID,
         json!({ "sub": "u", "client_id": "a", "sub_type": "user", "iat": now() - 1200, "exp": now() - 600 }),
     );
-    assert_eq!(verifier.verify(&token).unwrap_err(), VerifierError::Expired);
+    assert_eq!(
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
+        VerifierError::Expired
+    );
 }
 
 #[test]
@@ -719,7 +766,10 @@ fn assertion_beyond_maximum_age_denies() {
         TEST_KID,
         json!({ "sub": "u", "client_id": "a", "sub_type": "user", "iat": now() - 4000, "exp": now() + 600 }),
     );
-    assert_eq!(verifier.verify(&token).unwrap_err(), VerifierError::Expired);
+    assert_eq!(
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
+        VerifierError::Expired
+    );
 }
 
 // ---- Fractional NumericDate (P2 #4) --------------------------------------
@@ -738,7 +788,7 @@ fn fractional_iat_and_exp_within_bounds_verify() {
         TEST_KID,
         json!({ "sub": "u", "iat": iat, "exp": exp }),
     );
-    assert!(verifier.verify(&token).is_ok());
+    assert!(verifier.verify_for_aud(&token, AUDIENCE).is_ok());
 }
 
 #[test]
@@ -749,7 +799,7 @@ fn fractional_nbf_within_bounds_verifies() {
         TEST_KID,
         json!({ "sub": "u", "nbf": now() as f64 - 0.75 }),
     );
-    assert!(verifier.verify(&token).is_ok());
+    assert!(verifier.verify_for_aud(&token, AUDIENCE).is_ok());
 }
 
 #[test]
@@ -765,7 +815,7 @@ fn non_finite_numeric_date_denies() {
         json!({ "sub": "u", "nbf": "Infinity" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidTimeBounds
     );
 }
@@ -783,7 +833,7 @@ fn absurd_magnitude_fractional_date_denies() {
         json!({ "sub": "u", "nbf": 1.0e30 }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::InvalidTimeBounds
     );
 }
@@ -799,7 +849,7 @@ fn unknown_issuer_denies() {
         json!({ "sub": "u", "client_id": "a", "iss": "https://evil.example" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::UnknownIssuer
     );
 }
@@ -826,8 +876,12 @@ fn same_subject_distinct_issuers_are_distinct_identities() {
         let claims = json!({ "sub": "shared-sub", "iss": iss });
         mint(Some("nip-fi+jwt"), TEST_KID, claims)
     };
-    let a = verifier.verify(&sign(issuer_a)).expect("a verifies");
-    let b = verifier.verify(&sign(issuer_b)).expect("b verifies");
+    let a = verifier
+        .verify_for_aud(&sign(issuer_a), AUDIENCE)
+        .expect("a verifies");
+    let b = verifier
+        .verify_for_aud(&sign(issuer_b), AUDIENCE)
+        .expect("b verifies");
     assert_eq!(a.identity().subject(), b.identity().subject());
     assert_ne!(a.identity().issuer(), b.identity().issuer());
     assert_ne!(a.assertion_policy_id(), b.assertion_policy_id());
@@ -883,7 +937,7 @@ fn cross_issuer_token_cannot_mint_through_any_seam() {
         json!({ "iss": issuer_a, "sub": "victim" }),
     );
     assert_eq!(
-        verifier.verify(&forged).unwrap_err(),
+        verifier.verify_for_aud(&forged, AUDIENCE).unwrap_err(),
         VerifierError::InvalidSignatureOrClaims,
         "B-signed token claiming iss=A must not mint an A identity"
     );
@@ -903,11 +957,19 @@ fn cross_issuer_token_cannot_mint_through_any_seam() {
         json!({ "iss": issuer_b, "sub": "u" }),
     );
     assert_eq!(
-        verifier.verify(&honest_a).unwrap().identity().issuer(),
+        verifier
+            .verify_for_aud(&honest_a, AUDIENCE)
+            .unwrap()
+            .identity()
+            .issuer(),
         issuer_a
     );
     assert_eq!(
-        verifier.verify(&honest_b).unwrap().identity().issuer(),
+        verifier
+            .verify_for_aud(&honest_b, AUDIENCE)
+            .unwrap()
+            .identity()
+            .issuer(),
         issuer_b
     );
 }
@@ -926,7 +988,7 @@ fn registered_issuer_without_key_snapshot_is_unavailable_not_rejected() {
     // Empty key source: the issuer is registered but has no snapshot.
     let verifier = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([]));
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::KeySourceUnavailable);
     assert_eq!(err.denial_class(), DenialClass::AuthorizationUnavailable);
 }
@@ -951,7 +1013,7 @@ fn wrong_typ_is_rejected_before_key_source_lookup() {
     // `nip-fi+jwt` policy is rejected evidence (403), not 503.
     let verifier = verifier_with_empty_source();
     let token = mint(Some("JWT"), TEST_KID, json!({ "sub": "u" }));
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::TokenTypeRejected);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
     assert_eq!(err.denial_class().http_status(), 403);
@@ -966,7 +1028,7 @@ fn two_segment_garbage_is_rejected_before_key_source_lookup() {
     let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
     let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
     let token = format!("{header}.{claims}");
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::MalformedToken);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
     assert_eq!(err.denial_class().http_status(), 403);
@@ -980,7 +1042,7 @@ fn four_segment_garbage_is_rejected_before_key_source_lookup() {
     let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
     let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
     let token = format!("{header}.{claims}.sig.extra");
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::MalformedToken);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
@@ -994,7 +1056,7 @@ fn empty_signature_is_rejected_before_key_source_lookup() {
     let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
     let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
     let token = format!("{header}.{claims}.");
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::MalformedToken);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
     assert_eq!(err.denial_class().http_status(), 403);
@@ -1008,7 +1070,7 @@ fn non_base64url_signature_is_rejected_before_key_source_lookup() {
     let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
     let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
     let token = format!("{header}.{claims}.!");
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::MalformedToken);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
     assert_eq!(err.denial_class().http_status(), 403);
@@ -1029,7 +1091,7 @@ fn misbinding_key_source_is_rejected_by_defensive_check() {
     );
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::IssuerKeyMismatch
     );
 }
@@ -1052,7 +1114,7 @@ fn duplicate_claim_member_denies() {
     let header = r#"{"alg":"ES256","kid":"test-key-1","typ":"at+jwt"}"#;
     let token = format!("{}.{}.AAAA", b64_segment(header), b64_segment(&claims));
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::DuplicateMember
     );
 }
@@ -1069,7 +1131,7 @@ fn duplicate_header_member_denies() {
     );
     let token = format!("{}.{}.AAAA", b64_segment(header), b64_segment(&claims));
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::DuplicateMember
     );
 }
@@ -1083,10 +1145,10 @@ fn current_status_policy() -> IssuerPolicy {
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         Some(120), // maximum_status_age required for current-status
+        test_jwks_contract(),
     )
     .expect("valid current-status policy")
 }
@@ -1095,7 +1157,7 @@ fn current_status_policy() -> IssuerPolicy {
 fn current_status_policy_denies_without_witness() {
     let verifier = verifier_with(current_status_policy());
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::StatusWitnessUnavailable);
     // An unreadable required current dependency is authorization-unavailable
     // (503), never rejected evidence (403): the token may be perfectly valid.
@@ -1115,7 +1177,7 @@ fn current_status_invalid_signature_is_evidence_rejected_not_unavailable() {
     // A well-formed but cryptographically wrong signature completes every
     // offline check and denies as rejected evidence before deferral.
     let token = tamper_signature(&token);
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
     assert_eq!(err.denial_class().http_status(), 403);
@@ -1129,7 +1191,7 @@ fn current_status_wrong_audience_is_evidence_rejected_not_unavailable() {
         TEST_KID,
         json!({ "sub": "u", "aud": "https://other.example" }),
     );
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
@@ -1146,7 +1208,7 @@ fn current_status_malformed_claim_is_evidence_rejected_not_unavailable() {
         TEST_KID,
         json!({ "sub": "u", "exp": "not-a-number" }),
     );
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
@@ -1161,7 +1223,7 @@ fn current_status_expired_token_is_evidence_rejected_not_unavailable() {
         TEST_KID,
         json!({ "sub": "u", "iat": now() - 1200, "exp": now() - 600 }),
     );
-    let err = verifier.verify(&token).unwrap_err();
+    let err = verifier.verify_for_aud(&token, AUDIENCE).unwrap_err();
     assert_eq!(err, VerifierError::Expired);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
@@ -1222,7 +1284,7 @@ fn identity_subject_is_the_jwt_sub_claim() {
         TEST_KID,
         json!({ "sub": "user-123", "email": "mutable@example.com", "client_id": "app-1", "sub_type": "user" }),
     );
-    let assertion = verifier.verify(&token).expect("verifies");
+    let assertion = verifier.verify_for_aud(&token, AUDIENCE).expect("verifies");
     // The sealed subject is `sub`, never a mutable attribute like `email`.
     assert_eq!(assertion.identity().subject(), "user-123");
     assert_ne!(assertion.identity().subject(), "mutable@example.com");
@@ -1239,7 +1301,7 @@ fn token_without_sub_denies_even_with_other_identifier_claims() {
         json!({ "email": "mutable@example.com", "client_id": "app-1", "sub_type": "user" }),
     );
     assert_eq!(
-        verifier.verify(&token).unwrap_err(),
+        verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::ClaimRejected
     );
 }
@@ -1259,7 +1321,7 @@ fn revalidation_dependencies_carry_key_deadline_and_confidential_assertion() {
     registry.insert(dedicated_policy(ISSUER));
     let verifier = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([key_set]));
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
-    let assertion = verifier.verify(&token).expect("verifies");
+    let assertion = verifier.verify_for_aud(&token, AUDIENCE).expect("verifies");
     let deps = assertion.revalidation_dependencies();
     assert_eq!(deps.verification_key_id(), TEST_KID);
     assert_eq!(deps.key_snapshot_generation(), 7);
@@ -1294,7 +1356,7 @@ fn retained_key_revalidates_under_changed_snapshot_and_replacement_denies() {
     // two distinct generation-2 snapshots.
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
     let first = dedicated_verifier_at(1, test_jwks(TEST_KID))
-        .verify(&token)
+        .verify_for_aud(&token, AUDIENCE)
         .expect("verifies at generation 1");
     assert_eq!(
         first.revalidation_dependencies().key_snapshot_generation(),
@@ -1309,7 +1371,7 @@ fn retained_key_revalidates_under_changed_snapshot_and_replacement_denies() {
     // JWKS-ADD: a later generation that *retains* the signing key revalidates
     // the byte-identical assertion, now bound to the new generation.
     let revalidated = dedicated_verifier_at(2, test_jwks(TEST_KID))
-        .verify(&carried)
+        .verify_for_aud(&carried, AUDIENCE)
         .expect("retained key revalidates under the changed snapshot");
     assert_eq!(first.identity().subject(), revalidated.identity().subject());
     assert_eq!(
@@ -1327,7 +1389,7 @@ fn retained_key_revalidates_under_changed_snapshot_and_replacement_denies() {
         2,
         jwks_with_coords("replacement-key", TEST_JWK_X_B, TEST_JWK_Y_B),
     )
-    .verify(&carried)
+    .verify_for_aud(&carried, AUDIENCE)
     .unwrap_err();
     assert_eq!(err, VerifierError::AmbiguousKeyId);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
@@ -1343,7 +1405,7 @@ fn subject_bytes_are_preserved_exactly_not_trimmed() {
         TEST_KID,
         json!({ "sub": " user-123 ", "client_id": "app-1", "sub_type": "user" }),
     );
-    let assertion = verifier.verify(&token).expect("verifies");
+    let assertion = verifier.verify_for_aud(&token, AUDIENCE).expect("verifies");
     assert_eq!(assertion.identity().subject(), " user-123 ");
 }
 
@@ -1362,10 +1424,10 @@ fn assertion_policy_id_is_deterministic_and_semantic() {
         changed.token_class().clone(),
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         120, // different skew => different semantics
         3600,
         None,
+        test_jwks_contract(),
     )
     .unwrap();
     assert_ne!(p1.id(), changed.id());
@@ -1387,10 +1449,10 @@ fn offline_policy_rejects_inapplicable_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         Some(120),
+        test_jwks_contract(),
     )
     .unwrap_err();
     assert_eq!(err, IssuerPolicyError::InapplicableMaximumStatusAge);
@@ -1405,10 +1467,10 @@ fn offline_policy_accepts_absent_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .is_ok());
 }
@@ -1423,10 +1485,10 @@ fn current_status_policy_still_requires_positive_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .unwrap_err();
     assert_eq!(missing, IssuerPolicyError::MissingMaximumStatusAge);
@@ -1436,10 +1498,10 @@ fn current_status_policy_still_requires_positive_maximum_status_age() {
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![Algorithm::ES256],
-        false,
         60,
         3600,
         Some(0),
+        test_jwks_contract(),
     )
     .unwrap_err();
     assert_eq!(zero, IssuerPolicyError::InvalidTimeBounds);
@@ -1533,7 +1595,184 @@ fn assertion_policy_id_is_invariant_under_subject_class_value_permutation_and_du
     assert_eq!(base.id(), permuted.id());
 }
 
-// ---- Canonical scope capture ---------------------------------------------
+// ---- JwksSourceContract in AssertionPolicyId ------------------------------
+//
+// Per the NIP-FI spec ("Policy identity and snapshots"): `assertion_policy_id`
+// covers "authenticated key/status-source contracts" and "time rules". The
+// three contract fields are immutable contract identity, not mutable state —
+// changing any one of them changes which keys the runtime trusts or how long
+// it trusts them, invalidating all prepared evidence against the old contract.
+// Key rotation (JWKS content change) leaves all three unchanged and must NOT
+// move the ID.
+
+/// Helper: build a policy with the given `JwksSourceContract`.
+fn policy_with_contract(contract: crate::nip_fi::jwks::JwksSourceContract) -> IssuerPolicy {
+    IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::OfflineJwt,
+        vec![Algorithm::ES256],
+        60,
+        3600,
+        None,
+        contract,
+    )
+    .expect("valid policy")
+}
+
+#[test]
+fn assertion_policy_id_moves_when_jwks_uri_changes() {
+    // The JWKS URI selects the authenticated key source. A different URI may
+    // serve different keys — the policy ID must change.
+    //
+    // Mutation (omit URI from hash): both policies hash identically despite
+    // different endpoints; this test turns red.
+    let base = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let different_uri = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks-alt.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    assert_ne!(
+        base.id(),
+        different_uri.id(),
+        "JWKS URI change must move assertion_policy_id"
+    );
+}
+
+#[test]
+fn assertion_policy_id_moves_when_refresh_interval_changes() {
+    // The refresh interval defines bounded refresh behavior. A longer interval
+    // allows stale keys to persist longer — the policy ID must change.
+    //
+    // Mutation (omit refresh_interval from hash): both policies hash
+    // identically; this test turns red.
+    let base = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let different_interval = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            600, // doubled
+            3600,
+        )
+        .unwrap(),
+    );
+    assert_ne!(
+        base.id(),
+        different_interval.id(),
+        "refresh_interval_seconds change must move assertion_policy_id"
+    );
+}
+
+#[test]
+fn assertion_policy_id_moves_when_hard_deadline_changes() {
+    // The hard deadline defines the source's accepted time rule; every
+    // per-snapshot deadline the verifier seals into `VerifiedAssertion`
+    // derives from this. A looser deadline extends the valid window beyond
+    // what the new policy intends — the policy ID must change.
+    //
+    // Mutation (omit key_snapshot_hard_deadline from hash): both policies
+    // hash identically; this test turns red.
+    let base = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let different_deadline = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            7200, // doubled
+        )
+        .unwrap(),
+    );
+    assert_ne!(
+        base.id(),
+        different_deadline.id(),
+        "key_snapshot_hard_deadline_seconds change must move assertion_policy_id"
+    );
+}
+
+#[test]
+fn assertion_policy_id_is_stable_for_same_jwks_contract() {
+    // URI canonicalization is deterministic: the same validated URI, interval,
+    // and deadline always hash to the same policy ID regardless of call order.
+    let c1 = crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", ISSUER),
+        300,
+        3600,
+    )
+    .unwrap();
+    let c2 = crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", ISSUER),
+        300,
+        3600,
+    )
+    .unwrap();
+    let p1 = policy_with_contract(c1);
+    let p2 = policy_with_contract(c2);
+    assert_eq!(
+        p1.id(),
+        p2.id(),
+        "same JWKS contract must produce identical assertion_policy_id"
+    );
+}
+
+#[test]
+fn identical_contract_produces_stable_assertion_policy_id() {
+    // `AssertionPolicyId` is derived from the contract fields only — not from
+    // JWKS key material. This means JWKS key additions/removals (runtime
+    // rotation) cannot change the policy ID; only changes to the contract
+    // itself (JWKS URI, refresh interval, hard deadline) would do so.
+    //
+    // This test verifies the structural invariant: two `IssuerPolicy` values
+    // built from identical contracts produce the same `AssertionPolicyId`,
+    // regardless of when or how many times the ID is derived. Because key
+    // material never flows into `derive_assertion_policy_id`, the ID is
+    // stable for the lifetime of a given contract.
+    let p1 = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let p2 = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    // Identical contract → identical ID: key material is not part of the hash.
+    assert_eq!(
+        p1.id(),
+        p2.id(),
+        "identical contract must produce the same assertion_policy_id (key material is not hashed)"
+    );
+}
 
 #[test]
 fn scope_capture_is_canonical_under_order_and_duplicates() {
@@ -1541,18 +1780,24 @@ fn scope_capture_is_canonical_under_order_and_duplicates() {
     // seal byte-equal capabilities regardless of token order or repetition.
     let verifier = verifier_with(dedicated_policy(ISSUER));
     let a = verifier
-        .verify(&mint(
-            Some("nip-fi+jwt"),
-            TEST_KID,
-            json!({ "sub": "u", "scope": "read write admin" }),
-        ))
+        .verify_for_aud(
+            &mint(
+                Some("nip-fi+jwt"),
+                TEST_KID,
+                json!({ "sub": "u", "scope": "read write admin" }),
+            ),
+            AUDIENCE,
+        )
         .expect("verifies");
     let b = verifier
-        .verify(&mint(
-            Some("nip-fi+jwt"),
-            TEST_KID,
-            json!({ "sub": "u", "scope": "admin write read write" }),
-        ))
+        .verify_for_aud(
+            &mint(
+                Some("nip-fi+jwt"),
+                TEST_KID,
+                json!({ "sub": "u", "scope": "admin write read write" }),
+            ),
+            AUDIENCE,
+        )
         .expect("verifies");
     assert_eq!(a.capabilities().entries(), b.capabilities().entries());
     assert_eq!(
@@ -1600,4 +1845,134 @@ fn denial_classes_carry_exact_wire_text() {
     assert_eq!(u.nostr_text(), "restricted: authorization unavailable");
     assert_eq!(u.http_status(), 503);
     assert_eq!(u.http_body(), "authorization unavailable\n");
+}
+
+// ---- Community binding (NIP-FI.md:118-128, :227-248) ----------------------
+
+const COMMUNITY_B_AUD: &str = "https://b.relay.example";
+
+fn community(aud: &str, issuers: &[&str]) -> CommunityBinding {
+    CommunityBinding::new(aud.to_owned(), issuers.iter().map(|i| (*i).to_owned()))
+        .expect("valid community")
+}
+
+#[test]
+fn community_unauthorized_issuer_denies_before_key_source() {
+    // The key source holds no snapshot for ISSUER, so any key-source lookup
+    // would surface as `KeySourceUnavailable` (503). An issuer the community
+    // does not authorize must be rejected first, as evidence (403).
+    let mut registry = IssuerRegistry::new();
+    registry.insert(dedicated_policy(ISSUER));
+    let verifier = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([]));
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+
+    let err = verifier
+        .verify(&token, &community(AUDIENCE, &["https://other.example"]))
+        .unwrap_err();
+    assert_eq!(err, VerifierError::UnknownIssuer);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+    // Control: once authorized, the same token reaches the key source.
+    assert_eq!(
+        verifier
+            .verify(&token, &community(AUDIENCE, &[ISSUER]))
+            .unwrap_err(),
+        VerifierError::KeySourceUnavailable
+    );
+}
+
+#[test]
+fn community_unauthorized_indistinguishable_from_unknown_iss() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let unknown = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "iss": "https://evil.example" }),
+    );
+    let registered = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    let elsewhere = community(AUDIENCE, &["https://other.example"]);
+    assert_eq!(
+        verifier.verify(&registered, &elsewhere).unwrap_err(),
+        verifier.verify(&unknown, &elsewhere).unwrap_err()
+    );
+}
+
+#[test]
+fn assertion_for_community_a_on_community_b_denies_aud() {
+    // ISSUER is authorized for both communities; a token minted for A's aud
+    // must not be accepted on B.
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let token_for_a = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    assert!(verifier
+        .verify(&token_for_a, &community(AUDIENCE, &[ISSUER]))
+        .is_ok());
+    let err = verifier
+        .verify(&token_for_a, &community(COMMUNITY_B_AUD, &[ISSUER]))
+        .unwrap_err();
+    assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+}
+
+#[test]
+fn issuer_authorized_only_for_a_cannot_sign_b_aud() {
+    // ISSUER is trusted for A only. Even a token carrying B's exact aud is
+    // rejected on B, because B does not authorize ISSUER.
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let token_for_b = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "aud": COMMUNITY_B_AUD }),
+    );
+    let b = community(COMMUNITY_B_AUD, &["https://other.example"]);
+    assert_eq!(
+        verifier.verify(&token_for_b, &b).unwrap_err(),
+        VerifierError::UnknownIssuer
+    );
+}
+
+#[test]
+fn aud_array_containing_expected_passes() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "aud": [COMMUNITY_B_AUD, AUDIENCE] }),
+    );
+    assert!(verifier
+        .verify(&token, &community(AUDIENCE, &[ISSUER]))
+        .is_ok());
+}
+
+#[test]
+fn assertion_policy_id_covers_community_allowlist() {
+    let base = dedicated_policy(ISSUER);
+    let a = base
+        .clone()
+        .authorized_for_communities(vec![AUDIENCE.to_owned(), COMMUNITY_B_AUD.to_owned()]);
+    let permuted = base.clone().authorized_for_communities(vec![
+        COMMUNITY_B_AUD.to_owned(),
+        AUDIENCE.to_owned(),
+        AUDIENCE.to_owned(),
+    ]);
+    let fewer = base
+        .clone()
+        .authorized_for_communities(vec![AUDIENCE.to_owned()]);
+    assert_ne!(base.id(), a.id());
+    assert_eq!(a.id(), permuted.id());
+    assert_ne!(a.id(), fewer.id());
+}
+
+#[test]
+fn community_binding_rejects_empty_parts() {
+    assert_eq!(
+        CommunityBinding::new(String::new(), [ISSUER.to_owned()]).unwrap_err(),
+        CommunityBindingError::EmptyAudience
+    );
+    assert_eq!(
+        CommunityBinding::new(AUDIENCE.to_owned(), Vec::<String>::new()).unwrap_err(),
+        CommunityBindingError::EmptyIssuers
+    );
+    assert_eq!(
+        CommunityBinding::new(AUDIENCE.to_owned(), [String::new()]).unwrap_err(),
+        CommunityBindingError::EmptyIssuers
+    );
 }

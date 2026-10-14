@@ -243,7 +243,7 @@ pub async fn hydrate_for_write(
 ///
 /// `Ok(None)` if the pointer is absent (caller decides 404 vs first-push
 /// per call site). `Err(_)` on any below-pointer failure.
-async fn load_pointer(
+pub(super) async fn load_pointer(
     store: &GitStore,
     ctx: &TenantContext,
     owner: &str,

@@ -240,6 +240,56 @@ void main() {
     },
   );
 
+  test('tie_break_lower_id_wins_at_equal_second', () async {
+    // Relay retains `ORDER BY created_at DESC, id ASC` — the lower event ID
+    // wins at equal second. Pre-fix the manager kept the higher ID, which
+    // permanently disagreed with desktop post-#7805.
+    await setUpEnv();
+    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 0);
+    final manager = buildManager(relaySession: relay);
+    await manager.initialize();
+
+    // Deliver two equal-second events in higher-then-lower ID order via the
+    // live subscription and verify the lower-ID blob is the final state.
+    final higherIdEvent = sectionsEvent(
+      sections: [
+        {'id': 's-high', 'name': 'From Higher ID', 'order': 0},
+      ],
+      createdAt: 100,
+      id: 'zzzz',
+    );
+    final lowerIdEvent = sectionsEvent(
+      sections: [
+        {'id': 's-low', 'name': 'From Lower ID', 'order': 0},
+      ],
+      createdAt: 100,
+      id: 'aaaa',
+    );
+
+    relay.emit(higherIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(manager.store.sections.single.name, 'From Higher ID');
+
+    relay.emit(lowerIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(
+      manager.store.sections.single.name,
+      'From Lower ID',
+      reason: 'lower-ID event must win at equal second (relay id ASC order)',
+    );
+
+    // Re-delivery of the higher-ID event must NOT roll back.
+    relay.emit(higherIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(
+      manager.store.sections.single.name,
+      'From Lower ID',
+      reason: 'higher-ID event re-delivery must be rejected by tie-break guard',
+    );
+
+    manager.dispose(flushPending: false);
+  });
+
   test('backoff resets after full recovery so later failures start from the '
       'base delay', () async {
     await setUpEnv();

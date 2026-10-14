@@ -862,6 +862,9 @@ export function RepositoryFilesPanel({
                         accent={latestCommitProfile?.isAgent === true}
                         avatarUrl={latestCommitProfile?.avatarUrl ?? null}
                         displayName={latestCommitAuthorLabel}
+                        shape={
+                          latestCommitProfile?.isAgent ? "squircle" : "circle"
+                        }
                         size="sm"
                       />
                       <p className="min-w-0 flex-1 truncate text-foreground">

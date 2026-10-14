@@ -11,6 +11,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     required this.speakerLevel,
     required this.preparingResponse,
     required this.onTap,
+    this.contextualLabel,
     this.isSelf = false,
     this.frameSize = _huddleAvatarFrameSize,
   });
@@ -18,6 +19,9 @@ class _HuddleCallAvatar extends HookConsumerWidget {
   final String pubkey;
   final UserProfile? profile;
   final String? fallbackLabel;
+
+  /// The huddle-scoped identity label, when resolved.
+  final String? contextualLabel;
   final bool active;
   final double speakerLevel;
   final bool preparingResponse;
@@ -122,8 +126,10 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       pubkey: pubkey,
       profile: profile,
       fallbackLabel: fallbackLabel,
+      contextualLabel: contextualLabel,
       isSelf: isSelf,
     );
+    final isAgent = profile?.isAgent == true || fallbackLabel != null;
 
     final semanticStates = [
       label,
@@ -183,7 +189,14 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                             width: speakingRingSize,
                             height: speakingRingSize,
                             decoration: BoxDecoration(
-                              shape: BoxShape.circle,
+                              shape: isAgent
+                                  ? BoxShape.rectangle
+                                  : BoxShape.circle,
+                              borderRadius: isAgent
+                                  ? BorderRadius.circular(
+                                      speakingRingSize * 0.3,
+                                    )
+                                  : null,
                               color: context.colors.primary.withValues(
                                 alpha: 0.07,
                               ),
@@ -207,7 +220,14 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 width: avatarRadius * 2,
                                 height: avatarRadius * 2,
                                 decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
+                                  shape: isAgent
+                                      ? BoxShape.rectangle
+                                      : BoxShape.circle,
+                                  borderRadius: isAgent
+                                      ? BorderRadius.circular(
+                                          avatarRadius * 0.6,
+                                        )
+                                      : null,
                                   color: context.colors.primaryContainer,
                                 ),
                                 alignment: Alignment.center,
@@ -226,10 +246,11 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 backgroundColor:
                                     context.colors.primaryContainer,
                                 fallback: Icon(
-                                  LucideIcons.userRound,
+                                  BuzzIcons.userRound,
                                   size: fallbackIconSize,
                                   color: context.colors.onPrimaryContainer,
                                 ),
+                                isAgent: isAgent,
                               ),
                       ),
                     ],
@@ -249,8 +270,10 @@ String _huddleParticipantLabel({
   required UserProfile? profile,
   required String? fallbackLabel,
   required bool isSelf,
+  String? contextualLabel,
 }) {
   if (isSelf) return 'You';
+  if (contextualLabel != null) return contextualLabel;
   final profileName = profile?.displayName?.trim();
   final directoryName = fallbackLabel?.trim();
   return (profileName?.isNotEmpty == true ? profileName : null) ??

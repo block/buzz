@@ -710,7 +710,10 @@ test("hidden spoiler images are excluded from gallery navigation until revealed"
     .last();
   await expect(row).toBeVisible();
 
-  await row.locator(`img[src*="${SPOILER_VISIBLE_SHA}"]`).click();
+  const visibleImage = row.locator(`img[src*="${SPOILER_VISIBLE_SHA}"]`);
+  await visibleImage.scrollIntoViewIfNeeded();
+  await waitForAnimations(page);
+  await visibleImage.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(page.getByRole("button", { name: "Next image" })).toHaveCount(0);
@@ -723,7 +726,13 @@ test("hidden spoiler images are excluded from gallery navigation until revealed"
   await spoiler.click();
   await expect(spoiler).toHaveAttribute("data-revealed", "true");
 
-  await row.locator(`img[src*="${SPOILER_VISIBLE_SHA}"]`).click();
+  // The gallery snapshots visible images when opened; the state attribute
+  // changes before the spoiler image finishes its opacity transition.
+  await expect(spoiler.locator(`img[src*="${SPOILER_HIDDEN_SHA}"]`)).toHaveCSS(
+    "opacity",
+    "1",
+  );
+  await visibleImage.click();
   await expect(dialog).toBeVisible();
   await expect(page.getByRole("button", { name: "Next image" })).toBeVisible();
 });

@@ -45,6 +45,9 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "LC_ALL",
     "TMPDIR",
     "XDG_CONFIG_HOME",
+    // Explicit Buzz-owned OAuth root for named demo builds. The agent may spawn
+    // auth-capable child tools after clearing its ambient environment.
+    "BUZZ_AGENT_CONFIG_DIR",
     // SSH — required for git clone/push over SSH (git@github.com:...)
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
@@ -77,16 +80,11 @@ const PASSTHROUGH_ENV: &[&str] = &[
     // was configured correctly and the child could not see it.
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
-    // Buzz identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
-    // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
-    // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
-    // non-secret signed ownership attestation needed by portable owner-scoped
-    // CLI operations; MCP subprocesses are trusted like the agent runtime.
-    "NOSTR_PRIVATE_KEY",
+    // Git config/keyfile paths arrive explicitly in session/new mcpServers[].env.
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
-    // Agent display name — dev-mcp uses it as the git author name. On the
+    // Agent display name for tools. On the
     // Desktop path this arrives via the wire `mcpServers[].env` declaration
     // (which wins here anyway); the allowlist entry covers ACP clients that
     // spawn buzz-agent without declaring it.

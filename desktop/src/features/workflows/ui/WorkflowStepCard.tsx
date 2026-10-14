@@ -218,7 +218,7 @@ function StepConfigFields({
               onChange={(event) =>
                 onUpdate({ ...step, to: event.target.value })
               }
-              placeholder="e.g. {{trigger.author}} or hex pubkey"
+              placeholder="e.g. {{trigger.author}}, npub1…, or hex pubkey"
               value={step.to ?? ""}
             />
           </div>
@@ -311,7 +311,7 @@ function StepConfigFields({
               onChange={(event) =>
                 onUpdate({ ...step, from: event.target.value })
               }
-              placeholder="Pubkey or role"
+              placeholder="npub1…, hex pubkey, or role"
               value={step.from ?? ""}
             />
           </div>

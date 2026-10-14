@@ -1,7 +1,7 @@
 //! Locked-card import tests for `decode_snapshot_for_import`.
 //!
 //! Kept in a sibling file so `snapshot/tests.rs` stays under the
-//! 1000-line gate; `#[path]`-included from there as a child module,
+//! 1500-line gate; `#[path]`-included from there as a child module,
 //! so `super::*` still resolves to the shared test helpers.
 
 use super::*;
@@ -16,6 +16,7 @@ use crate::managed_agents::agent_snapshot_envelope::{
 /// agent-endpoint unlock path resolves exactly as production does.
 fn record_for(agent: &nostr::Keys) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         pubkey: agent.public_key().to_hex(),
         slug: None,
         persona_id: Some("locked-test".to_string()),

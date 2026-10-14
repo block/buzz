@@ -29,8 +29,10 @@ export function PersonaProviderApiKeyField({
   isInherited,
   inheritedLabel,
   isRequired,
+  isValidating = false,
   label,
   onValueChange,
+  validationMessage,
   value,
 }: {
   disabled: boolean;
@@ -47,9 +49,13 @@ export function PersonaProviderApiKeyField({
   inheritedLabel: string;
   /** True when the key is required and not satisfied anywhere. */
   isRequired: boolean;
+  /** True while the provider is checking the current key. */
+  isValidating?: boolean;
   /** Display label, e.g. "Anthropic API Key". */
   label: string;
   onValueChange: (next: string) => void;
+  /** User-facing validation error for the current key. */
+  validationMessage?: string | null;
   /** Current agent-local value of the secret env var. */
   value: string;
 }) {
@@ -59,6 +65,12 @@ export function PersonaProviderApiKeyField({
   const hintId = envVarName
     ? `persona-provider-api-key-hint-${uid}`
     : undefined;
+  const validationId =
+    isValidating || validationMessage
+      ? `persona-provider-api-key-validation-${uid}`
+      : undefined;
+  const describedBy =
+    [hintId, validationId].filter(Boolean).join(" ") || undefined;
 
   return (
     <div className="space-y-1.5">
@@ -77,7 +89,8 @@ export function PersonaProviderApiKeyField({
         )}
       >
         <Input
-          aria-describedby={hintId}
+          aria-describedby={describedBy}
+          aria-invalid={validationMessage ? true : undefined}
           autoComplete="off"
           className={cn(
             "h-8 flex-1 px-0 py-0 leading-6",
@@ -104,6 +117,15 @@ export function PersonaProviderApiKeyField({
           )}
         </button>
       </div>
+      {isValidating ? (
+        <p className="text-xs text-muted-foreground" id={validationId}>
+          Checking API key…
+        </p>
+      ) : validationMessage ? (
+        <p className="text-xs text-destructive" id={validationId} role="alert">
+          {validationMessage}
+        </p>
+      ) : null}
     </div>
   );
 }

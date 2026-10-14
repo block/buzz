@@ -13,13 +13,18 @@ void main() {
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
       '<text x="16" y="24" text-anchor="middle">🦝</text></svg>';
 
-  Widget subject(String? imageUrl, {Color? backgroundColor}) => ProviderScope(
+  Widget subject(
+    String? imageUrl, {
+    Color? backgroundColor,
+    bool isAgent = false,
+  }) => ProviderScope(
     child: MaterialApp(
       home: AvatarImage(
         imageUrl: imageUrl,
         radius: 16,
         backgroundColor: backgroundColor,
         fallback: const Text('R'),
+        isAgent: isAgent,
       ),
     ),
   );
@@ -31,6 +36,14 @@ void main() {
       isFalse,
     );
     expect(isCacheablePushAvatarSource('data:image/png;base64,%%%'), isFalse);
+  });
+
+  testWidgets('clips agents to a 30 percent squircle', (tester) async {
+    await tester.pumpWidget(subject(null, isAgent: true));
+
+    expect(find.byType(CircleAvatar), findsNothing);
+    final clip = tester.widget<ClipRRect>(find.byType(ClipRRect));
+    expect(clip.borderRadius, BorderRadius.circular(9.6));
   });
 
   testWidgets('renders raccoon percent-encoded SVG data avatar', (

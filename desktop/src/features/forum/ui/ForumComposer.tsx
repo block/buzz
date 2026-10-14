@@ -2,16 +2,18 @@ import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
 import { ChevronDown } from "lucide-react";
+import { toast } from "sonner";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
+import { claimDraftSend, useDrafts } from "@/features/messages/lib/useDrafts";
+import { useDraftPersistLifecycle } from "@/features/messages/ui/useDraftPersistSnapshot";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
+import { useComposerFocusOwnership } from "@/features/messages/lib/useComposerFocusOwnership";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import {
-  hasMentionClipboardHtml,
-  normalizeMentionClipboardHtml,
-} from "@/features/messages/lib/normalizeMentionClipboard";
+import { hasMentionClipboardHtml } from "@/features/messages/lib/normalizeMentionClipboard";
+import { handleMentionClipboardPaste } from "@/features/messages/lib/mentionClipboardPaste";
 import {
   type LinkSelectionInfo,
   useRichTextEditor,
@@ -20,6 +22,7 @@ import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
+import { NonMemberMentionDialog } from "@/features/messages/ui/NonMemberMentionDialog";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -34,8 +37,20 @@ import { ForumComposerAutocompletes } from "./ForumComposerAutocompletes";
 import { ForumComposerCompactLayout } from "./ForumComposerCompactLayout";
 import { ForumComposerMediaStatus } from "./ForumComposerMediaStatus";
 import { useCompactComposerInteractions } from "./useCompactComposerInteractions";
+import { useForumMentionPreparation } from "./useForumMentionPreparation";
+import { useForumDraftRecovery } from "./useForumDraftRecovery";
 
-export function ForumComposer({
+export function ForumComposer(props: ForumComposerProps) {
+  return (
+    <ForumComposerVisit
+      key={`${props.channelId ?? ""}:${props.draftKey ?? ""}`}
+      {...props}
+    />
+  );
+}
+
+function ForumComposerVisit({
+  draftKey,
   channelId = null,
   channelType,
   members,
@@ -52,6 +67,14 @@ export function ForumComposer({
   autocompleteBelow = false,
   profiles,
 }: ForumComposerProps) {
+  const drafts = useDrafts();
+  const mountedRef = React.useRef(false);
+  React.useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [content, setContent] = React.useState("");
   const contentRef = React.useRef(content);
   contentRef.current = content;
@@ -73,8 +96,20 @@ export function ForumComposer({
   }, [compact]);
 
   const mentions = useMentions(channelId, members, profiles, { channelType });
+  const { prepareMentionPubkeys, nonMemberPromptProps } =
+    useForumMentionPreparation(channelId, channelType, mentions);
   const channelLinks = useChannelLinks();
   const media = useMediaUpload();
+  const expectedMediaRef = React.useRef(media.pendingImeta);
+  const pendingMediaRestoreRef = React.useRef(false);
+  const replacePendingImeta = React.useCallback(
+    (imeta: typeof media.pendingImeta) => {
+      expectedMediaRef.current = imeta;
+      pendingMediaRestoreRef.current = true;
+      media.setPendingImeta(imeta);
+    },
+    [media.setPendingImeta],
+  );
   const { handlePaperclipClick, handleToolbarMouseDown, shouldIgnoreBlur } =
     useCompactComposerInteractions({
       compact,
@@ -101,6 +136,8 @@ export function ForumComposer({
     mentions.isMentionOpen || channelLinks.isChannelOpen;
 
   const submitMessageRef = React.useRef<() => void>(() => {});
+  const formRef = React.useRef<HTMLFormElement>(null);
+  const composerOwnsFocus = useComposerFocusOwnership(formRef);
 
   // Set after `useLinkEditor` exists; the editor's link-click handler
   // delegates through this ref to break the hook ordering cycle.
@@ -118,6 +155,7 @@ export function ForumComposer({
     mentionNames: mentions.knownNames,
     channelNames: channelLinks.knownChannelNames,
     messageLinkChannels: channelLinks.channels,
+    getMentionIdentities: mentions.getMentionIdentities,
     onSubmit: () => submitMessageRef.current(),
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
@@ -127,9 +165,77 @@ export function ForumComposer({
       const markdown = richText.getMarkdown();
       setContent(markdown);
       contentRef.current = markdown;
+      draftLifecycle.trackAuthoredContent(markdown);
 
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
+    },
+  });
+
+  const spoileredUrlsRef = React.useRef(new Set<string>());
+  const draftLifecycle = useDraftPersistLifecycle({
+    effectiveDraftKey: draftKey,
+    channelId,
+    loadDraft: drafts.loadDraft,
+    persistDraft: drafts.persistDraft,
+    getMentionRefs: mentions.getDraftMentionRefs,
+    restoreMentionRefs: mentions.restoreDraftMentionRefs,
+    livePendingImeta: media.pendingImeta,
+    setPendingImeta: replacePendingImeta,
+    setContent: (value) => {
+      contentRef.current = value;
+      setContent(value);
+      richText.setContent(value);
+    },
+    clearContent: () => {
+      contentRef.current = "";
+      setContent("");
+      richText.clearContent();
+    },
+    setSpoileredAttachmentUrls: () => {},
+    spoileredAttachmentUrlsRef: spoileredUrlsRef,
+    syncComposerContentFromEditor: () => contentRef.current,
+  });
+
+  // Completed media changes are authored intent too, including add -> remove.
+  // Programmatic restoration/clear goes through replacePendingImeta instead.
+  React.useLayoutEffect(() => {
+    if (pendingMediaRestoreRef.current) {
+      if (
+        JSON.stringify(media.pendingImeta) !==
+        JSON.stringify(expectedMediaRef.current)
+      )
+        return;
+      pendingMediaRestoreRef.current = false;
+    }
+    if (
+      JSON.stringify(expectedMediaRef.current) !==
+      JSON.stringify(media.pendingImeta)
+    ) {
+      expectedMediaRef.current = media.pendingImeta;
+      draftLifecycle.trackAuthoredContent(contentRef.current);
+    }
+  }, [media.pendingImeta, draftLifecycle.trackAuthoredContent]);
+  React.useLayoutEffect(() => {
+    if (media.isUploading)
+      draftLifecycle.trackAuthoredContent(contentRef.current);
+  }, [media.isUploading, draftLifecycle.trackAuthoredContent]);
+  const captureRecovery = useForumDraftRecovery({
+    draftKey,
+    channelId,
+    getComposerRevision: draftLifecycle.getComposerRevision,
+    isEmpty: () =>
+      !contentRef.current &&
+      media.pendingImetaRef.current.length === 0 &&
+      !isUploadingRef.current,
+    restore: (snapshot) => {
+      draftLifecycle.runComposerUpdate(() => {
+        setContent(snapshot.content);
+        contentRef.current = snapshot.content;
+        richText.setContent(snapshot.content);
+        replacePendingImeta(snapshot.pendingImeta);
+        mentions.restoreDraftMentionRefs(snapshot.mentionRefs);
+      }, snapshot.pendingImeta);
     },
   });
 
@@ -233,15 +339,28 @@ export function ForumComposer({
         return;
       }
 
+      claimDraftSend(draftKey);
+      const composerRevision = draftLifecycle.getComposerRevision();
       isSubmissionPendingRef.current = true;
       setIsSubmissionPending(true);
       mentions.cancelMentionAutocomplete();
       channelLinks.clearChannels();
       setIsEmojiPickerOpen(false);
       try {
-        const pubkeys = await mentions.revalidateMentionPubkeys(
+        // A pasted mention's identity check can still be in flight; extracting
+        // first would publish the label with no `p` tag. Bounded internally.
+        await mentions.settlePendingMentionBindings();
+        // This await precedes the preparation adapter's own visit fence.
+        if (
+          !mountedRef.current ||
+          draftLifecycle.getComposerRevision() !== composerRevision
+        )
+          return;
+        const pubkeys = await prepareMentionPubkeys(
           mentions.extractMentionPubkeys(trimmed),
+          trimmed,
         );
+        if (pubkeys === null || !mountedRef.current) return;
 
         // Reuse the shared send-path builder so forum/notes posts emit the same
         // body + imeta as chat: generic files become `[filename](url)` links with a
@@ -252,47 +371,60 @@ export function ForumComposer({
           currentPendingImeta,
         );
 
-        // Save draft state so we can restore on failure.
-        const savedContent = contentRef.current;
-        const savedImeta = [...currentPendingImeta];
-
-        setContent("");
-        contentRef.current = "";
-        richText.clearContent();
-        media.setPendingImeta([]);
-        mentions.clearMentions();
+        // Publication has been authorized for this visit. Preserve the exact
+        // snapshot before the existing optimistic clear, including selected refs.
+        const recoverDraft = captureRecovery({
+          content: contentRef.current,
+          pendingImeta: [...currentPendingImeta],
+          mentionRefs: mentions.getDraftMentionRefs(contentRef.current),
+        });
+        draftLifecycle.runComposerUpdate(() => {
+          setContent("");
+          contentRef.current = "";
+          richText.clearContent();
+          replacePendingImeta([]);
+          mentions.clearMentions();
+        }, []);
+        if (draftKey) drafts.clearDraft(draftKey);
         channelLinks.clearChannels();
         setIsEmojiPickerOpen(false);
-
         try {
           await submitter(finalContent, pubkeys, mediaTags);
+          if (!mountedRef.current) return;
           setSubmitMode("primary");
           if (compact) setIsCompactExpanded(false);
-        } catch {
-          setContent(savedContent);
-          contentRef.current = savedContent;
-          richText.setContent(savedContent);
-          media.setPendingImeta(savedImeta);
-          if (compact) setIsCompactExpanded(true);
+        } catch (failure) {
+          // Draft authority survives the visit; editor ownership does not.
+          recoverDraft();
+          throw failure;
         }
-      } catch {
-        // Keep the draft intact when authorization refresh fails.
+      } catch (error) {
+        // Authorization, ambiguous-name and transport failures remain visible
+        // only in the originating visit; draft recovery is handled above.
+        if (mountedRef.current)
+          toast.error(error instanceof Error ? error.message : String(error));
       } finally {
         isSubmissionPendingRef.current = false;
-        setIsSubmissionPending(false);
+        if (mountedRef.current) setIsSubmissionPending(false);
       }
     },
     [
       compact,
+      draftKey,
+      drafts.clearDraft,
+      draftLifecycle.runComposerUpdate,
+      draftLifecycle.getComposerRevision,
+      mentions.getDraftMentionRefs,
+      captureRecovery,
       media.pendingImetaRef,
-      media.setPendingImeta,
+      replacePendingImeta,
       mentions.cancelMentionAutocomplete,
       mentions.extractMentionPubkeys,
-      mentions.revalidateMentionPubkeys,
+      mentions.settlePendingMentionBindings,
+      prepareMentionPubkeys,
       mentions.clearMentions,
       channelLinks.clearChannels,
       richText.clearContent,
-      richText.setContent,
     ],
   );
   const submitSelectedMessage = React.useCallback(() => {
@@ -356,6 +488,10 @@ export function ForumComposer({
   // ── Media paste ─────────────────────────────────────────────────────
   const uploadFileRef = React.useRef(media.uploadFile);
   uploadFileRef.current = media.uploadFile;
+  const bindMentionIdentitiesRef = React.useRef(
+    mentions.bindPastedMentionIdentities,
+  );
+  bindMentionIdentitiesRef.current = mentions.bindPastedMentionIdentities;
 
   React.useEffect(() => {
     if (!richText.editor) return;
@@ -376,12 +512,15 @@ export function ForumComposer({
             return true;
           }
 
-          const html = event.clipboardData?.getData("text/html");
-          if (html && hasMentionClipboardHtml(html)) {
-            const cleanHtml = normalizeMentionClipboardHtml(html);
-            event.preventDefault();
-            _view.pasteHTML(cleanHtml);
-            return true;
+          const clipboardData = event.clipboardData;
+          const html = clipboardData?.getData("text/html");
+          if (clipboardData && html && hasMentionClipboardHtml(html)) {
+            return handleMentionClipboardPaste({
+              bindMentionIdentities: bindMentionIdentitiesRef.current,
+              clipboardData,
+              preventDefault: () => event.preventDefault(),
+              view: _view,
+            });
           }
 
           return false;
@@ -500,6 +639,7 @@ export function ForumComposer({
         }}
         onFocusCapture={expandCompactComposer}
         onSubmit={handleSubmit}
+        ref={formRef}
       >
         {media.isDragOver && <DropZoneOverlay />}
         {isCompactLayout ? (
@@ -526,6 +666,7 @@ export function ForumComposer({
                   ? channelLinks.channelSuggestions
                   : []
               }
+              composerOwnsFocus={composerOwnsFocus}
               mentionSelectedIndex={mentions.mentionSelectedIndex}
               mentionSuggestions={
                 mentions.isMentionOpen ? mentions.suggestions : []
@@ -631,6 +772,13 @@ export function ForumComposer({
           </>
         )}
       </form>
+      <NonMemberMentionDialog
+        {...nonMemberPromptProps}
+        onRestoreFocus={() => {
+          if (mountedRef.current && !isSubmissionPendingRef.current)
+            richText.focus();
+        }}
+      />
       {!isSubmissionPending && linkEditor.card}
       {!isSubmissionPending && linkEditor.dialog}
     </>

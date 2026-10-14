@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../features/age_gate/age_signal_provider.dart';
 import 'huddle_auth.dart';
 import 'huddle_media.dart';
 import 'huddle_transport.dart';
@@ -184,6 +185,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   StreamSubscription<HuddleTransportError>? _transportIssueSubscription;
   StreamSubscription<HuddlePeerEvent>? _peerEventSubscription;
   var _generation = 0;
+  bool _ageRestricted = false;
   var _receivedFrames = 0;
   var _sentFrames = 0;
   static const _playbackQueueCapacityPerPeer = 10;
@@ -201,6 +203,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
 
   @override
   HuddleSessionState build() {
+    _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
     ref.onDispose(() {
       _generation += 1;
       unawaited(_disposeResources());
@@ -214,6 +217,9 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     bool isCreator = false,
     String? startedEventId,
   }) async {
+    if (_ageRestricted) {
+      throw StateError('Huddle unavailable while age-restricted');
+    }
     if (state.isInSession) {
       if (state.ephemeralChannelId == parameters.ephemeralChannelId) return;
       state = state.copyWith(

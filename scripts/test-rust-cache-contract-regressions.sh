@@ -139,7 +139,7 @@ YAML
 run_contract >/dev/null
 rm -rf "$tmp/.github/actions" "$tmp/.github/workflows/new-cache-user.yaml"
 
-python3 - "$tmp/.github/workflows/ci.yml" <<'PY'
+python3 - "$tmp/.github/workflows/_ci-rust.yml" <<'PY'
 import pathlib
 import sys
 

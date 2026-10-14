@@ -10,10 +10,13 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555"; // sadscan:disable sq
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
 fn local_in_app() -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: UUID.to_string(),
         display_name: "Local".to_string(),
         avatar_url: None,
         system_prompt: "local prompt".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("opus".to_string()),
         provider: Some("anthropic".to_string()),
@@ -38,10 +41,13 @@ fn local_in_app() -> AgentDefinition {
 /// slug = Some(d-tag), empty env_vars, source_team None.
 fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
         system_prompt: "remote prompt".to_string(),
+        acp_command: None,
         runtime: Some("acp".to_string()),
         model: Some("sonnet".to_string()),
         provider: Some("openai".to_string()),
@@ -65,13 +71,16 @@ fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
 #[test]
 fn in_app_persona_matches_existing_uuid_and_patches() {
     let mut personas = vec![local_in_app()];
-    apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
+    let mut inbound = inbound_for(UUID, "Remote");
+    inbound.acp_command = Some("buzz-janet-acp".to_string());
+    apply_inbound_persona(&mut personas, inbound);
 
     assert_eq!(personas.len(), 1, "no duplicate row");
     let p = &personas[0];
     // Projected fields patched.
     assert_eq!(p.display_name, "Remote");
     assert_eq!(p.system_prompt, "remote prompt");
+    assert_eq!(p.acp_command.as_deref(), Some("buzz-janet-acp"));
     assert_eq!(p.provider, Some("openai".to_string()));
     // Local identity + secrets + lineage preserved.
     assert_eq!(p.id, UUID);
@@ -90,12 +99,14 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     let mut local = local_in_app();
     local.respond_to = Some("owner-only".to_string());
     local.parallelism = Some(2);
+    local.session_policy = crate::managed_agents::AcpSessionPolicy::Channel;
     let mut personas = vec![local];
 
     let mut inbound = inbound_for(UUID, "Remote");
     inbound.respond_to = Some("allowlist".to_string());
     inbound.respond_to_allowlist = vec!["a".repeat(64)];
     inbound.parallelism = Some(8);
+    inbound.session_policy = crate::managed_agents::AcpSessionPolicy::Thread;
     apply_inbound_persona(&mut personas, inbound);
 
     assert_eq!(personas.len(), 1, "no duplicate row");
@@ -103,10 +114,20 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     assert_eq!(p.respond_to, Some("allowlist".to_string()));
     assert_eq!(p.respond_to_allowlist, vec!["a".repeat(64)]);
     assert_eq!(p.parallelism, Some(8));
+    assert_eq!(
+        p.session_policy,
+        crate::managed_agents::AcpSessionPolicy::Thread
+    );
     // A quad-absent inbound also applies (clears), same as prompt/model.
     apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
     assert_eq!(personas[0].respond_to, None);
     assert_eq!(personas[0].parallelism, None);
+    // The default channel policy also represents an inbound event that omitted
+    // session_policy, so it must clear a previously stored thread policy.
+    assert_eq!(
+        personas[0].session_policy,
+        crate::managed_agents::AcpSessionPolicy::Channel
+    );
 }
 
 #[test]
@@ -161,6 +182,8 @@ const AGENT_PUBKEY: &str = "agentpubkeyhex00000000000000000000000000000000000000
 /// event must NEVER be able to overwrite.
 fn local_agent() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: AGENT_PUBKEY.to_string(),
         name: "Local Agent".to_string(),
         persona_id: Some("persona-local".to_string()),
@@ -914,4 +937,57 @@ fn inbound_definition_less_agent_accepts_visible_multiline_prompt() {
     );
 
     assert!(validate_inbound_managed_agent_definition(&inbound).is_ok());
+}
+
+#[test]
+fn shared_transport_redaction_preserves_local_override_but_explicit_stock_resets() {
+    use crate::managed_agents::persona_events::{build_persona_event, persona_from_event};
+    let keys = nostr::Keys::generate();
+    let mut local = local_in_app();
+    local.acp_command = Some("/opt/custom-acp".into());
+    let mut published = local.clone();
+    published.shared = true;
+    let event = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    assert!(!event.content.contains("/opt/custom-acp"));
+    let mut personas = vec![local];
+    for _ in 0..2 {
+        apply_inbound_persona(&mut personas, persona_from_event(&event).unwrap());
+        assert_eq!(personas[0].acp_command.as_deref(), Some("/opt/custom-acp"));
+    }
+    let mut fresh_device = Vec::new();
+    apply_inbound_persona(&mut fresh_device, persona_from_event(&event).unwrap());
+    assert_eq!(fresh_device[0].acp_command, None);
+    // Redaction must not preserve a stale portable wrapper.
+    personas[0].acp_command = Some("buzz-old-acp".into());
+    apply_inbound_persona(&mut personas, persona_from_event(&event).unwrap());
+    assert_eq!(personas[0].acp_command, None);
+    // Stock is normalized to None by the store, but shared publication makes
+    // the reset explicit so it also replaces an owner's legacy local command.
+    personas[0].acp_command = Some("/opt/custom-acp".into());
+    published.acp_command = None;
+    let reset = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    apply_inbound_persona(&mut personas, persona_from_event(&reset).unwrap());
+    assert_eq!(personas[0].acp_command.as_deref(), Some("buzz-acp"));
+    // Non-catalog owner-sync keeps both legacy custom values and clears.
+    published.shared = false;
+    published.acp_command = Some("/opt/other-acp".into());
+    let custom = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    apply_inbound_persona(&mut personas, persona_from_event(&custom).unwrap());
+    assert_eq!(personas[0].acp_command.as_deref(), Some("/opt/other-acp"));
+    published.acp_command = None;
+    let clear = build_persona_event(&published)
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+    apply_inbound_persona(&mut personas, persona_from_event(&clear).unwrap());
+    assert_eq!(personas[0].acp_command, None);
 }

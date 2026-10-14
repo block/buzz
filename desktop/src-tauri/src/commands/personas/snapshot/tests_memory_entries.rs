@@ -1,6 +1,6 @@
 //! Tests for `memory_entries_from_listing` — the shared level → entries
 //! selection used by both snapshot export and card minting. Split from
-//! `tests.rs` to keep that file under the 1000-line gate; `#[path]`-included
+//! `tests.rs` to keep that file under the 1500-line gate; `#[path]`-included
 //! from there as a child module, so `super::*` resolves to `tests`'s parent
 //! scope re-exports.
 

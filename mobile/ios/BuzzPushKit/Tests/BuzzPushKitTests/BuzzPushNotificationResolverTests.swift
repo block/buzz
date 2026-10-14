@@ -18,6 +18,10 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
   static let relayPrivateKey = String(repeating: "0", count: 63) + "3"
   static let gatewayBody = "Reconnect to your relay now"
   static let channelID = "123e4567-e89b-42d3-a456-426614174000"
+  static let unnamedSenderHex =
+    "aa4fc8665f5696e33db7e1a572e3b0f5b3d615837b0f362dcb1c8068b098c7b4"
+  static let unnamedSenderNpub =
+    "npub14f8usejl26twx0dhuxjh9cas7keav9vr0v8nvtwtrjqx3vycc76qqh9nsy"
 
   override func setUp() {
     super.setUp()
@@ -129,6 +133,35 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result?.0.body, "lower ID")
   }
 
+  func testDecodeResolutionSenderTitlesCanonicalizeKeysOrFallBackToNeutral() {
+    // The sender-identity presentation boundary: a verifiable key renders
+    // as the same compact npub whether it arrives as hex or as an npub, and
+    // an unverifiable key — including radix impostors like "+a"×32 that
+    // parse as hex pairs but are not literal hex keys — gets the neutral
+    // identity, never raw key material, while body, subtitle, and internal
+    // payload fields pass through untouched. Malformed-input classification
+    // itself is pinned at the codec (Bech32Tests); named senders winning
+    // over these labels is covered by the cached-profile resolve tests.
+    let senders: [(pubkey: String, title: String)] = [
+      (Self.unnamedSenderHex, "npub14f8…9nsy"),
+      (Self.unnamedSenderNpub, "npub14f8…9nsy"),
+      ("author-pubkey", "Someone"),
+      (String(repeating: "+a", count: 32), "Someone"),
+    ]
+    for sender in senders {
+      let result = BuzzPushNotificationResolver.decodeResolution(
+        events: [event(pubkey: sender.pubkey, content: "Preview")],
+        community: community()
+      )
+
+      XCTAssertEqual(result?.0.title, sender.title, "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.body, "Preview", "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.subtitle, "Community", "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.senderPubkey, sender.pubkey, "pubkey: \(sender.pubkey)")
+      XCTAssertEqual(result?.0.threadIdentifier, "community-id", "pubkey: \(sender.pubkey)")
+    }
+  }
+
   func testResolveSucceedsAndMutatesGatewayContent() throws {
     let event = try JSONDecoder().decode(
       VerifiedNostrEvent.self,
@@ -146,7 +179,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
 
     XCTAssertNotEqual(result.title, Self.gatewayBody)
     XCTAssertNotEqual(result.body, Self.gatewayBody)
-    XCTAssertEqual(result.title, String(event.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "npub1ccz…mnyd")
     XCTAssertEqual(result.body, "Hello Buzz")
     XCTAssertEqual(result.subtitle, "Community")
     XCTAssertEqual(
@@ -559,7 +592,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, String(message.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "npub1ccz…mnyd")
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.subtitle, "Community")
     XCTAssertEqual(result.body, "Fallback content")
@@ -602,7 +635,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, String(message.pubkey.prefix(8)) + "…")
+    XCTAssertEqual(result.title, "npub1ccz…mnyd")
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.body, "Bounded fallback")
     XCTAssertEqual(URLProtocolStub.requests.count, 2)

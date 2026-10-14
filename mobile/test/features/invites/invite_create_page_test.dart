@@ -5,11 +5,12 @@ import 'package:buzz/features/invites/invite_create_provider.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 void main() {
@@ -133,8 +134,8 @@ void main() {
             .dx,
       ),
     );
-    expect(tester.widget<Icon>(find.byIcon(LucideIcons.share2)).size, 22);
-    expect(tester.widget<Icon>(find.byIcon(LucideIcons.copy)).size, 22);
+    expect(tester.widget<Icon>(find.byIcon(BuzzIcons.share2)).size, 22);
+    expect(tester.widget<Icon>(find.byIcon(BuzzIcons.copy)).size, 22);
     final settingsDivider = find.descendant(
       of: find.byKey(const Key('community-invite-link-settings')),
       matching: find.byType(Divider),
@@ -162,7 +163,7 @@ void main() {
       find.byKey(const Key('community-invite-resolved-$pastedPubkey')),
       findsOneWidget,
     );
-    expect(find.text(shortCommunityInviteNpub(pastedPubkey)), findsOneWidget);
+    expect(find.text(shortPubkey(pastedPubkey)), findsOneWidget);
     expect(find.text('Resolved person'), findsNothing);
     expect(find.text('person@example.com'), findsNothing);
     expect(
@@ -170,7 +171,7 @@ void main() {
       findsNothing,
     );
     expect(find.text('Role'), findsOneWidget);
-    expect(find.byIcon(LucideIcons.shield), findsNothing);
+    expect(find.byIcon(BuzzIcons.shield), findsNothing);
     final personDivider = find.descendant(
       of: find.byKey(const Key('community-invite-person-card')),
       matching: find.byType(Divider),
@@ -270,7 +271,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Profile not found'), findsNothing);
-    expect(find.text(shortCommunityInviteNpub(pastedPubkey)), findsOneWidget);
+    expect(find.text(shortPubkey(pastedPubkey)), findsOneWidget);
     expect(find.byKey(const Key('community-invite-submit')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('community-invite-submit')));
@@ -377,7 +378,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Limit number of uses'), findsNWidgets(2));
-    expect(find.byIcon(LucideIcons.check), findsOneWidget);
+    expect(find.byIcon(BuzzIcons.check), findsOneWidget);
     await tester.tap(find.byKey(const Key('community-invite-option-5-uses')));
     await tester.pumpAndSettle();
 
@@ -389,7 +390,7 @@ void main() {
     await tester.tap(find.byKey(const Key('community-invite-expiry-setting')));
     await tester.pumpAndSettle();
     expect(find.text('Expires after'), findsNWidgets(2));
-    expect(find.byIcon(LucideIcons.check), findsOneWidget);
+    expect(find.byIcon(BuzzIcons.check), findsOneWidget);
     await tester.tap(find.byKey(const Key('community-invite-option-7-days')));
     await tester.pumpAndSettle();
 

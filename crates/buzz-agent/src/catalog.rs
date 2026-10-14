@@ -12,7 +12,7 @@
 //! This helper never opens a browser. Callers choose whether to reject, degrade,
 //! or start a separate interactive authentication flow.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde_json::Value;
@@ -27,8 +27,9 @@ use crate::{
 /// A discovered model entry: `id` is the picker value (the raw endpoint id or
 /// Unity Catalog model-service FQN, and the wire/config value), `name` is the
 /// display label. Databricks catalog APIs do not provide a consistently useful
-/// picker label, so discovery curates names from the capability manifest when
-/// an exact known id exists and otherwise uses the raw id.
+/// picker label, so discovery derives `name` as exact record → unique alias →
+/// generated label grammar (known `label_family_tokens` families only) → raw
+/// id. Adding a vendor means adding one `label_family_tokens` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
     pub id: String,
@@ -80,12 +81,10 @@ const UNITY_CATALOG_DESCRIPTOR: CatalogDescriptor<ModelEntry> = CatalogDescripto
     parse_page: parse_uc_model_services_page,
 };
 
-/// Curated display label for a discovered Databricks endpoint or model-service
-/// id. Unknown ids deliberately pass through unchanged.
+/// Display label for a discovered Databricks endpoint or model-service id. Ids
+/// the label grammar cannot fully parse deliberately pass through unchanged.
 fn curated_model_name(id: &str) -> String {
-    crate::model_capabilities::databricks_registry_label(id)
-        .unwrap_or(id)
-        .to_string()
+    crate::model_capabilities::databricks_registry_label(id).unwrap_or_else(|| id.to_string())
 }
 
 /// Fallback catalog used only when both authenticated Databricks v2 catalogs
@@ -133,26 +132,52 @@ pub(crate) fn is_chat_capable_endpoint(name: &str) -> bool {
 /// # Panics
 /// Never panics.
 pub async fn discover_databricks_models(cfg: &Config) -> Result<Vec<ModelEntry>, AgentError> {
-    discover_databricks_models_with_token_source(cfg, build_token_source(cfg)?).await
+    discover_databricks_models_with_cache_dir(cfg, None).await
+}
+
+/// Discover Databricks models while storing PKCE credentials under an explicit
+/// cache root. `None` preserves buzz-agent's production cache location.
+pub async fn discover_databricks_models_with_cache_dir(
+    cfg: &Config,
+    cache_dir: Option<&Path>,
+) -> Result<Vec<ModelEntry>, AgentError> {
+    let token_source = if matches!(cfg.provider, Provider::Databricks | Provider::DatabricksV2)
+        && cfg.api_key.is_empty()
+    {
+        crate::auth::PkceOAuthTokenSource::new(crate::llm::databricks_pkce_config(
+            &cfg.base_url,
+            cache_dir.map(Path::to_path_buf),
+        ))?
+    } else {
+        build_token_source(cfg)?
+    };
+    discover_databricks_models_with_token_source(cfg, token_source).await
 }
 
 async fn discover_databricks_models_with_token_source(
     cfg: &Config,
     token_source: Arc<dyn TokenSource>,
 ) -> Result<Vec<ModelEntry>, AgentError> {
+    discover_databricks_models_with_client(cfg, token_source, &Client::new()).await
+}
+
+pub(crate) async fn discover_databricks_models_with_client(
+    cfg: &Config,
+    token_source: Arc<dyn TokenSource>,
+    http: &Client,
+) -> Result<Vec<ModelEntry>, AgentError> {
     let mut bearer = token_source.bearer_no_browser().await?;
-    let http = Client::new();
     let host = cfg.base_url.trim_end_matches('/');
     let mut refreshed = false;
 
     loop {
         let result = match cfg.provider {
-            Provider::Databricks => fetch_v1_models(&http, host, &bearer)
+            Provider::Databricks => fetch_v1_models(http, host, &bearer)
                 .await
                 .map(|models| apply_model_filter(models, cfg.databricks_model_filter.as_ref())),
             Provider::DatabricksV2 => {
                 fetch_v2_models(
-                    &http,
+                    http,
                     host,
                     &bearer,
                     cfg.databricks_model_filter.as_ref(),
@@ -1877,7 +1902,7 @@ mod tests {
         // `name` is the curated label + provenance suffix, not the raw id.
         assert!(models.iter().all(|model| {
             let label = crate::model_capabilities::databricks_registry_label(&model.id)
-                .unwrap_or(model.id.as_str());
+                .unwrap_or_else(|| model.id.clone());
             model.name == format!("{label}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}")
         }));
     }

@@ -186,9 +186,9 @@ pub(super) enum DirectoryScope {
 /// - Phase 1 (parallel): member-chain (kind:39002→kind:39000), the non-member
 ///   metadata source (pending-owned ids when member-only, else the all-open
 ///   kind:39000 scan), and the hidden-DM snapshot (kind:30622).
-/// - Phase 2 (parallel): member counts (kind:39002 batch) and last-message
-///   timestamps (bounded per-channel human-visible activity batches), fanned
-///   out over the merged set. Member-count failures degrade to zero; timestamp
+/// - Phase 2 (parallel): missing member counts (kind:39002 batch) and last-message
+///   timestamps (bounded per-channel human-visible activity batches). Reuse the
+///   member-chain rosters; missing-count failures degrade to zero. Timestamp
 ///   failures abort so cached recency is never replaced by a false
 ///   authoritative empty result.
 pub(super) async fn fetch_channels(
@@ -263,7 +263,7 @@ pub(super) async fn fetch_channels(
                 Vec::new()
             };
 
-            Ok::<_, String>(meta_events)
+            Ok::<_, String>((meta_events, collect_members_by_channel(&member_events)))
         },
         // Step 3: non-member channel metadata (kind:39000).
         // - IncludeOpenDirectory: scan ALL open channels so the discovery
@@ -321,7 +321,7 @@ pub(super) async fn fetch_channels(
     #[cfg(debug_assertions)]
     let t_phase1 = _profile_start.elapsed();
 
-    let meta_events = member_chain_result?;
+    let (meta_events, mut membership) = member_chain_result?;
     let open_meta_events = open_meta_result?;
     // hidden_dms is already a resolved HashSet (tolerant path above)
 
@@ -371,8 +371,8 @@ pub(super) async fn fetch_channels(
         }
     }
 
-    // Phase 2 — concurrent: member counts (step 4) and last-message timestamps
-    // (step 5). Member-count failures degrade to zero. Timestamp failures
+    // Phase 2 — concurrent: missing member counts (step 4) and last-message
+    // timestamps (step 5). Missing-count failures degrade to zero. Timestamp failures
     // abort this refresh so the frontend keeps its previous Recent ordering.
     let all_channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
     if !all_channel_ids.is_empty() {
@@ -381,16 +381,27 @@ pub(super) async fn fetch_channels(
             .map(|id| last_message_filter(id))
             .collect();
 
-        // Bind both filter arrays before the join so their lifetimes cover
-        // both branches of the concurrent pair.
+        // Step 1 already returned complete rosters, not just the matching p-tag.
+        // Only directory-only or still-pending channels need another read. Keep
+        // reuse local to this fetch so the next refresh sees membership changes.
+        let missing_member_ids: Vec<&String> = all_channel_ids
+            .iter()
+            .filter(|id| !membership.contains_key(*id))
+            .collect();
         let member_count_filters = [serde_json::json!({
             "kinds": [39002],
-            "#d": &all_channel_ids,
-            "limit": all_channel_ids.len(),
+            "#d": &missing_member_ids,
+            "limit": missing_member_ids.len(),
         })];
         let (members_result, message_result) = tokio::join!(
-            // Step 4: batch-fetch kind:39002 for member counts.
-            query_relay(state, &member_count_filters),
+            // Step 4: do not send an empty #d filter (an unscoped roster query).
+            async {
+                if missing_member_ids.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    query_relay(state, &member_count_filters).await
+                }
+            },
             // Step 5: preserve one indexed filter per channel while keeping
             // every relay request within its aggregate explicit-channel cap.
             query_last_messages(state, &last_msg_filters),
@@ -400,7 +411,9 @@ pub(super) async fn fetch_channels(
         // empty result and clear every cached timestamp in the frontend.
         let messages = message_result?;
 
-        let membership = collect_members_by_channel(&members_result.unwrap_or_default());
+        membership.extend(collect_members_by_channel(
+            &members_result.unwrap_or_default(),
+        ));
         for channel in &mut channels {
             if let Some(info) = membership.get(&channel.id) {
                 channel.member_count = info.count;
@@ -488,3 +501,7 @@ pub(super) fn collect_members_by_channel(
     }
     map
 }
+
+#[cfg(test)]
+#[path = "fetch_tests.rs"]
+mod tests;

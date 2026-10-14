@@ -1021,12 +1021,11 @@ run — it MUST NOT fall back to `default`.
 `ghcr.io/block/buzz-sprig`: Alpine base + `bash` (required by the dev-MCP
 shell tool) + `git` + CA certificates + the static musl `sprig` multicall
 binary with its personality links (`buzz-acp`, `buzz-agent`, `buzz-dev-mcp`,
-`rg`, `tree`, `buzz`, `git-credential-nostr`, `git-sign-nostr`) + a baked
-system gitconfig wiring the nostr signing and credential helpers. The baked
-credential-helper config MUST be scoped to the relay's git URL — mirroring
-the local spawn's `credential.<relay-url>/git.helper` scoping — never a
-global `credential.helper`: a global nostr helper would answer for every
-remote, including github.com. ~15–25MB;
+`rg`, `tree`, `buzz`, `git-credential-nostr`, `git-sign-nostr`). The harness
+provides ephemeral Git identity, signing and URL-scoped credentials to every
+adapter and its MCP servers, exactly as on Desktop. No global or system Git
+configuration is written. Credentials are restricted to the relay's `/git`
+namespace; unrelated remotes retain their own helpers. ~15–25MB;
 not FROM-scratch (bash and git preclude it). Sprig-only: alternate-harness
 dependencies (node for Claude Code / Codex) come via the `image` override
 field, not a fatter default. Tagging follows the relay image's matrix —

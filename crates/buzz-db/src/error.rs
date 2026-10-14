@@ -45,6 +45,11 @@ pub enum DbError {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    /// A partition the catalog audit had already listed was dropped before the
+    /// audit finished. A fresh snapshot sees a consistent catalog.
+    #[error("partition catalog changed mid-audit: {0}")]
+    PartitionDroppedMidAudit(String),
+
     /// A serving write admitted before the lifecycle transition is still live.
     /// This is an ordinary retryable drain condition, not a safety violation.
     #[error(
@@ -64,6 +69,14 @@ pub enum DbError {
     #[error("deletion safety error: {0}")]
     DeletionSafety(String),
 
+    /// A complete read-state snapshot exceeds its bounded resource budget.
+    #[error("read-state snapshot exceeds event or byte limit")]
+    ReadStateSnapshotTooLarge,
+
+    /// A complete thread window exceeds its request-wide work allowance.
+    #[error("thread window exceeds {0} budget")]
+    ThreadWindowBudgetExceeded(&'static str),
+
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
@@ -74,6 +87,18 @@ pub enum DbError {
     /// Operator before demoting or deleting the current one.
     #[error("operation would remove the last relay operator")]
     LastOperator,
+}
+
+impl DbError {
+    /// Whether Postgres cancelled the statement (SQLSTATE 57014:
+    /// `statement_timeout` or an explicit cancel). Re-running such a query on
+    /// the writer would only repeat the same expensive work.
+    pub fn is_statement_cancelled(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+        )
+    }
 }
 
 /// Convenience alias for `Result<T, DbError>`.

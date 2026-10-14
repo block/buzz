@@ -13,7 +13,7 @@ use crate::{
     util::now_iso,
 };
 
-use super::{pending, retain_persona_pending, trim_optional, trim_required};
+use super::{normalize_description, pending, retain_persona_pending, trim_optional, trim_required};
 
 #[tauri::command]
 pub async fn create_persona(
@@ -29,7 +29,9 @@ pub async fn create_persona(
         // exact string before the ACP harness executes it.
         let system_prompt = input.system_prompt.clone();
         validate_agent_definition_text(&display_name, &system_prompt)?;
+        let description = normalize_description(input.description)?;
         let avatar_url = trim_optional(input.avatar_url);
+        let acp_command = trim_optional(input.acp_command);
         let runtime = trim_optional(input.runtime);
         let model = trim_optional(input.model);
         let provider = trim_optional(input.provider);
@@ -58,7 +60,9 @@ pub async fn create_persona(
             id: Uuid::new_v4().to_string(),
             display_name,
             avatar_url,
+            description,
             system_prompt,
+            acp_command,
             runtime,
             model,
             provider,
@@ -76,6 +80,7 @@ pub async fn create_persona(
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
             created_at: now.clone(),
             updated_at: now,
         };

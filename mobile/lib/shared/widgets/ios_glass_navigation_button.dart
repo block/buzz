@@ -25,6 +25,8 @@ enum IosGlassNavigationIcon {
   sun,
   moon,
   systemAppearance,
+  more,
+  reply,
 }
 
 /// Leading width used by iOS channel-style headers.
@@ -226,6 +228,8 @@ class IosGlassNavigationButton extends HookWidget {
                           )
                         : Icon(
                             switch (icon) {
+                              IosGlassNavigationIcon.more => Icons.more_horiz,
+                              IosGlassNavigationIcon.reply => Icons.reply,
                               IosGlassNavigationIcon.back =>
                                 Icons.arrow_back_ios_new_rounded,
                               IosGlassNavigationIcon.close =>

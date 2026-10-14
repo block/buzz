@@ -13,38 +13,50 @@ use mesh_llm_system::hardware;
 use mesh_llm_system::vram::{format_rated_capacity, rated_capacity_gb};
 
 /// Buzz-curated tier picks. These are the models we know survive the agent
-/// harness on shared compute — deliberately non-reasoning instruction models,
-/// so agents stay snappy instead of burning hidden reasoning tokens.
+/// harness on shared compute.
 ///
-/// The large pick is resolved through mesh-llm's remote catalog
-/// (huggingface.co/datasets/meshllm/catalog), so it does not need to exist in
-/// the compiled `MODEL_CATALOG`; the entry is synthesized below.
-const CURATED_LARGE: &str = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M";
-const CURATED_LARGE_ALIAS: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
-const CURATED_LARGE_SIZE: &str = "17GB";
-const CURATED_LARGE_FILE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf";
-const CURATED_LARGE_DESCRIPTION: &str =
-    "Gemma 4 26B MoE (4B active) — Buzz default for 64GB+ machines";
+/// The recommended ladder follows rated unified memory:
+/// - below 32 GB: Gemma 4 E4B;
+/// - 32 GB through the rated classes below 64 GB: Qwen3.5 9B;
+/// - 64 GB and above: Qwen3.8 27B.
+///
+/// The Qwen entries are canonicalized from mesh-llm's compiled
+/// `MODEL_CATALOG` rather than synthesized.
+const CURATED_LARGE: &str = "unsloth/Qwen3.8-27B-GGUF:Q4_K_M";
+const CURATED_LARGE_ALIAS: &str = "Qwen3.8-27B-Q4_K_M";
+const CURATED_MEDIUM: &str = "unsloth/Qwen3.5-9B-GGUF:Q4_K_M";
+const CURATED_MEDIUM_ALIAS: &str = "Qwen3.5-9B-Vision-Q4_K_M";
 const CURATED_SMALL: &str = "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M";
 const CURATED_SMALL_ALIAS: &str = "Gemma-4-E4B-it-Q4_K_M";
-/// Rated-capacity boundary between the two curated tiers, in GB (marketing
-/// capacity — a "64GB" Mac rates as 64 even though usable AI memory is less).
+/// Superseded large alias retained only to preserve the historical string
+/// canonicalization contract. Availability in a particular Mesh runtime is
+/// determined by that runtime's compiled catalog.
+const LEGACY_LARGE: &str = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M";
+const LEGACY_LARGE_ALIAS: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
+/// Rated-capacity boundary for the balanced Qwen3.5 9B tier.
+const CURATED_MEDIUM_MIN_RATED_GB: u64 = 32;
+/// Qwen3.8 27B is recommended for 64 GB-and-larger rated capacity classes,
+/// leaving substantial headroom beyond its observed working footprint for KV
+/// cache and runtime use.
 const CURATED_LARGE_MIN_RATED_GB: u64 = 64;
 
 /// The Buzz-curated recommendation for a machine's rated memory capacity.
 fn buzz_recommended_model(rated_gb: Option<u64>) -> &'static str {
     match rated_gb {
         Some(gb) if gb >= CURATED_LARGE_MIN_RATED_GB => CURATED_LARGE,
-        _ => CURATED_SMALL,
+        Some(gb) if gb >= CURATED_MEDIUM_MIN_RATED_GB => CURATED_MEDIUM,
+        Some(_) | None => CURATED_SMALL,
     }
 }
 
-/// Convert Buzz's pre-0.74 curated package aliases into the canonical model
+/// Convert Buzz's historical curated package aliases into the canonical model
 /// ids advertised and accepted by Mesh's OpenAI ingress.
 pub(crate) fn canonical_curated_model_id(model_id: &str) -> &str {
     match model_id.trim() {
         CURATED_SMALL_ALIAS => CURATED_SMALL,
+        CURATED_MEDIUM_ALIAS => CURATED_MEDIUM,
         CURATED_LARGE_ALIAS => CURATED_LARGE,
+        LEGACY_LARGE_ALIAS => LEGACY_LARGE,
         other => other,
     }
 }
@@ -172,31 +184,14 @@ fn build_catalog(
         })
         .collect();
 
-    // The compiled MODEL_CATALOG does not know the Buzz large pick; it
-    // resolves through mesh-llm's remote catalog at download time. Synthesize
-    // its entry so the picker can offer it.
-    if !entries.iter().any(|e| e.name == CURATED_LARGE) {
-        let size_gb = parse_size_gb(CURATED_LARGE_SIZE);
-        entries.push(MeshCatalogEntry {
-            fit: fit_code(size_gb, vram_gb),
-            installed: is_installed(CURATED_LARGE_FILE, CURATED_LARGE)
-                || is_installed(CURATED_LARGE_FILE, CURATED_LARGE_ALIAS),
-            recommended: false,
-            curated: false,
-            name: CURATED_LARGE.to_string(),
-            size: CURATED_LARGE_SIZE.to_string(),
-            size_gb,
-            description: CURATED_LARGE_DESCRIPTION.to_string(),
-        });
-    }
-
     let recommended = Some(buzz_recommended_model(rated_capacity_gb(vram_bytes)).to_string());
     for entry in &mut entries {
         entry.recommended = recommended.as_deref() == Some(entry.name.as_str());
-        // Both curated tiers are always offered: the recommended one for this
-        // machine plus the other pick (e.g. the small one as an explicit
-        // lighter choice on big machines).
-        entry.curated = entry.name == CURATED_LARGE || entry.name == CURATED_SMALL;
+        // All curated tiers are always offered: the recommendation plus
+        // lighter and heavier alternatives appropriate to other machine tiers.
+        entry.curated = entry.name == CURATED_LARGE
+            || entry.name == CURATED_MEDIUM
+            || entry.name == CURATED_SMALL;
     }
 
     entries.sort_by(|a, b| {
@@ -269,20 +264,31 @@ mod tests {
     }
 
     #[test]
-    fn recommendation_follows_buzz_curated_tiers() {
+    fn recommendation_follows_buzz_curated_ladder() {
         assert_eq!(CURATED_SMALL, "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M");
-        assert_eq!(CURATED_LARGE, "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M");
-        // 64GB+ rated machines get the large curated pick.
+        assert_eq!(CURATED_MEDIUM, "unsloth/Qwen3.5-9B-GGUF:Q4_K_M");
+        assert_eq!(CURATED_LARGE, "unsloth/Qwen3.8-27B-GGUF:Q4_K_M");
+
+        // Qwen3.8 is recommended for 64 GB-and-larger rated capacity classes.
         let large = build_catalog(None, 64_000_000_000, 64.0, &[]);
         assert_eq!(large.recommended.as_deref(), Some(CURATED_LARGE));
+        let large_80 = build_catalog(None, 80_000_000_000, 80.0, &[]);
+        assert_eq!(large_80.recommended.as_deref(), Some(CURATED_LARGE));
         let big = build_catalog(None, 128_000_000_000, 128.0, &[]);
         assert_eq!(big.recommended.as_deref(), Some(CURATED_LARGE));
-        // Below the boundary: the small curated pick — never a reasoning
-        // model, never sub-4B guesswork.
-        let small = build_catalog(None, 32_000_000_000, 32.0, &[]);
+
+        // The balanced Qwen3.5 tier covers every rated class from 32 GB up
+        // to (but not including) 64 GB.
+        let medium = build_catalog(None, 32_000_000_000, 32.0, &[]);
+        assert_eq!(medium.recommended.as_deref(), Some(CURATED_MEDIUM));
+        let medium_max = build_catalog(None, 48_000_000_000, 48.0, &[]);
+        assert_eq!(medium_max.recommended.as_deref(), Some(CURATED_MEDIUM));
+
+        // Smaller and unknown machines use the light Gemma tier.
+        let small = build_catalog(None, 24_000_000_000, 24.0, &[]);
         assert_eq!(small.recommended.as_deref(), Some(CURATED_SMALL));
-        let tiny = build_catalog(None, 16_000_000_000, 16.0, &[]);
-        assert_eq!(tiny.recommended.as_deref(), Some(CURATED_SMALL));
+        let unknown = build_catalog(None, 0, 0.0, &[]);
+        assert_eq!(unknown.recommended.as_deref(), Some(CURATED_SMALL));
     }
 
     #[test]
@@ -292,9 +298,14 @@ mod tests {
             CURATED_SMALL
         );
         assert_eq!(
+            canonical_curated_model_id(CURATED_MEDIUM_ALIAS),
+            CURATED_MEDIUM
+        );
+        assert_eq!(
             canonical_curated_model_id(CURATED_LARGE_ALIAS),
             CURATED_LARGE
         );
+        assert_eq!(canonical_curated_model_id(LEGACY_LARGE_ALIAS), LEGACY_LARGE);
         assert_eq!(
             canonical_curated_model_id("other/model:Q4"),
             "other/model:Q4"
@@ -304,14 +315,17 @@ mod tests {
     #[test]
     fn curated_picks_lead_the_catalog() {
         let catalog = build_catalog(None, 96_000_000_000, 96.0, &[]);
-        // Recommended curated entry first, the other curated pick second,
-        // advanced entries after.
+        // Recommended curated entry first, then the other two curated tiers,
+        // with advanced entries after them.
         assert_eq!(catalog.entries[0].name, CURATED_LARGE);
         assert!(catalog.entries[0].recommended && catalog.entries[0].curated);
-        assert_eq!(catalog.entries[1].name, CURATED_SMALL);
+        assert_eq!(catalog.entries[1].name, CURATED_MEDIUM);
         assert!(catalog.entries[1].curated && !catalog.entries[1].recommended);
-        assert!(catalog.entries[2..].iter().all(|e| !e.curated));
-        // The synthesized large pick carries a real size for fit ranking.
+        assert_eq!(catalog.entries[2].name, CURATED_SMALL);
+        assert!(catalog.entries[2].curated && !catalog.entries[2].recommended);
+        assert!(catalog.entries[3..].iter().all(|e| !e.curated));
+        // The large pick comes from the compiled catalog with a real size, so
+        // fit ranking is meaningful rather than a placeholder.
         assert!(catalog.entries[0].size_gb > 10.0);
     }
 

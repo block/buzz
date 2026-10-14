@@ -11,10 +11,13 @@ const TEST_RELAY: &str = "ws://example.com:3000";
 
 fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: None,
         system_prompt: String::new(),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,
@@ -37,6 +40,8 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
 
 fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: String::new(),
         name: name.to_string(),
         persona_id: persona_id.map(|s| s.to_string()),
@@ -524,8 +529,8 @@ fn commit_newer_generation_wins_over_a_stale_finisher() {
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let gen_a = gate.claim(); // pre-edit request
-    let gen_b = gate.claim(); // post-edit request
+    let gen_a = gate.claim().0; // pre-edit request
+    let gen_b = gate.claim().0; // post-edit request
     assert!(gen_a < gen_b);
 
     // B (newer) commits first.
@@ -554,8 +559,8 @@ fn commit_boot_fallback_relay_cannot_bury_apply_workspace_relay() {
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let boot_gen = gate.claim(); // boot, fallback relay
-    let apply_gen = gate.claim(); // apply_workspace, workspace relay
+    let boot_gen = gate.claim().0; // boot, fallback relay
+    let apply_gen = gate.claim().0; // apply_workspace, workspace relay
 
     // apply_workspace's render lands first.
     assert!(gate
@@ -595,8 +600,8 @@ fn commit_failed_newer_request_still_supersedes_older_snapshot() {
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let gen1 = gate.claim(); // pre-edit request
-    let gen2 = gate.claim(); // post-edit request
+    let gen1 = gate.claim().0; // pre-edit request
+    let gen2 = gate.claim().0; // post-edit request
     assert!(gen1 < gen2);
 
     // gen2 fails during relay work and never reaches commit — nothing written.
@@ -636,7 +641,7 @@ fn commit_claim_at_the_older_tasks_cutover_supersedes_it() {
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let gen1 = gate.claim();
+    let gen1 = gate.claim().0;
 
     let wrote_gen1 = gate
         .commit_hooked(&file, "gen1 roster", gen1, || {
@@ -660,7 +665,7 @@ fn commit_claim_at_the_older_tasks_cutover_supersedes_it() {
 
     // The lock is free once commit returns, so a newer request now claims and
     // may publish over gen1.
-    let gen2 = gate.claim();
+    let gen2 = gate.claim().0;
     assert!(gen1 < gen2);
     assert!(gate.commit(&file, "gen2 roster", gen2).unwrap());
 
@@ -677,7 +682,7 @@ fn commit_equal_generation_is_allowed() {
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
 
-    let gen = gate.claim();
+    let gen = gate.claim().0;
     assert!(gate.commit(&file, "first", gen).unwrap());
     assert!(
         gate.commit(&file, "second", gen).unwrap(),
@@ -698,11 +703,11 @@ fn commit_poisoned_lock_returns_error_instead_of_panicking() {
     let gate = std::sync::Arc::new(NestRegenGate::new());
     let tmp = tempfile::tempdir().unwrap();
     let file = agents_md_with_markers(tmp.path());
-    let gen = gate.claim();
+    let gen = gate.claim().0;
 
     let poisoner = gate.clone();
     let _ = std::thread::spawn(move || {
-        let _guard = poisoner.highest_requested.lock().unwrap();
+        let _guard = poisoner.state.lock().unwrap();
         panic!("poison the gate lock");
     })
     .join();

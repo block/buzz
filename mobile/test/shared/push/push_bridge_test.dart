@@ -60,6 +60,52 @@ void main() {
     },
   );
 
+  test('strict age-gate snapshot requires a native handler', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, null);
+
+    await expectLater(
+      registerBuzzPushCommunitySnapshotStrict(const [], settleFence: false),
+      throwsA(isA<MissingPluginException>()),
+    );
+  });
+
+  test(
+    'strict age-gate snapshot uses the acknowledged native method',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'syncAgeGatePushSnapshot');
+            expect(call.arguments, {
+              'section': 'communities',
+              'communities': <Object?>[],
+              'signingKeys': <String, String>{},
+              'settleFence': true,
+            });
+            return null;
+          });
+
+      await registerBuzzPushCommunitySnapshotStrict(
+        const [],
+        settleFence: true,
+      );
+    },
+  );
+
+  test('purges notifications delivered before age restriction', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'purgeAgeRestrictedNotifications');
+          expect(call.arguments, isNull);
+          return null;
+        });
+
+    await purgeAgeRestrictedBuzzNotifications();
+  });
+
   test('reads native notification authorization status', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -145,6 +191,7 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(_channel, (call) async {
       expect(call.method, 'endpointGrants');
+      expect(call.arguments, {'gatewayUrl': Env.pushGatewayUrl});
       return [_grantMap('opaque-grant')];
     });
 
@@ -156,7 +203,6 @@ void main() {
     expect(grants.single.installationId, 'c' * 32);
     expect(grants.single.endpointGrant, 'opaque-grant');
     expect(grants.single.endpointHash, 'b' * 64);
-    expect(grants.single.appProfile, 'buzz-ios-dogfood');
     expect(grants.single.endpointEpoch, 1);
     expect(grants.single.generation, 1);
     expect(grants.single.expiresAt, 1752624000);
@@ -410,7 +456,6 @@ Map<String, Object> _grantMap(String endpointGrant) => {
   'installationId': 'c' * 32,
   'endpointGrant': endpointGrant,
   'endpointHash': 'b' * 64,
-  'appProfile': 'buzz-ios-dogfood',
   'endpointEpoch': 1,
   'generation': 1,
   'expiresAt': 1752624000,

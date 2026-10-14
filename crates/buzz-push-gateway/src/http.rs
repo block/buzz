@@ -5,13 +5,17 @@ use crate::{
     authority::{
         AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, NewInstallation,
     },
+    config::{
+        DELEGATE_AUDIENCE, ENROLL_AUDIENCE, REVOKE_DELEGATION_AUDIENCE,
+        REVOKE_INSTALLATION_AUDIENCE, ROTATE_ENDPOINT_AUDIENCE,
+    },
     grant::GrantKeyring,
     model::*,
     token::TokenKeyring,
 };
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{OriginalUri, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -20,7 +24,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use nostr::{
     nips::nip98::{verify_auth_header, HttpMethod},
-    Event, JsonUtil, Timestamp,
+    Event, JsonUtil, TagKind, TagStandard, Timestamp,
 };
 use std::{
     sync::{
@@ -32,8 +36,9 @@ use std::{
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
+/// Verification and delivery services for this gateway's configured application.
 #[derive(Clone)]
-pub struct ProfileRuntime {
+pub struct ApplicationRuntime {
     pub app_attest: Arc<AppAttestVerifier>,
     pub transport: Arc<dyn PushTransport>,
 }
@@ -43,10 +48,9 @@ pub struct AppState {
     pub grant_keyring: Arc<GrantKeyring>,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
-    /// Server-owned dogfood application identity and APNs transport. The wire
-    /// profile selector is fixed and App Attest verifies the configured app ID.
-    pub profile: Arc<ProfileRuntime>,
-    pub delivery_url: url::Url,
+    /// Server-owned application identity and APNs transport.
+    /// App Attest verifies the configured app ID.
+    pub application: Arc<ApplicationRuntime>,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
@@ -69,14 +73,46 @@ fn valid_relay_pubkey(v: &str) -> bool {
         && v.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn auth_event_id(header: &str) -> Option<String> {
+pub(crate) const DELIVERY_PATH: &str = "/v1/deliveries/apns";
+
+// Keep preliminary decoding bounded to the pinned nostr verifier's limits.
+fn delivery_auth(header: &str, body: &[u8]) -> Option<(String, String)> {
     let (prefix, encoded) = header.split_once(' ')?;
-    if prefix != "Nostr" {
+    const MAX_EVENT_BYTES: usize = 64 * 1024;
+    const MAX_ENCODED_BYTES: usize = MAX_EVENT_BYTES.div_ceil(3) * 4;
+    if prefix != "Nostr" || encoded.len() > MAX_ENCODED_BYTES {
         return None;
     }
-    Event::from_json(STANDARD.decode(encoded).ok()?)
-        .ok()
-        .map(|e| e.id.to_hex())
+    let decoded = STANDARD.decode(encoded).ok()?;
+    if decoded.len() > MAX_EVENT_BYTES {
+        return None;
+    }
+    let event = Event::from_json(decoded).ok()?;
+    let signed_url = match event.tags.find_standardized(TagKind::u())? {
+        TagStandard::AbsoluteURL(url) => url,
+        _ => return None,
+    };
+    if !matches!(signed_url.scheme(), "http" | "https")
+        || signed_url.path() != DELIVERY_PATH
+        || signed_url.query().is_some()
+        || signed_url.fragment().is_some()
+        || !signed_url.username().is_empty()
+        || signed_url.password().is_some()
+    {
+        return None;
+    }
+    // This delivery profile binds method and path, not request origin. Passing
+    // the validated signed URL retains the library's kind, method, timestamp,
+    // body hash, event ID and signature checks without reconstructing a URL.
+    let relay = verify_auth_header(
+        header,
+        signed_url,
+        HttpMethod::POST,
+        Timestamp::now(),
+        Some(body),
+    )
+    .ok()?;
+    Some((event.id.to_hex(), relay.to_hex()))
 }
 
 fn decode_challenge(value: &str) -> Option<[u8; 32]> {
@@ -88,23 +124,25 @@ fn decode_challenge(value: &str) -> Option<[u8; 32]> {
 fn authority_error(e: AuthorityError) -> Response {
     match e {
         AuthorityError::Rejected => error(StatusCode::NOT_FOUND, "not_authorized"),
+        AuthorityError::Conflict => installation_conflict(),
         AuthorityError::RateLimited => error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
         AuthorityError::Unavailable => {
             error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
         }
     }
 }
+fn installation_conflict() -> Response {
+    error(StatusCode::CONFLICT, "installation_conflict")
+}
 fn endpoint_bytes(endpoint: &str) -> Option<Vec<u8>> {
     valid_endpoint(endpoint)
         .then(|| hex::decode(endpoint).ok())
         .flatten()
 }
-fn endpoint_fingerprint(profile: AppProfile, token: &[u8]) -> [u8; 32] {
+fn endpoint_fingerprint(token: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(b"buzz-apns-endpoint-v1\0");
-    h.update(profile.as_str().as_bytes());
-    h.update([0]);
+    h.update(b"buzz-apns-endpoint-v2\0");
     h.update(token);
     h.finalize().into()
 }
@@ -151,11 +189,11 @@ async fn challenge(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct EnrollTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     key_id: &'a str,
-    app_profile: AppProfile,
+
     endpoint: &'a str,
     endpoint_epoch: i64,
     expires_at: i64,
@@ -170,9 +208,6 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    if r.app_profile != AppProfile::BuzzIosDogfood {
-        return error(StatusCode::BAD_REQUEST, "invalid_request");
-    }
     if r.v != WIRE_VERSION
         || r.endpoint_epoch != 1
         || r.expires_at <= now
@@ -186,11 +221,11 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
     };
     let t = EnrollTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/installations",
+        audience: ENROLL_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         key_id: &r.key_id,
-        app_profile: r.app_profile,
+
         endpoint: &r.endpoint,
         endpoint_epoch: r.endpoint_epoch,
         expires_at: r.expires_at,
@@ -199,21 +234,19 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let verified =
-        match s
-            .profile
-            .app_attest
-            .verify_attestation(&r.attestation, &r.key_id, signed.as_bytes())
-        {
-            Ok(value) => value,
-            Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
-        };
-    let fingerprint = endpoint_fingerprint(r.app_profile, &token);
+    let verified = match s.application.app_attest.verify_attestation(
+        &r.attestation,
+        &r.key_id,
+        signed.as_bytes(),
+    ) {
+        Ok(value) => value,
+        Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
+    };
+    let fingerprint = endpoint_fingerprint(&token);
     match s
         .authority
         .matching_installation(
             &verified.key_id,
-            r.app_profile,
             fingerprint,
             r.endpoint_epoch,
             r.expires_at,
@@ -232,7 +265,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
             )
                 .into_response();
         }
-        Ok(Some(_)) => return error(StatusCode::NOT_FOUND, "not_authorized"),
+        Ok(Some(_)) => return installation_conflict(),
         Ok(None) => {}
         Err(e) => return authority_error(e),
     }
@@ -253,7 +286,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         app_attest_key_id: verified.key_id,
         app_attest_public_key: verified.public_key,
         assertion_counter: 0,
-        profile: r.app_profile,
+
         token_ciphertext: ciphertext,
         token_fingerprint: fingerprint,
         endpoint_epoch: 1,
@@ -273,42 +306,47 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         .into_response()
 }
 
+struct AssertionChallenge<'a> {
+    id: uuid::Uuid,
+    text: &'a str,
+}
+
 async fn verify_installation_assertion<T: serde::Serialize>(
     s: &AppState,
     installation_id: uuid::Uuid,
-    challenge_id: uuid::Uuid,
-    challenge_text: &str,
+    challenge: AssertionChallenge<'_>,
     assertion: &str,
     domain: &str,
     signed: &T,
+    include_revoked: bool,
 ) -> Result<(), Response> {
     let now = (s.now)();
-    let challenge = decode_challenge(challenge_text)
+    let challenge_bytes = decode_challenge(challenge.text)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    let installation = s
-        .authority
-        .installation(installation_id, now)
-        .await
-        .map_err(authority_error)?;
-    if installation.profile != AppProfile::BuzzIosDogfood {
-        return Err(error(StatusCode::NOT_FOUND, "not_authorized"));
+    let installation = if include_revoked {
+        s.authority
+            .installation_for_revocation(installation_id, now)
+            .await
+    } else {
+        s.authority.installation(installation_id, now).await
     }
+    .map_err(authority_error)?;
     let transcript = transcript(domain, signed)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
     let verified = s
-        .profile
+        .application
         .app_attest
         .verify_assertion(
             assertion,
             transcript.as_bytes(),
             &installation.app_attest_public_key,
             installation.assertion_counter,
-            challenge_text,
-            challenge_text,
+            challenge.text,
+            challenge.text,
         )
         .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?;
     s.authority
-        .consume_challenge(challenge_id, challenge, now)
+        .consume_challenge(challenge.id, challenge_bytes, now)
         .await
         .map_err(authority_error)?;
     s.authority
@@ -324,7 +362,7 @@ async fn verify_installation_assertion<T: serde::Serialize>(
 #[derive(serde::Serialize)]
 struct DelegateTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -352,7 +390,7 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     }
     let t = DelegateTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/delegations",
+        audience: DELEGATE_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -365,11 +403,14 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.delegate.v1",
         &t,
+        false,
     )
     .await
     {
@@ -392,10 +433,6 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
         v: WIRE_VERSION,
         delegation_id: d.id,
         relay_pubkey: d.relay_pubkey,
-        app_profile: match s.authority.installation(d.installation_id, now).await {
-            Ok(i) => i.profile,
-            Err(e) => return authority_error(e),
-        },
         endpoint_epoch: d.endpoint_epoch,
         generation: d.generation,
         expires_at: d.expires_at,
@@ -413,7 +450,7 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct RotateTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -436,17 +473,9 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     {
         return error(StatusCode::BAD_REQUEST, "invalid_request");
     }
-    let installation = match s
-        .authority
-        .installation(r.installation_handle, (s.now)())
-        .await
-    {
-        Ok(i) => i,
-        Err(e) => return authority_error(e),
-    };
     let t = RotateTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/installations/endpoint",
+        audience: ROTATE_ENDPOINT_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -457,11 +486,14 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.rotate-endpoint.v1",
         &t,
+        false,
     )
     .await
     {
@@ -478,7 +510,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
             r.endpoint_epoch,
             r.new_endpoint_epoch,
             ciphertext,
-            endpoint_fingerprint(installation.profile, &token),
+            endpoint_fingerprint(&token),
         )
         .await
     {
@@ -489,7 +521,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct RevokeDelegationTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -506,7 +538,7 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
     }
     let t = RevokeDelegationTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/delegations/revoke",
+        audience: REVOKE_DELEGATION_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -516,11 +548,14 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.revoke-delegation.v1",
         &t,
+        false,
     )
     .await
     {
@@ -538,7 +573,7 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
 #[derive(serde::Serialize)]
 struct RevokeInstallationTranscript<'a> {
     v: u8,
-    audience: &'static str,
+    audience: &'a str,
     challenge_id: uuid::Uuid,
     challenge: &'a str,
     installation_handle: uuid::Uuid,
@@ -558,7 +593,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     }
     let t = RevokeInstallationTranscript {
         v: r.v,
-        audience: "https://push.buzz.xyz/v1/installations/revoke",
+        audience: REVOKE_INSTALLATION_AUDIENCE,
         challenge_id: r.challenge_id,
         challenge: &r.challenge,
         installation_handle: r.installation_handle,
@@ -568,11 +603,14 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     if let Err(e) = verify_installation_assertion(
         &s,
         r.installation_handle,
-        r.challenge_id,
-        &r.challenge,
+        AssertionChallenge {
+            id: r.challenge_id,
+            text: &r.challenge,
+        },
         &r.assertion,
         "buzz.push.revoke-installation.v1",
         &t,
+        true,
     )
     .await
     {
@@ -592,7 +630,12 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     }
 }
 
-async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn deliver(
+    State(s): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let r: DeliveryRequest = match crate::strict_json::from_slice(&body) {
         Ok(x) => x,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
@@ -607,19 +650,12 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         Some(x) => x,
         None => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
     };
-    let event_id = match auth_event_id(auth) {
-        Some(x) => x,
+    if uri.query().is_some() {
+        return error(StatusCode::UNAUTHORIZED, "invalid_auth");
+    }
+    let (event_id, relay) = match delivery_auth(auth, &body) {
+        Some(auth) => auth,
         None => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
-    };
-    let relay = match verify_auth_header(
-        auth,
-        &s.delivery_url,
-        HttpMethod::POST,
-        Timestamp::now(),
-        Some(&body),
-    ) {
-        Ok(x) => x.to_hex(),
-        Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
     };
     let grant = match s.grant_keyring.open(&r.endpoint_grant) {
         Ok(x) => x,
@@ -662,6 +698,11 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             crate::metrics::record_delivery_error("invalid_grant");
             return error(StatusCode::NOT_FOUND, "invalid_grant");
         }
+        Err(AuthorityError::Conflict) => {
+            crate::metrics::record_admission(crate::metrics::Admission::Rejected);
+            crate::metrics::record_delivery_error("invalid_grant");
+            return error(StatusCode::NOT_FOUND, "invalid_grant");
+        }
         Err(AuthorityError::RateLimited) => {
             crate::metrics::record_admission(crate::metrics::Admission::Rejected);
             crate::metrics::record_delivery_error("rate_limited");
@@ -673,23 +714,7 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
-    if permit.authority.profile != grant.app_profile {
-        crate::metrics::record_delivery_error("profile_mismatch");
-        let _ = s
-            .authority
-            .finish_delivery(permit, DeliveryDisposition::Terminal)
-            .await;
-        return error(StatusCode::NOT_FOUND, "invalid_grant");
-    }
-    if permit.authority.profile != AppProfile::BuzzIosDogfood {
-        crate::metrics::record_delivery_error("profile_disabled");
-        let _ = s
-            .authority
-            .finish_delivery(permit, DeliveryDisposition::Retryable)
-            .await;
-        return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
-    }
-    let transport = Arc::clone(&s.profile.transport);
+    let transport = Arc::clone(&s.application.transport);
     let endpoint = match s.token_keyring.open(&permit.authority.token_ciphertext) {
         Ok(token) => hex::encode(token),
         Err(_) => {
@@ -797,7 +822,7 @@ pub fn router_with_metrics(
         .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/endpoint", post(rotate_endpoint))
         .route("/v1/installations/revoke", post(revoke_installation))
-        .route("/v1/deliveries/apns", post(deliver))
+        .route(DELIVERY_PATH, post(deliver))
         .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
     let public = Router::new()
         .merge(enrollment)
@@ -859,7 +884,7 @@ mod request_limit_tests {
 
     fn state() -> AppState {
         let app_attest = AppAttestVerifier::new(
-            "TEAMID.xyz.block.buzz.dogfood.mobile".to_owned(),
+            "TEAMID.com.example.buzz".to_owned(),
             include_bytes!("../tests/fixtures/apple-app-attestation-root.pem").to_vec(),
         )
         .expect("pinned Apple root fixture");
@@ -871,11 +896,10 @@ mod request_limit_tests {
             token_keyring: Arc::new(
                 TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap(),
             ),
-            profile: Arc::new(ProfileRuntime {
+            application: Arc::new(ApplicationRuntime {
                 app_attest: Arc::new(app_attest),
                 transport: Arc::new(NeverTransport),
             }),
-            delivery_url: "https://push.buzz.xyz/v1/deliveries/apns".parse().unwrap(),
             max_grant_lifetime_seconds: 86_400,
             max_installation_lifetime_seconds: 86_400,
             endpoint_quota_window_seconds: 60,
@@ -892,7 +916,7 @@ mod request_limit_tests {
             challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0; 32]),
             key_id: STANDARD.encode([0; 32]),
             attestation: STANDARD.encode(vec![0; MAX_APP_ATTESTATION_BYTES]),
-            app_profile: AppProfile::BuzzIosDogfood,
+
             endpoint: "ab".repeat(MAX_ENDPOINT_HEX_BYTES),
             endpoint_epoch: 1,
             expires_at: fixed_now() + 60,
@@ -932,6 +956,15 @@ mod request_limit_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn live_installation_conflict_has_an_unambiguous_status() {
+        assert_eq!(
+            authority_error(AuthorityError::Conflict).status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(installation_conflict().status(), StatusCode::CONFLICT);
     }
 
     #[test]
@@ -1015,7 +1048,7 @@ mod transcript_vector_tests {
             challenge_id: CHALLENGE_ID,
             challenge: CHALLENGE,
             key_id: KEY_ID,
-            app_profile: AppProfile::BuzzIosDogfood,
+
             endpoint: ENDPOINT,
             endpoint_epoch: 1,
             expires_at: 1_752_624_000,

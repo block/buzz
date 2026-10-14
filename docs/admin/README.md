@@ -121,6 +121,7 @@ can be a break-glass root, silently discarding it would be a lockout.
 | Capability | Operator | Moderator |
 |---|---|---|
 | Read reports, feedback, attachment bytes | ✓ | ✓ |
+| Read community directory, member profiles, and events | ✓ | ✓ |
 | Resolve reports (dismiss, escalate, delete, kick, ban, timeout) | ✓ | ✓ |
 | Update feedback status | ✓ | ✓ |
 | Manage operator roster (`GET/PUT/DELETE /operators`) | ✓ | ✗ |
@@ -153,9 +154,8 @@ emptied freely because config still guarantees an operator.
 
 ### Disabled mode (`BUZZ_ADMIN_AUTH=disabled`)
 
-Operators whose admin API is already protected at the network layer — for
-example by a corporate VPN such as WARP+Okta — can disable request
-authentication entirely:
+Disabled mode turns the admin API into a read-only window with no request
+authentication:
 
 ```text
 BUZZ_ADMIN_AUTH=disabled
@@ -163,23 +163,50 @@ BUZZ_ADMIN_AUTH=disabled
 
 Only the exact value `disabled` is accepted.
 
-In this mode the relay logs a `WARN` on every startup:
+| | `nip98` (default) | `disabled` |
+|---|---|---|
+| Moderation reads | signed, any staff role | served to anyone who can reach the relay |
+| Writes (resolve, ban, timeout, delete, lift, feedback status) | signed, role-checked | refused (`403`) |
+| Staffing (`/operators`) | signed Operator | refused (`403`) |
+
+**What disabled mode exposes**, in every community the relay hosts, to anyone
+who can send it an HTTP request:
+
+- reports, including reporter keys, private reporter notes, resolutions and the
+  full content of reported messages, deleted ones included
+- product feedback and its attachment bytes
+- bans and timeouts, with their private reasons and the acting moderator
+- the directory of every community
+- member search and member profiles, including role, ban and timeout state
+  (staff status is not revealed in disabled mode)
+- any stored message by event ID, regardless of channel membership and
+  including deleted messages (encrypted content stays ciphertext)
+
+**Who should be able to reach it:** only people allowed to see all moderation
+data in every community. A company-wide VPN is usually a much larger group.
+
+**The whole relay port must be private, not just the admin hostname.** The admin
+API is served on the relay's main listener, and the admin hostname check
+compares against the caller's own `Host` header, which any client can set. A
+relay whose port is reachable from the internet exposes everything above even if
+the admin hostname resolves only inside a VPN. If the relay must be public, use
+`nip98`.
+
+Disabled mode records no reader identity. To act on anything, switch to `nip98`.
+
+The relay logs a `WARN` on every startup in this mode:
 
 ```
-BUZZ_ADMIN_AUTH=disabled — the admin API is unauthenticated; the operator has
-asserted that access is controlled at the network layer
+BUZZ_ADMIN_AUTH=disabled — the admin API serves every moderation read without
+authentication to anyone who can reach the relay: reports, feedback and
+attachments, restrictions, the community directory, member profiles and any
+stored message by ID, in every community. Writes and staffing are refused. Keep
+the whole relay port private to people allowed to see all of that
 ```
 
-The `Host`/`Origin` checks remain active as defense-in-depth. The dashboard
-detects that no credential is needed on first load (probe returns `200`) and
-renders directly.
-
-**This mode relies entirely on the operator's network controls.** If the admin
-API is reachable by untrusted clients, the entire moderation and feedback dataset
-is exposed. Use nip98 mode instead.
-
-When using a reverse proxy in this mode, document the requirement and consider a
-proxy-injected shared secret or signed identity header for additional assurance.
+The `Host`/`Origin` checks remain active, but they are not authentication. The
+dashboard detects that no credential is needed on first load (probe returns
+`200`) and renders read-only.
 
 ### Mode selection and error behaviour
 
@@ -254,6 +281,19 @@ a startup warning — and adopt `nip98` (populate `RELAY_OPERATOR_PUBKEYS`) or
 replace it with `BUZZ_ADMIN_AUTH=disabled`. Behavior is identical; the old
 variable is no longer recognised.
 
+**Member restriction routes now take `communityHost`, not `communityId`:**
+`GET /members/restrictions` and `DELETE /members/:pubkey/ban|timeout` name the
+community by the relay host the client connected to, so the relay resolves
+its own tenant (see [Member restriction routes](#member-restriction-routes-operator-and-moderator)).
+There is no compatibility shim:
+
+- Roll the relay with this change **before** any desktop build that uses it.
+  A new desktop against an old relay cannot list or lift restrictions.
+- Scripts that call these routes with `communityId` must switch to
+  `communityHost`.
+- Rolling the relay back to a `communityId` build breaks the desktop
+  Admin → Staffing → Restrictions UI until the relay is rolled forward again.
+
 Relays without `BUZZ_ADMIN_HOST` are completely unaffected, except that a
 lingering `BUZZ_ADMIN_TOKEN` now logs a startup warning and must be removed.
 
@@ -268,12 +308,34 @@ rolling.
 
 For local review, run `just admin-seed` before `just admin`. `just admin`
 defaults to `BUZZ_ADMIN_AUTH=disabled`, so the dashboard renders without a
-credential. The seed command also uploads real image and diagnostic fixtures to
-local MinIO. Feedback search and filters run over the bounded browser result
+credential. Unless the mode is exactly `nip98`, it binds the relay to
+`127.0.0.1` on the port from `BUZZ_BIND_ADDR` (default 3000), so
+unauthenticated moderation reads stay local even when the value is padded or
+misspelled; `BUZZ_ADMIN_AUTH=nip98` keeps `BUZZ_BIND_ADDR` as configured. The
+seed command also uploads real image and diagnostic fixtures to local MinIO.
+Feedback search and filters run over the bounded browser result
 set. The feedback **status** control (`new`/`reviewed`/`archived`) is
 server-backed: in `nip98` mode it `PATCH`es the relay and adopts the returned
 status, so every operator sees the same state; in `disabled` mode it renders as
 a read-only badge because the server rejects mutations.
+
+`just admin-seed` also seeds `beta.localhost:3000`, `gamma.localhost:3000` and
+50 `filler-NN.localhost:3000` communities, named members, one ban and one
+timeout per named community, and one pre-signed message per named community for
+the delete preview. It prints the member npubs and message `note`/`nevent` ids
+to paste. Rerunning it restores the seeded state, including deleted messages,
+restrictions, kicked message authors and feedback status. It refuses, writing
+nothing, while a seeded report or admin action is still in progress; finish or
+cancel it first. To use it from the desktop admin console with `just dev`, add
+these to `.env` and restart `just dev`:
+
+```bash
+BUZZ_ADMIN_HOST=admin.localhost:3000
+BUZZ_ADMIN_AUTH=nip98
+RELAY_OPERATOR_PUBKEYS=<your dev app pubkey, hex>
+```
+
+Then set the admin origin in Settings → Admin to `http://admin.localhost:3000`.
 
 ## Routes
 
@@ -285,6 +347,50 @@ a read-only badge because the server rejects mutations.
 - `GET /api/admin/v1/feedback`
 - `GET /api/admin/v1/feedback/:id`
 - `GET /api/admin/v1/feedback/:id/attachments/:sha256`
+
+### Community read routes (Operator and Moderator in `nip98`; unauthenticated in `disabled` mode)
+
+The three member and event routes name the community by `communityHost` (the
+relay's own host authority, host plus port when non-default), resolving it
+through the same tenant binder that scopes live connections. A host that the
+relay serves no live community for returns `400 unknown_community_host`. All
+four reject unknown query parameters with `400` (axum's plain-text rejection,
+not the JSON error envelope, before authentication). All four accept a signed
+`HEAD` request (sign with method `HEAD`).
+
+- `GET /api/admin/v1/communities?q=&cursor=&limit=`
+  Lists live communities (not archived, not deleted). Response:
+  `{"items": [{"id", "host", "icon"|null}], "nextCursor": "<token>"|null}`.
+  `q` is a case-insensitive literal host prefix (trimmed; `%` and `_` are
+  literal characters, not wildcards), max 255 chars else `400
+  invalid_query`. Results are ordered by lowercased host. `limit` 1–100,
+  default 50, else `400 invalid_limit`. `cursor` is opaque: pass the
+  previous page's `nextCursor`; a malformed cursor returns `400
+  invalid_cursor`. `nextCursor` is non-null when the page is full; a final
+  full page may be followed by an empty page.
+- `GET /api/admin/v1/members/search?communityHost=&q=&limit=`
+  Searches the community's stored profiles; former members appear. Response:
+  `{"items": [{"pubkey", "displayName"|null, "nip05"|null,
+  "avatarUrl"|null}]}`. `q` is trimmed, 1–100 characters else `400
+  invalid_query`. `limit` 1–50, default 20.
+- `GET /api/admin/v1/members/{pubkey}?communityHost=`
+  Returns a single member record. Response: `{"pubkey", "profile":
+  {"displayName", "nip05", "avatarUrl", "about"}|null, "role":
+  "owner"|"admin"|"member"|null, "banned": bool, "mutedUntil":
+  <timestamp>|null, "isStaff": bool|null}`. `role` null means the pubkey
+  is not on the community roster. `isStaff` is whether the pubkey is
+  deployment staff (Operator or Moderator); it is `null` in `disabled` mode
+  (the roster is never revealed without a signed staff caller). A roster
+  lookup failure returns `500`. For an agent pubkey, `banned` and
+  `mutedUntil` reflect the effective restriction, which includes its
+  owner's.
+- `GET /api/admin/v1/events/{id}?communityHost=`
+  Reads a single event scoped to that community, including soft-deleted
+  ones. Response: `{"id", "authorPubkey", "kind", "content", "createdAt",
+  "deletedAt"|null, "channelId"|null}`. Never returns author-only kinds
+  (event reminders, push leases, private managed agents) or result-gated
+  kinds (DM visibility, agent turn metrics). Absent, other-community,
+  excluded-kind, and malformed IDs all return `404 event_not_found`.
 
 ### Action routes (Operator and Moderator)
 
@@ -319,6 +425,28 @@ a read-only badge because the server rejects mutations.
   mutation point) — treat as "refresh detail".
 - `PATCH /api/admin/v1/feedback/:id`
   Body: `{"status": "new|reviewed|archived"}`
+
+### Member restriction routes (Operator and Moderator)
+
+All three name the community by `communityHost`: the relay's own host
+authority (host, plus port when non-default), which the relay resolves to its
+tenant through the same binder that scopes live connections. The caller's
+local community ids are never accepted. A host the relay serves no community
+for returns `400` with error `unknown_community_host`, never an empty result.
+Unknown query parameters are rejected with `400` (axum's plain-text
+rejection, before authentication).
+
+- `GET /api/admin/v1/members/restrictions?communityHost=<host>[&limit=<1-200>][&cursor=<token>]`
+  Lists active bans and timeouts, newest first. Response:
+  `{"items": [...], "nextCursor": "<token>" | null}`. `limit` defaults to 200;
+  pass the prior page's `nextCursor` as `cursor` to continue. `400` on a missing
+  or unknown host, an out-of-range `limit`, or a malformed `cursor`.
+- `DELETE /api/admin/v1/members/:pubkey/ban?communityHost=<host>`
+  Lifts an active ban. `204` on success, `409` if no active ban exists.
+  Mutation: requires `nip98` mode.
+- `DELETE /api/admin/v1/members/:pubkey/timeout?communityHost=<host>`
+  Clears an active timeout. `204` on success, `409` if no active timeout exists.
+  Mutation: requires `nip98` mode.
 
 ### Staffing routes (Operator only)
 

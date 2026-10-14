@@ -15,7 +15,8 @@ export function subscribeToAgentObserverFrames(
   ownerPubkey: string,
   onEvent: (event: RelayEvent) => void,
 ) {
-  return relayClient.subscribeLive(
+  // Ephemeral control results must not wait behind cold channel history.
+  return relayClient.subscribeInteractive(
     {
       kinds: [KIND_AGENT_OBSERVER_FRAME],
       "#p": [ownerPubkey],

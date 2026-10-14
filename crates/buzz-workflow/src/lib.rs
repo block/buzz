@@ -1047,7 +1047,7 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
 
     #[test]

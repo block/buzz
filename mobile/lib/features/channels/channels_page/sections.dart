@@ -139,7 +139,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                 alignment: Alignment.centerLeft,
                 child: icon == null || icon.isEmpty
                     ? Icon(
-                        LucideIcons.folder,
+                        BuzzIcons.folder,
                         size: _kChannelIconSize,
                         color: sectionColor,
                       )
@@ -179,7 +179,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                 tooltip: '${section.name} options',
                 visualDensity: VisualDensity.compact,
                 icon: Icon(
-                  LucideIcons.ellipsisVertical,
+                  BuzzIcons.ellipsisVertical,
                   size: _kChannelIconSize,
                   color: sectionColor,
                 ),
@@ -194,7 +194,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         value: 'rename',
                         padding: _sectionMenuItemPadding,
                         child: _SectionMenuItemContent(
-                          icon: LucideIcons.pencil,
+                          icon: BuzzIcons.pencil,
                           label: 'Rename section',
                         ),
                       ),
@@ -203,7 +203,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         enabled: !isFirst,
                         padding: _sectionMenuItemPadding,
                         child: const _SectionMenuItemContent(
-                          icon: LucideIcons.arrowUp,
+                          icon: BuzzIcons.arrowUp,
                           label: 'Move up',
                         ),
                       ),
@@ -212,7 +212,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         enabled: !isLast,
                         padding: _sectionMenuItemPadding,
                         child: const _SectionMenuItemContent(
-                          icon: LucideIcons.arrowDown,
+                          icon: BuzzIcons.arrowDown,
                           label: 'Move down',
                         ),
                       ),
@@ -221,7 +221,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                         value: 'delete',
                         padding: _sectionMenuItemPadding,
                         child: _SectionMenuItemContent(
-                          icon: LucideIcons.trash2,
+                          icon: BuzzIcons.trash2,
                           label: 'Delete section',
                           color: context.colors.error,
                         ),
@@ -346,7 +346,7 @@ PopupMenuItem<String> _sortMenuItem({
     children: [
       Expanded(child: Text(label)),
       if (selected)
-        const Icon(LucideIcons.check, key: ValueKey('sort-selected-check'))
+        const Icon(BuzzIcons.check, key: ValueKey('sort-selected-check'))
       else
         const SizedBox(width: 24),
     ],
@@ -467,7 +467,7 @@ class _EmptyState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              LucideIcons.messagesSquare,
+              BuzzIcons.messagesSquare,
               size: Grid.xl,
               color: context.colors.onSurfaceVariant,
             ),
@@ -559,7 +559,7 @@ class _SectionHeader extends StatelessWidget {
                   tooltip: '$label options',
                   visualDensity: VisualDensity.compact,
                   icon: Icon(
-                    LucideIcons.ellipsisVertical,
+                    BuzzIcons.ellipsisVertical,
                     size: _kChannelIconSize,
                     color: sectionColor,
                   ),
@@ -612,11 +612,7 @@ class _SectionChevron extends StatelessWidget {
       turns: expanded ? 0 : -0.25,
       duration: reducedMotion ? Duration.zero : _kSectionExpandDuration,
       curve: _kSectionExpandCurve,
-      child: Icon(
-        LucideIcons.chevronDown,
-        size: _kChannelIconSize,
-        color: color,
-      ),
+      child: Icon(BuzzIcons.chevronDown, size: _kChannelIconSize, color: color),
     );
   }
 }

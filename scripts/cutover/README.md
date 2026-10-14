@@ -17,7 +17,25 @@ derived from the deployment host.
 
 Only when upgrading a Postgres that already holds **pre-1321 single-community
 data** to 1321. A brand-new deployment does **not** run this — it provisions
-from `migrations/0001_initial_schema.sql` (or `schema/schema.sql`) directly.
+from `migrations/0001_initial_schema.sql` (or `schema/schema.sql`; with raw `psql`,
+run `cd schema && psql -f schema.sql` so its `\i` includes resolve) directly.
+
+## Supported writer contract during transition
+
+Outside this one-off cutover, direct owner SQL mutation is not a supported
+steady-state path unless explicitly reviewed.
+
+- Reviewed backfills and reconciliations should use relay-owned transaction and
+  lock protocols where they exist (one community fence per transaction and
+  replica-floor shared/exclusive lock ordering).
+- If a workflow cannot use those protocols yet, execute it under an explicitly
+  reviewed procedure that keeps replica routing fences closed for the run.
+- Existing trigger/function backstops remain the commit-time authority during
+  this transition. Their removal requires separate coverage and fleet gates;
+  this cutover does not authorize it.
+- Role separation is deliberate: schema reconciliation scripts carry schema
+  convergence only; serving admission/fencing semantics remain in runtime/store
+  code paths with startup verification and metrics.
 
 ## Preconditions
 

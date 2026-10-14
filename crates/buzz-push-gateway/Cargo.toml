@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "buzz-push-gateway"
 path = "src/main.rs"
 
+[features]
+# Personal device development only. Production builds remain production-only.
+personal-dev-app-attest = ["appattest/testing"]
+
 [dependencies]
 aes-gcm = "0.10"
 appattest = { version = "0.1.1", default-features = false }

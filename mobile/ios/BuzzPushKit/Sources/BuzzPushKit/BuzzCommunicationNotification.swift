@@ -60,18 +60,24 @@ public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
   /// Donates and applies Apple's supported Communication Notifications intent.
   public final class BuzzCommunicationNotificationPresenter {
     public typealias Donation = (INInteraction, @escaping (Error?) -> Void) -> Void
+    /// Deletes previously donated interactions and reports when deletion finishes.
+    public typealias InteractionDeletion = (@escaping (Error?) -> Void) -> Void
     public typealias ContentUpdate = (
       UNMutableNotificationContent,
       INSendMessageIntent
     ) throws -> UNNotificationContent
 
     private let donate: Donation
+    private let interactionDeletionDeadline: BuzzInteractionDeletionDeadline
     private let updateContent: ContentUpdate
 
     public convenience init() {
       self.init(
         donate: { interaction, completion in
           interaction.donate(completion: completion)
+        },
+        deleteAllInteractions: { completion in
+          INInteraction.deleteAll(completion: completion)
         },
         updateContent: { content, intent in
           try content.updating(from: intent)
@@ -81,32 +87,53 @@ public struct BuzzCommunicationNotificationDescriptor: Equatable, Sendable {
 
     public init(
       donate: @escaping Donation,
-      updateContent: @escaping ContentUpdate
+      deleteAllInteractions: @escaping InteractionDeletion,
+      updateContent: @escaping ContentUpdate,
+      scheduleDeletionTimeout: @escaping BuzzInteractionDeletionDeadline.ScheduleTimeout = { delay, action in
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay, execute: action)
+      }
     ) {
       self.donate = donate
+      self.interactionDeletionDeadline = BuzzInteractionDeletionDeadline(
+        timeout: 5,
+        deleteAllInteractions: deleteAllInteractions,
+        scheduleTimeout: scheduleDeletionTimeout
+      )
       self.updateContent = updateContent
     }
 
+    /// Donates only while the caller's privacy fence remains unchanged.
     public func present(
       ordinaryContent: UNMutableNotificationContent,
       resolution: BuzzPushResolution,
+      isStillAllowed: @escaping () -> Bool = { true },
+      onDeletionFailure: @escaping (Error) -> Void = { _ in },
       completion: @escaping (UNNotificationContent) -> Void
     ) {
-      guard let descriptor = BuzzCommunicationNotificationDescriptor(resolution: resolution) else {
+      guard isStillAllowed(),
+        let descriptor = BuzzCommunicationNotificationDescriptor(resolution: resolution)
+      else {
         completion(ordinaryContent)
         return
       }
       let intent = Self.makeIntent(descriptor)
       let interaction = INInteraction(intent: intent, response: nil)
       interaction.direction = .incoming
-      donate(interaction) { [updateContent] error in
-        guard error == nil,
-          let specialized = try? updateContent(ordinaryContent, intent)
-        else {
+      donate(interaction) { [interactionDeletionDeadline, updateContent] error in
+        guard error == nil else {
           completion(ordinaryContent)
           return
         }
-        completion(specialized)
+        guard isStillAllowed() else {
+          interactionDeletionDeadline.deleteAll { error in
+            if let error {
+              onDeletionFailure(error)
+            }
+            completion(ordinaryContent)
+          }
+          return
+        }
+        completion((try? updateContent(ordinaryContent, intent)) ?? ordinaryContent)
       }
     }
 

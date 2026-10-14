@@ -8,6 +8,88 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final titled in [false, true]) {
+      for (final ownSafeArea in [false, true]) {
+        testWidgets(
+          'fixed bottom clearance $platform titled=$titled ownSafeArea=$ownSafeArea',
+          (tester) async {
+            debugDefaultTargetPlatformOverride = platform;
+            tester.view.physicalSize = const Size(390, 844);
+            tester.view.devicePixelRatio = 1;
+            final systemInset = platform == TargetPlatform.iOS ? 34.0 : 24.0;
+            tester.view.padding = FakeViewPadding(bottom: systemInset);
+            tester.view.viewPadding = FakeViewPadding(bottom: systemInset);
+            addTearDown(() {
+              tester.view.reset();
+              debugDefaultTargetPlatformOverride = null;
+            });
+            try {
+              double? contentInset;
+              await tester.pumpWidget(
+                MaterialApp(
+                  theme: AppTheme.light(),
+                  home: Builder(
+                    builder: (context) => Scaffold(
+                      body: TextButton(
+                        onPressed: () => showBuzzModalBottomSheet<void>(
+                          context: context,
+                          title: titled ? 'People' : null,
+                          showCloseButton: titled,
+                          isScrollControlled: true,
+                          builder: (context) {
+                            contentInset = MediaQuery.paddingOf(context).bottom;
+                            final list = SizedBox(
+                              height: 300,
+                              child: ListView.builder(
+                                key: const ValueKey('clearance-scroll'),
+                                padding: EdgeInsets.zero,
+                                itemCount: 30,
+                                itemBuilder: (_, index) => SizedBox(
+                                  height: 48,
+                                  child: Text('Person $index'),
+                                ),
+                              ),
+                            );
+                            return ownSafeArea
+                                ? SafeArea(top: false, child: list)
+                                : list;
+                          },
+                        ),
+                        child: const Text('Open'),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+              await tester.tap(find.text('Open'));
+              await tester.pumpAndSettle();
+              final list = find.byKey(const ValueKey('clearance-scroll'));
+              final viewportBottom = tester.getRect(list).bottom;
+              // This is outside the scrolling viewport, not trailing list space.
+              expect(
+                viewportBottom,
+                lessThanOrEqualTo(844 - systemInset - Grid.half),
+              );
+              expect(contentInset, 0);
+              await tester.drag(list, const Offset(0, -2000));
+              await tester.pumpAndSettle();
+              expect(find.text('Person 29'), findsOneWidget);
+              expect(tester.getRect(list).bottom, viewportBottom);
+              expect(
+                tester.getRect(find.text('Person 29')).bottom,
+                lessThanOrEqualTo(viewportBottom),
+              );
+              expect(tester.takeException(), isNull);
+            } finally {
+              debugDefaultTargetPlatformOverride = null;
+            }
+          },
+        );
+      }
+    }
+  }
+
   Border sheetHeaderBorder(WidgetTester tester) {
     final decoration =
         tester
@@ -75,6 +157,15 @@ void main() {
         await tester.pump();
 
         expect(find.byType(UiKitView), findsOneWidget);
+        expect(
+          find.ancestor(
+            of: find.byType(UiKitView),
+            matching: find.byWidgetPredicate(
+              (widget) => widget is IgnorePointer && widget.ignoring,
+            ),
+          ),
+          findsOneWidget,
+        );
         expect(
           find.byWidgetPredicate(
             (widget) => widget is Material && widget.color == Colors.red,
@@ -183,14 +274,16 @@ void main() {
       );
       await tester.pump();
 
-      expect(colorUpdates, hasLength(1));
-      expect(colorUpdates.single.method, 'updateColors');
+      final initialColorUpdates = colorUpdates
+          .where((call) => call.method == 'updateColors')
+          .toList();
+      expect(initialColorUpdates, hasLength(1));
       expect(
-        colorUpdates.single.arguments,
+        initialColorUpdates.single.arguments,
         containsPair('color', darkTheme.colorScheme.surface.toARGB32()),
       );
       expect(
-        colorUpdates.single.arguments,
+        initialColorUpdates.single.arguments,
         containsPair(
           'backdropColor',
           darkTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
@@ -201,18 +294,84 @@ void main() {
       await tester.pumpWidget(themedSurface(lightTheme));
       await tester.pumpAndSettle();
 
-      expect(colorUpdates.length, greaterThanOrEqualTo(2));
+      final updatedColorCalls = colorUpdates
+          .where((call) => call.method == 'updateColors')
+          .toList();
+      expect(updatedColorCalls.length, greaterThanOrEqualTo(2));
       expect(
-        colorUpdates.last.arguments,
+        updatedColorCalls.last.arguments,
         containsPair('color', lightTheme.colorScheme.surface.toARGB32()),
       );
       expect(
-        colorUpdates.last.arguments,
+        updatedColorCalls.last.arguments,
         containsPair(
           'backdropColor',
           lightTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
         ),
       );
+    } finally {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        supportChannel,
+        null,
+      );
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        viewChannel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('native glass surfaces receive concentric composer geometry', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const supportChannel = MethodChannel('buzz/concentric_sheet_surface');
+    const viewChannel = MethodChannel('buzz/concentric_sheet_surface/84');
+    final updates = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      supportChannel,
+      (call) async => call.method == 'isSupported' ? true : null,
+    );
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      viewChannel,
+      (call) async {
+        updates.add(call);
+        return null;
+      },
+    );
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: const ConcentricSheetSurface(
+            enabled: true,
+            usesGlass: true,
+            minimumRadius: 26,
+            contentClipRadius: 18,
+            padding: EdgeInsets.zero,
+            providesSheetSurface: false,
+            child: SizedBox(height: 80, child: Text('Composer')),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(nativeSurface.creationParams, containsPair('usesGlass', true));
+      expect(nativeSurface.creationParams, containsPair('minimumRadius', 26));
+      final contentClip = tester.widget<ClipRSuperellipse>(
+        find.byKey(const ValueKey('concentric-sheet-content-clip')),
+      );
+      expect(contentClip.borderRadius, BorderRadius.circular(18));
+
+      nativeSurface.onPlatformViewCreated!(84);
+      await tester.pump();
+      final geometryUpdate = updates.singleWhere(
+        (call) => call.method == 'updateGeometry',
+      );
+      expect(geometryUpdate.arguments, containsPair('minimumRadius', 26.0));
+      expect(geometryUpdate.arguments, containsPair('brightness', 'light'));
     } finally {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         supportChannel,

@@ -19,6 +19,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<VideoPlayerController?>(null);
+    // Tracks a VideoPlayerController that has been created (i.e. platform
+    // resources allocated via createWithOptions()) but whose initialize()+play()
+    // chain has not yet completed or failed.  The effect cleanup path disposes
+    // this directly so a close-during-init does not leak the native player,
+    // even when the async chain is suspended waiting for the initialized event
+    // or for play() to return.
+    final pendingController = useRef<VideoPlayerController?>(null);
     final videoFile = useRef<File?>(null);
     final downloadRequestAbort = useRef<Completer<void>?>(null);
     final downloadSubscription = useRef<StreamSubscription<List<int>>?>(null);
@@ -48,34 +55,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
         final auth = ref.read(mediaGetAuthServiceProvider);
         final uri = Uri.parse(videoUrl);
 
-        // ExoPlayer supports the request headers on every range request, so
-        // keep Android on its streaming path. iOS uses the authenticated local
-        // copy below because AVPlayer can drop those headers after the first
-        // request.
-        if (Platform.isAndroid) {
-          VideoPlayerController? streamingController;
-          try {
-            streamingController = VideoPlayerController.networkUrl(
-              uri,
-              httpHeaders: auth.headersFor(videoUrl),
-            );
-            await streamingController.initialize();
-            await streamingController.play();
-            if (disposed) {
-              await streamingController.dispose();
-              return;
-            }
-            controller.value = streamingController;
-            return;
-          } catch (_) {
-            if (streamingController != null) {
-              await streamingController.dispose();
-            }
-            // Fall through to the authenticated local-file path only when the
-            // streaming controller cannot initialize.
-          }
-        }
-
+        // All platforms: download to an authenticated local file so the proof
+        // is bound at request time rather than frozen into controller headers.
+        // (iOS already used this path; Android previously used streaming headers
+        // but video_player_android 2.9.5 freezes those headers into static
+        // DefaultHttpDataSource request properties — a proof minted at
+        // controller creation time becomes stale after 60 s, causing seeks
+        // outside the buffer to fail with expiry rejection.)
         try {
           final client = ref.read(mediaHttpClientProvider);
           final requestAbort = Completer<void>();
@@ -85,6 +71,14 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             uri,
             abortTrigger: requestAbort.future,
           )..headers.addAll(auth.headersFor(videoUrl));
+          // A GET carries no request body.  StreamedRequest's sink MUST be
+          // closed to signal end-of-stream: IOClient.send() awaits
+          // stream.pipe(ioRequest) before returning a response, and pipe
+          // blocks until the source stream ends.  Without close(), every
+          // download hangs in loading until the request is aborted.
+          // close() is unawaited because it may not complete until after
+          // the pipe is in progress (streamed_request.dart:15-29).
+          unawaited(request.sink.close());
           late final http.StreamedResponse response;
           try {
             response = await client.send(request);
@@ -98,7 +92,12 @@ class MediaVideoViewerPage extends HookConsumerWidget {
             return;
           }
           if (response.statusCode < 200 || response.statusCode >= 300) {
-            await response.stream.drain<void>();
+            // Cancel (not drain) the error-body stream so a stalled server body
+            // cannot hold the download open.  `drain()` waits for the upstream
+            // to close the stream; `_cancelVideoResponse` subscribes and
+            // immediately cancels, which closes the underlying connection without
+            // waiting for the full response body [F2r(b)].
+            await _cancelVideoResponse(response);
             throw HttpException(
               'Video download failed (${response.statusCode})',
               uri: uri,
@@ -146,14 +145,72 @@ class MediaVideoViewerPage extends HookConsumerWidget {
           }
 
           final localController = VideoPlayerController.file(file);
-          await localController.initialize();
-          await localController.play();
-          if (disposed) {
-            await localController.dispose();
-            await deleteVideoFile();
-            return;
+          // Register as pending BEFORE the first async suspension
+          // (initialize()) so the effect cleanup can always reach it.
+          // video_player 2.11.1 allocates the native player synchronously
+          // inside createWithOptions() before _creatingCompleter completes;
+          // a close arriving at any point after this line will find the
+          // controller in pendingController and dispose it correctly.
+          pendingController.value = localController;
+          // Own the controller before any async suspension so a failed
+          // initialize() or play() — or a disposal that races with init —
+          // can always call dispose() unconditionally [F2r(a)].
+          // video_player 2.11.1 completes the init future with an error on
+          // native failure but does NOT dispose the player; Android 2.9.5
+          // retains the native player until explicit disposal.  Without this
+          // wrapper, a PlatformException from initialize() unwinds to the
+          // outer catch where controller.value is still null, so the cleanup
+          // teardown's `if (activeController != null)` guard silently skips
+          // disposal — leaking the native player and its event subscription.
+          try {
+            await localController.initialize();
+            if (disposed) {
+              // Effect cleanup will also see pendingController.value and
+              // dispose it; clear the ref here to avoid a double-dispose.
+              pendingController.value = null;
+              await localController.dispose();
+              await deleteVideoFile();
+              return;
+            }
+            await localController.play();
+            if (disposed) {
+              pendingController.value = null;
+              await localController.dispose();
+              await deleteVideoFile();
+              return;
+            }
+            pendingController.value = null;
+            controller.value = localController;
+          } catch (_) {
+            // Start disposal without awaiting it, then rethrow immediately.
+            //
+            // video_player 2.11.1 initialize() creates _creatingCompleter at
+            // the top of the method, then awaits createWithOptions() before
+            // completing it (video_player.dart:546,587-590).  If
+            // createWithOptions() itself throws, _creatingCompleter is never
+            // completed, and dispose() waits on it unconditionally at :682-683.
+            // Awaiting dispose() here would therefore deadlock: the outer catch
+            // never sets error.value, the error UI is never shown, and the
+            // viewer is left in an infinite loading state.
+            //
+            // Note: if createWithOptions() throws, _creatingCompleter is never
+            // completed, so the unawaited disposal stalls at the same wait.
+            // This bypasses the deadlock for the outer catch but does not
+            // release the native player in the create-failure case.  After a
+            // successful create, _creatingCompleter is completed at :590, so
+            // the detached disposal runs normally; errors from that detached
+            // future are caught and logged below rather than becoming uncaught
+            // async errors [F2r(d)].
+            pendingController.value = null;
+            unawaited(
+              localController.dispose().catchError((Object disposeError) {
+                debugPrint(
+                  '[VideoViewer] dispose() failed after load error: $disposeError',
+                );
+              }),
+            );
+            rethrow;
           }
-          controller.value = localController;
         } catch (loadError) {
           if (!disposed) error.value = loadError.toString();
         }
@@ -168,6 +225,15 @@ class MediaVideoViewerPage extends HookConsumerWidget {
         }
         unawaited(downloadSubscription.value?.cancel() ?? Future.value());
         unawaited(downloadSink.value?.close() ?? Future.value());
+        // Dispose whichever controller is reachable: a controller that has
+        // finished init+play and been published to controller.value, OR one
+        // that is still mid-init (registered in pendingController before the
+        // first await).  Exactly one of these is non-null at any moment;
+        // clearing both refs prevents a double-dispose if initializeVideo()
+        // races with the teardown.
+        final activePending = pendingController.value;
+        pendingController.value = null;
+        if (activePending != null) unawaited(activePending.dispose());
         final activeController = controller.value;
         if (activeController != null) unawaited(activeController.dispose());
         unawaited(deleteVideoFile());
@@ -214,6 +280,8 @@ class MediaVideoViewerPage extends HookConsumerWidget {
       callback();
     }
 
+    final controls = _useVideoControlsVisibility(context, controller.value);
+
     final viewportHeight = MediaQuery.sizeOf(context).height;
     final dragProgress = (dragOffset.value / viewportHeight).clamp(0.0, 1.0);
     final videoScale = 1 - (dragProgress * 0.1);
@@ -233,22 +301,24 @@ class MediaVideoViewerPage extends HookConsumerWidget {
               offset: Offset(0, dragOffset.value),
               child: Transform.scale(
                 scale: videoScale,
-                child: GestureDetector(
-                  key: const ValueKey('message-media-video-viewer-gesture'),
-                  behavior: HitTestBehavior.opaque,
-                  onVerticalDragStart: (_) {
+                child: _VideoZoomSurface(
+                  key: ValueKey(videoUrl),
+                  onTap: controls.toggle,
+                  controlsVisible: controls.visible,
+                  onInteractionStart: controls.beginInteraction,
+                  onInteractionEnd: controls.endInteraction,
+                  onDismissStart: () {
                     snapBackController.stop();
                     isDragging.value = true;
                   },
-                  onVerticalDragUpdate: (details) {
+                  onDismissUpdate: (delta) {
                     if (!isDragging.value) return;
-                    dragOffset.value = (dragOffset.value + details.delta.dy)
+                    dragOffset.value = (dragOffset.value + delta)
                         .clamp(0.0, viewportHeight)
                         .toDouble();
                   },
-                  onVerticalDragEnd: (details) {
+                  onDismissEnd: (velocity) {
                     isDragging.value = false;
-                    final velocity = details.primaryVelocity ?? 0;
                     if (dragOffset.value > _dismissThreshold ||
                         velocity > _dismissVelocity) {
                       controller.value?.pause();
@@ -257,8 +327,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                     }
                     animateSnapBack();
                   },
-                  onVerticalDragCancel: animateSnapBack,
-                  child: SafeArea(
+                  onDismissCancel: () {
+                    snapBackController.stop();
+                    isDragging.value = false;
+                    dragOffset.value = 0;
+                  },
+                  child: Padding(
+                    padding: _mediaViewerPadding(context),
                     child: Center(
                       child: FutureBuilder<void>(
                         future: initializeFuture.value,
@@ -266,7 +341,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                           if (error.value != null || snapshot.hasError) {
                             return const _MediaLoadFailure(
                               message: 'Failed to load video',
-                              icon: LucideIcons.videoOff,
+                              icon: BuzzIcons.videoOff,
                             );
                           }
 
@@ -288,29 +363,61 @@ class MediaVideoViewerPage extends HookConsumerWidget {
               ),
             ),
           ),
-          PositionedDirectional(
-            top: Grid.sm,
-            end: Grid.sm,
-            child: Opacity(
-              opacity: chromeOpacity,
-              child: SafeArea(
-                child: _MediaViewerCloseButton(
-                  key: const ValueKey('message-media-video-viewer-close'),
-                  tooltip: 'Close video viewer',
-                  onPressed: () => Navigator.of(context).maybePop(),
+          if (defaultTargetPlatform == TargetPlatform.iOS)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height:
+                  MediaQuery.paddingOf(context).top +
+                  IosNavigationMetrics.of(context).compactHeight,
+              child: _VideoViewerChrome(
+                visible: controls.visible,
+                dragOpacity: chromeOpacity,
+                child: Theme(
+                  data: ThemeData.dark(),
+                  child: IosNavigationBar(
+                    title: 'Video',
+                    actions: [
+                      IosNavigationAction(
+                        label: 'Close video viewer',
+                        symbol: 'xmark',
+                        onPressed: () => Navigator.of(context).maybePop(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          else
+            PositionedDirectional(
+              top: Grid.sm,
+              end: Grid.sm,
+              child: _VideoViewerChrome(
+                visible: controls.visible,
+                dragOpacity: chromeOpacity,
+                child: SafeArea(
+                  child: _MediaViewerCloseButton(
+                    key: const ValueKey('message-media-video-viewer-close'),
+                    tooltip: 'Close video viewer',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
                 ),
               ),
             ),
-          ),
           PositionedDirectional(
             bottom: 0,
             start: 0,
             end: 0,
-            child: Opacity(
-              opacity: chromeOpacity,
+            child: _VideoViewerChrome(
+              key: const ValueKey('message-media-video-viewer-controls'),
+              visible: controls.visible,
+              dragOpacity: chromeOpacity,
               child: SafeArea(
                 child: _VideoViewerBottomControls(
                   controller: controller.value,
+                  onInteractionStart: controls.beginInteraction,
+                  onInteractionEnd: controls.endInteraction,
                   onReply: onReply == null
                       ? null
                       : () => unawaited(replyInThread()),
@@ -375,7 +482,7 @@ class _VideoLoadingPoster extends StatelessWidget {
     return ColoredBox(
       color: context.colors.surfaceContainerHighest,
       child: Icon(
-        LucideIcons.video,
+        BuzzIcons.video,
         size: 40,
         color: context.colors.onSurfaceVariant,
       ),

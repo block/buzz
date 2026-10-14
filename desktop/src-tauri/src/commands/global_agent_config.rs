@@ -257,6 +257,9 @@ async fn restart_local_agent_on_config_change(
     let old_global_clone = old_global.clone();
     let new_global_clone = new_global.clone();
     let personas_owned = personas_snapshot.to_vec();
+    use tauri::Manager;
+    // Captured before the stop: a community removed meanwhile refuses the start.
+    let admission = crate::managed_agents::AdmissionSnapshot::capture(&app.state::<AppState>());
 
     let stop_result = tokio::task::spawn_blocking(move || {
         use tauri::Manager;
@@ -346,10 +349,15 @@ async fn restart_local_agent_on_config_change(
     };
 
     let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
-    use tauri::Manager;
     let state = app.state::<AppState>();
-    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
-        .await
+    match super::agents::start_local_agent_pairs_with_preflight(
+        app,
+        &state,
+        pubkey,
+        &relay_urls,
+        &admission,
+    )
+    .await
     {
         Ok(_) => {
             eprintln!(

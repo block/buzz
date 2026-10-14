@@ -59,8 +59,8 @@ const PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// The JSON body stored in a persona event's content field.
 ///
 /// Field order MUST match the NIP-AP reference vectors (`docs/nips/NIP-AP.md`
-/// content body: `display_name, system_prompt, avatar_url, runtime, model,
-/// provider, name_pool`). serde emits fields in declaration order, so this
+/// content body: `display_name, system_prompt, acp_command, avatar_url, runtime,
+/// model, provider, name_pool, respond_to, respond_to_allowlist, parallelism`). serde emits fields in declaration order, so this
 /// order pins the exact content bytes and therefore the NIP-01 event id — a
 /// reorder here breaks cross-implementation interop. Guarded by
 /// `content_matches_nip_ap_vector`.
@@ -73,6 +73,8 @@ pub struct PersonaEventContent {
     /// and therefore `persona_content_hash` — are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +94,18 @@ pub struct PersonaEventContent {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Optional short, PUBLIC description (max 280 chars). Appended after the
+    /// pre-existing fields so records without one serialize byte-identically
+    /// to the pre-description era — existing content bytes and event ids are
+    /// unchanged. EXCLUDED from [`persona_content_hash`]: description is
+    /// display metadata, not spawn-relevant config, so a description-only edit
+    /// must not badge linked instances as needing a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// ACP conversation boundary. Appended to preserve the historical field
+    /// order and omitted for the default channel behavior.
+    #[serde(default, skip_serializing_if = "super::AcpSessionPolicy::is_channel")]
+    pub session_policy: super::AcpSessionPolicy,
 }
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
@@ -176,7 +190,18 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
 pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, String> {
     // Single projection point — persona_event_content owns the field mapping
     // (and the hash-stability rules that come with it).
-    let content = persona_event_content(record);
+    let mut content = persona_event_content(record);
+    if record.shared {
+        // Public catalog heads carry only portable aliases. Explicit stock
+        // distinguishes a reset from an omitted machine-local owner override.
+        content.acp_command = match record.acp_command.as_deref() {
+            None => Some(super::DEFAULT_ACP_COMMAND.to_string()),
+            Some(command) if super::backend::is_portable_acp_command(command) => {
+                Some(command.to_string())
+            }
+            Some(_) => None,
+        };
+    }
 
     let content_json = serde_json::to_string(&content)
         .map_err(|e| format!("failed to serialize persona content: {e}"))?;
@@ -229,7 +254,9 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
+        description: content.description,
         system_prompt: content.system_prompt.unwrap_or_default(),
+        acp_command: content.acp_command,
         runtime: content.runtime,
         model: content.model,
         provider: content.provider,
@@ -245,6 +272,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
         parallelism: content.parallelism,
+        session_policy: content.session_policy,
         created_at: created_at.clone(),
         updated_at: created_at,
     })
@@ -284,8 +312,8 @@ pub async fn flush_pending_events(
 /// The scope snapshots its relay, owner keys, and database path together
 /// before network work starts. Switching communities during the flush cannot
 /// redirect rows from the old scope into the new relay.
-pub async fn flush_active_pending_events(
-    app: &tauri::AppHandle,
+pub async fn flush_active_pending_events<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &AppState,
 ) -> Result<u32, String> {
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
@@ -492,9 +520,18 @@ fn redate_tombstone(
 /// clock skew and export/import round-trips. `PersonaEventContent` field order
 /// is fixed by the struct definition, so `serde_json` produces a stable
 /// canonical encoding.
+///
+/// `description` is deliberately EXCLUDED from the hashed projection: it is
+/// public display metadata, not spawn-relevant config, so a description-only
+/// edit must not flip the "restart required" drift badge on linked instances.
+/// Guarded by `description_change_does_not_change_content_hash`.
 pub fn persona_content_hash(content: &PersonaEventContent) -> String {
     use sha2::{Digest, Sha256};
-    let json = serde_json::to_vec(content).unwrap_or_default();
+    let hashed = PersonaEventContent {
+        description: None,
+        ..content.clone()
+    };
+    let json = serde_json::to_vec(&hashed).unwrap_or_default();
     let digest = Sha256::digest(&json);
     hex::encode(digest)
 }
@@ -510,6 +547,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         // records serialize byte-identically and persona_content_hash is
         // stable across the upgrade (drift badges must not flip).
         system_prompt: Some(record.system_prompt.clone()),
+        acp_command: record.acp_command.clone(),
         runtime: record.runtime.clone(),
         model: record.model.clone(),
         provider: record.provider.clone(),
@@ -522,6 +560,8 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         respond_to: record.respond_to.clone(),
         respond_to_allowlist: record.respond_to_allowlist.clone(),
         parallelism: record.parallelism,
+        description: record.description.clone(),
+        session_policy: record.session_policy,
     }
 }
 
@@ -536,6 +576,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
 /// the definition's current content hash.
 pub struct PersonaSnapshot {
     pub system_prompt: Option<String>,
+    pub acp_command: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
     /// Preferred ACP runtime ID, copied verbatim from the persona (including
@@ -557,6 +598,7 @@ pub struct PersonaSnapshot {
 pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
     PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
+        acp_command: persona.acp_command.clone(),
         model: persona.model.clone(),
         provider: persona.provider.clone(),
         runtime: persona.runtime.clone(),
@@ -587,9 +629,15 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     if let Some(prompt) = snapshot.system_prompt {
         record.system_prompt = Some(prompt);
     }
+    // The definition view omits stock buzz-acp. Absence therefore resets a
+    // previously selected wrapper; preserving the instance would resurrect it.
+    record.acp_command = snapshot
+        .acp_command
+        .unwrap_or_else(|| super::DEFAULT_ACP_COMMAND.to_string());
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
+    record.session_policy = persona.session_policy;
     // Drop a stale create-time harness pin when the definition switches to a
     // different known runtime (builtin, static preset, or loaded custom). A pin
     // that names an unknown/custom command is always kept.

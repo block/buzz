@@ -9,20 +9,28 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/physics.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/community/community_icon_provider.dart';
+import '../../shared/community/community_avatar.dart';
+import '../../shared/community/paired_community_landing.dart';
+import '../../shared/community/community_membership_provider.dart';
+import '../../shared/widgets/app_list_card_item.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/app_list_card.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/buzz_titled_sheet_layout.dart';
+import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
@@ -30,6 +38,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../pairing/pairing_page.dart';
 import '../pairing/pairing_provider.dart';
@@ -47,7 +56,6 @@ import 'channel_sort/channel_sort_storage.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
-import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -60,6 +68,8 @@ part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
 part 'channels_page/skeleton.dart';
 part 'channels_page/community.dart';
+part 'channels_page/community_switcher.dart';
+part 'channels_page/community_switcher_action.dart';
 part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 
@@ -87,7 +97,6 @@ const double _kChannelLabelInset =
 /// sections while the labels stay on [_kChannelLabelInset].
 const double _kDmAvatarSize = _kChannelIconSize;
 
-const double _kTopSectionCommunityAvatarSize = 40.0;
 const double _kTopSectionProfileAvatarSize = 36.0;
 const double _kTopSectionBottomPadding = Grid.xxs;
 
@@ -141,9 +150,8 @@ _UnreadChannelState _computeUnreadChannelState({
     int? readAtForObservedEvent(ObservedUnreadEvent event) =>
         observedUnreadEventReadAt(
           event,
-          channelReadAt,
-          (rootId) => readState.effectiveTimestamp(threadContextKey(rootId)),
-          (messageId) => readState.effectiveTimestamp(msgContextKey(messageId)),
+          channel.id,
+          readState.effectiveTimestamp,
         );
 
     final unreadCount = countUnreadObservedEvents(
@@ -161,12 +169,20 @@ _UnreadChannelState _computeUnreadChannelState({
 class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
+    this.communityInvitePageBuilder,
+    this.communityAppearancePageBuilder,
     required this.onSettingsTransitionProgress,
     this.tabReselection,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
+
+  /// Builds the invite destination opened from the community sheet.
+  final WidgetBuilder? communityInvitePageBuilder;
+
+  /// Builds the appearance destination opened from the community sheet.
+  final WidgetBuilder? communityAppearancePageBuilder;
 
   /// Reports Settings route progress so its foreground and Home's background
   /// render from the same timeline.
@@ -177,6 +193,10 @@ class ChannelsPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Resolve permissions before the community menu is opened.
+    if (communityInvitePageBuilder != null) {
+      ref.watch(currentCommunityRoleProvider);
+    }
     final channelsAsync = ref.watch(channelsProvider);
     final sessionState = ref.watch(relaySessionProvider);
     final currentPubkey = ref
@@ -192,7 +212,14 @@ class ChannelsPage extends HookConsumerWidget {
       context,
       titleStyle: headerTitleStyle,
       bottomHeight: _kTopSectionBottomPadding,
+      nativeLargeTitle: true,
     );
+    final communityAvatarKey = useMemoized(GlobalKey.new);
+    final nativeCommunityAvatarBounds = useRef<Rect?>(null);
+    final headerKey = useMemoized(GlobalKey.new);
+    final nativeHeaderReady = useRef(false);
+    final bodyReady = useRef(false);
+    final communityFlightActive = useState(false);
     final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final headerFrostProgress = useState(0.0);
@@ -284,35 +311,162 @@ class ChannelsPage extends HookConsumerWidget {
       return timer.cancel;
     }, [canSurfaceError]);
 
-    // Keep cached content steady through brief socket flaps. A sustained
-    // reconnect swaps to element-shaped skeletons that match desktop.
-    final showConnectionSkeleton = useState(false);
-    final isReconnectingWithContent =
-        channels != null &&
-        (sessionState.status == SessionStatus.connecting ||
-            sessionState.status == SessionStatus.reconnecting);
-    useEffect(() {
-      if (!isReconnectingWithContent) {
-        showConnectionSkeleton.value = false;
-        return null;
+    Rect? measureCommunityAvatar() {
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        final header = headerKey.currentContext?.findRenderObject();
+        final bounds = nativeCommunityAvatarBounds.value;
+        return header is RenderBox && bounds != null
+            ? MatrixUtils.transformRect(header.getTransformTo(null), bounds)
+            : null;
       }
-      final timer = Timer(const Duration(seconds: 2), () {
-        showConnectionSkeleton.value = true;
+      final avatar = communityAvatarKey.currentContext?.findRenderObject();
+      return avatar is RenderBox
+          ? MatrixUtils.transformRect(
+              avatar.getTransformTo(null),
+              Offset.zero & avatar.size,
+            )
+          : null;
+    }
+
+    Future<Rect?> prepareCommunityLanding() async {
+      // The list snapshot precedes unread history and DM profile hydration.
+      // Both can still change weight, labels, and sorting behind the picker.
+      final channels = ref.read(channelsProvider).requireValue;
+      final dmPubkeys = {
+        for (final channel in channels)
+          if (channel.isMember && !channel.isArchived && channel.isDm)
+            ...channel.participantPubkeys,
+      };
+      await Future.wait([
+        ref.read(channelsProvider.notifier).waitForUnreadCatchUp(),
+        if (dmPubkeys.isNotEmpty)
+          ref.read(userCacheProvider.notifier).preload(dmPubkeys.toList()),
+      ]);
+      if (!context.mounted || !communityFlightActive.value) return null;
+      // Settle Home's scale and scroll while the loading backdrop is opaque.
+      onSettingsTransitionProgress(0);
+      if (channelsScrollController.hasClients) {
+        channelsScrollController.jumpTo(
+          channelsScrollController.position.minScrollExtent,
+        );
+      }
+      Rect? previous;
+      var stableFrames = 0;
+      while (context.mounted && communityFlightActive.value) {
+        await WidgetsBinding.instance.endOfFrame;
+        if (!context.mounted) return null;
+        final ready =
+            ref.read(_communityContentReadyProvider).value == true &&
+            bodyReady.value &&
+            (defaultTargetPlatform != TargetPlatform.iOS ||
+                nativeHeaderReady.value);
+        final bounds = ready ? measureCommunityAvatar() : null;
+        stableFrames = ready && bounds == previous ? stableFrames + 1 : 0;
+        previous = bounds;
+        if (ready && stableFrames >= 2) return bounds;
+      }
+      return null;
+    }
+
+    final arrivingCommunity = ref.watch(pairedCommunityLandingProvider);
+    useEffect(() {
+      if (arrivingCommunity == null) return null;
+      var cancelled = false;
+      Future<void> revealPairedCommunity() async {
+        // Add-community pairing is a pushed route. Let it finish dismissing
+        // before placing the loading surface above the destination Home page.
+        do {
+          await WidgetsBinding.instance.endOfFrame;
+          if (cancelled || !context.mounted) return;
+        } while (ModalRoute.of(context)?.isCurrent == false);
+        if (ref.read(pairedCommunityLandingProvider)?.id !=
+            arrivingCommunity.id) {
+          return;
+        }
+        ref.read(pairedCommunityLandingProvider.notifier).clear();
+        communityFlightActive.value = true;
+        final completedPairing = ref.read(pairingProvider);
+        final navigator = Navigator.of(context, rootNavigator: true);
+        await navigator.push<void>(
+          PageRouteBuilder<void>(
+            opaque: false,
+            transitionDuration: Duration.zero,
+            reverseTransitionDuration: Duration.zero,
+            pageBuilder: (_, _, _) => _CommunitySwitcherPage(
+              arrivingCommunity: arrivingCommunity,
+              destination: measureCommunityAvatar(),
+              prepareLanding: prepareCommunityLanding,
+              onFlightChanged: (flying) {
+                if (context.mounted) communityFlightActive.value = flying;
+              },
+              onTransitionProgress: onSettingsTransitionProgress,
+            ),
+          ),
+        );
+        if (context.mounted) {
+          communityFlightActive.value = false;
+          if (completedPairing.status == PairingStatus.success &&
+              identical(ref.read(pairingProvider), completedPairing)) {
+            ref.read(pairingProvider.notifier).reset();
+          }
+        }
+      }
+
+      unawaited(revealPairedCommunity());
+      return () => cancelled = true;
+    }, [arrivingCommunity]);
+
+    void openCommunityGrid() {
+      if (!context.mounted) return;
+      ref.invalidate(communityIconProvider);
+      final destination = measureCommunityAvatar();
+      late final _CommunitySwitcherRoute route;
+      route = _CommunitySwitcherRoute(
+        onTransitionProgress: onSettingsTransitionProgress,
+        builder: (_) => _CommunitySwitcherPage(
+          destination: destination,
+          prepareLanding: prepareCommunityLanding,
+          onFlightChanged: (flying) {
+            route.flying = flying;
+            communityFlightActive.value = flying;
+          },
+          onTransitionProgress: onSettingsTransitionProgress,
+        ),
+      );
+      Navigator.of(context).push(route).whenComplete(() {
+        if (context.mounted) communityFlightActive.value = false;
       });
-      return timer.cancel;
-    }, [isReconnectingWithContent]);
+    }
 
     void openCommunitySwitcher() {
+      // Freeze the menu shape for this presentation. If a cold permission
+      // lookup is still pending, the next opening uses its resolved result.
+      final role = ref.read(currentCommunityRoleProvider).unwrapPrevious();
+      final canInvite = role.hasError || canManageCommunityInvites(role.value);
       unawaited(HapticFeedback.selectionClick());
-      ref.invalidate(communityIconProvider);
       showBuzzModalBottomSheet<void>(
         context: context,
         showCloseButton: false,
-        showDragHandle: false,
-        builder: (_) => const _CommunitySwitcherSheet(),
+        showDragHandle: true,
+        builder: (_) => _CommunityMenuSheet(
+          canInvite: canInvite,
+          onSwitchCommunity: openCommunityGrid,
+          invitePageBuilder: communityInvitePageBuilder,
+          appearancePageBuilder: communityAppearancePageBuilder,
+        ),
       );
     }
 
+    final activeCommunity = ref
+        .watch(activeCommunityProvider)
+        .unwrapPrevious()
+        .value;
+    final communityRelay = activeCommunity?.relayUrl;
+    final communityAvatar = communityRelay == null
+        ? null
+        : ref.watch(communityIconPresentationProvider(communityRelay));
+    final profile = ref.watch(profileProvider).unwrapPrevious().value;
+    final communityName = activeCommunity?.name.trim() ?? '';
     final topSectionGradient = context.appColors.topSectionGradient;
     final usesPinnedGradient = topSectionGradient != null;
 
@@ -322,6 +476,45 @@ class ChannelsPage extends HookConsumerWidget {
           : context.colors.surface,
       backgroundGradient: topSectionGradient,
       appBar: FrostedAppBar(
+        key: headerKey,
+        onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
+        nativeTitle: communityName.isEmpty ? 'Community' : communityName,
+        nativeLargeTitle: true,
+        nativeLeading: IosNavigationAction(
+          label: 'Community settings',
+          onAvatarBoundsChanged: (bounds) {
+            final header = headerKey.currentContext?.findRenderObject();
+            if (header is RenderBox) {
+              // Store native coordinates, then apply the current Home transform
+              // when measuring the destination immediately before departure.
+              nativeCommunityAvatarBounds.value =
+                  header.globalToLocal(bounds.topLeft) & bounds.size;
+            }
+          },
+          avatarHidden: communityFlightActive.value,
+          avatarIdentity: activeCommunity?.id,
+          symbol: 'building.2.crop.circle',
+          imageUrl: communityAvatar,
+          avatarInitial: communityName.isEmpty
+              ? '?'
+              : communityName.substring(0, 1).toUpperCase(),
+          onPressed: openCommunitySwitcher,
+        ),
+        nativeActions: [
+          IosNavigationAction(
+            label: 'Settings',
+            avatarIdentity: '${activeCommunity?.id}:${activeCommunity?.pubkey}',
+            symbol: 'person.crop.circle',
+            imageUrl: profile?.avatarUrl,
+            avatarInitial: profile?.initial ?? '?',
+            onPressed: () => Navigator.of(context).push(
+              _SettingsPageRoute(
+                builder: settingsPageBuilder,
+                onTransitionProgress: onSettingsTransitionProgress,
+              ),
+            ),
+          ),
+        ],
         horizontalInset: _kTopSectionInset,
         // Let the full Buzz gradient show at rest. Once the list begins to
         // move beneath this row, build up blur over the first 64dp of scroll
@@ -334,7 +527,11 @@ class ChannelsPage extends HookConsumerWidget {
             ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
             : 20,
         showBottomDivider: false,
-        leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        leading: _CommunityIndicator(
+          onTap: openCommunitySwitcher,
+          avatarKey: communityAvatarKey,
+          hidden: communityFlightActive.value,
+        ),
         centerTitle: false,
         titleStyle: headerTitleStyle,
         title: _CommunityHeaderTitle(
@@ -365,11 +562,11 @@ class ChannelsPage extends HookConsumerWidget {
         bottom: const SizedBox.expand(),
       ),
       body: _ChannelsBody(
+        onReadyChanged: (ready) => bodyReady.value = ready,
         channels: channels,
         channelsAsync: channelsAsync,
         showError: showError.value,
         sessionStatus: sessionState.status,
-        showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
         topSectionHeight: topSectionHeight,
         usesPinnedGradient: usesPinnedGradient,
@@ -388,11 +585,14 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
   _SettingsPageRoute({
     required WidgetBuilder builder,
     required this.onTransitionProgress,
+    bool? opaque,
   }) : super(
          pageBuilder: (context, animation, secondaryAnimation) =>
              builder(context),
          transitionsBuilder: _buildSettingsTransition,
-         opaque: false,
+         // Stop compositing Home's UIKit controls once Settings has settled.
+         // Opaque routes still paint the previous page during both transitions.
+         opaque: opaque ?? defaultTargetPlatform == TargetPlatform.iOS,
          allowSnapshotting: false,
          transitionDuration: const Duration(milliseconds: 150),
          reverseTransitionDuration: const Duration(milliseconds: 150),

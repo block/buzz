@@ -82,9 +82,21 @@ where
     F: FnOnce(PgConnection) -> Fut,
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
-    let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
-        .await?
-        .detach();
+    let mut lock_conn = crate::observability::acquire_writer_with_legacy_metrics(
+        pool,
+        crate::observability::WriterOperation::Bootstrap,
+    )
+    .await?
+    .detach();
+    // This dedicated connection intentionally waits for the current migration
+    // or schema-destruction owner and may then run long DDL. Exempt those two
+    // phases from runtime lock/statement budgets. Keep the idle-in-transaction
+    // timeout: a client wedged idle mid-migration is still a lock holder that
+    // should be reaped. The detached connection is closed below and never
+    // returns these session settings to the pool.
+    sqlx::raw_sql("SET lock_timeout = 0; SET statement_timeout = 0")
+        .execute(&mut lock_conn)
+        .await?;
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::MigrationSchemaSafety,
         sqlx::query("SELECT pg_advisory_lock($1)")
@@ -174,7 +186,7 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use std::{
         collections::BTreeSet,
@@ -184,8 +196,8 @@ mod tests {
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
-    /// Connection parameters parsed out of a `postgres://user:pass@host:port/db`
-    /// URL so the parity test can pass them to the `bin/pgschema` binary, which
+    /// Connection parameters parsed out of a PostgreSQL URL so the parity test
+    /// can pass them to the `bin/pgschema` binary, which
     /// takes discrete `--host/--port/--user/--password/--db` flags rather than a
     /// URL. Only the shapes this test emits (`BUZZ_TEST_DATABASE_URL` /
     /// `DATABASE_URL` / `TEST_DB_URL`) are supported.
@@ -477,6 +489,9 @@ mod tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "storage_accounting_snapshots",
+            "operator_listener_pubkeys",
+            "operator_listener_outbox",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -690,7 +705,57 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 40);
+        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations[58].version, 59);
+        assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
+        assert_eq!(migrations[59].version, 60);
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE push_leases DROP COLUMN app_profile"));
+        assert_eq!(migrations[55].version, 56);
+        assert!(migrations[55]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE personal_read_accounts"));
+        assert_eq!(migrations[56].version, 57);
+        assert!(migrations[56]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE personal_read_accounts ADD COLUMN started_at"));
+        assert_eq!(migrations[57].version, 58);
+        assert!(migrations[57]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN through_message_id"));
+        assert_eq!(migrations[48].version, 49);
+        assert_eq!(migrations[49].version, 50);
+        assert_eq!(migrations[50].version, 51);
+        assert_eq!(migrations[51].version, 52);
+        assert_eq!(migrations[52].version, 53);
+        assert_eq!(migrations[53].version, 54);
+        assert_eq!(migrations[54].version, 55);
+        assert!(migrations[48]
+            .sql
+            .as_str()
+            .contains("idx_thread_metadata_window"));
+        assert!(migrations[50]
+            .sql
+            .as_str()
+            .contains("community_deletion_owner_provenance"));
+        assert!(migrations[52].sql.as_str().contains("approval_origin"));
+        assert!(migrations[52]
+            .sql
+            .as_str()
+            .contains("community_deletion_requests_owner_preparable"));
+        assert!(migrations[53]
+            .sql
+            .as_str()
+            .contains("community_deletion_requests_owner_quota_reservations"));
+        assert!(migrations[54]
+            .sql
+            .as_str()
+            .contains("idx_relay_admin_actions_direct_request"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -742,6 +807,11 @@ mod tests {
             .as_str()
             .contains("CREATE INDEX idx_events_tags_gin"));
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
+        // schema.sql (CI / isolated relay bootstrap) must carry the same index,
+        // or e-tag reads there run on plans prod never sees.
+        assert!(crate::test_support::desired_state_schema_sql().contains(
+            "CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops)"
+        ));
 
         // NIP-AM (kind 44200) FTS exclusion: additive migration, never folded
         // into 0001 — folding would change 0001's checksum and break brownfield
@@ -898,7 +968,7 @@ mod tests {
         assert!(migrations[32].sql.as_str().contains("kind = 30179"));
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
-        assert!(include_str!("../../../../schema/schema.sql")
+        assert!(crate::test_support::desired_state_schema_sql()
             .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -1041,7 +1111,7 @@ mod tests {
             .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
+        let desired_schema = crate::test_support::desired_state_schema_sql();
         assert!(
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
@@ -1132,17 +1202,28 @@ mod tests {
         // Fresh desired-state bootstrap must install the identical executable
         // fence as migration 0032. CI and isolated relay startup use schema.sql
         // without running migrations, so drift reopens rolling-deploy races.
-        fn extract_roster_fence(sql: &str) -> &str {
-            let fence_start = "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()";
-            let fence_end = "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();";
-            let start = sql.find(fence_start).expect("roster fence function");
-            let relative_end = sql[start..].find(fence_end).expect("roster fence trigger");
-            &sql[start..start + relative_end + fence_end.len()]
+        // The desired state keeps the function and its trigger in separate
+        // files, so compare each statement rather than one contiguous span.
+        fn extract_span<'a>(sql: &'a str, start: &str, end: &str) -> &'a str {
+            let begin = sql.find(start).expect("span start");
+            let relative_end = sql[begin..].find(end).expect("span end");
+            &sql[begin..begin + relative_end + end.len()]
         }
-        assert_eq!(
-            extract_roster_fence(roster_fence),
-            extract_roster_fence(desired_schema)
-        );
+        for (start, end) in [
+            (
+                "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()",
+                "$$ LANGUAGE plpgsql;",
+            ),
+            (
+                "CREATE TRIGGER trg_events_guard_channel_roster_snapshot",
+                "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();",
+            ),
+        ] {
+            assert_eq!(
+                extract_span(roster_fence, start, end),
+                extract_span(&desired_schema, start, end)
+            );
+        }
 
         // The single-row heartbeat table is updated continuously. Prevent
         // autovacuum from truncating its heap so standby queries are not
@@ -1232,6 +1313,112 @@ mod tests {
             operator_audit.contains("_operator_global_tables"),
             "migration 39 must register relay_operator_audit in _operator_global_tables"
         );
+
+        assert_eq!(migrations[40].version, 41);
+        let identity_foundation = migrations[40].sql.as_str();
+        assert!(identity_foundation.contains("CREATE TABLE identity_bindings"));
+        assert!(identity_foundation.contains("CREATE TABLE identity_lifecycle_history"));
+
+        assert_eq!(migrations[41].version, 42);
+        let authorization_foundation = migrations[41].sql.as_str();
+        assert!(authorization_foundation.contains("CREATE TABLE authorization_events"));
+        assert!(authorization_foundation.contains("CREATE TABLE protected_object_authority"));
+
+        // Brownfield relay databases created through SQLx still carry the
+        // production/sandbox constraint from 0015. Converge them to the same
+        // dogfood-only authority declared by the desired-state schema.
+        assert_eq!(migrations[42].version, 43);
+        let dogfood_profile = migrations[42].sql.as_str();
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_delegations"));
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_installations"));
+        assert!(dogfood_profile
+            .contains("DROP CONSTRAINT push_gateway_installations_app_profile_check"));
+        assert!(dogfood_profile.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+        assert!(!desired_schema.contains("app_profile"));
+
+        // Drop the Phase-A NIP-FI relay-side authority ledger (0041 + 0042).
+        // OSS Buzz is stateless for identity (spec v2, PR #7214); the durable
+        // ledger tables are dead code. Restores community_write_fence_excluded_table
+        // to its pre-0041 body so the deletion catalog no longer includes the
+        // removed relations.
+        assert_eq!(migrations[43].version, 44);
+        let ledger_removal = migrations[43].sql.as_str();
+        assert!(ledger_removal.contains("DROP TABLE authorization_operation_receipts"));
+        assert!(ledger_removal.contains("DROP TABLE identity_bindings"));
+        assert!(ledger_removal.contains("DROP TABLE authorization_events"));
+        assert!(ledger_removal
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        // The restored exclusion function must NOT list any NIP-FI relation.
+        assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
+        assert!(!ledger_removal.contains("'identity_bindings'"));
+        assert_eq!(migrations[45].version, 46);
+        assert!(migrations[45]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_snapshots"));
+        assert_eq!(migrations[47].version, 48);
+        assert!(migrations[47]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN hash_version SMALLINT"));
+        assert_eq!(migrations[49].version, 50);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE operator_listener_pubkeys"));
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE operator_listener_outbox"));
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION community_write_fence_excluded_table"));
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("'rate_limit_violations', 'operator_listener_outbox'"));
+        for index in [
+            "operator_listener_pubkeys_target",
+            "operator_listener_pubkeys_created_at",
+            "operator_listener_outbox_due",
+            "operator_listener_outbox_recovery",
+            "operator_listener_outbox_created_at",
+        ] {
+            assert!(
+                migrations[49].sql.as_str().contains(index),
+                "migration 0050 must declare {index}"
+            );
+            assert!(
+                desired_schema.contains(index),
+                "schema.sql must declare {index}"
+            );
+        }
+        for index_shape in [
+            "ON operator_listener_outbox (next_attempt_at, created_at, id)",
+            "ON operator_listener_outbox (lease_until, created_at, id)",
+        ] {
+            assert!(
+                migrations[49].sql.as_str().contains(index_shape),
+                "migration 0050 must declare {index_shape}"
+            );
+            assert!(
+                desired_schema.contains(index_shape),
+                "schema.sql must declare {index_shape}"
+            );
+        }
+        // schema.sql keeps the restored (pre-0041) deletion exclusions and also
+        // leaves the deployment-global listener outbox outside tenant fencing.
+        assert!(
+            desired_schema
+                .contains("'rate_limit_violations', 'operator_listener_outbox'\n    ]::TEXT[])"),
+            "schema.sql must exclude the deployment-global listener outbox from tenant fencing"
+        );
+        assert_eq!(migrations[51].version, 52);
+        assert!(migrations[51]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE artifact_heads"));
     }
 
     #[test]
@@ -1310,7 +1497,162 @@ mod tests {
             .sql
             .as_str()
             .contains("error_code"));
-        assert!(include_str!("../../../../schema/schema.sql").contains("error_code          TEXT"));
+        assert!(
+            crate::test_support::desired_state_schema_sql().contains("error_code          TEXT")
+        );
+    }
+
+    /// `schema/schema.sql` includes every desired-state file exactly once, and
+    /// `schema/tables/public/` (the SchemaBot schema directory's `public`
+    /// namespace) holds only one table per file: its CREATE TABLE plus the
+    /// CREATE INDEX statements on it. Types, functions, partitions, triggers
+    /// and seed rows belong in the sibling directories SchemaBot never reads.
+    #[test]
+    fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
+        use std::collections::BTreeSet;
+
+        fn sql_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read schema directory") {
+                let path = entry.expect("schema directory entry").path();
+                if path.is_dir() {
+                    sql_files(&path, root, out);
+                } else if path.extension().is_some_and(|ext| ext == "sql") {
+                    let relative = path.strip_prefix(root).expect("schema-relative path");
+                    out.push(relative.to_str().expect("utf-8 path").replace('\\', "/"));
+                }
+            }
+        }
+
+        let schema_dir = crate::test_support::desired_state_schema_dir();
+        let manifest =
+            std::fs::read_to_string(schema_dir.join("schema.sql")).expect("read schema/schema.sql");
+        let mut included = Vec::new();
+        for line in manifest.lines() {
+            if let Some(include) = line.strip_prefix("\\i ") {
+                included.push(include.trim().to_owned());
+            }
+        }
+        let included_set: BTreeSet<_> = included.iter().cloned().collect();
+        assert_eq!(
+            included.len(),
+            included_set.len(),
+            "schema.sql includes a file twice"
+        );
+
+        let mut on_disk = Vec::new();
+        sql_files(&schema_dir, &schema_dir, &mut on_disk);
+        let on_disk: BTreeSet<_> = on_disk.into_iter().filter(|f| f != "schema.sql").collect();
+        assert_eq!(
+            on_disk, included_set,
+            "every schema/ file must be included by schema/schema.sql exactly once"
+        );
+
+        fn strip_comments(text: &str) -> String {
+            text.lines()
+                .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Table and index DDL must live in its table file, where SchemaBot
+        // reads it. A merge conflict resolved by pasting DDL into the manifest,
+        // or DDL in a sibling directory, would still build and pass CI.
+        for line in strip_comments(&manifest).lines().map(str::trim) {
+            assert!(
+                line.is_empty()
+                    || line.starts_with("\\i ")
+                    || line.to_ascii_uppercase().starts_with("CREATE EXTENSION "),
+                "schema/schema.sql may only hold \\i includes and CREATE EXTENSION; \
+                 put table DDL in tables/public/<table>.sql: {line:.80}"
+            );
+        }
+        let non_table_files = std::iter::once("schema.sql").chain(
+            included
+                .iter()
+                .map(String::as_str)
+                .filter(|f| !f.starts_with("tables/public/")),
+        );
+        for file in non_table_files {
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
+            for statement in strip_comments(&text).to_ascii_uppercase().split(';') {
+                let tokens: Vec<_> = statement.split_whitespace().collect();
+                assert!(
+                    !tokens.windows(2).any(|pair| matches!(
+                        pair,
+                        ["CREATE" | "UNIQUE", "INDEX"] | ["DROP" | "ALTER", "TABLE" | "INDEX"]
+                    )),
+                    "{file} may not create, alter or drop tables or indexes; \
+                     change tables/public/<table>.sql instead"
+                );
+                let creates_table = tokens.iter().enumerate().any(|(i, token)| {
+                    *token == "CREATE"
+                        && tokens[i + 1..].iter().find(|t| {
+                            !matches!(**t, "UNLOGGED" | "TEMP" | "TEMPORARY" | "GLOBAL" | "LOCAL")
+                        }) == Some(&"TABLE")
+                });
+                assert!(
+                    !creates_table
+                        || (file.starts_with("partitions/")
+                            && tokens.windows(2).any(|pair| pair == ["PARTITION", "OF"])),
+                    "{file} may not CREATE TABLE; only partitions/ may, and only PARTITION OF. \
+                     Declare tables in tables/public/<table>.sql"
+                );
+            }
+        }
+
+        let tables_dir = schema_dir.join("tables");
+        for entry in std::fs::read_dir(&tables_dir).expect("read schema/tables") {
+            let path = entry.expect("schema/tables entry").path();
+            assert!(
+                path.is_dir() && path.file_name().is_some_and(|name| name == "public"),
+                "schema/tables may contain only the `public` namespace: {}",
+                path.display()
+            );
+        }
+        let mut tables = 0;
+        for file in included.iter().filter(|f| f.starts_with("tables/public/")) {
+            let table = file
+                .strip_prefix("tables/public/")
+                .and_then(|name| name.strip_suffix(".sql"))
+                .expect("table file name");
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read table file");
+            let code = strip_comments(&text);
+            let mut creates = 0;
+            for statement in code
+                .split(';')
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            {
+                if statement.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = statement.strip_prefix("CREATE TABLE ") {
+                    assert!(
+                        rest.starts_with(&format!("{table} (")) && !rest.contains(" PARTITION OF "),
+                        "{file} may only create table {table}: {statement:.80}"
+                    );
+                    creates += 1;
+                } else {
+                    let index = statement
+                        .strip_prefix("CREATE INDEX ")
+                        .or_else(|| statement.strip_prefix("CREATE UNIQUE INDEX "))
+                        .unwrap_or_else(|| {
+                            panic!("{file} may only hold CREATE TABLE/INDEX: {statement:.80}")
+                        });
+                    assert!(
+                        !index.starts_with("IF NOT EXISTS ")
+                            && !index.starts_with("CONCURRENTLY "),
+                        "{file} must use a plain CREATE INDEX (SchemaBot refuses IF NOT EXISTS and CONCURRENTLY): {statement:.80}"
+                    );
+                    assert!(
+                        index.contains(&format!(" ON {table} ")),
+                        "{file} may only index {table}: {statement:.80}"
+                    );
+                }
+            }
+            assert_eq!(creates, 1, "{file} must create exactly one table");
+            tables += 1;
+        }
+        assert!(tables > 0, "schema/tables/public declares no tables");
     }
 
     #[test]
@@ -1324,7 +1666,7 @@ mod tests {
         assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
         assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
+        let desired_schema = crate::test_support::desired_state_schema_sql();
         assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
         assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
     }
@@ -1586,6 +1928,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn owner_deletion_auto_approval_migration_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 53)
+            .expect("embedded migration 0053")
+            .sql
+            .as_ref()
+            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
+
+        for sql in [&migration, &schema] {
+            assert!(sql.contains("approval_origin text not null default 'operator'"));
+            assert!(sql.contains("approval_origin in ('operator', 'owner_automatic')"));
+            assert!(sql.contains("'submitted', 'approved', 'fenced'"));
+            assert!(sql.contains("community_deletion_requests_owner_preparable"));
+            assert!(sql.contains("request_origin = 'owner'"));
+            assert!(sql.contains("stage = 'submitted'"));
+        }
+        assert!(migration.contains("set local lock_timeout = '5s'"));
+    }
+
+    #[test]
+    fn owner_deletion_quota_reservation_index_matches_desired_schema() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 54)
+            .expect("embedded migration 0054")
+            .sql
+            .as_ref()
+            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
+
+        for sql in [&migration, &schema] {
+            assert!(sql.contains("community_deletion_requests_owner_quota_reservations"));
+            assert!(sql.contains("request_origin = 'owner'"));
+            assert!(sql.contains("stage <> 'aborted'"));
+            assert!(sql.contains("include (community_id, completed_at)"));
+        }
+        assert!(migration.contains("set local lock_timeout = '5s'"));
+    }
+
     /// Structural parity between migration 0029's deletion surface and the
     /// desired-state bootstrap schema (`schema/schema.sql`).
     ///
@@ -1699,14 +2083,16 @@ mod tests {
             .expect("embedded migration 0029")
             .sql
             .as_ref();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema_sql = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql");
+        let migration_0051: &str = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 51)
+            .expect("embedded migration 0051")
+            .sql
+            .as_ref();
+        let schema_sql = crate::test_support::desired_state_schema_sql();
 
         let migration = surface(migration_0029);
+        let owner_admission_migration = surface(migration_0051);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -1723,24 +2109,90 @@ mod tests {
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
-            if table != "community_deletion_requests" {
+            if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
         }
+        let migration_approval_table = migration
+            .tables
+            .get("community_deletion_approvals")
+            .expect("0029 approval table");
+        let schema_approval_table = schema
+            .tables
+            .get("community_deletion_approvals")
+            .expect("schema.sql approval table");
+        for invariant in [
+            "inventory_digest bytea not null check (length(inventory_digest) = 32)",
+            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict",
+        ] {
+            assert!(
+                migration_approval_table.contains(invariant),
+                "0029 deletion approvals are missing {invariant}"
+            );
+            assert!(
+                schema_approval_table.contains(invariant),
+                "schema.sql deletion approvals are missing {invariant}"
+            );
+        }
+        let migration_request_table = migration
+            .tables
+            .get("community_deletion_requests")
+            .expect("0029 deletion request table");
+        for request_table in [
+            migration_request_table,
+            schema
+                .tables
+                .get("community_deletion_requests")
+                .expect("schema.sql deletion request table"),
+        ] {
+            assert!(
+                request_table.contains("unique (id, community_id, inventory_digest)"),
+                "deletion requests must expose the exact composite approval target"
+            );
+        }
         for (function, definition) in &migration.functions {
             let in_schema = schema
                 .functions
                 .get(function)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion function {function}"));
-            if function != "community_write_fence_excluded_table" {
+            if function != "community_write_fence_excluded_table"
+                && function != "prevent_community_deletion_request_retargeting"
+            {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {function}() drifted from migration 0029"
                 );
             }
+        }
+        assert_eq!(
+            schema
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("schema.sql deletion retargeting guard"),
+            owner_admission_migration
+                .functions
+                .get("prevent_community_deletion_request_retargeting")
+                .expect("0051 deletion retargeting guard"),
+            "schema.sql must carry the latest immutable owner-provenance guard"
+        );
+        let request_table = schema
+            .tables
+            .get("community_deletion_requests")
+            .expect("schema.sql deletion request table");
+        for owner_provenance_fragment in [
+            "request_origin text not null default 'operator'",
+            "owner_pubkey text",
+            "mediating_operator_pubkey text",
+            "acknowledgement_version integer",
+            "constraint community_deletion_owner_provenance check",
+        ] {
+            assert!(
+                request_table.contains(owner_provenance_fragment),
+                "schema.sql deletion requests are missing {owner_provenance_fragment}"
+            );
         }
         for (trigger, definition) in &migration.triggers {
             let in_schema = schema
@@ -1767,6 +2219,61 @@ mod tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        let personal = surface(
+            MIGRATOR
+                .iter()
+                .find(|m| m.version == 56)
+                .expect("personal read migration")
+                .sql
+                .as_ref(),
+        );
+        // 0057 adds personal_read_accounts.started_at after 0056's CREATE TABLE.
+        let started_at_column = "started_at timestamptz, ";
+        assert!(MIGRATOR
+            .iter()
+            .find(|m| m.version == 57)
+            .expect("personal read start migration")
+            .sql
+            .as_str()
+            .contains("ADD COLUMN started_at TIMESTAMPTZ"));
+        assert!(schema
+            .tables
+            .get("personal_read_accounts")
+            .expect("schema.sql personal read accounts")
+            .contains(started_at_column));
+        // 0058 replaces the frontier's whole-channel cut with its anchor ID.
+        let threads_through_column = "threads_through_timestamp timestamptz \
+            check (threads_through_timestamp is null or root_id = ''::bytea), ";
+        let through_message_column =
+            "through_message_id bytea check (octet_length(through_message_id) = 32), ";
+        let through_message = MIGRATOR
+            .iter()
+            .find(|m| m.version == 58)
+            .expect("personal read anchor migration")
+            .sql
+            .as_str();
+        assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
+        for (table, definition) in personal.tables {
+            let in_schema = schema.tables.get(&table).map(|schema_definition| {
+                if table == "personal_read_accounts" {
+                    schema_definition.replacen(started_at_column, "", 1)
+                } else {
+                    schema_definition.clone()
+                }
+            });
+            let definition = if table == "personal_read_frontiers" {
+                definition.replacen(threads_through_column, through_message_column, 1)
+            } else {
+                definition
+            };
+            assert_eq!(
+                in_schema.as_ref(),
+                Some(&definition),
+                "personal read table {table} differs"
+            );
+        }
+        expected_fences.extend(personal.fence_attachments);
+        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2198,9 +2705,9 @@ mod tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(39, &migrated)
+            .run_to(55, &migrated)
             .await
-            .expect("apply migrations 1-39");
+            .expect("apply migrations 1-55");
 
         for table in [
             "relay_admin_actions",
@@ -2389,6 +2896,22 @@ mod tests {
         .await
         .expect("read post-upgrade search behavior");
         assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
+    }
+
+    /// Migration-upgrade half of the owner-provenance contract.
+    ///
+    /// The desired-state bootstrap half lives in
+    /// `store::deletion::postgres_tests` and asserts the same shared case
+    /// table, so `schema/schema.sql` cannot admit owner rows the migration
+    /// path refuses (or the reverse).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrated_schema_enforces_owner_provenance_contract() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("run migrations");
+
+        crate::store::deletion::owner_provenance_contract::assert_contract(&pool).await;
     }
 
     #[tokio::test]
@@ -2608,5 +3131,185 @@ mod tests {
             .execute(&pool)
             .await
             .expect("drop late-table fixtures");
+    }
+
+    /// Verify migration 0044 applies cleanly against a DB that has rows in
+    /// the NIP-FI 0041+0042 tables. The immutability guards (no_delete,
+    /// no_truncate) are enforced via triggers; DROP TABLE bypasses them and
+    /// must succeed even when rows are present.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0044_drops_populated_nip_fi_ledger_cleanly() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(42, &pool)
+            .await
+            .expect("apply migrations 1-42");
+
+        // Seed a community and minimal rows in a selection of 0041+0042 tables.
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("drop-test-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("seed community");
+
+        // Seed a receipt (used as FK anchor for several 0042 tables).
+        let operation_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 12, $4, 1, $5)",
+        )
+        .bind(community_id)
+        .bind(operation_id)
+        .bind(vec![0xAA_u8; 32])
+        .bind(vec![0xBB_u8; 32])
+        .bind(vec![0xCC_u8; 32])
+        .execute(&pool)
+        .await
+        .expect("seed operation receipt");
+
+        // Seed an invalidation domain (0042 table with no FK to receipts).
+        sqlx::query(
+            "INSERT INTO authorization_invalidation_domains \
+             (community_id, current_generation) VALUES ($1, 0)",
+        )
+        .bind(community_id)
+        .execute(&pool)
+        .await
+        .expect("seed invalidation domain");
+
+        // Apply migration 0043 (dogfood profile) and 0044 (ledger removal).
+        MIGRATOR
+            .run_to(44, &pool)
+            .await
+            .expect("migration 0044 must apply cleanly against a populated NIP-FI DB");
+
+        // All NIP-FI tables must be gone.
+        let nip_fi_tables = [
+            "authorization_admission_results",
+            "authorization_authentication_denial_attempts",
+            "authorization_authority_epochs",
+            "authorization_event_capacity",
+            "authorization_events",
+            "authorization_invalidation_domains",
+            "authorization_invalidation_floors",
+            "authorization_operation_receipts",
+            "authorization_operation_version_delta_manifests",
+            "authorization_operation_version_deltas",
+            "identity_bindings",
+            "identity_enrollment_policies",
+            "identity_lifecycle_history",
+            "identity_lifecycle_selectors",
+            "protected_object_authority",
+        ];
+        let present: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_name = ANY($1)",
+        )
+        .bind(&nip_fi_tables[..])
+        .fetch_all(&pool)
+        .await
+        .expect("catalog check after ledger removal");
+        assert!(
+            present.is_empty(),
+            "all NIP-FI tables must be absent after migration 0044: {present:?}"
+        );
+
+        // Complete later additive migrations before comparing to the current
+        // binary's complete tenant-table inventory.
+        run_migrations(&pool)
+            .await
+            .expect("complete current migrations");
+        // The deletion catalog must validate with ledger relations gone.
+        crate::deletion::DeletionStore::new(pool.clone())
+            .validate_catalog()
+            .await
+            .expect("deletion catalog validates after migration 0044");
+    }
+
+    /// Migration 0055's `relay_admin_actions_direct_shape` rejects a direct
+    /// timeout carrying only one of duration and expiry on the migrated
+    /// schema. The desired-state (pgschema + reconcile) path is covered by
+    /// `direct_timeout_shape_check_holds_on_desired_state_schema` in buzz-relay.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0055_rejects_half_filled_direct_timeout() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(55, &pool)
+            .await
+            .expect("apply migrations 1-55");
+        for (secs, until) in [(Some(60i64), None), (None, Some(chrono::Utc::now()))] {
+            let err = sqlx::query(
+                "INSERT INTO relay_admin_actions (report_community_id, request_id, actor_pubkey, \
+                 actor_role, action, timeout_secs, timeout_until, enforcement_target_pubkey) \
+                 VALUES (gen_random_uuid(), gen_random_uuid(), $1, 'operator', 'timeout', $2, $3, $1)",
+            )
+            .bind([9u8; 32].as_slice())
+            .bind(secs)
+            .bind(until)
+            .execute(&pool)
+            .await
+            .expect_err("half-filled timeout must violate the CHECK");
+            assert!(
+                err.to_string().contains("relay_admin_actions_direct_shape"),
+                "{err}"
+            );
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0060_refuses_active_legacy_leases_without_mutation() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 59)
+            .await
+            .expect("legacy schema");
+        let community = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities(id,host) VALUES($1,'push-cutover.example')")
+            .bind(community)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO push_leases(community_id,author,installation_id,source_event_id,source_created_at,generation,active,app_profile,endpoint_hash,endpoint_grant,max_class,subscriptions,expires_at) VALUES($1,$2,'legacy',$3,1,1,true,'buzz-ios-dogfood',$4,'opaque','default','[]',2000000000)")
+            .bind(community).bind(vec![1_u8;32]).bind(vec![2_u8;32]).bind(vec![3_u8;32])
+            .execute(&pool).await.unwrap();
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("active legacy lease blocks cutover");
+        assert!(
+            error.to_string().contains("no active legacy push leases"),
+            "{error}"
+        );
+        let preserved: (bool, String) =
+            sqlx::query_as("SELECT active,app_profile FROM push_leases WHERE community_id=$1")
+                .bind(community)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, (true, "buzz-ios-dogfood".to_owned()));
+        sqlx::query("UPDATE push_leases SET active=false,app_profile=NULL,endpoint_hash=NULL,endpoint_grant=NULL,max_class=NULL,subscriptions=NULL WHERE community_id=$1")
+            .bind(community).execute(&pool).await.unwrap();
+        run_migrations(&pool)
+            .await
+            .expect("inactive legacy lease permits cutover");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_leases WHERE community_id=$1 AND NOT active",
+        )
+        .bind(community)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(sqlx::query("SELECT app_profile FROM push_leases")
+            .execute(&pool)
+            .await
+            .is_err());
     }
 }

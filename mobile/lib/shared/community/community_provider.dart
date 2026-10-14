@@ -80,9 +80,7 @@ final communityStorageProvider = Provider<CommunityStorage>((ref) {
 typedef CommunitySnapshotWriter =
     Future<void> Function(List<Community> communities);
 
-/// Writes the complete persisted community set to storage shared with the iOS
-/// notification service extension. Tests override this provider to verify that
-/// every persistence path refreshes (or clears) the native snapshot.
+/// Exports persisted communities to the notification service extension.
 final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
   ref,
 ) {
@@ -132,13 +130,11 @@ Future<void> _deactivateCommunityPushLease(
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
   final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
-  final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
+  final descriptor = await fetchBuzzPushLeaseDescriptor(
+    canonicalBuzzPushRelayHttpUrl(community.relayUrl),
+  );
   final matchingGrant = (await readBuzzPushEndpointGrants())
-      .where(
-        (grant) =>
-            grant.relayOrigin == descriptor.origin &&
-            grant.appProfile == buzzDevPushAppProfile,
-      )
+      .where((grant) => grant.relayOrigin == descriptor.origin)
       .firstOrNull;
   if (matchingGrant == null) {
     throw StateError('No endpoint grant exists for push lease tombstone.');
@@ -182,9 +178,23 @@ class _CommunitySnapshotSync {
 
   final CommunitySnapshotWriter _writer;
   String? _lastSuccessfulSnapshot;
+  Future<void> _mutationTail = Future.value();
 
-  Future<void> write(List<Community> communities) async {
-    final fingerprint = communities
+  Future<void> _serializeMutation(Future<void> Function() operation) {
+    final result = _mutationTail.then((_) => operation());
+    _mutationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  Future<void> write(List<Community> communities) =>
+      _serializeMutation(() => _write(communities));
+
+  Future<void> _write(List<Community> communities) async {
+    final effectiveCommunities = communities;
+    final contentFingerprint = effectiveCommunities
         .map(
           (community) => [
             community.id,
@@ -199,10 +209,9 @@ class _CommunitySnapshotSync {
           ].join('\u0000'),
         )
         .join('\u0001');
-    if (fingerprint == _lastSuccessfulSnapshot) return;
-
-    await _writer(communities);
-    _lastSuccessfulSnapshot = fingerprint;
+    if (contentFingerprint == _lastSuccessfulSnapshot) return;
+    await _writer(effectiveCommunities);
+    _lastSuccessfulSnapshot = contentFingerprint;
   }
 }
 
@@ -412,7 +421,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
   }
 
-  Future<void> markPushLeaseAccepted(
+  Future<bool> markPushLeaseAccepted(
     String id, {
     required List<BuzzPushSubscription> subscriptions,
     required int generation,
@@ -420,14 +429,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? await storage.loadAll();
     final index = current.indexWhere((community) => community.id == id);
-    if (index < 0) return;
+    if (index < 0) return false;
 
     final community = current[index];
     final acceptedGeneration =
         community.pushSubscriptionState.acceptedGeneration ?? 0;
     final generationCursor =
         community.pushSubscriptionState.generationCursor ?? 0;
-    if (generation < max(acceptedGeneration, generationCursor)) return;
+    if (generation < max(acceptedGeneration, generationCursor)) return false;
+    if (buzzPushSubscriptionsFingerprint(
+          community.pushSubscriptionState.desired,
+        ) !=
+        buzzPushSubscriptionsFingerprint(subscriptions)) {
+      return false;
+    }
     final updated = community.copyWith(
       pushSubscriptionState: community.pushSubscriptionState.withAccepted(
         subscriptions: subscriptions,
@@ -438,6 +453,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current]..[index] = updated;
     state = AsyncData(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+    return true;
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
@@ -600,21 +616,11 @@ final activeCommunityProvider = FutureProvider<Community?>((ref) async {
 
   if (communities.isEmpty) return null;
 
-  if (activeId == null) {
-    // No active ID stored but communities exist — fall back to first.
-    await storage.saveActiveId(communities.first.id);
-    return communities.first;
-  }
-
-  try {
-    return communities.firstWhere((w) => w.id == activeId);
-  } on StateError {
-    // Active ID points to a community that no longer exists.
-    // Fall back to first community.
-    if (communities.isNotEmpty) {
-      await storage.saveActiveId(communities.first.id);
-      return communities.first;
-    }
-    return null;
-  }
+  // This projection can outlive the list it captured above. Never persist a
+  // fallback here: a newer authentication may already have selected a community
+  // absent from that list. Authentication owns durable active-ID repair.
+  return communities.firstWhere(
+    (community) => community.id == activeId,
+    orElse: () => communities.first,
+  );
 });

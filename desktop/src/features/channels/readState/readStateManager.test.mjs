@@ -81,7 +81,7 @@ function makeFakeRelay() {
   return {
     fetchEvents: async () => [],
     publishEvent: async () => {},
-    subscribeLive: () => () => {},
+    subscribeInteractive: () => () => {},
   };
 }
 
@@ -792,7 +792,7 @@ test("publishSplitSlots_noopSuppression_skipsWhenUnchanged", async () => {
   const fakeRelay = {
     fetchEvents: async () => [],
     publishEvent: async () => {},
-    subscribeLive: () => () => {},
+    subscribeInteractive: () => () => {},
   };
 
   const pubkey = "b".repeat(64);

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/mentions/mention_tags.dart';
 import 'channel_window.dart';
 
 enum SystemEventType {
@@ -118,9 +119,9 @@ class SystemEvent {
         return '$actor removed $target from the channel';
       }(),
       SystemEventType.topicChanged =>
-        '$actor ${_describeTextFieldChange('topic', topic)}',
+        '$actor ${describeChannelTextFieldChange('topic', topic)}',
       SystemEventType.purposeChanged =>
-        '$actor ${_describeTextFieldChange('purpose', purpose)}',
+        '$actor ${describeChannelTextFieldChange('purpose', purpose)}',
       SystemEventType.channelCreated => '$actor created this channel',
       SystemEventType.channelArchived => '$actor archived this channel',
       SystemEventType.channelUnarchived => '$actor unarchived this channel',
@@ -141,7 +142,7 @@ class SystemEvent {
 ///
 /// Mirrors `describeChannelTextFieldChange` in
 /// `desktop/src/features/messages/lib/systemEventCopy.ts`.
-String _describeTextFieldChange(String field, String? value) {
+String describeChannelTextFieldChange(String field, String? value) {
   final trimmed = value?.trim();
   if (trimmed == null || trimmed.isEmpty) {
     return 'cleared the $field';
@@ -219,6 +220,12 @@ class ThreadSummary {
   final String threadHeadId;
   final int replyCount;
 
+  /// Whether this count is a minimum pending a complete recount.
+  final bool isLowerBound;
+
+  /// The last known total is awaiting reconciliation and should not be displayed.
+  final bool isCountPending;
+
   /// Up to 3 most recent unique participant pubkeys.
   final List<String> participantPubkeys;
   final int? lastReplyAt;
@@ -226,6 +233,8 @@ class ThreadSummary {
   const ThreadSummary({
     required this.threadHeadId,
     required this.replyCount,
+    this.isLowerBound = false,
+    this.isCountPending = false,
     required this.participantPubkeys,
     this.lastReplyAt,
   });
@@ -341,6 +350,10 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
   return result;
 }
 
+/// Debug-only instrumentation for actual timeline formatting invocations.
+@visibleForTesting
+VoidCallback? debugOnFormatTimeline;
+
 /// Process a chronologically-sorted list of [NostrEvent]s into a list of
 /// [TimelineMessage]s, applying deletions, edits, reactions, and system event
 /// parsing.
@@ -351,6 +364,10 @@ List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
 }) {
+  assert(() {
+    debugOnFormatTimeline?.call();
+    return true;
+  }());
   // 1. Collect deletion targets. Both kind:5 (NIP-09) and kind:9005
   // (Buzz-native) are deletion markers; mirror desktop's behavior.
   final deletedIds = <String>{};
@@ -490,10 +507,7 @@ List<TimelineMessage> formatTimeline(
       // Include both notify (`p`) and reference-only (`mention`) tags —
       // mirrors desktop's resolveMentionNames, so names in messages sent
       // "without inviting" still render as mentions.
-      final mentions = <String>[
-        for (final tag in effectiveTags)
-          if (tag.length >= 2 && (tag[0] == 'p' || tag[0] == 'mention')) tag[1],
-      ];
+      final mentions = mentionedPubkeysFromTags(effectiveTags).toList();
 
       final threadRef = event.threadReference;
 
@@ -560,10 +574,10 @@ bool _isBroadcastReply(TimelineMessage message) {
 /// order is mobile's own (see [_mergeParticipants]) because this file already
 /// renders relay participants in the order the relay sent them.
 ///
-/// Both halves count descendants, not direct replies: the relay's
-/// `descendant_count` and the locally assembled [_buildDescendantStats]. A badge
-/// on the main timeline stands for the whole thread under that message, so a
-/// reply to a reply has to raise it.
+/// Both halves represent descendants. The relay only increments descendant
+/// counts on the outer root, so a broadcast reply's direct-reply count is also
+/// positive evidence, and a lower bound on its descendants. Locally assembled
+/// [_buildDescendantStats] includes nested replies under every ancestor.
 ThreadSummary? _buildSummary(
   String messageId,
   Map<String, _DescendantStats> descendantStats,
@@ -576,6 +590,8 @@ ThreadSummary? _buildSummary(
 
   return ThreadSummary(
     threadHeadId: messageId,
+    isLowerBound: relay.isLowerBound,
+    isCountPending: relay.isCountPending,
     replyCount: local.replyCount > relay.replyCount
         ? local.replyCount
         : relay.replyCount,
@@ -684,10 +700,19 @@ ThreadSummary? _buildRelaySummary(
   String messageId,
   ChannelWindowThreadSummary? relaySummary,
 ) {
-  if (relaySummary == null || relaySummary.descendantCount <= 0) return null;
+  if (relaySummary == null) return null;
+  // The relay counts direct children on every parent, but descendants only on
+  // the outer root. Broadcast replies can therefore have valid 1/0 counters.
+  final useDirectCount = relaySummary.replyCount > relaySummary.descendantCount;
+  final count = useDirectCount
+      ? relaySummary.replyCount
+      : relaySummary.descendantCount;
+  if (count <= 0) return null;
   return ThreadSummary(
     threadHeadId: messageId,
-    replyCount: relaySummary.descendantCount,
+    replyCount: count,
+    isLowerBound: relaySummary.isLowerBound || useDirectCount,
+    isCountPending: relaySummary.isCountPending,
     participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
     lastReplyAt: relaySummary.lastReplyAt,
   );

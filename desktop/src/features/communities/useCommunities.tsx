@@ -23,6 +23,7 @@ import { removeProjectSnapshotForRelay } from "@/features/projects/projectSnapsh
 import { clearChannelHeadCache } from "@/shared/api/tauriChannelHeadCache";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearSavedCommunitySnapshot } from "@/features/agents/activeAgentTurnsStore";
+import { readmitRelay } from "@/features/agents/managedAgentRelayCleanup";
 import {
   clearCommunityDestinations,
   removeCommunityDestination,
@@ -213,6 +214,13 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       saveCommunities(next);
       return next;
     });
+    // A relay removed from this device earlier admits local agent pairs again.
+    readmitRelay(community.relayUrl).catch((error) => {
+      console.error(
+        "[communities] re-admitting local agents on this relay failed; their starts stay refused:",
+        error,
+      );
+    });
     return resolvedId;
   }, []);
 
@@ -298,6 +306,9 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       );
 
       if (result.kind === "updated") {
+        const previousRelayUrl = communitiesRef.current.find(
+          (w) => w.id === id,
+        )?.relayUrl;
         setCommunitiesState((prev) => {
           const next = prev.map((w) =>
             w.id === id ? { ...w, ...updates } : w,
@@ -305,6 +316,19 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
           saveCommunities(next);
           return next;
         });
+
+        if (
+          updates.relayUrl !== undefined &&
+          updates.relayUrl !== previousRelayUrl
+        ) {
+          // Queued before the reinit so its reconcile on the new relay is admitted.
+          readmitRelay(updates.relayUrl).catch((error) => {
+            console.error(
+              "[communities] re-admitting local agents on the edited relay failed; their starts stay refused:",
+              error,
+            );
+          });
+        }
 
         if (result.requiresReinit) {
           setReinitKey((k) => k + 1);

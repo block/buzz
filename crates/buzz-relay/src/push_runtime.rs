@@ -5,15 +5,31 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::Engine as _;
 use buzz_core::filter::{filters_match, reader_authorized_for_event};
 use chrono::{TimeDelta, Utc};
-use nostr::{EventBuilder, Filter, Kind, Tag};
+use nostr::Filter;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tracing::{error, warn};
 
-use crate::{handlers::push_lease::Subscription, state::AppState};
+use crate::{handlers::push_lease::Subscription, nip98::nip98_header, state::AppState};
+
+// Dropping a SQLx transaction rolls it back; committed claims remain leased
+// until expiry. Dropping HTTP cannot recall requests already accepted by the
+// gateway. Do not acknowledge, delete, or retry a job merely on cancellation.
+async fn run_push_task(
+    enabled: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+    work: impl std::future::Future<Output = ()>,
+) {
+    if !enabled {
+        return;
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {},
+        _ = work => {},
+    }
+}
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
@@ -58,6 +74,15 @@ enum DeliveryResponse {
 /// transaction — plus one complete/retry statement each — regardless of
 /// batch size or how many (event, lease) pairs match.
 pub async fn run_matcher(state: Arc<AppState>) {
+    run_push_task(
+        state.config.push_enabled,
+        &state.push_cancel,
+        matcher_loop(&state),
+    )
+    .await;
+}
+
+async fn matcher_loop(state: &AppState) {
     let mut idle_delay = IDLE_POLL_FLOOR;
     let mut last_reap = tokio::time::Instant::now();
     loop {
@@ -77,7 +102,7 @@ pub async fn run_matcher(state: Arc<AppState>) {
         {
             Ok(Some(batch)) => {
                 idle_delay = IDLE_POLL_FLOOR;
-                process_match_batch(&state, batch).await;
+                process_match_batch(state, batch).await;
             }
             Ok(None) => {
                 tokio::time::sleep(idle_delay).await;
@@ -338,6 +363,15 @@ fn push_filter_authorized_for_event(
 
 /// Continuously claim due wakes and deliver them through the push gateway.
 pub async fn run_delivery_worker(state: Arc<AppState>) {
+    run_push_task(
+        state.config.push_enabled,
+        &state.push_cancel,
+        delivery_worker_loop(&state),
+    )
+    .await;
+}
+
+async fn delivery_worker_loop(state: &AppState) {
     let http = match reqwest::Client::builder()
         .timeout(state.config.push_gateway_timeout)
         .build()
@@ -352,7 +386,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
-        match state.db.usage_community_hosts().await {
+        match state.db.active_community_hosts().await {
             Ok(communities) => {
                 for community in communities {
                     let community = buzz_core::CommunityId::from_uuid(community.id);
@@ -361,7 +395,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
                         Ok(wakes) => {
                             for wake in wakes {
                                 found = true;
-                                deliver_one(&state, &http, wake).await;
+                                deliver_one(state, &http, wake).await;
                             }
                         }
                         Err(e) => warn!(%community, "push wake claim failed: {e}"),
@@ -666,22 +700,6 @@ async fn retry_or_fail(
     }
 }
 
-fn nip98_header(keys: &nostr::Keys, url: &str, body: &[u8]) -> anyhow::Result<String> {
-    let hash = hex::encode(Sha256::digest(body));
-    let event = EventBuilder::new(Kind::HttpAuth, "")
-        .tags([
-            Tag::parse(["u", url])?,
-            Tag::parse(["method", "POST"])?,
-            Tag::parse(["payload", &hash])?,
-            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])?,
-        ])
-        .sign_with_keys(keys)?;
-    Ok(format!(
-        "Nostr {}",
-        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event)?)
-    ))
-}
-
 fn class_rank(_: &str) -> u8 {
     1
 }
@@ -689,7 +707,14 @@ fn class_rank(_: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, routing::post, Json, Router};
+    use axum::{
+        body::Bytes,
+        extract::{OriginalUri, State},
+        http::HeaderMap,
+        routing::post,
+        Json, Router,
+    };
+    use nostr::{EventBuilder, Kind, Tag};
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
@@ -729,9 +754,25 @@ mod tests {
 
     async fn capture(
         State(seen): State<Arc<Mutex<Vec<Value>>>>,
-        Json(body): Json<Value>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Json<Value> {
-        seen.lock().await.push(body);
+        let url: url::Url = format!("http://{}{}", headers["host"].to_str().unwrap(), uri)
+            .parse()
+            .unwrap();
+        assert!(!headers.contains_key("x-forwarded-proto"));
+        nostr::nips::nip98::verify_auth_header(
+            headers["authorization"].to_str().unwrap(),
+            &url,
+            nostr::nips::nip98::HttpMethod::POST,
+            nostr::Timestamp::now(),
+            Some(&body),
+        )
+        .unwrap();
+        seen.lock()
+            .await
+            .push(serde_json::from_slice(&body).unwrap());
         Json(serde_json::json!({"status":"accepted"}))
     }
 
@@ -744,12 +785,14 @@ mod tests {
             axum::serve(
                 listener,
                 Router::new()
-                    .route("/deliver", post(capture))
+                    .route("/v1/deliveries/apns", post(capture))
                     .with_state(seen.clone()),
             )
             .into_future(),
         );
-        let url: url::Url = format!("http://{address}/deliver").parse().unwrap();
+        let url: url::Url = format!("http://{address}/v1/deliveries/apns")
+            .parse()
+            .unwrap();
         let http = reqwest::Client::new();
         let keys = nostr::Keys::generate();
         let request_id = uuid::Uuid::new_v4();
@@ -765,5 +808,72 @@ mod tests {
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0]["request_id"], request_id.to_string());
         assert_eq!(bodies[1]["request_id"], request_id.to_string());
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::run_push_task;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn relay_shutdown_stops_both_worker_entry_points() {
+        let mut state = crate::state::tests::test_state().await;
+        let config = &mut Arc::get_mut(&mut state).unwrap().config;
+        Arc::get_mut(config).unwrap().push_enabled = true;
+        state.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                super::run_matcher(state.clone()),
+                super::run_delivery_worker(state.clone())
+            );
+        })
+        .await
+        .expect("both real workers must honor shutdown before touching dependencies");
+    }
+
+    #[tokio::test]
+    async fn disabled_or_cancelled_worker_never_polls_work() {
+        for enabled in [false, true] {
+            let cancel = CancellationToken::new();
+            if enabled {
+                cancel.cancel();
+            }
+            run_push_task(enabled, &cancel, async { panic!("worker must not start") }).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_drops_in_flight_work_without_waiting_for_it() {
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = OnDrop(dropped.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            run_push_task(true, &worker_cancel, async move {
+                let _guard = guard;
+                started.send(()).unwrap();
+                std::future::pending::<()>().await;
+            })
+            .await;
+        });
+        ready.await.unwrap();
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

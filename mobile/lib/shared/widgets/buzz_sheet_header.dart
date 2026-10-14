@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
 import 'buzz_navigation_metrics.dart';
@@ -107,7 +107,7 @@ class _SheetCloseButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
         ),
-        icon: const Icon(LucideIcons.x, size: 22),
+        icon: const Icon(BuzzIcons.x, size: 22),
       ),
     );
   }

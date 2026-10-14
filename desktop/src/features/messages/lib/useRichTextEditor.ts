@@ -5,9 +5,8 @@ import { useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
-import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
-import { Selection, TextSelection } from "@tiptap/pm/state";
-import type { ResolvedPos } from "@tiptap/pm/model";
+import { Extension } from "@tiptap/core";
+import { TextSelection } from "@tiptap/pm/state";
 
 import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
 import {
@@ -28,6 +27,13 @@ import {
   settleAutocompleteMentionInsert,
   syncMentionHighlightFromProps,
 } from "./mentionHighlightExtension";
+import { handleComposerMentionCopy } from "./composerMentionCopy";
+import { PastedMentionOccurrencesExtension } from "./pastedMentionOccurrences";
+import {
+  hardBreakLineBounds,
+  MacEmacsTextShortcuts,
+} from "./macEmacsTextShortcuts";
+import type { MentionIdentity } from "./mentionClipboard";
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
@@ -44,24 +50,6 @@ import { SpoilerMark } from "./spoilerMark";
 import { createComposerLinkPasteHandler } from "./composerMessageLinkNode";
 import type { ComposerMessageLinkChannel } from "./useComposerMessageLinks";
 import { useComposerMessageLinks } from "./useComposerMessageLinks";
-
-function hardBreakLineBounds($from: ResolvedPos) {
-  const parentStart = $from.start();
-  let start = parentStart;
-  let end = parentStart + $from.parent.content.size;
-
-  $from.parent.forEach((node, offset) => {
-    if (node.type.name !== "hardBreak") return;
-    const breakPosition = parentStart + offset;
-    if (breakPosition < $from.pos) {
-      start = breakPosition + node.nodeSize;
-    } else if (breakPosition >= $from.pos && end > breakPosition) {
-      end = breakPosition;
-    }
-  });
-
-  return { end, start };
-}
 
 /**
  * Plain-text edit descriptor returned by autocomplete hooks
@@ -96,6 +84,12 @@ export type RichTextEditorOptions = {
   messageLinkChannels?: readonly ComposerMessageLinkChannel[];
   /** Known custom-emoji set; used to render `:shortcode:` inline as images. */
   customEmoji?: CustomEmoji[];
+  /**
+   * `label → pubkey` pairs the composer currently knows. Copy/cut writes them
+   * into the clipboard's HTML flavor so a draft moved between channels keeps
+   * the identity it tagged, not just the words.
+   */
+  getMentionIdentities?: () => readonly MentionIdentity[];
   /** Called on plain Enter (submit). Handled inside Tiptap's extension system
    *  so it fires *before* ProseMirror's default splitBlock behaviour. */
   onSubmit?: () => void;
@@ -157,6 +151,7 @@ export function useRichTextEditor({
   channelNames,
   messageLinkChannels,
   customEmoji,
+  getMentionIdentities,
   onSubmit,
   onEditLastOwnMessage,
   isAutocompleteOpen,
@@ -167,21 +162,20 @@ export function useRichTextEditor({
   const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
-
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
-
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
-
   const onEditLinkRef = React.useRef(onEditLink);
   onEditLinkRef.current = onEditLink;
-
   const onLinkSelectionChangeRef = React.useRef(onLinkSelectionChange);
   onLinkSelectionChangeRef.current = onLinkSelectionChange;
 
   const onLinkShortcutRef = React.useRef(onLinkShortcut);
   onLinkShortcutRef.current = onLinkShortcut;
+
+  const getMentionIdentitiesRef = React.useRef(getMentionIdentities);
+  getMentionIdentitiesRef.current = getMentionIdentities;
 
   const placeholderRef = React.useRef(placeholder);
   placeholderRef.current = placeholder;
@@ -221,84 +215,7 @@ export function useRichTextEditor({
           // below with custom options (autolink, openOnClick, etc.).
           link: false,
         }),
-        // macOS text fields traditionally support a small set of Emacs-style
-        // Control shortcuts. Keep movement and kill-line scoped to the current
-        // hard-break-delimited line rather than the whole ProseMirror block.
-        Extension.create({
-          name: "macEmacsTextShortcuts",
-          addKeyboardShortcuts() {
-            const shortcuts: Record<string, KeyboardShortcutCommand> = {};
-            if (!isMacPlatform()) {
-              return shortcuts;
-            }
-
-            return {
-              "Ctrl-a": ({ editor: ed }) => {
-                const { $from } = ed.state.selection;
-                if (!$from.parent.inlineContent) return false;
-                return ed.commands.setTextSelection(
-                  hardBreakLineBounds($from).start,
-                );
-              },
-              "Ctrl-e": ({ editor: ed }) => {
-                const { $from } = ed.state.selection;
-                if (!$from.parent.inlineContent) return false;
-                return ed.commands.setTextSelection(
-                  hardBreakLineBounds($from).end,
-                );
-              },
-              "Ctrl-b": ({ editor: ed }) => {
-                const { empty, from } = ed.state.selection;
-                if (!empty || from <= 0) return false;
-                return ed.commands.setTextSelection(from - 1);
-              },
-              "Ctrl-f": ({ editor: ed }) => {
-                const { empty, from } = ed.state.selection;
-                if (!empty || from >= ed.state.doc.content.size) return false;
-                return ed.commands.setTextSelection(from + 1);
-              },
-              "Ctrl-k": ({ editor: ed }) => {
-                const { state, view } = ed;
-                const { $from, empty, from, to } = state.selection;
-
-                if (!empty) {
-                  return ed.commands.deleteSelection();
-                }
-
-                if ($from.parent.inlineContent) {
-                  const lineEnd = hardBreakLineBounds($from).end;
-                  if (from < lineEnd) {
-                    return ed.commands.deleteRange({ from, to: lineEnd });
-                  }
-
-                  const nodeAfter = $from.nodeAfter;
-                  if (nodeAfter?.type.name === "hardBreak") {
-                    return ed.commands.deleteRange({
-                      from,
-                      to: from + nodeAfter.nodeSize,
-                    });
-                  }
-                }
-
-                const blockEnd = $from.end();
-                if (from < blockEnd) {
-                  return ed.commands.deleteRange({ from, to: blockEnd });
-                }
-
-                const nextSelection = Selection.findFrom(
-                  state.doc.resolve(to),
-                  1,
-                  true,
-                );
-                if (!nextSelection) return false;
-
-                const transaction = state.tr.delete(to, nextSelection.from);
-                view.dispatch(transaction.scrollIntoView());
-                return true;
-              },
-            };
-          },
-        }),
+        MacEmacsTextShortcuts,
         // Shift+Enter inside lists/blockquotes: split the node instead of
         // inserting a hard break so continuation lines keep their formatting.
         Extension.create({
@@ -413,6 +330,9 @@ export function useRichTextEditor({
         CodeBlockAfterHardBreak,
         SpoilerMark,
         MentionHighlightExtension,
+        // Lets a pasted mention's identity check, which can outlive the paste,
+        // tell the text it inserted from whatever the user typed next.
+        PastedMentionOccurrencesExtension,
         customEmojiWiring.extension,
         messageLinkWiring.extension,
         Placeholder.configure({
@@ -454,6 +374,22 @@ export function useRichTextEditor({
       ],
       editorProps: {
         handleDOMEvents: {
+          // Both modalities reach the same DOM event: ⌘C/⌘X and the Edit menu
+          // (and the context menu) all dispatch `copy` / `cut` here.
+          copy: (view, event) =>
+            handleComposerMentionCopy({
+              event: event as ClipboardEvent,
+              identities: getMentionIdentitiesRef.current?.() ?? [],
+              isCut: false,
+              view,
+            }),
+          cut: (view, event) =>
+            handleComposerMentionCopy({
+              event: event as ClipboardEvent,
+              identities: getMentionIdentitiesRef.current?.() ?? [],
+              isCut: true,
+              view,
+            }),
           paste: (view, event) =>
             parseSnapshotClipboardHtml(
               (event as ClipboardEvent).clipboardData?.getData("text/html") ??
@@ -618,13 +554,20 @@ export function useRichTextEditor({
   const hadFocusBeforeDisableRef = React.useRef(false);
   React.useEffect(() => {
     if (!editor || editor.isEditable === editable) return;
+    // `emitUpdate: false` on both toggles — the doc hasn't changed, so the
+    // default synthetic `update` event would replay `onUpdate` with stale
+    // text/cursor and resurrect consumer state derived from it (e.g. reopen
+    // a mention menu the user dismissed with Escape, or re-fire a typing
+    // notification for an untouched draft). Real content changes (typing,
+    // clearContent) dispatch real transactions that emit their own updates.
     if (!editable) {
       // About to disable: remember whether we currently hold focus so we know
       // whether to restore it when re-enabled.
       hadFocusBeforeDisableRef.current = editor.isFocused;
-      editor.setEditable(false);
+      // Editability is not an authored document update (not even a clear).
+      editor.setEditable(false, false);
     } else {
-      editor.setEditable(true);
+      editor.setEditable(true, false);
       // Re-enabled: if we owned focus before the disable blurred us, take it
       // back (preserving the current selection — `focus()` with no arg keeps
       // the existing selection rather than jumping to the end).

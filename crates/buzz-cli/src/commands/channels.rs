@@ -267,16 +267,78 @@ pub async fn cmd_list_channel_members(
     Ok(())
 }
 
-pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
-    let filter = serde_json::json!({
+/// Fetch the live canvas head (kind 40100) for a channel.
+///
+/// The relay orders results `created_at DESC, id ASC`, so a `limit: 1` query
+/// returns exactly the head every surface agrees on — no full-stream scan, no
+/// silent page clamp.
+///
+/// `writer_pinned` opts into read-your-writes: when the head read gates a write
+/// (the restore precondition, or `set`'s writer-discipline stamping) it must
+/// observe the caller's own recent writes, so it sets `consistency: strong` to
+/// pin the relay read to the writer pool. The display path (`get`) leaves it
+/// `false` and stays replica-eligible.
+async fn fetch_canvas_head(
+    client: &BuzzClient,
+    channel_id: &str,
+    writer_pinned: bool,
+) -> Result<Option<serde_json::Value>, CliError> {
+    let mut filter = serde_json::json!({
         "kinds": [40100],
-        "#h": [channel_id]
+        "#h": [channel_id],
+        "limit": 1,
+    });
+    if writer_pinned {
+        filter["consistency"] = serde_json::json!("strong");
+    }
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response querying canvas head: {e}"
+        ))
+    })?;
+    Ok(events.into_iter().next())
+}
+
+/// Fetch a single canvas revision by event ID, scoped to the channel and kind.
+///
+/// An ID-scoped query resolves revisions of any age; scanning a capped stream
+/// would report a retained-but-old revision as absent.
+async fn fetch_canvas_revision(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: &str,
+) -> Result<Option<serde_json::Value>, CliError> {
+    let filter = serde_json::json!({
+        "ids": [revision],
+        "kinds": [40100],
+        "#h": [channel_id],
+        "limit": 1,
     });
     let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    if let Some(content) = events
-        .first()
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response querying canvas revision: {e}"
+        ))
+    })?;
+    Ok(events.into_iter().next())
+}
+
+pub async fn cmd_get_canvas(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: Option<&str>,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    let selected = match revision {
+        Some(revision) => {
+            validate_hex64(revision)?;
+            fetch_canvas_revision(client, channel_id, revision).await?
+        }
+        None => fetch_canvas_head(client, channel_id, false).await?,
+    };
+    if let Some(content) = selected
+        .as_ref()
         .and_then(|e| e.get("content"))
         .and_then(|c| c.as_str())
     {
@@ -285,6 +347,309 @@ pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(),
         println!("null");
     }
     Ok(())
+}
+
+/// List canvas revisions newest-first as JSON `{event_id, author, created_at}`.
+///
+/// Uses composite `(until, before_id)` pagination so a `limit` above one relay
+/// page returns the full requested window instead of a silently truncated one.
+/// The Clap layer bounds `limit` to 1–10000, so the request is never unbounded.
+///
+/// Ordering is `created_at DESC, id ASC`: revisions sharing a second break the
+/// tie by smallest event id, not by which write arrived last.
+pub async fn cmd_canvas_history(
+    client: &BuzzClient,
+    channel_id: &str,
+    limit: u32,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    let filter = serde_json::json!({
+        "kinds": [40100],
+        "#h": [channel_id],
+    });
+    let events = client.query_paginated(filter, limit).await?;
+    let revisions: Vec<serde_json::Value> = events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                "author": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string(&revisions).unwrap_or_default());
+    Ok(())
+}
+
+/// Restore the canvas to a previous revision by re-publishing its content.
+///
+/// The target revision is fetched by an ID-scoped query (resolves any age) and
+/// the head by a separate `limit: 1` query — neither scans the full stream.
+/// Fetching the head immediately before the write is an optimistic
+/// precondition check: a missing target revision or absent head fails here, and
+/// restoring the current head is short-circuited so history never grows a
+/// redundant revision. The republished event is built via
+/// [`buzz_sdk::build_set_canvas_after_head`], which applies writer discipline
+/// (`created_at = max(now, head.created_at + 1)`) so the restore sorts strictly
+/// ahead of the head it read; the `expected-revision` tag it carries is
+/// enforced by the relay as a CAS (compare-and-swap): the relay reads the
+/// canonical live head under an advisory lock and rejects writes whose
+/// precondition no longer matches.
+///
+/// After publishing, a single post-write re-read classifies whether the restore
+/// still holds the visible head (or a later write legitimately built on it). If
+/// a concurrent write has become current, this returns [`CliError::Conflict`]
+/// (exit 5) naming the persisted revision — the restore is not lost, it survives
+/// in history. If the verification read itself fails, the accepted restore is
+/// reported as success (exit 0) with a stderr warning that verification was
+/// unavailable — a failed read must never masquerade as a failed restore.
+pub async fn cmd_restore_canvas(
+    client: &BuzzClient,
+    channel_id: &str,
+    revision: &str,
+    out: &mut dyn std::io::Write,
+) -> Result<(), CliError> {
+    let channel_uuid = parse_uuid(channel_id)?;
+    validate_hex64(revision)?;
+
+    let content = fetch_canvas_revision(client, channel_id, revision)
+        .await?
+        .as_ref()
+        .and_then(|e| e.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "revision {revision} not found for channel {channel_id}"
+            ))
+        })?
+        .to_string();
+
+    let head = fetch_canvas_head(client, channel_id, true)
+        .await?
+        .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
+    let head_id = head
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CliError::Other(format!("no canvas head found for channel {channel_id}")))?;
+    let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // Restoring the revision that is already the head would publish a new event
+    // with identical content, growing history with a redundant revision. Match
+    // Desktop, which hides Restore on the current revision, by short-circuiting.
+    if head_id.eq_ignore_ascii_case(revision) {
+        eprintln!("revision {revision} is already the current revision");
+        let _ = writeln!(
+            out,
+            "{}",
+            serde_json::json!({
+                "event_id": revision,
+                "accepted": true,
+                "message": "already-current",
+            })
+        );
+        return Ok(());
+    }
+
+    let builder =
+        buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
+            .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    let event = client.sign_event(builder)?;
+    let our_id = event.id.to_hex();
+    let submit_result = client.submit_event(event).await;
+
+    // If the relay returned a conflict-shaped error the submit may still have
+    // persisted: a prior attempt stored A(expected=H), the response was lost,
+    // and the retry of identical A bytes sees RevisionMismatch — a persisted
+    // restore presented as a rejected write. Two concurrent-write shapes arise:
+    //
+    // - A tagged write B(expected=A) becomes head: `canvas_write_survived`
+    //   returns true; A committed and is an accepted ancestor → success.
+    // - An unconditional (legacy) write B(no expected-revision) becomes head:
+    //   `canvas_write_survived` returns false because B carries no ancestry link
+    //   to A, yet A may still be durably in the stream. A bounded ancestry walk
+    //   alone cannot distinguish "A is absent" from "A is present but not an
+    //   ancestor of head."
+    //
+    // Fix: establish A's persistence via a separate writer-pinned IDs lookup,
+    // then feed the four-way classification:
+    //   - survived (ancestor of head)         → accepted JSON, exit 0
+    //   - persisted but head unrelated to A   → supersession naming A
+    //   - genuinely absent                    → original 409 rejection
+    //   - either reconciliation read fails    → DeliveryUnknown naming A
+    let resp = match submit_result {
+        Ok(resp) => resp,
+        Err(e @ CliError::Relay { status: 409, .. }) if matches!(&e, CliError::Relay { body, .. } if body.contains("canvas changed")) =>
+        {
+            // Both reads use strong consistency so read-replica lag cannot
+            // report a just-stored event as absent.
+            let stream = match fetch_canvas_ancestry(client, channel_id).await {
+                Ok(s) => s,
+                Err(_) => {
+                    return Err(CliError::DeliveryUnknown(format!(
+                        "canvas restore {our_id}: submit returned a conflict and the post-submit ancestry read failed; outcome unknown — check `buzz canvas history` before retrying"
+                    )));
+                }
+            };
+            if buzz_sdk::canvas_write_survived(&our_id, &stream) {
+                // A is an ancestor of the live head: it committed and a later
+                // write built on it. This is the same committed state the
+                // normal accepted-submit path treats as success — return
+                // accepted JSON so the caller is not prompted to re-restore.
+                // The relay's 409 response body is not an accepted response;
+                // synthesize one from the event ID we know committed.
+                let accepted_json = serde_json::json!({
+                    "event_id": our_id,
+                    "accepted": true,
+                    "message": "",
+                })
+                .to_string();
+                let _ = writeln!(out, "{accepted_json}");
+                return Ok(());
+            }
+            // A is not a reachable ancestor. Distinguish absence from presence
+            // with a separate writer-pinned IDs lookup (an unconditional legacy
+            // write can become head without linking back to A, so the bounded
+            // ancestry stream alone cannot confirm A exists).
+            match fetch_canvas_event_exists(client, channel_id, &our_id).await {
+                Ok(true) => {
+                    // A committed but is no longer an ancestor of the current
+                    // head: an unconditional write superseded it. Surface as a
+                    // post-write supersession so the caller knows A is durable.
+                    return Err(CliError::Conflict(format!(
+                        "canvas restore {our_id} was superseded by a concurrent write; it is preserved in history — re-run restore against the current head if you still want it"
+                    )));
+                }
+                Ok(false) => {
+                    // A is genuinely absent: return the original relay error unchanged.
+                    return Err(e);
+                }
+                Err(_) => {
+                    // Cannot confirm or deny whether A was stored.
+                    return Err(CliError::DeliveryUnknown(format!(
+                        "canvas restore {our_id}: submit returned a conflict and the post-submit existence check failed; outcome unknown — check `buzz canvas history` before retrying"
+                    )));
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Post-write supersession check. Re-read a recent slice of the revision
+    // stream and classify via the SDK's shared predicate: our event is the
+    // head, or reachable through the head's `expected-revision` ancestry chain
+    // (a later write legitimately built on ours, possibly transitively) → the
+    // restore is live; anything else (including no head) → a concurrent write
+    // won the visible head. The restored revision is preserved in history, so
+    // surface a conflict naming it rather than reporting a hollow success. This
+    // only catches a competitor visible by now; the residual race past this
+    // read needs relay linearization (phase 2).
+    //
+    // The submit above was accepted, so the restore is durable. Only this
+    // verification read can still fail; when it does we must not present an
+    // accepted publish as a failed restore. Print the normal success response
+    // naming `our_id`, warn on stderr that verification was unavailable, and
+    // exit 0 — a failed read is not a conflict.
+    let live_stream = match fetch_canvas_ancestry(client, channel_id).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            eprintln!(
+                "warning: canvas restore {our_id} was published but its post-write verification read failed; the restore is preserved in history — check `buzz canvas history` if a concurrent edit may have landed"
+            );
+            let _ = writeln!(out, "{}", normalize_write_response(&resp));
+            return Ok(());
+        }
+    };
+    if !buzz_sdk::canvas_write_survived(&our_id, &live_stream) {
+        return Err(CliError::Conflict(format!(
+            "canvas restore {our_id} was superseded by a concurrent write; it is preserved in history — re-run restore against the current head if you still want it"
+        )));
+    }
+
+    let _ = writeln!(out, "{}", normalize_write_response(&resp));
+    Ok(())
+}
+
+/// Read a recent slice of the canvas revision stream as `(event_id,
+/// expected-revision tag)` pairs, newest first, for the post-write supersession
+/// check. The head is the first element; the rest let
+/// [`buzz_sdk::canvas_write_survived`] walk `expected-revision` links back
+/// through a descendant chain (A→B→C) so a legitimate later write layered on
+/// ours is not misread as a supersession. An empty vec means no canvas exists.
+async fn fetch_canvas_ancestry(
+    client: &BuzzClient,
+    channel_id: &str,
+) -> Result<Vec<(String, Option<String>)>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [40100],
+        "#h": [channel_id],
+        "limit": buzz_sdk::CANVAS_ANCESTRY_WALK_MAX,
+        // Read-your-writes: this post-write verification read must observe the
+        // restore we just published, so it pins to the writer pool.
+        "consistency": "strong",
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response querying canvas head: {e}"
+        ))
+    })?;
+    Ok(events
+        .iter()
+        .filter_map(|event| {
+            let id = event.get("id").and_then(|v| v.as_str())?.to_string();
+            Some((id, extract_head_expected_revision(event)))
+        })
+        .collect())
+}
+
+/// Whether a canvas event with `event_id` exists in this channel's history,
+/// using a writer-pinned (strong-consistency) read so the caller is not
+/// reporting a truly-persisted event as absent due to read-replica lag.
+///
+/// Used by the 409-reconciliation branch to establish persistence independently
+/// of ancestry position: an unconditional ("legacy") write can become head
+/// without building an `expected-revision` link to the event being checked,
+/// so a bounded ancestry walk alone cannot confirm presence.
+async fn fetch_canvas_event_exists(
+    client: &BuzzClient,
+    channel_id: &str,
+    event_id: &str,
+) -> Result<bool, CliError> {
+    let filter = serde_json::json!({
+        "ids": [event_id],
+        "kinds": [40100],
+        "#h": [channel_id],
+        "limit": 1,
+        "consistency": "strong",
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).map_err(|e| {
+        CliError::Other(format!(
+            "malformed relay response checking canvas event existence: {e}"
+        ))
+    })?;
+    Ok(!events.is_empty())
+}
+
+/// The head's own `["expected-revision", …]` tag value (the id it built on), or
+/// `None` when absent — used by the post-write supersession check to recognize
+/// a later write that legitimately layered on top of ours.
+fn extract_head_expected_revision(head: &serde_json::Value) -> Option<String> {
+    head.get("tags")
+        .and_then(|t| t.as_array())
+        .and_then(|tags| {
+            tags.iter().find(|t| {
+                t.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    == Some("expected-revision")
+            })
+        })
+        .and_then(|t| t.as_array())
+        .and_then(|a| a.get(1))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 pub async fn cmd_create_channel(
@@ -1120,7 +1485,9 @@ pub async fn cmd_create_channel_from_template(
             .replace("{channel.name}", name)
             .replace("{template.name}", &template.name);
         let canvas_result: Result<(), CliError> = async {
-            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content)
+            // Fresh channel: no head can exist yet, so assert the create with
+            // `Some("none")` to match the create-assertion convention.
+            let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none"))
                 .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
             let event = client.sign_event(builder)?;
             client.submit_event(event).await?;
@@ -1461,8 +1828,31 @@ pub async fn cmd_set_canvas(
     let content = read_or_stdin(content)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_set_canvas(channel_uuid, &content)
-        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+    // `set` is an unconditional replace — no `expected-revision` tag, so the
+    // relay accepts the write regardless of the current head. A moved head is
+    // not an error; there is no post-write supersession check.
+    //
+    // Writer discipline still applies: read the head and stamp
+    // `created_at = max(now, head + 1)` so the write sorts strictly ahead of a
+    // newer or future-dated head under `created_at DESC, id ASC`. This keeps
+    // an accepted append from landing behind the current head in read order,
+    // which would "succeed" without changing the visible canvas.
+    //
+    // The skew guard applies: a head timestamped more than CANVAS_MAX_FUTURE_SKEW_SECS
+    // in the future is refused with a clear error rather than extending a poisoned
+    // timeline. With no head yet, `build_set_canvas` with no tag stamps at `now`.
+    let builder = match fetch_canvas_head(client, channel_id, true).await? {
+        Some(head) => {
+            let head_created_at = head.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            buzz_sdk::build_set_canvas_unconditional_after_head(
+                channel_uuid,
+                &content,
+                head_created_at,
+            )
+        }
+        None => buzz_sdk::build_set_canvas(channel_uuid, &content, None),
+    }
+    .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1578,8 +1968,14 @@ pub async fn dispatch(
 pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::CanvasCmd;
     match cmd {
-        CanvasCmd::Get { channel } => cmd_get_canvas(client, &channel).await,
+        CanvasCmd::Get { channel, revision } => {
+            cmd_get_canvas(client, &channel, revision.as_deref()).await
+        }
         CanvasCmd::Set { channel, content } => cmd_set_canvas(client, &channel, &content).await,
+        CanvasCmd::History { channel, limit } => cmd_canvas_history(client, &channel, limit).await,
+        CanvasCmd::Restore { channel, revision } => {
+            cmd_restore_canvas(client, &channel, &revision, &mut std::io::stdout()).await
+        }
     }
 }
 
@@ -2927,6 +3323,1329 @@ mod tests {
         assert!(
             map.values().all(|h| h.profile_updated_at.is_none()),
             "the hung profile query must contribute nothing: {map:?}"
+        );
+    }
+}
+
+/// Command-level coverage for `cmd_set_canvas`'s writer discipline: it must read
+/// the head, stamp `created_at` strictly ahead of a future-dated head, emit NO
+/// `expected-revision` tag (unconditional replace), fall back to stamping at `now`
+/// when no head exists, and refuse to submit against a structurally poisoned head.
+/// These pin the fix so a revert to `created_at = now` / no head read fails a test
+/// rather than silently recreating the false-success bug.
+///
+/// Each test spins up a local axum relay that answers `POST /query` with a fixed
+/// head and captures the event submitted to `POST /events`, then inspects the
+/// signed event — behaviour at the command seam, not implementation details.
+#[cfg(test)]
+mod set_canvas_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::Keys;
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
+
+    use super::cmd_set_canvas;
+    use crate::client::BuzzClient;
+
+    const CHANNEL: &str = "326d56bc-c96c-4af0-86a1-5e804cd1b467";
+
+    #[derive(Clone)]
+    struct RelayState {
+        query_response: Arc<String>,
+        submitted: Arc<Mutex<Option<Value>>>,
+        /// All filter arrays sent to POST /query, in call order.
+        query_bodies: Arc<Mutex<Vec<Vec<Value>>>>,
+    }
+
+    /// Spawn a relay that returns `query_response` from `POST /query` and records
+    /// the event posted to `POST /events`. `submitted` stays `None` until (and
+    /// unless) `set` actually publishes.
+    ///
+    /// Returns `(url, submitted_event, query_bodies)`.
+    async fn relay(
+        query_response: &str,
+    ) -> (
+        String,
+        Arc<Mutex<Option<Value>>>,
+        Arc<Mutex<Vec<Vec<Value>>>>,
+    ) {
+        let submitted: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let query_bodies: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let state = RelayState {
+            query_response: Arc::new(query_response.to_string()),
+            submitted: submitted.clone(),
+            query_bodies: query_bodies.clone(),
+        };
+        let app = Router::new()
+            .route(
+                "/query",
+                post(|State(s): State<RelayState>, body: Bytes| async move {
+                    let filters: Vec<Value> = serde_json::from_slice(&body).unwrap_or_default();
+                    s.query_bodies.lock().unwrap().push(filters);
+                    (*s.query_response).clone()
+                }),
+            )
+            .route(
+                "/events",
+                post(|State(s): State<RelayState>, body: Bytes| async move {
+                    let event: Value = serde_json::from_slice(&body).expect("event json");
+                    *s.submitted.lock().unwrap() = Some(event);
+                    r#"{"event_id":"deadbeef","accepted":true,"message":""}"#.to_string()
+                }),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submitted, query_bodies)
+    }
+
+    /// Return all filter objects from all /query calls flattened into one vec.
+    fn all_filters(query_bodies: &Arc<Mutex<Vec<Vec<Value>>>>) -> Vec<Value> {
+        query_bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|batch| batch.clone())
+            .collect()
+    }
+
+    fn client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    fn tag_value(event: &Value, key: &str) -> Option<String> {
+        event
+            .get("tags")?
+            .as_array()?
+            .iter()
+            .find(|t| {
+                t.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    == Some(key)
+            })
+            .and_then(|t| t.as_array())
+            .and_then(|a| a.get(1))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// A future-dated head (within the skew ceiling) forces the
+    /// `max(now, head + 1)` bump to resolve to `head + 1` deterministically (no
+    /// clock dependence, no sleeps), so the submitted event sorts strictly
+    /// ahead of the head under `created_at DESC, id ASC`. `set` is unconditional:
+    /// no `expected-revision` tag is emitted even though the head was read.
+    #[tokio::test]
+    async fn set_stamps_ahead_of_future_head_and_is_untagged() {
+        let head_id = "a".repeat(64);
+        // A head ahead of `now` but inside the 60-second ceiling: `head + 1`
+        // deterministically wins the `max`, and the guard accepts it. Computed
+        // from `now` so it tracks the wall clock without a hardcoded date.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let future = now + 30;
+        let head = json!([{
+            "id": head_id,
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "old",
+            "created_at": future,
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, submitted, _) = relay(&head.to_string()).await;
+
+        cmd_set_canvas(&client(&url), CHANNEL, "new content")
+            .await
+            .expect("set succeeds");
+
+        let event = submitted.lock().unwrap().clone().expect("set must submit");
+        assert_eq!(
+            event.get("created_at").and_then(|v| v.as_u64()),
+            Some(future + 1),
+            "must stamp strictly ahead of the future-dated head"
+        );
+        // `set` is unconditional — no expected-revision tag regardless of head presence.
+        assert_eq!(
+            tag_value(&event, "expected-revision"),
+            None,
+            "set must NOT emit expected-revision — it is an unconditional replace"
+        );
+        assert_eq!(event.get("kind").and_then(|v| v.as_u64()), Some(40100));
+    }
+
+    /// `set` inherits the SDK skew guard via `build_set_canvas_after_head`: a
+    /// head timestamped far beyond the future ceiling is refused with a clear
+    /// error and nothing is published, rather than extending a poisoned timeline.
+    #[tokio::test]
+    async fn set_refuses_a_poisoned_future_head() {
+        let head = json!([{
+            "id": "a".repeat(64),
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "old",
+            "created_at": 4_102_444_800u64, // 2100-01-01Z — far past the ceiling
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, submitted, _) = relay(&head.to_string()).await;
+
+        let err = cmd_set_canvas(&client(&url), CHANNEL, "new content")
+            .await
+            .expect_err("a poisoned future head must be refused");
+
+        assert!(
+            err.to_string().contains("too far in the future"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            submitted.lock().unwrap().is_none(),
+            "no event may be published against a poisoned head"
+        );
+    }
+
+    /// No head yet: `set` still submits (create is not an error) and does NOT
+    /// emit an `expected-revision` tag — `set` is unconditional regardless of
+    /// head presence.
+    #[tokio::test]
+    async fn set_with_no_head_creates_without_expected_revision() {
+        let (url, submitted, _) = relay("[]").await;
+
+        cmd_set_canvas(&client(&url), CHANNEL, "first content")
+            .await
+            .expect("set on empty channel succeeds");
+
+        let event = submitted.lock().unwrap().clone().expect("set must submit");
+        assert_eq!(
+            tag_value(&event, "expected-revision"),
+            None,
+            "set must NOT emit expected-revision even on first create"
+        );
+    }
+
+    /// `set` sends `"consistency": "strong"` on its head-read (write-influencing)
+    /// but NOT on other queries. This is the request-filter side of the writer-pin
+    /// contract: removing the injection from `fetch_canvas_head(writer_pinned=true)`
+    /// must turn this test red.
+    ///
+    /// Mutation oracle: if `filter["consistency"] = …` is deleted from the
+    /// `writer_pinned` branch of `fetch_canvas_head`, the head-read filter no
+    /// longer carries `"consistency"`, and the assertion below fails.
+    #[tokio::test]
+    async fn set_head_read_carries_strong_consistency() {
+        let head_id = "a".repeat(64);
+        let head = json!([{
+            "id": head_id,
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "old",
+            "created_at": 1_700_000_000u64,
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, _, query_bodies) = relay(&head.to_string()).await;
+        cmd_set_canvas(&client(&url), CHANNEL, "new content")
+            .await
+            .expect("set succeeds");
+
+        let filters = all_filters(&query_bodies);
+        // The head read is a non-`ids` filter for kind 40100 with limit 1.
+        let head_reads: Vec<_> = filters
+            .iter()
+            .filter(|f| {
+                f.get("ids").is_none()
+                    && f.get("kinds")
+                        .and_then(|k| k.as_array())
+                        .map(|a| a.iter().any(|k| k == 40100))
+                        .unwrap_or(false)
+                    && f.get("limit").and_then(|v| v.as_u64()) == Some(1)
+            })
+            .collect();
+        assert!(
+            !head_reads.is_empty(),
+            "set must issue at least one head-read filter"
+        );
+        for f in &head_reads {
+            assert_eq!(
+                f.get("consistency").and_then(|v| v.as_str()),
+                Some("strong"),
+                "set head-read must carry consistency=strong: {f}"
+            );
+        }
+    }
+
+    /// `get` (display path) does NOT send `"consistency"` — it stays
+    /// replica-eligible. This is the inverse of the writer-pin contract: a
+    /// display read that silently acquired the pin would unnecessarily load
+    /// the writer pool.
+    ///
+    /// Mutation oracle: if `fetch_canvas_head(writer_pinned=false)` were changed
+    /// to always inject `consistency`, the assertion below would fail.
+    #[tokio::test]
+    async fn get_head_read_does_not_carry_consistency() {
+        use super::cmd_get_canvas;
+
+        let head_id = "a".repeat(64);
+        let head = json!([{
+            "id": head_id,
+            "pubkey": "b".repeat(64),
+            "kind": 40100,
+            "content": "canvas content",
+            "created_at": 1_700_000_000u64,
+            "tags": [["h", CHANNEL]],
+        }]);
+        let (url, _, query_bodies) = relay(&head.to_string()).await;
+        cmd_get_canvas(&client(&url), CHANNEL, None)
+            .await
+            .expect("get succeeds");
+
+        let filters = all_filters(&query_bodies);
+        let head_reads: Vec<_> = filters
+            .iter()
+            .filter(|f| {
+                f.get("ids").is_none()
+                    && f.get("kinds")
+                        .and_then(|k| k.as_array())
+                        .map(|a| a.iter().any(|k| k == 40100))
+                        .unwrap_or(false)
+                    && f.get("limit").and_then(|v| v.as_u64()) == Some(1)
+            })
+            .collect();
+        assert!(!head_reads.is_empty(), "get must issue a head-read filter");
+        for f in &head_reads {
+            assert!(
+                f.get("consistency").is_none(),
+                "display head-read must NOT carry consistency: {f}"
+            );
+        }
+    }
+}
+
+/// Command-level coverage for `cmd_restore_canvas`'s post-write supersession
+/// check. After publishing the restored revision, the command re-reads the head
+/// once and classifies the outcome via the SDK's `canvas_write_survived`
+/// predicate. These pin all three post-write outcomes deterministically —
+/// controlled relay responses, no timing, no sleeps — so a revert of the
+/// verification hunk fails a test rather than silently reporting hollow success.
+///
+/// The relay dispatches by filter shape: an `ids` query returns the target
+/// revision's content; the first plain head query returns the pre-write head,
+/// and the post-write head query is synthesized from the captured submission per
+/// a per-test [`PostHead`] mode — so the head can echo our own event id (which
+/// we cannot predict before signing under a random key).
+#[cfg(test)]
+mod restore_canvas_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::Keys;
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
+
+    use super::cmd_restore_canvas;
+    use crate::client::BuzzClient;
+    use crate::CliError;
+
+    const CHANNEL: &str = "326d56bc-c96c-4af0-86a1-5e804cd1b467";
+    const REVISION: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const HEAD: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const STRANGER: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const THIRD: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+
+    /// How the relay synthesizes the post-write head from the submitted event.
+    #[derive(Clone, Copy)]
+    enum PostHead {
+        /// The head is our own submitted event → survived.
+        OurEvent,
+        /// The head is a stranger whose `expected-revision` names our submitted
+        /// event → a later write legitimately built on us → survived.
+        StrangerBuildsOnUs,
+        /// The head is a stranger two links above ours: C(exp=B)→B(exp=ours)→
+        /// ours, all present in the stream → survived by ancestry walk.
+        StrangerBuildsOnUsTransitively,
+        /// The head is an unrelated stranger → our restore was superseded.
+        Stranger,
+        /// The post-write verification read fails (HTTP 500). The submit was
+        /// accepted, so the restore must still report success (exit 0).
+        ReadFails,
+    }
+
+    #[derive(Clone)]
+    struct RelayState {
+        revision_response: Arc<String>,
+        pre_head: Arc<String>,
+        post_head: PostHead,
+        /// Head queries seen so far: read 0 is pre-write, read 1 is post-write.
+        head_reads: Arc<Mutex<u32>>,
+        submitted: Arc<Mutex<Option<Value>>>,
+        /// All filter arrays sent to POST /query, in call order.
+        query_bodies: Arc<Mutex<Vec<Vec<Value>>>>,
+    }
+
+    async fn relay(
+        post_head: PostHead,
+    ) -> (
+        String,
+        Arc<Mutex<Option<Value>>>,
+        Arc<Mutex<Vec<Vec<Value>>>>,
+    ) {
+        let submitted: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let query_bodies: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let state = RelayState {
+            revision_response: Arc::new(json!([canvas_event(REVISION, 1_000, None)]).to_string()),
+            pre_head: Arc::new(json!([canvas_event(HEAD, 2_000, None)]).to_string()),
+            post_head,
+            head_reads: Arc::new(Mutex::new(0)),
+            submitted: submitted.clone(),
+            query_bodies: query_bodies.clone(),
+        };
+        let app = Router::new()
+            .route(
+                "/query",
+                post(|State(s): State<RelayState>, body: Bytes| async move {
+                    use axum::http::StatusCode;
+                    // Capture every request body for filter-field assertions.
+                    if let Ok(filters) = serde_json::from_slice::<Vec<Value>>(&body) {
+                        s.query_bodies.lock().unwrap().push(filters);
+                    }
+                    let is_ids_query = std::str::from_utf8(&body)
+                        .map(|b| b.contains("\"ids\""))
+                        .unwrap_or(false);
+                    if is_ids_query {
+                        return (StatusCode::OK, (*s.revision_response).clone());
+                    }
+                    let mut reads = s.head_reads.lock().unwrap();
+                    let read = *reads;
+                    *reads += 1;
+                    if read == 0 {
+                        return (StatusCode::OK, (*s.pre_head).clone());
+                    }
+                    // Post-write verification read that fails: the submit was
+                    // accepted, so the command reports success despite this 500.
+                    if matches!(s.post_head, PostHead::ReadFails) {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, String::new());
+                    }
+                    // Post-write head: synthesize from the captured submission.
+                    let our_id = s
+                        .submitted
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|e| e.get("id"))
+                        .and_then(|v| v.as_str())
+                        .expect("post-write head read must follow a submit")
+                        .to_string();
+                    let body = match s.post_head {
+                        PostHead::OurEvent => {
+                            json!([canvas_event(&our_id, 2_001, Some(HEAD))]).to_string()
+                        }
+                        PostHead::StrangerBuildsOnUs => {
+                            json!([canvas_event(STRANGER, 2_002, Some(&our_id))]).to_string()
+                        }
+                        PostHead::StrangerBuildsOnUsTransitively => {
+                            // C(head, exp=STRANGER) → B(STRANGER, exp=ours) →
+                            // ours: the whole chain is in the returned stream so
+                            // the ancestry walk reaches ours. Newest first.
+                            json!([
+                                canvas_event(THIRD, 2_003, Some(STRANGER)),
+                                canvas_event(STRANGER, 2_002, Some(&our_id)),
+                                canvas_event(&our_id, 2_001, Some(HEAD)),
+                            ])
+                            .to_string()
+                        }
+                        PostHead::Stranger => {
+                            json!([canvas_event(STRANGER, 2_002, Some(HEAD))]).to_string()
+                        }
+                        PostHead::ReadFails => unreachable!("handled above"),
+                    };
+                    (StatusCode::OK, body)
+                }),
+            )
+            .route(
+                "/events",
+                post(|State(s): State<RelayState>, body: Bytes| async move {
+                    let event: Value = serde_json::from_slice(&body).expect("event json");
+                    *s.submitted.lock().unwrap() = Some(event);
+                    r#"{"event_id":"deadbeef","accepted":true,"message":""}"#.to_string()
+                }),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submitted, query_bodies)
+    }
+
+    fn client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    /// Return all filter objects from all /query calls flattened into one vec.
+    fn all_filters(query_bodies: &Arc<Mutex<Vec<Vec<Value>>>>) -> Vec<Value> {
+        query_bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|batch| batch.clone())
+            .collect()
+    }
+
+    /// A canvas event JSON with the given id/created_at and optional
+    /// `expected-revision` ancestry tag.
+    fn canvas_event(id: &str, created_at: u64, expected_revision: Option<&str>) -> Value {
+        let mut tags = vec![json!(["h", CHANNEL])];
+        if let Some(rev) = expected_revision {
+            tags.push(json!(["expected-revision", rev]));
+        }
+        json!({
+            "id": id,
+            "pubkey": "c".repeat(64),
+            "kind": 40100,
+            "content": "target content",
+            "created_at": created_at,
+            "tags": tags,
+        })
+    }
+
+    /// The post-write head is our own event → restore holds the head → success.
+    #[tokio::test]
+    async fn restore_survives_when_head_is_our_event() {
+        let (url, submitted, _) = relay(PostHead::OurEvent).await;
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect("restore that holds the head succeeds");
+        assert!(submitted.lock().unwrap().is_some(), "restore must publish");
+    }
+
+    /// A later write built on our restore (its `expected-revision` names us):
+    /// the restore is still in the accepted chain → success.
+    #[tokio::test]
+    async fn restore_survives_when_head_builds_on_it() {
+        let (url, submitted, _) = relay(PostHead::StrangerBuildsOnUs).await;
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect("restore a later write built on succeeds");
+        assert!(submitted.lock().unwrap().is_some(), "restore must publish");
+    }
+
+    /// A later write two links above our restore (C→B→ours, whole chain in the
+    /// stream): the ancestry walk reaches ours → success, not a supersession.
+    #[tokio::test]
+    async fn restore_survives_when_head_builds_on_it_transitively() {
+        let (url, submitted, _) = relay(PostHead::StrangerBuildsOnUsTransitively).await;
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect("a transitive descendant of our restore succeeds");
+        assert!(submitted.lock().unwrap().is_some(), "restore must publish");
+    }
+
+    /// A concurrent stranger won the visible head (no ancestry to our restore):
+    /// the command returns `CliError::Conflict` naming the persisted revision.
+    #[tokio::test]
+    async fn restore_conflicts_when_head_is_a_stranger() {
+        let (url, submitted, _) = relay(PostHead::Stranger).await;
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("a stranger head must be a supersession conflict");
+
+        assert!(
+            matches!(err, CliError::Conflict(_)),
+            "expected Conflict (exit 5), got {err:?}"
+        );
+        let our_id = submitted
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|e| e.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("the restore did publish before it was superseded")
+            .to_string();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("superseded") && msg.contains("preserved in history"),
+            "conflict must describe the supersession: {msg}"
+        );
+        assert!(
+            msg.contains(&our_id),
+            "conflict must name the persisted revision id {our_id}: {msg}"
+        );
+    }
+
+    /// The post-write verification read fails after an accepted submit: the
+    /// restore is durable, so the command reports success (exit 0), not a
+    /// conflict or error — a failed read must never masquerade as a failed
+    /// restore.
+    #[tokio::test]
+    async fn restore_succeeds_when_verification_read_fails() {
+        let (url, submitted, _) = relay(PostHead::ReadFails).await;
+        let mut out = vec![];
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut out)
+            .await
+            .expect("an accepted restore whose verification read fails still succeeds");
+        assert!(
+            submitted.lock().unwrap().is_some(),
+            "the restore did publish before the verification read failed"
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out)
+            .expect("stdout must be valid JSON even when verification read fails");
+        assert!(
+            json.get("event_id").is_some(),
+            "stdout JSON must contain event_id"
+        );
+        assert!(
+            json.get("accepted").is_some(),
+            "stdout JSON must contain accepted"
+        );
+        assert!(
+            json.get("message").is_some(),
+            "stdout JSON must contain message"
+        );
+    }
+
+    /// `restore` sends `"consistency": "strong"` on the write-influencing
+    /// head reads (pre-write precondition and post-write ancestry) and does NOT
+    /// send it on the revision-by-id lookup (display read).
+    ///
+    /// Mutation oracle — removing either `"consistency"` injection must flip the
+    /// relevant assertion:
+    ///   * `fetch_canvas_head(writer_pinned=true)` → pre-write head filter loses
+    ///     the field.
+    ///   * `fetch_canvas_ancestry` → post-write filter loses it.
+    ///   * Adding `"consistency"` to `fetch_canvas_revision` → ids filter
+    ///     incorrectly gains it.
+    #[tokio::test]
+    async fn restore_write_influencing_reads_carry_strong_consistency() {
+        let (url, _, query_bodies) = relay(PostHead::OurEvent).await;
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect("restore succeeds");
+
+        let filters = all_filters(&query_bodies);
+
+        // IDs filter (revision fetch — display read): must NOT have consistency.
+        let ids_filters: Vec<_> = filters.iter().filter(|f| f.get("ids").is_some()).collect();
+        assert!(!ids_filters.is_empty(), "restore must issue an ids filter");
+        for f in &ids_filters {
+            assert!(
+                f.get("consistency").is_none(),
+                "revision-fetch (ids) filter must NOT carry consistency: {f}"
+            );
+        }
+
+        // Non-ids kind-40100 filters (head reads — write-influencing): must all
+        // carry consistency=strong. These are the pre-write precondition head and
+        // the post-write ancestry verification read.
+        let head_filters: Vec<_> = filters
+            .iter()
+            .filter(|f| {
+                f.get("ids").is_none()
+                    && f.get("kinds")
+                        .and_then(|k| k.as_array())
+                        .map(|a| a.iter().any(|k| k == 40100))
+                        .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !head_filters.is_empty(),
+            "restore must issue at least one head/ancestry filter"
+        );
+        for f in &head_filters {
+            assert_eq!(
+                f.get("consistency").and_then(|v| v.as_str()),
+                Some("strong"),
+                "write-influencing head/ancestry filter must carry consistency=strong: {f}"
+            );
+        }
+    }
+
+    /// Relay for conflict-reconciliation tests. Models the real ambiguous retry
+    /// seam in `submit_stored_event`:
+    ///
+    /// 1. Attempt 1 — POST /events: A is persisted on the relay; the relay then
+    ///    returns HTTP 503 (a retryable status), so `with_retry_body` retries
+    ///    with the same bytes.
+    /// 2. A concurrent writer arrives and becomes the new head.
+    /// 3. Attempt 2 — POST /events: returns the canonical 409 conflict body
+    ///    because the concurrent write is now the head. `cmd_restore_canvas`
+    ///    enters the reconciliation branch.
+    /// 4. Ancestry walk — POST /query: returns a stream shaped by `scenario`.
+    /// 5. IDs existence check — POST /query (only for `GenuinelyAbsent`,
+    ///    `LegacySupersession`, and `ExistenceReadFails`): the ancestry walk
+    ///    returns `canvas_write_survived` = false, so the command follows up
+    ///    with a writer-pinned IDs lookup for our event.
+    ///
+    /// The event ID is captured so tests can assert it appears in error messages.
+    #[derive(Clone, Copy)]
+    enum ConflictScenario {
+        /// B(expected=A) is head, A is a reachable ancestor → `canvas_write_survived`
+        /// true → accepted JSON, exit 0 (same as accepted-submit success path).
+        ReachableAncestor,
+        /// B(no expected-revision) is head, A exists in the stream but is not
+        /// an ancestor → `canvas_write_survived` false, IDs lookup finds A →
+        /// supersession naming A.
+        LegacySupersession,
+        /// A is absent (only a stranger, no A in stream or IDs lookup) → genuine
+        /// conflict → original `CliError::Relay { 409, .. }` returned unchanged.
+        GenuinelyAbsent,
+        /// Ancestry read fails (HTTP 500) → `CliError::DeliveryUnknown`.
+        ReadFails,
+        /// Ancestry succeeds with A unreachable (canvas_write_survived = false),
+        /// then the IDs existence check fails (HTTP 500) → `CliError::DeliveryUnknown`.
+        ExistenceReadFails,
+    }
+
+    async fn conflict_relay(
+        scenario: ConflictScenario,
+    ) -> (
+        String,
+        Arc<Mutex<Option<Value>>>,
+        Arc<Mutex<Option<String>>>,
+    ) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let submitted: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let submitted_q = submitted.clone();
+        let submitted_ev = submitted.clone();
+        // Captures the first post-submit IDs query body (the writer-pinned
+        // existence check). `None` when the query is never reached (e.g.
+        // ReachableAncestor where canvas_write_survived = true).
+        let ids_query_body: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let ids_query_body_q = ids_query_body.clone();
+        let events_attempt: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let events_attempt2 = events_attempt.clone();
+
+        let app = Router::new()
+            .route(
+                "/query",
+                post(move |body: Bytes| {
+                    let sub = submitted_q.clone();
+                    let ids_cap = ids_query_body_q.clone();
+                    async move {
+                        use axum::http::StatusCode;
+                        let body_str = std::str::from_utf8(&body).unwrap_or("");
+                        let is_ids_query = body_str.contains("\"ids\"");
+                        let our_id_opt = sub
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|e| e.get("id"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        if is_ids_query && our_id_opt.is_none() {
+                            // Pre-submit revision content fetch — always succeeds.
+                            return (
+                                StatusCode::OK,
+                                json!([canvas_event(REVISION, 1_000, None)]).to_string(),
+                            );
+                        }
+                        if our_id_opt.is_none() {
+                            // Pre-submit head read — REVISION ≠ HEAD so command proceeds.
+                            return (
+                                StatusCode::OK,
+                                json!([canvas_event(HEAD, 2_000, None)]).to_string(),
+                            );
+                        }
+                        let our_id = our_id_opt.unwrap();
+                        if is_ids_query {
+                            // Post-conflict writer-pinned IDs existence check for our_id.
+                            // Only reached when canvas_write_survived is false (i.e.
+                            // LegacySupersession, GenuinelyAbsent, and ExistenceReadFails
+                            // scenarios). Capture the first IDs body for consistency tests.
+                            {
+                                let mut cap = ids_cap.lock().unwrap();
+                                if cap.is_none() {
+                                    *cap = Some(body_str.to_owned());
+                                }
+                            }
+                            return match scenario {
+                                ConflictScenario::LegacySupersession => {
+                                    // A is in the relay — return it so the existence
+                                    // check confirms persistence.
+                                    (
+                                        StatusCode::OK,
+                                        json!([canvas_event(&our_id, 2_001, Some(HEAD))])
+                                            .to_string(),
+                                    )
+                                }
+                                ConflictScenario::GenuinelyAbsent => {
+                                    // A was never stored — empty response.
+                                    (StatusCode::OK, json!([]).to_string())
+                                }
+                                ConflictScenario::ExistenceReadFails => {
+                                    // IDs existence check itself fails — the outcome
+                                    // cannot be determined → DeliveryUnknown.
+                                    (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+                                }
+                                // ReachableAncestor: canvas_write_survived = true,
+                                // never reaches the existence check.
+                                // ReadFails: ancestry read returns 500,
+                                // never reaches the existence check.
+                                _ => unreachable!(
+                                    "existence check only reached for LegacySupersession/GenuinelyAbsent/ExistenceReadFails"
+                                ),
+                            };
+                        }
+                        // Post-conflict ancestry walk: shape per scenario.
+                        match scenario {
+                            ConflictScenario::ReadFails => {
+                                (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+                            }
+                            ConflictScenario::GenuinelyAbsent => {
+                                // A is absent — genuine conflict. Stream contains
+                                // only an unrelated stranger (no A, no B).
+                                (
+                                    StatusCode::OK,
+                                    json!([canvas_event(STRANGER, 2_002, None)]).to_string(),
+                                )
+                            }
+                            ConflictScenario::ExistenceReadFails => {
+                                // Ancestry succeeds but A is unreachable (stranger
+                                // only, canvas_write_survived = false). The IDs check
+                                // that follows returns 500 above.
+                                (
+                                    StatusCode::OK,
+                                    json!([canvas_event(STRANGER, 2_002, None)]).to_string(),
+                                )
+                            }
+                            ConflictScenario::ReachableAncestor => {
+                                // B(expected=A) is head: B built on A, A is in the
+                                // ancestry chain → canvas_write_survived = true →
+                                // command returns accepted JSON (exit 0).
+                                (
+                                    StatusCode::OK,
+                                    json!([
+                                        canvas_event(STRANGER, 2_002, Some(&our_id)),
+                                        canvas_event(&our_id, 2_001, Some(HEAD)),
+                                    ])
+                                    .to_string(),
+                                )
+                            }
+                            ConflictScenario::LegacySupersession => {
+                                // B(no expected-revision) is head: B does not link
+                                // to A, so canvas_write_survived = false, but A is
+                                // in the stream (not at head). The IDs existence
+                                // check follows and confirms A is stored.
+                                (
+                                    StatusCode::OK,
+                                    json!([
+                                        canvas_event(STRANGER, 2_002, None),
+                                        canvas_event(&our_id, 2_001, Some(HEAD)),
+                                    ])
+                                    .to_string(),
+                                )
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/events",
+                post(move |body: Bytes| {
+                    let sub = submitted_ev.clone();
+                    let attempt_ctr = events_attempt2.clone();
+                    async move {
+                        use axum::http::StatusCode;
+                        let event: Value = serde_json::from_slice(&body).expect("event json");
+                        let attempt = attempt_ctr.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            // Attempt 1: A is persisted; simulate a lost response by
+                            // returning 503 (retried by with_retry_body). This models
+                            // a network-level response loss where the relay stored the
+                            // event but the client never received confirmation.
+                            // We capture the event ID here for use in ancestry responses.
+                            *sub.lock().unwrap() = Some(event);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                r#"{"error":"relay temporarily unavailable"}"#.to_string(),
+                            );
+                        }
+                        // Attempt 2 (same bytes — `submit_stored_event` retry):
+                        // A is already stored; B built on A; relay returns canonical 409.
+                        (
+                            StatusCode::CONFLICT,
+                            r#"{"error":"conflict: canvas changed since it was loaded"}"#
+                                .to_string(),
+                        )
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), submitted, ids_query_body)
+    }
+
+    /// A non-409 relay error whose body happens to contain "canvas changed"
+    /// must NOT enter the conflict-reconciliation branch — it must propagate
+    /// as a plain `CliError::Relay` without triggering an ancestry walk.
+    ///
+    /// Mutation oracle: removing the `status: 409` guard from the match arm
+    /// makes this return `CliError::Conflict` (ancestry walk finds our event
+    /// reachable, so reconciliation misclassifies it as a supersession) instead
+    /// of `CliError::Relay { status: 500, .. }`.
+    #[tokio::test]
+    async fn non_409_lookalike_with_conflict_phrase_is_not_reconciled() {
+        // Relay: /events returns 500 + conflict phrase but DOES capture the event
+        // ID. /query post-submit returns a stream where our event IS reachable
+        // (so that if the classifier incorrectly fires, it produces Conflict — a
+        // distinct, detectable outcome).
+        let submitted: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let submitted_q = submitted.clone();
+        let submitted_ev = submitted.clone();
+        let app = Router::new()
+            .route(
+                "/query",
+                post(move |body: Bytes| {
+                    let sub = submitted_q.clone();
+                    async move {
+                        use axum::http::StatusCode;
+                        let is_ids_query = std::str::from_utf8(&body)
+                            .map(|b| b.contains("\"ids\""))
+                            .unwrap_or(false);
+                        if is_ids_query {
+                            return (
+                                StatusCode::OK,
+                                json!([canvas_event(REVISION, 1_000, None)]).to_string(),
+                            );
+                        }
+                        let our_id_opt = sub
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|e| e.get("id"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        if our_id_opt.is_none() {
+                            // Pre-submit head — REVISION ≠ HEAD so command proceeds.
+                            return (
+                                StatusCode::OK,
+                                json!([canvas_event(HEAD, 2_000, None)]).to_string(),
+                            );
+                        }
+                        // Post-error ancestry walk: our event IS reachable.
+                        // If the status guard is missing, reconciliation fires here
+                        // and returns CliError::Conflict — the oracle fires.
+                        let our_id = our_id_opt.unwrap();
+                        (
+                            StatusCode::OK,
+                            json!([
+                                canvas_event(STRANGER, 2_002, Some(&our_id)),
+                                canvas_event(&our_id, 2_001, Some(HEAD)),
+                            ])
+                            .to_string(),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/events",
+                post(move |body: Bytes| {
+                    let sub = submitted_ev.clone();
+                    async move {
+                        use axum::http::StatusCode;
+                        let event: Value = serde_json::from_slice(&body).expect("event json");
+                        *sub.lock().unwrap() = Some(event);
+                        // 500 with the conflict phrase in the body — a lookalike.
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            r#"{"error":"canvas changed — internal relay fault"}"#.to_string(),
+                        )
+                    }
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("a 500 error must propagate as Relay, not enter reconciliation");
+
+        // With the 409 status guard: the 500 exits the match via Err(e) => return Err(e)
+        // and arrives here as Relay{500}.
+        // Without the guard: the body phrase matches → reconciliation fires →
+        // ancestry walk finds our event reachable → CliError::Conflict returned instead.
+        assert!(
+            !matches!(err, CliError::Conflict(_)),
+            "non-409 error with conflict phrase must not be classified as Conflict: {err:?}"
+        );
+        assert!(
+            matches!(err, CliError::Relay { status: 500, .. }),
+            "non-409 body-lookalike must propagate as Relay{{500}}, got {err:?}"
+        );
+    }
+
+    /// A conflict-shaped submit where `canvas_write_survived` is true (B(expected=A)
+    /// is head, A is a reachable ancestor): A committed before the 409 response was
+    /// lost. The command must return accepted JSON (exit 0) — identical to a clean
+    /// accepted submit — NOT `CliError::Conflict`, which would incorrectly prompt
+    /// the caller to re-restore over B.
+    ///
+    /// Mutation oracle: removing the conflict-reconciliation block from
+    /// `cmd_restore_canvas` (restoring `client.submit_event(event).await?`) makes
+    /// this return `CliError::Relay` instead of `Ok(())`.
+    #[tokio::test]
+    async fn conflict_shaped_submit_succeeds_when_our_event_is_reachable_ancestor() {
+        let (url, submitted, _) = conflict_relay(ConflictScenario::ReachableAncestor).await;
+        let mut out = vec![];
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut out)
+            .await
+            .expect("a conflict where A is a reachable ancestor must succeed (exit 0)");
+        assert!(
+            submitted.lock().unwrap().is_some(),
+            "the restore must have submitted before the 409"
+        );
+        // Must emit the same accepted JSON as a clean submit.
+        let json: serde_json::Value =
+            serde_json::from_slice(&out).expect("stdout must be valid JSON");
+        assert!(
+            json.get("event_id").is_some(),
+            "stdout JSON must contain event_id: {json}"
+        );
+        assert!(
+            json.get("accepted").is_some(),
+            "stdout JSON must contain accepted: {json}"
+        );
+        assert!(
+            json.get("message").is_some(),
+            "stdout JSON must contain message: {json}"
+        );
+    }
+
+    /// A conflict-shaped submit where an unconditional (legacy, no `expected-revision`)
+    /// write B is head and our event A is present in the stream but not an ancestor:
+    /// `canvas_write_survived` is false, but the writer-pinned IDs lookup confirms A
+    /// exists. The command must return `CliError::Conflict` naming A — superseded,
+    /// preserved in history — NOT the original 409 relay error that would wrongly
+    /// tell the caller the restore was rejected.
+    ///
+    /// Mutation oracle: removing the IDs existence check (returning the original
+    /// 409 relay error whenever `canvas_write_survived` is false) makes this return
+    /// `CliError::Relay` instead of `CliError::Conflict`.
+    #[tokio::test]
+    async fn conflict_shaped_submit_superseded_by_legacy_write_when_event_exists_but_not_ancestor()
+    {
+        let (url, submitted, _) = conflict_relay(ConflictScenario::LegacySupersession).await;
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("a conflict where A exists but is not an ancestor must be a supersession");
+
+        assert!(
+            matches!(err, CliError::Conflict(_)),
+            "expected Conflict (exit 5 — superseded by legacy write, preserved), got {err:?}"
+        );
+        let our_id = submitted
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|e| e.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("the restore must have submitted before the 409")
+            .to_string();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("superseded") && msg.contains("preserved in history"),
+            "conflict message must describe the supersession: {msg}"
+        );
+        assert!(
+            msg.contains(&our_id),
+            "conflict message must name the persisted revision id {our_id}: {msg}"
+        );
+    }
+
+    /// A conflict-shaped submit where the ancestry walk shows our event is
+    /// absent: the relay genuinely rejected the write (stale precondition, not
+    /// a lost response). The command must return the ORIGINAL `CliError::Relay`
+    /// unchanged — status 409, body as received from the relay — rather than a
+    /// fabricated replacement body.
+    ///
+    /// Mutation oracle: always returning `Conflict` from the reconciliation
+    /// block (ignoring `canvas_write_survived`) makes this return `CliError::Conflict`
+    /// instead of `CliError::Relay`.
+    #[tokio::test]
+    async fn conflict_shaped_submit_stays_relay_error_when_our_event_absent() {
+        let (url, _, _) = conflict_relay(ConflictScenario::GenuinelyAbsent).await;
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("a genuine conflict must error");
+
+        // Must be the original Relay error (409) — not fabricated, not Conflict.
+        match &err {
+            CliError::Relay { status, body } => {
+                assert_eq!(
+                    *status, 409,
+                    "absent case must preserve the original 409 status"
+                );
+                assert!(
+                    body.contains("canvas changed"),
+                    "absent case must preserve the original conflict body: {body}"
+                );
+            }
+            other => {
+                panic!("expected Relay error (genuine conflict, nothing stored), got {other:?}")
+            }
+        }
+    }
+
+    /// A conflict-shaped submit where the ancestry walk itself fails. The
+    /// outcome is genuinely unknown: the restore may or may not be stored.
+    /// The command must return `CliError::DeliveryUnknown` (exit 2,
+    /// category `delivery_unknown`) — not a false success, not a false conflict,
+    /// and not the generic `CliError::Other` (exit 4, category `error`).
+    ///
+    /// Mutation oracle: returning `CliError::Conflict` when the ancestry read
+    /// fails makes this return `Conflict` instead of `DeliveryUnknown`.
+    #[tokio::test]
+    async fn conflict_shaped_submit_with_failed_ancestry_read_returns_unknown_outcome() {
+        let (url, submitted, _) = conflict_relay(ConflictScenario::ReadFails).await;
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("unknown outcome must error");
+
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "expected DeliveryUnknown (exit 2, category delivery_unknown — outcome unknown), got {err:?}"
+        );
+        let our_id = submitted
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|e| e.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("the restore must have submitted before the failed read")
+            .to_string();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown"),
+            "error message must state outcome is unknown: {msg}"
+        );
+        assert!(
+            msg.contains(&our_id),
+            "error message must name the event id {our_id}: {msg}"
+        );
+    }
+
+    /// A conflict-shaped submit where the ancestry walk finds A unreachable
+    /// (canvas_write_survived = false) and then the writer-pinned IDs existence
+    /// check itself fails (HTTP 500). The outcome is unknown — A may or may not
+    /// be stored. The command must return `CliError::DeliveryUnknown` naming A's
+    /// ID, not a false `CliError::Relay` (absent/original 409) and not a false
+    /// `CliError::Conflict` (treated as supersession without confirmation).
+    ///
+    /// Mutation oracle: changing the existence-query `Err(_)` arm to return the
+    /// original 409 relay error makes this return `CliError::Relay` instead of
+    /// `CliError::DeliveryUnknown`.
+    #[tokio::test]
+    async fn conflict_shaped_submit_with_failed_existence_read_returns_unknown_outcome() {
+        let (url, submitted, _) = conflict_relay(ConflictScenario::ExistenceReadFails).await;
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("unknown outcome from existence-check failure must error");
+
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "expected DeliveryUnknown (existence check failed — outcome unknown), got {err:?}"
+        );
+        let our_id = submitted
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|e| e.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("the restore must have submitted before the failed existence check")
+            .to_string();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown"),
+            "error message must state outcome is unknown: {msg}"
+        );
+        assert!(
+            msg.contains(&our_id),
+            "error message must name the event id {our_id}: {msg}"
+        );
+    }
+
+    /// The writer-pinned IDs existence check sent during 409-reconciliation
+    /// must carry `consistency=strong` with exactly the expected filter fields
+    /// so that replica lag cannot hide a durable event A and produce a false
+    /// absence classification.
+    ///
+    /// Mutation oracle: removing `"consistency": "strong"` from
+    /// `fetch_canvas_event_exists` makes the assertion on the captured request
+    /// body fail.
+    #[tokio::test]
+    async fn conflict_shaped_submit_existence_read_carries_strong_consistency() {
+        // Use LegacySupersession: ancestry succeeds with canvas_write_survived =
+        // false, so the existence check is reached and its body is captured.
+        let (url, submitted, ids_body_cap) =
+            conflict_relay(ConflictScenario::LegacySupersession).await;
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("legacy supersession must return Conflict");
+
+        let our_id = submitted
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|e| e.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("the restore must have submitted before the existence check")
+            .to_string();
+
+        let raw = ids_body_cap
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("existence query body must have been captured");
+        // query() wraps the filter in a JSON array ([filter]) per the HTTP bridge contract.
+        let filters: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).expect("existence query body must be a valid JSON array");
+        let filter = filters
+            .into_iter()
+            .next()
+            .expect("existence query body must contain at least one filter");
+
+        // ids=[our_id] — queries precisely the event we submitted.
+        assert_eq!(
+            filter.get("ids").and_then(|v| v.as_array()),
+            Some(&vec![serde_json::json!(our_id)]),
+            "existence filter must query exactly our submitted event id: {filter}"
+        );
+        // kinds=[40100] — scoped to canvas events only.
+        assert_eq!(
+            filter.get("kinds").and_then(|v| v.as_array()),
+            Some(&vec![serde_json::json!(40100)]),
+            "existence filter must restrict to kind 40100: {filter}"
+        );
+        // #h=[channel] — scoped to the correct channel.
+        assert_eq!(
+            filter.get("#h").and_then(|v| v.as_array()),
+            Some(&vec![serde_json::json!(CHANNEL)]),
+            "existence filter must restrict to the correct channel: {filter}"
+        );
+        // limit=1 — one-shot check.
+        assert_eq!(
+            filter.get("limit").and_then(|v| v.as_u64()),
+            Some(1),
+            "existence filter must set limit=1: {filter}"
+        );
+        // consistency=strong — writer-pinned, no replica lag.
+        assert_eq!(
+            filter.get("consistency").and_then(|v| v.as_str()),
+            Some("strong"),
+            "existence filter must carry consistency=strong to prevent replica-lag false absence: {filter}"
+        );
+    }
+}
+
+/// Item 4 regression: the already-current short-circuit must emit structured
+/// JSON on stdout (matching the JSON-only stdout contract) with the fields
+/// `{event_id, accepted, message}`. A bare prose `println!` violates the
+/// JSON-only stdout contract.
+#[cfg(test)]
+mod restore_canvas_already_current_tests {
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::Keys;
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    use super::cmd_restore_canvas;
+    use crate::client::BuzzClient;
+
+    const CHANNEL: &str = "326d56bc-c96c-4af0-86a1-5e804cd1b467";
+    // REVISION == HEAD so the command short-circuits without submitting.
+    const REVISION_EQ_HEAD: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// Relay that serves REVISION_EQ_HEAD both as the revision-by-id content
+    /// and as the current head, so `cmd_restore_canvas` takes the already-current
+    /// short-circuit. No `/events` route is needed because the command returns
+    /// before building or submitting the event.
+    async fn already_current_relay() -> (String, Arc<Mutex<Vec<Vec<Value>>>>) {
+        let query_bodies: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(
+                "/query",
+                post(
+                    |State(qb): State<Arc<Mutex<Vec<Vec<Value>>>>>, body: Bytes| async move {
+                        if let Ok(filters) = serde_json::from_slice::<Vec<Value>>(&body) {
+                            qb.lock().unwrap().push(filters);
+                        }
+                        let is_ids_query = std::str::from_utf8(&body)
+                            .map(|b| b.contains("\"ids\""))
+                            .unwrap_or(false);
+                        let event = json!({
+                            "id": REVISION_EQ_HEAD,
+                            "pubkey": "b".repeat(64),
+                            "kind": 40100,
+                            "content": "canvas content",
+                            "created_at": 2_000u64,
+                            "tags": [["h", CHANNEL]],
+                        });
+                        if is_ids_query {
+                            return json!([event]).to_string();
+                        }
+                        // Head query — returns the same id so the command short-circuits.
+                        json!([event]).to_string()
+                    },
+                ),
+            )
+            .with_state(query_bodies.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), query_bodies)
+    }
+
+    fn client(base_url: &str) -> BuzzClient {
+        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+    }
+
+    /// The already-current short-circuit must return Ok (exit 0) AND emit
+    /// structured JSON on stdout with `event_id`, `accepted`, and `message`
+    /// fields. Captured via the injected `out` writer.
+    ///
+    /// Mutation oracle: reverting to `println!("revision {revision} is already
+    /// the current revision")` emits prose instead of JSON. Parsing the output
+    /// with `serde_json::from_str` would fail, and the `accepted` / `event_id` /
+    /// `message` field assertions would not hold.
+    #[tokio::test]
+    async fn already_current_restore_emits_json_with_required_fields() {
+        let (url, _) = already_current_relay().await;
+        let mut out: Vec<u8> = Vec::new();
+        cmd_restore_canvas(&client(&url), CHANNEL, REVISION_EQ_HEAD, &mut out)
+            .await
+            .expect("already-current restore must succeed");
+
+        let output = String::from_utf8(out).expect("stdout must be valid UTF-8");
+        let json: Value = serde_json::from_str(output.trim()).expect("stdout must be valid JSON");
+
+        assert_eq!(
+            json.get("event_id").and_then(|v| v.as_str()),
+            Some(REVISION_EQ_HEAD),
+            "event_id must match the revision: {json}"
+        );
+        assert_eq!(
+            json.get("accepted").and_then(|v| v.as_bool()),
+            Some(true),
+            "accepted must be true: {json}"
+        );
+        assert!(
+            json.get("message").and_then(|v| v.as_str()).is_some(),
+            "message field must be present: {json}"
         );
     }
 }

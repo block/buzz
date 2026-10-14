@@ -1,5 +1,7 @@
 //! Narrow App Attest verification boundary. Production enrollment accepts only
-//! Apple production AAGUID material; unsupported devices have no bypass path.
+//! Apple production AAGUID material by default; personal development requires
+//! an explicit build feature and environment. No cryptographic checks are skipped.
+use crate::config::AppAttestEnvironment;
 use appattest::{assertion::Assertion, attestation::Attestation};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use byteorder::{BigEndian, ByteOrder};
@@ -31,9 +33,24 @@ pub enum AppAttestError {
 pub struct AppAttestVerifier {
     app_id: String,
     apple_root_cert_pem: Vec<u8>,
+    environment: AppAttestEnvironment,
 }
 impl AppAttestVerifier {
+    /// Construct a production-only verifier.
     pub fn new(app_id: String, apple_root_cert_pem: Vec<u8>) -> Result<Self, AppAttestError> {
+        Self::with_environment(
+            app_id,
+            apple_root_cert_pem,
+            AppAttestEnvironment::Production,
+        )
+    }
+
+    /// Construct a verifier for exactly one server-selected attestation environment.
+    pub fn with_environment(
+        app_id: String,
+        apple_root_cert_pem: Vec<u8>,
+        environment: AppAttestEnvironment,
+    ) -> Result<Self, AppAttestError> {
         if app_id.is_empty()
             || Sha256::digest(&apple_root_cert_pem).as_slice() != APPLE_APP_ATTEST_ROOT_PEM_SHA256
         {
@@ -42,8 +59,14 @@ impl AppAttestVerifier {
         Ok(Self {
             app_id,
             apple_root_cert_pem,
+            environment,
         })
     }
+    /// Exact server-selected environment accepted by this verifier.
+    pub fn environment(&self) -> AppAttestEnvironment {
+        self.environment
+    }
+
     /// `client_data` is the exact canonical enrollment transcript represented by
     /// the challenge string passed to `attestKey`; callers must include every
     /// authority-bearing enrollment field in it.
@@ -59,6 +82,7 @@ impl AppAttestVerifier {
         if cbor.is_empty() || cbor.len() > crate::model::MAX_APP_ATTESTATION_BYTES {
             return Err(AppAttestError::Invalid);
         }
+        verify_attestation_environment(&cbor, self.environment)?;
         let challenge = std::str::from_utf8(client_data).map_err(|_| AppAttestError::Invalid)?;
         let att = Attestation::from_cbor_bytes(&cbor).map_err(|_| AppAttestError::Invalid)?;
         let (public_key, _) = att
@@ -110,6 +134,83 @@ impl AppAttestVerifier {
             .map_err(|_| AppAttestError::Invalid)?;
         Ok(VerifiedAssertion { counter })
     }
+}
+
+// The dependency's development feature accepts both Apple environments. Fence
+// the exact signed authData here, then let its full verifier validate those same
+// bytes (chain, nonce, app ID, counter, public key and credential ID).
+fn verify_attestation_environment(
+    cbor: &[u8],
+    environment: AppAttestEnvironment,
+) -> Result<(), AppAttestError> {
+    let mut decoder = minicbor::Decoder::new(cbor);
+    let count = decoder
+        .map()
+        .map_err(|_| AppAttestError::Invalid)?
+        .ok_or(AppAttestError::Invalid)?;
+    if count != 3 {
+        return Err(AppAttestError::Invalid);
+    }
+    let mut auth_data = None;
+    let mut format_seen = false;
+    let mut statement_seen = false;
+    for _ in 0..count {
+        match decoder.str().map_err(|_| AppAttestError::Invalid)? {
+            "authData" if auth_data.is_none() => {
+                auth_data = Some(decoder.bytes().map_err(|_| AppAttestError::Invalid)?);
+            }
+            "fmt" if !format_seen => {
+                if decoder.str().map_err(|_| AppAttestError::Invalid)? != "apple-appattest" {
+                    return Err(AppAttestError::Invalid);
+                }
+                format_seen = true;
+            }
+            "attStmt" if !statement_seen => {
+                // appattest 0.1.1 treats indefinite containers as empty without
+                // consuming their contents. Accept only the definite schema so
+                // its cursor cannot reinterpret nested fields as root fields.
+                if decoder.map().map_err(|_| AppAttestError::Invalid)? != Some(2) {
+                    return Err(AppAttestError::Invalid);
+                }
+                let mut certs_seen = false;
+                let mut receipt_seen = false;
+                for _ in 0..2 {
+                    match decoder.str().map_err(|_| AppAttestError::Invalid)? {
+                        "x5c" if !certs_seen => {
+                            let count = decoder
+                                .array()
+                                .map_err(|_| AppAttestError::Invalid)?
+                                .filter(|count| (1..=3).contains(count))
+                                .ok_or(AppAttestError::Invalid)?;
+                            for _ in 0..count {
+                                decoder.bytes().map_err(|_| AppAttestError::Invalid)?;
+                            }
+                            certs_seen = true;
+                        }
+                        "receipt" if !receipt_seen => {
+                            decoder.bytes().map_err(|_| AppAttestError::Invalid)?;
+                            receipt_seen = true;
+                        }
+                        _ => return Err(AppAttestError::Invalid),
+                    }
+                }
+                statement_seen = true;
+            }
+            _ => return Err(AppAttestError::Invalid),
+        }
+    }
+    if decoder.position() != cbor.len() {
+        return Err(AppAttestError::Invalid);
+    }
+    let expected: &[u8] = match environment {
+        AppAttestEnvironment::Production => b"appattest\0\0\0\0\0\0\0",
+        #[cfg(feature = "personal-dev-app-attest")]
+        AppAttestEnvironment::Development => b"appattestdevelop",
+    };
+    if auth_data.and_then(|data| data.get(37..53)) != Some(expected) {
+        return Err(AppAttestError::Invalid);
+    }
+    Ok(())
 }
 
 /// App Attest assertion CBOR is a closed two-field map. Extracting signCount
@@ -173,6 +274,7 @@ mod tests {
         AppAttestVerifier {
             app_id: app_id.to_owned(),
             apple_root_cert_pem: root_cert_pem.to_vec(),
+            environment: AppAttestEnvironment::Production,
         }
     }
 
@@ -288,6 +390,7 @@ mod tests {
     fn wrong_aaguid_is_rejected_as_invalid_aaguid() {
         let fixture = fixture(WRONG_AAGUID_FIXTURE_JSON);
         assert_eq!(fixture.aaguid, "appattestdevelop");
+        #[cfg(not(feature = "personal-dev-app-attest"))]
         assert_eq!(
             verify_dependency(
                 &fixture,
@@ -305,6 +408,194 @@ mod tests {
                 fixture.challenge.as_bytes(),
             )
             .is_err());
+    }
+
+    #[cfg(feature = "personal-dev-app-attest")]
+    #[test]
+    fn development_mode_preserves_verification_and_rejects_production() {
+        let dev = fixture(WRONG_AAGUID_FIXTURE_JSON);
+        let mut v = verifier(&dev.app_id, dev.root_cert_pem.as_bytes());
+        v.environment = AppAttestEnvironment::Development;
+        let cbor = STANDARD.decode(&dev.attestation_b64).unwrap();
+        assert!(
+            verify_attestation_environment(&cbor, v.environment).is_ok(),
+            "environment parser"
+        );
+        verify_dependency(
+            &dev,
+            &dev.app_id,
+            &dev.challenge,
+            &dev.key_id_b64,
+            dev.root_cert_pem.as_bytes(),
+        )
+        .expect("development dependency");
+        assert!(v
+            .verify_attestation(
+                &dev.attestation_b64,
+                &dev.key_id_b64,
+                dev.challenge.as_bytes()
+            )
+            .is_ok());
+        let prod = fixture(GOOD_FIXTURE_JSON);
+        assert!(v
+            .verify_attestation(
+                &prod.attestation_b64,
+                &prod.key_id_b64,
+                prod.challenge.as_bytes()
+            )
+            .is_err());
+        assert!(v
+            .verify_attestation(&dev.attestation_b64, &dev.key_id_b64, b"wrong challenge")
+            .is_err());
+        assert!(v
+            .verify_attestation(
+                &dev.attestation_b64,
+                &STANDARD.encode([0; 32]),
+                dev.challenge.as_bytes()
+            )
+            .is_err());
+        v.app_id = "OTHER.wrong.app".into();
+        assert!(v
+            .verify_attestation(
+                &dev.attestation_b64,
+                &dev.key_id_b64,
+                dev.challenge.as_bytes()
+            )
+            .is_err());
+        v.app_id = dev.app_id;
+        v.apple_root_cert_pem = fixture(WRONG_ROOT_FIXTURE_JSON).root_cert_pem.into_bytes();
+        assert!(v
+            .verify_attestation(
+                &dev.attestation_b64,
+                &dev.key_id_b64,
+                dev.challenge.as_bytes()
+            )
+            .is_err());
+    }
+
+    #[cfg(feature = "personal-dev-app-attest")]
+    #[test]
+    fn nested_statement_cannot_bypass_environment_fence() {
+        for (json, environment, decoy_aaguid) in [
+            (
+                WRONG_AAGUID_FIXTURE_JSON,
+                AppAttestEnvironment::Production,
+                &b"appattest\0\0\0\0\0\0\0"[..],
+            ),
+            (
+                GOOD_FIXTURE_JSON,
+                AppAttestEnvironment::Development,
+                &b"appattestdevelop"[..],
+            ),
+        ] {
+            let fixture = fixture(json);
+            let original = STANDARD.decode(&fixture.attestation_b64).unwrap();
+            let mut decoder = minicbor::Decoder::new(&original);
+            let count = decoder.map().unwrap().unwrap();
+            let mut auth = &[][..];
+            let mut statement = &[][..];
+            for _ in 0..count {
+                let key = decoder.str().unwrap();
+                let start = decoder.position();
+                decoder.skip().unwrap();
+                match key {
+                    "authData" => auth = &original[start..decoder.position()],
+                    "attStmt" => statement = &original[start..decoder.position()],
+                    _ => {}
+                }
+            }
+            let mut decoy = [0u8; 53];
+            decoy[37..53].copy_from_slice(decoy_aaguid);
+            let mut buffer = vec![0; original.len() + 256];
+            let mut encoder =
+                minicbor::Encoder::new(minicbor::encode::write::Cursor::new(buffer.as_mut_slice()));
+            encoder
+                .map(5)
+                .unwrap()
+                .str("fmt")
+                .unwrap()
+                .str("apple-appattest")
+                .unwrap()
+                .str("authData")
+                .unwrap()
+                .bytes(&decoy)
+                .unwrap()
+                .str("attStmt")
+                .unwrap()
+                .begin_map()
+                .unwrap()
+                .str("attStmt")
+                .unwrap();
+            use minicbor::encode::Write;
+            encoder.writer_mut().write_all(statement).unwrap();
+            encoder.str("authData").unwrap();
+            encoder.writer_mut().write_all(auth).unwrap();
+            encoder
+                .end()
+                .unwrap()
+                .str("padding1")
+                .unwrap()
+                .u8(0)
+                .unwrap()
+                .str("padding2")
+                .unwrap()
+                .u8(0)
+                .unwrap();
+            let length = encoder.writer().position();
+            let malicious = &buffer[..length];
+            // Prove this envelope reaches valid signed material in the dependency.
+            Attestation::from_cbor_bytes(malicious)
+                .unwrap()
+                .verify(
+                    &fixture.challenge,
+                    &fixture.app_id,
+                    &fixture.key_id_b64,
+                    fixture.root_cert_pem.as_bytes(),
+                )
+                .unwrap();
+            let mut verifier = verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes());
+            verifier.environment = environment;
+            assert!(
+                verifier
+                    .verify_attestation(
+                        &STANDARD.encode(malicious),
+                        &fixture.key_id_b64,
+                        fixture.challenge.as_bytes(),
+                    )
+                    .is_err(),
+                "cross-environment nested statement accepted: {environment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn environment_parser_rejects_ambiguous_or_truncated_auth_data() {
+        for data in [vec![], vec![0xa0], vec![0xa1, 0x68], vec![0xbf, 0xff]] {
+            assert!(
+                verify_attestation_environment(&data, AppAttestEnvironment::Production).is_err()
+            );
+        }
+        let mut data = [0u8; 256];
+        let mut encoder =
+            minicbor::Encoder::new(minicbor::encode::write::Cursor::new(data.as_mut_slice()));
+        let mut auth = [0u8; 53];
+        auth[37..53].copy_from_slice(b"appattest\0\0\0\0\0\0\0");
+        encoder
+            .map(2)
+            .unwrap()
+            .str("authData")
+            .unwrap()
+            .bytes(&auth)
+            .unwrap()
+            .str("authData")
+            .unwrap()
+            .bytes(&auth)
+            .unwrap();
+        let length = encoder.writer().position();
+        assert!(
+            verify_attestation_environment(&data[..length], AppAttestEnvironment::Production)
+                .is_err()
+        );
     }
 
     #[test]

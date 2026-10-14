@@ -176,6 +176,24 @@ async fn handle_ban(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restriction_cache(tenant.community(), &target);
+
+    // Live enforcement: close open sessions for the banned principal now —
+    // this pod's sockets synchronously (fenced to this community) and every
+    // other pod's via the fire-and-forget cross-pod fan-out. The paired helper
+    // makes "close locally but forget the Redis publish" unrepresentable, so a
+    // live ban takes effect immediately, everywhere (decision 4).
+    // This runs before the audit insert, so an audit failure cannot leave the
+    // banned member connected. A failed owned-agent lookup is still reported
+    // (after the notice below) instead of claiming success.
+    let revoked = state
+        .revoke_live_access(
+            tenant,
+            &target,
+            &event.id.to_hex(),
+            "blocked: you are banned from this community",
+        )
+        .await;
 
     let action_id = insert_audit(
         state,
@@ -187,18 +205,6 @@ async fn handle_ban(
         reason.as_deref(),
     )
     .await?;
-
-    // Live enforcement: close open sessions for the banned principal now —
-    // this pod's sockets synchronously (fenced to this community) and every
-    // other pod's via the fire-and-forget cross-pod fan-out. The paired helper
-    // makes "close locally but forget the Redis publish" unrepresentable, so a
-    // live ban takes effect immediately, everywhere (decision 4).
-    state.disconnect_pubkey_clusterwide(
-        tenant,
-        &target,
-        &event.id.to_hex(),
-        "blocked: you are banned from this community",
-    );
 
     // Notice DM: tell the banned user the terms of the restriction.
     let public_reason = reason.clone().unwrap_or_default();
@@ -222,7 +228,9 @@ async fn handle_ban(
     }
 
     info!(target = %hex::encode(&target), "community ban applied");
-    Ok(())
+    revoked
+        .map(|_| ())
+        .map_err(|e| format!("error: ban applied but live revoke incomplete: {e}"))
 }
 
 // ── 9041: unban ──────────────────────────────────────────────────────────────
@@ -254,6 +262,7 @@ async fn handle_unban(
     if !lifted {
         return Err(invalid("member is not banned"));
     }
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     insert_audit(state, tenant, actor, "unban", Some(&target), None, None).await?;
 
@@ -296,6 +305,7 @@ async fn handle_timeout(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     let action_id = insert_audit(
         state,
@@ -359,6 +369,7 @@ async fn handle_untimeout(
     if !cleared {
         return Err(invalid("member is not timed out"));
     }
+    state.invalidate_restriction_cache(tenant.community(), &target);
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
 
