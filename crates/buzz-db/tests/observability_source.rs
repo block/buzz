@@ -2457,7 +2457,7 @@ fn event_floor_guard_uses_the_database_statement_clock_and_shared_floor() {
     );
     assert!(
         guard.contains(".bind(CREATED_AT_FLOOR_SECS as f64)"),
-        "app check, GUC and fence wall must share the same floor constant"
+        "app check and fence wall must share the same floor constant"
     );
 }
 
