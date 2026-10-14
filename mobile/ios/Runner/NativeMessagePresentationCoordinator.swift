@@ -105,8 +105,8 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
     guard pendingResult != nil, terminalValue == nil else { return }
     terminalValue = value
     guard let presented else { complete(value); return }
-    let completion: () -> Void = { [weak self, weak presented] in
-      guard let self, let presented, self.presented === presented else { return }
+    let completion: () -> Void = { [weak self] in
+      guard let self, self.presented === presented else { return }
       self.complete(value)
     }
     if let menu = presented as? NativeMessageMenuViewController {
