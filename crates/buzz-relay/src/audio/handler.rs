@@ -2855,6 +2855,48 @@ async fn check_membership_for_admission(
         channel_id
     };
 
+    // Announce channels (`posting = members`): guests and non-members cannot
+    // join a huddle, in the channel itself or in an ephemeral huddle under it.
+    let parent_record;
+    let posting_scope = if lifecycle_parent_id == channel_id {
+        &channel
+    } else {
+        parent_record = state
+            .db
+            .get_channel(tenant.community(), lifecycle_parent_id)
+            .await
+            .map_err(|e| match e {
+                buzz_db::DbError::ChannelNotFound(_) => {
+                    AdmissionRefusal::Denied("parent channel not found")
+                }
+                e => AdmissionRefusal::Dependency(e),
+            })?;
+        &parent_record
+    };
+    if buzz_db::channel::ChannelPosting::parse_fail_closed(&posting_scope.posting)
+        == buzz_db::channel::ChannelPosting::Members
+    {
+        let scope_member = state
+            .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
+            .await
+            .map_err(AdmissionRefusal::Dependency)?;
+        if !crate::handlers::ingest::may_post(
+            state,
+            tenant.community(),
+            lifecycle_parent_id,
+            pubkey_bytes,
+            posting_scope,
+            scope_member,
+        )
+        .await
+        .map_err(AdmissionRefusal::Dependency)?
+        {
+            return Err(AdmissionRefusal::Denied(
+                "only members can join huddles in this channel",
+            ));
+        }
+    }
+
     // Fast path: already a member.
     let is_member = state
         .is_member_cached(tenant.community(), channel_id, pubkey_bytes)
@@ -3797,7 +3839,7 @@ mod tests {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = require_relay_membership;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1 -- unreachable test-only URL
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let mut pool_options = sqlx::postgres::PgPoolOptions::new();
         if let Some(timeout) = acquire_timeout {

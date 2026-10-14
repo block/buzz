@@ -215,7 +215,26 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
     let (pool, name) = create_scratch_db_through(&admin, "tw_prebuild_writer", Some(48)).await;
     let community = Uuid::new_v4();
     let channel = Uuid::new_v4();
-    seed_community_channel(&pool, community, channel, &nostr::Keys::generate()).await;
+    // Plain SQL: the schema stops at 0048, so the current channel store's
+    // column list (which includes later columns such as `posting`) does not
+    // apply yet.
+    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+        .bind(community)
+        .bind(format!("tw-prebuild-{}.example", community.simple()))
+        .execute(&pool)
+        .await
+        .expect("insert community");
+    sqlx::query(
+        "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+         VALUES ($1, $2, $3, 'stream', 'open', $4)",
+    )
+    .bind(channel)
+    .bind(community)
+    .bind(format!("tw-prebuild-{channel}"))
+    .bind(nostr::Keys::generate().public_key().to_bytes().to_vec())
+    .execute(&pool)
+    .await
+    .expect("insert channel");
     sqlx::query("CREATE INDEX CONCURRENTLY idx_thread_metadata_window ON thread_metadata (community_id,root_event_id,event_created_at DESC,event_id ASC)")
         .execute(&pool).await.unwrap();
     let oid: i64 = sqlx::query_scalar("SELECT 'idx_thread_metadata_window'::regclass::oid::bigint")

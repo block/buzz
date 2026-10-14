@@ -76,7 +76,7 @@ pub async fn find_dm_by_participants(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, posting
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -142,7 +142,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, posting
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -212,7 +212,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, posting
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -532,6 +532,7 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         purpose_set_at: row.try_get("purpose_set_at").unwrap_or(None),
         ttl_seconds: row.try_get("ttl_seconds").unwrap_or(None),
         ttl_deadline: row.try_get("ttl_deadline").unwrap_or(None),
+        posting: row.try_get("posting")?,
     })
 }
 

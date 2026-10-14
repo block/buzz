@@ -168,6 +168,26 @@ impl std::fmt::Display for ChannelVisibility {
     }
 }
 
+/// Who may write in a channel (`posting`).
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ChannelPostingArg {
+    /// Members, plus anyone in an open channel (default).
+    #[value(name = "everyone")]
+    Everyone,
+    /// Announce channel: only members may write; guests read only.
+    #[value(name = "members")]
+    Members,
+}
+
+impl From<ChannelPostingArg> for buzz_sdk::ChannelPosting {
+    fn from(value: ChannelPostingArg) -> Self {
+        match value {
+            ChannelPostingArg::Everyone => Self::Everyone,
+            ChannelPostingArg::Members => Self::Members,
+        }
+    }
+}
+
 #[derive(Clone, clap::ValueEnum)]
 pub enum PresenceStatus {
     #[value(name = "online")]
@@ -642,9 +662,9 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, visibility, or ephemeral TTL
+    /// Update channel name, description, visibility, posting, or ephemeral TTL
     #[command(
-        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private"
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --posting members"
     )]
     Update {
         /// Channel UUID
@@ -666,6 +686,10 @@ pub enum ChannelsCmd {
         /// Clear an existing TTL, making the channel permanent.
         #[arg(long)]
         no_ttl: bool,
+        /// Who may write. `members` makes an announce channel: joiners
+        /// become guests who can read but not post. Owner/admin only.
+        #[arg(long, value_enum)]
+        posting: Option<ChannelPostingArg>,
     },
     /// Set the channel topic
     Topic {
