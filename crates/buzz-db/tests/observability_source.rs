@@ -2229,3 +2229,189 @@ fn every_search_hydrator_preserves_the_exact_hit_timestamp() {
         );
     }
 }
+
+// These startup probes always roll back; they deliberately exercise the DB
+// backstops rather than the app check. The two serving writers are exempt only
+// while their INSERT remains structurally channel-NULL (checked below).
+const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 2] = [
+    "pub async fn verify_floor_guard_behavior(",
+    "pub async fn verify_channel_roster_fence_behavior(",
+];
+
+fn is_channel_null_event_writer(function: &str) -> bool {
+    let header = function_header(function);
+    if header.starts_with("pub async fn publish_nip43_membership_locked(") {
+        // Kind 13534: the channel bind is always NULL.
+        return function.contains(".bind::<Option<Uuid>>(None)");
+    }
+    if header.starts_with("pub async fn accept_lease_event(") {
+        // Kind 30350: channel_id is the literal NULL in VALUES.
+        return normalized_sql(function).contains("now(),null,$8)");
+    }
+    false
+}
+
+fn updates_event_floor_columns(function: &str) -> bool {
+    let normalized = normalized_sql(function);
+    ["update events set ", "update public.events set "]
+        .iter()
+        .any(|marker| {
+            normalized.match_indices(marker).any(|(index, marker)| {
+                let assignments = normalized[index + marker.len()..]
+                    .split(" where ")
+                    .next()
+                    .expect("split has first part");
+                assignments.split(',').any(|assignment| {
+                    assignment.split_once('=').is_some_and(|(column, _)| {
+                        matches!(column.trim(), "created_at" | "channel_id")
+                    })
+                })
+            })
+        })
+}
+
+fn event_floor_policy_violations(production: &str) -> Vec<String> {
+    function_slices(production)
+        .into_iter()
+        .filter(|function| {
+            let header = function_header(function);
+            if EVENT_FLOOR_PROBE_EXCEPTIONS
+                .iter()
+                .any(|exception| header.starts_with(exception))
+            {
+                return false;
+            }
+            updates_event_floor_columns(function)
+                || (inserts_events_row(function)
+                    && !is_channel_null_event_writer(function)
+                    && !mask_comments_and_literals(function)
+                        .contains("replica_fence::guard_event_created_at_floor("))
+        })
+        .map(|function| function_header(function).to_owned())
+        .collect()
+}
+
+#[test]
+fn event_floor_policy_rejects_unguarded_inserts_and_floor_column_updates() {
+    let source = r#"
+async fn missing_guard(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (id) VALUES ($1)");
+    // replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+}
+async fn guarded(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO public.events (id) VALUES ($1)");
+}
+async fn rewrite_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET tags = $1, created_at = $2 WHERE id = $3");
+}
+async fn attach_channel(tx: &mut AdmittedTx) {
+    sqlx::query("uPdAtE public.events\nSET channel_id=$1 WHERE id=$2");
+}
+async fn delete_only(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET deleted_at=now() WHERE channel_id=$1 AND created_at<$2");
+}
+"#;
+    assert_eq!(
+        event_floor_policy_violations(source),
+        [
+            "async fn missing_guard(tx: &mut AdmittedTx) {",
+            "async fn rewrite_time(tx: &mut AdmittedTx) {",
+            "async fn attach_channel(tx: &mut AdmittedTx) {",
+        ]
+    );
+}
+
+#[test]
+fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it() {
+    fn collect(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else if should_scan_guarded_write_source_file(&path) {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    collect(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut guarded_writers = 0;
+    let mut violations = Vec::new();
+    for path in files {
+        let production = strip_cfg_test_items(&std::fs::read_to_string(&path).expect("source"));
+        guarded_writers += function_slices(&production)
+            .into_iter()
+            .filter(|function| {
+                inserts_events_row(function)
+                    && mask_comments_and_literals(function)
+                        .contains("replica_fence::guard_event_created_at_floor(")
+            })
+            .count();
+        violations.extend(
+            event_floor_policy_violations(&production)
+                .into_iter()
+                .map(|header| format!("{}: {header}", path.display())),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "event floor policy violations: {violations:?}"
+    );
+    assert!(
+        guarded_writers >= 5,
+        "expected five channel-bearing event writers, found {guarded_writers}"
+    );
+}
+
+#[test]
+fn event_floor_guard_uses_the_database_statement_clock_and_shared_floor() {
+    let source = strip_cfg_test_items(include_str!("../src/runtime/replica_fence.rs"));
+    let guard = function_slices(&source)
+        .into_iter()
+        .find(|function| function_header(function).contains("fn guard_event_created_at_floor("))
+        .expect("app floor guard");
+    assert!(
+        guard.contains("SELECT $1::timestamptz < clock_timestamp()"),
+        "the guard must sample the database statement clock, after BEGIN"
+    );
+    assert!(
+        guard.contains(".bind(CREATED_AT_FLOOR_SECS as f64)"),
+        "app check, GUC and fence wall must share the same floor constant"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn admin_seed_refuses_remote_database_before_invoking_psql() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("buzz-seed-policy-{}", uuid::Uuid::new_v4()));
+    let scripts = root.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scratch scripts directory");
+    let script = scripts.join("seed-admin-dashboard.sh");
+    std::fs::write(
+        &script,
+        include_str!("../../../scripts/seed-admin-dashboard.sh"),
+    )
+    .expect("copy script without developer .env");
+    let psql = root.join("psql");
+    std::fs::write(&psql, "#!/bin/sh\ntouch \"$SEED_PSQL_WITNESS\"\nexit 1\n").expect("stub psql");
+    std::fs::set_permissions(&psql, std::fs::Permissions::from_mode(0o755))
+        .expect("executable stub");
+    let witness = root.join("psql-was-invoked");
+    let output = std::process::Command::new("/bin/bash")
+        .arg(script)
+        .env("PGHOST", "shared-db.example.invalid")
+        .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+        .env("SEED_PSQL_WITNESS", &witness)
+        .output()
+        .expect("run local seed guard");
+    let invoked = witness.exists();
+    std::fs::remove_dir_all(root).expect("remove scratch fixture");
+    assert!(!invoked, "a non-local target reached psql");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a local PostgreSQL target"));
+}

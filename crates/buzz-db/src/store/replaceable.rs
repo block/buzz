@@ -251,6 +251,8 @@ async fn replace_parameterized_event_in_transaction_impl(
         ));
     }
 
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
+
     // Everything from the supersede through the mention index runs under one
     // savepoint on the admitted transaction. A duplicate insert or any failure
     // (including mention indexing) rolls the whole replacement back and leaves
@@ -477,6 +479,8 @@ pub(crate) async fn replace_addressable_event_under_lock(
     let tags_json = serde_json::to_value(&event.tags)?;
     crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
         .await?;
+
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
 
     // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
     sqlx::query(superseded_with_mentions_sql!(

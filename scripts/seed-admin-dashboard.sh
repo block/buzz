@@ -19,6 +19,15 @@ export PGUSER="${PGUSER:-buzz}"
 export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
 export PGDATABASE="${PGDATABASE:-buzz}"
 
+# This raw fixture writer is unarmed and must never target a live replica fence.
+case "${PGHOST}" in
+  localhost|127.0.0.1|::1|/*) ;;
+  *)
+    echo "error: admin seed requires a local PostgreSQL target (PGHOST=${PGHOST})" >&2
+    exit 1
+    ;;
+esac
+
 if command -v psql >/dev/null 2>&1; then
   run_psql() {
     PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" \
