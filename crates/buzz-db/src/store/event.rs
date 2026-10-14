@@ -894,16 +894,8 @@ fn has_tag_values(q: &EventQuery) -> bool {
     q.tag_values.iter().any(|(_, values)| !values.is_empty())
 }
 
-/// Two tests per [`EventQuery::tag_values`] entry, so each entry is an OR
-/// over its values and entries are ANDed:
-///
-/// - `tags @> ANY(...)` lets Postgres use the `tags` GIN index. On its own
-///   it over-matches, because JSONB containment ignores order and repeats:
-///   `[["t", "stream"]]` contains `[["t", "t"]]`, and `[["name", "t"]]`
-///   contains `[["t", "name"]]`. Those false candidates could fill the page
-///   before `LIMIT` and hide a real match.
-/// - The `EXISTS` test then keeps only rows with a tag whose name is
-///   exactly `name` and whose first value is one of `values`.
+/// AND one [`push_exact_tag_match`] per non-empty [`EventQuery::tag_values`]
+/// entry, so entries are ANDed and values within an entry are ORed.
 fn push_tag_value_filters(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     col_prefix: &str,
@@ -913,21 +905,8 @@ fn push_tag_value_filters(
         if values.is_empty() {
             continue;
         }
-        let containments: Vec<serde_json::Value> = values
-            .iter()
-            .map(|value| serde_json::json!([[name, value]]))
-            .collect();
-        qb.push(format!(" AND {col_prefix}tags @> ANY("))
-            .push_bind(containments)
-            .push("::jsonb[])");
-        qb.push(format!(
-            " AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
-             WHERE tag->>0 = "
-        ))
-        .push_bind(name.clone())
-        .push(" AND tag->>1 = ANY(")
-        .push_bind(values.clone())
-        .push("::text[]))");
+        qb.push(" AND ");
+        push_exact_tag_match(qb, col_prefix, name, values);
     }
 }
 
