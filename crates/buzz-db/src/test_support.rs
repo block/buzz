@@ -58,31 +58,88 @@ pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 
 
 /// In one per-test database, make any return to the retired SQL predicate
 /// observable without changing the production function in the public schema.
-pub(crate) async fn reject_legacy_sql_fence_predicate(pool: &sqlx::PgPool) {
-    sqlx::query("CREATE SCHEMA admission_test")
+pub(crate) async fn reject_legacy_sql_fence_predicate(pool: &sqlx::PgPool) -> String {
+    let schema = format!("admission_test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(pool)
         .await
         .expect("create test-only function schema");
-    sqlx::query(
-        "CREATE FUNCTION admission_test.community_write_allowed(uuid) RETURNS boolean \
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {schema}.community_write_allowed(uuid) RETURNS boolean \
          LANGUAGE plpgsql VOLATILE AS $$ BEGIN \
            RAISE EXCEPTION 'legacy SQL fence predicate called'; END $$",
-    )
+    )))
     .execute(pool)
     .await
     .expect("shadow legacy SQL predicate");
-    sqlx::query("SET search_path = admission_test, public")
-        .execute(pool)
-        .await
-        .expect("resolve test-local predicate first");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET search_path = {schema}, public"
+    )))
+    .execute(pool)
+    .await
+    .expect("resolve test-local predicate first");
     let shadowed: bool = sqlx::query_scalar(
-        "SELECT to_regprocedure('community_write_allowed(uuid)') = \
-                to_regprocedure('admission_test.community_write_allowed(uuid)')",
+        "SELECT to_regprocedure('community_write_allowed(uuid)') = to_regprocedure($1)",
     )
+    .bind(format!("{schema}.community_write_allowed(uuid)"))
     .fetch_one(pool)
     .await
     .expect("resolve shadowed predicate");
     assert!(shadowed);
+    schema
+}
+
+/// Hold the executor's exclusive lock until a sweep reaches shared admission,
+/// then quiesce in that same transaction before releasing it. The ordinary
+/// second pool keeps lifecycle triggers enabled; the sweep fixture bypasses them.
+pub(crate) async fn fence_while_sweep_waits<F, T>(community: buzz_core::CommunityId, sweep: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url())
+        .await
+        .expect("connect deletion executor pool");
+    let mut tx = pool.begin().await.expect("begin deletion executor");
+    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+        .bind(community.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("hold exclusive deletion lock");
+    let mut task = tokio::spawn(sweep);
+    let waiting = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted \
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                   AND pg_backend_pid() = ANY(pg_blocking_pids(pid)))",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .expect("inspect blocked advisory admission");
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if waiting.is_err() {
+        task.abort();
+        panic!("sweep did not block in admission before deadline");
+    }
+    set_deletion_state_in_transaction(&mut tx, *community.as_uuid(), "quiescing").await;
+    tx.commit().await.expect("commit deletion fence");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await;
+    if result.is_err() {
+        task.abort();
+        panic!("sweep did not finish after deletion fence committed");
+    }
+    pool.close().await;
+    result.unwrap().expect("sweep task")
 }
 
 /// Move a community fixture into a deletion lifecycle state the way the
@@ -91,6 +148,15 @@ pub(crate) async fn reject_legacy_sql_fence_predicate(pool: &sqlx::PgPool) {
 /// current fence generation.
 pub(crate) async fn set_deletion_state(pool: &sqlx::PgPool, id: uuid::Uuid, state: &str) {
     let mut tx = pool.begin().await.expect("begin lifecycle fixture");
+    set_deletion_state_in_transaction(&mut tx, id, state).await;
+    tx.commit().await.expect("commit lifecycle fixture");
+}
+
+async fn set_deletion_state_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: uuid::Uuid,
+    state: &str,
+) {
     sqlx::query(
         "SELECT set_config('buzz.deletion_executor_community', $1, true), \
                 set_config('buzz.deletion_fence_generation', \
@@ -98,7 +164,7 @@ pub(crate) async fn set_deletion_state(pool: &sqlx::PgPool, id: uuid::Uuid, stat
     )
     .bind(id.to_string())
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .expect("authorize lifecycle fixture");
     sqlx::query(
@@ -108,10 +174,9 @@ pub(crate) async fn set_deletion_state(pool: &sqlx::PgPool, id: uuid::Uuid, stat
     )
     .bind(id)
     .bind(state)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .expect("set lifecycle state");
-    tx.commit().await.expect("commit lifecycle fixture");
 }
 
 /// Move a disposable test community into `quiescing`, the state in which

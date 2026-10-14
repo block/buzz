@@ -642,24 +642,32 @@ pub async fn prune_scheduled_workflow_fires_before(
     .await?;
     let mut deleted = 0;
     for id in communities {
-        let Some(mut tx) = crate::begin_community_sweep_transaction(
-            pool,
-            CommunityId::from_uuid(id),
-            crate::observability::WriterOperation::Maintenance,
-        )
-        .await?
-        else {
-            continue;
-        };
-        let result = sqlx::query(
-            "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND claimed_at < $2",
-        )
-        .bind(id)
-        .bind(older_than)
-        .execute(tx.conn())
-        .await?;
-        tx.commit().await?;
-        deleted += result.rows_affected();
+        let batch: Result<u64> = async {
+            let Some(mut tx) = crate::begin_community_sweep_transaction(
+                pool,
+                CommunityId::from_uuid(id),
+                crate::observability::WriterOperation::Maintenance,
+            )
+            .await?
+            else {
+                return Ok(0);
+            };
+            let result = sqlx::query(
+                "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND claimed_at < $2",
+            )
+            .bind(id)
+            .bind(older_than)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        }
+        .await;
+        match batch {
+            Ok(count) => deleted += count,
+            Err(error) => tracing::warn!(community_id = %id, error = %error,
+                "Workflow fire prune failed; retained rows will retry next tick"),
+        }
     }
     Ok(deleted)
 }

@@ -861,11 +861,56 @@ async fn channel_reap_admits_active_tenant_and_skips_quiescing_tenant() {
     }
 }
 
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn channel_reap_postgres_tests_returns_committed_rows_after_later_tenant_error() {
-    let (db, communities) = fixture().await;
-    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+/// Keep every failure-injection object, including the ALWAYS trigger's table,
+/// in this call's shadow schema so a shared-database run cannot leak it.
+async fn fail_tenant_mutations(pool: &sqlx::PgPool, schema: &str, table: &str, id: Uuid) {
+    // Dynamic identifiers come only from our UUID schema and literal table names.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {schema}.{table} (LIKE public.{table} INCLUDING ALL)"
+    )))
+    .execute(pool)
+    .await
+    .expect("create test-local serving table");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {schema}.fail_tenant (id uuid PRIMARY KEY)"
+    )))
+    .execute(pool)
+    .await
+    .expect("create failure target");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {schema}.fail_tenant (id) VALUES ($1)"
+    )))
+    .bind(id)
+    .execute(pool)
+    .await
+    .expect("select failing tenant");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {schema}.fail_tenant_mutation() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN \
+           IF EXISTS (SELECT 1 FROM {schema}.fail_tenant \
+                      WHERE id = COALESCE(NEW.community_id, OLD.community_id)) \
+           THEN RAISE EXCEPTION 'tenant mutation failed'; END IF; \
+           IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$",
+    )))
+    .execute(pool)
+    .await
+    .expect("create failure trigger function");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER fail_tenant_mutation BEFORE UPDATE OR DELETE ON {schema}.{table} \
+         FOR EACH ROW EXECUTE FUNCTION {schema}.fail_tenant_mutation()",
+    )))
+    .execute(pool)
+    .await
+    .expect("create test-local failure trigger");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.{table} ENABLE ALWAYS TRIGGER fail_tenant_mutation"
+    )))
+    .execute(pool)
+    .await
+    .expect("enable trigger with replica role");
+}
+
+async fn two_active_tenants(db: &Db, first: CommunityId) -> [Uuid; 2] {
     let extra = Uuid::new_v4();
     sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
         .bind(extra)
@@ -873,8 +918,18 @@ async fn channel_reap_postgres_tests_returns_committed_rows_after_later_tenant_e
         .execute(&db.pool)
         .await
         .expect("seed second active tenant");
-    let mut ids = [*communities[0].as_uuid(), extra];
+    let mut ids = [*first.as_uuid(), extra];
     ids.sort();
+    ids
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_reap_returns_committed_rows_after_earlier_tenant_error() {
+    let (db, communities) = fixture().await;
+    let schema = crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let ids = two_active_tenants(&db, communities[0]).await;
+    fail_tenant_mutations(&db.pool, &schema, "channels", ids[0]).await;
     for id in ids {
         sqlx::query(
             "INSERT INTO channels (community_id, name, created_by, ttl_seconds, ttl_deadline) \
@@ -886,49 +941,12 @@ async fn channel_reap_postgres_tests_returns_committed_rows_after_later_tenant_e
         .await
         .expect("seed expired channel");
     }
-    sqlx::query("CREATE TABLE admission_test.fail_tenant (id uuid PRIMARY KEY)")
-        .execute(&db.pool)
+    let reaped = super::channel::reap_expired_ephemeral_channels(&db.pool)
         .await
-        .expect("create failure target");
-    sqlx::query("INSERT INTO admission_test.fail_tenant (id) VALUES ($1)")
-        .bind(ids[1])
-        .execute(&db.pool)
-        .await
-        .expect("select later tenant");
-    sqlx::query(
-        "CREATE FUNCTION admission_test.fail_later_archive() RETURNS trigger \
-         LANGUAGE plpgsql AS $$ BEGIN \
-           IF EXISTS (SELECT 1 FROM admission_test.fail_tenant WHERE id = NEW.community_id) \
-           THEN RAISE EXCEPTION 'later tenant archive failed'; END IF; \
-           RETURN NEW; END $$",
-    )
-    .execute(&db.pool)
-    .await
-    .expect("create failure trigger function");
-    sqlx::query(
-        "CREATE TRIGGER fail_later_archive BEFORE UPDATE ON channels \
-         FOR EACH ROW EXECUTE FUNCTION admission_test.fail_later_archive()",
-    )
-    .execute(&db.pool)
-    .await
-    .expect("create failure trigger");
-    sqlx::query("ALTER TABLE channels ENABLE ALWAYS TRIGGER fail_later_archive")
-        .execute(&db.pool)
-        .await
-        .expect("enable trigger with replica role");
-
-    let error = super::channel::reap_expired_ephemeral_channels(&db.pool)
-        .await
-        .expect_err("second tenant fails after first commits");
-    match error {
-        DbError::EphemeralReapPartial { reaped, source } => {
-            assert_eq!(reaped.len(), 1);
-            assert_eq!(*reaped[0].community_id.as_uuid(), ids[0]);
-            assert!(source.to_string().contains("later tenant archive failed"));
-        }
-        other => panic!("expected committed rows with later failure, got {other:?}"),
-    }
-    for (id, expected) in [(ids[0], true), (ids[1], false)] {
+        .expect("tenant failure must not stop the fleet sweep");
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(*reaped[0].community_id.as_uuid(), ids[1]);
+    for (id, expected) in [(ids[0], false), (ids[1], true)] {
         let archived: bool = sqlx::query_scalar(
             "SELECT archived_at IS NOT NULL FROM channels WHERE community_id = $1",
         )
@@ -938,6 +956,17 @@ async fn channel_reap_postgres_tests_returns_committed_rows_after_later_tenant_e
         .expect("read archive state");
         assert_eq!(archived, expected, "archive state for {id}");
     }
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM {schema}.fail_tenant"
+    )))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let retried = super::channel::reap_expired_ephemeral_channels(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(*retried[0].community_id.as_uuid(), ids[0]);
 }
 
 #[tokio::test]
@@ -1041,5 +1070,203 @@ async fn match_reap_admits_active_tenant_and_skips_quiescing_tenant() {
                 .await
                 .unwrap();
         assert_eq!(count, expected, "exhausted job for {community}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invite_sweep_rechecks_admission_after_candidate_read() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let community = communities[0];
+    let cutoff = chrono::Utc::now();
+    sqlx::query(
+        "INSERT INTO relay_invites (community_id, token_hash, expires_at, created_by) \
+         VALUES ($1, $2, $3, 'test')",
+    )
+    .bind(community.as_uuid())
+    .bind(vec![0_u8; 32])
+    .bind(cutoff - chrono::Duration::minutes(1))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let pool = db.pool.clone();
+    let reaped = crate::test_support::fence_while_sweep_waits(community, async move {
+        super::relay_invite::reap_expired_relay_invites(&pool, cutoff).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(reaped, 0);
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM relay_invites WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "newly fenced tenant's invite must remain");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_reap_rechecks_admission_after_candidate_read() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let community = communities[0];
+    sqlx::query(
+        "INSERT INTO channels (community_id, name, created_by, ttl_seconds, ttl_deadline) \
+         VALUES ($1, 'expired', $2, 60, now() - interval '1 minute')",
+    )
+    .bind(community.as_uuid())
+    .bind(vec![1_u8; 32])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let pool = db.pool.clone();
+    let reaped = crate::test_support::fence_while_sweep_waits(community, async move {
+        super::channel::reap_expired_ephemeral_channels(&pool).await
+    })
+    .await
+    .unwrap();
+    assert!(reaped.is_empty());
+    let archived: bool =
+        sqlx::query_scalar("SELECT archived_at IS NOT NULL FROM channels WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !archived,
+        "newly fenced tenant's channel must remain unarchived"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn match_claim_rechecks_admission_and_continues_after_candidate_read() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let ids = two_active_tenants(&db, communities[0]).await;
+    for (index, id) in ids.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO push_match_queue (community_id, event_id, next_attempt_at) \
+             VALUES ($1, $2, now() - make_interval(mins => $3))",
+        )
+        .bind(id)
+        .bind(vec![index as u8; 32])
+        .bind(if index == 0 { 2 } else { 1 })
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let pool = db.pool.clone();
+    // Missing source events take the production claim's terminal cleanup path.
+    crate::test_support::fence_while_sweep_waits(CommunityId::from_uuid(ids[0]), async move {
+        super::push::claim_due_match_batch(
+            &pool,
+            8,
+            chrono::Utc::now() + chrono::Duration::minutes(1),
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    for (id, expected) in [(ids[0], 1), (ids[1], 0)] {
+        let state: Vec<(String, i32)> =
+            sqlx::query_as("SELECT state, attempts FROM push_match_queue WHERE community_id = $1")
+                .bind(id)
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(state.len(), expected, "queue state for {id}");
+        if expected == 1 {
+            assert_eq!(state[0], ("pending".to_owned(), 0));
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn periodic_reaps_continue_after_tenant_error_and_retry_retained_rows() {
+    for table in [
+        "relay_invites",
+        "scheduled_workflow_fires",
+        "push_match_queue",
+    ] {
+        let (db, communities) = fixture().await;
+        let schema = crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+        let ids = two_active_tenants(&db, communities[0]).await;
+        fail_tenant_mutations(&db.pool, &schema, table, ids[0]).await;
+        let cutoff = chrono::Utc::now();
+        for id in ids {
+            match table {
+                "relay_invites" => {
+                    sqlx::query(
+                        "INSERT INTO relay_invites (community_id, token_hash, expires_at, created_by) \
+                         VALUES ($1, $2, $3, 'test')",
+                    )
+                    .bind(id).bind(vec![1_u8; 32])
+                    .bind(cutoff - chrono::Duration::minutes(if id == ids[0] { 2 } else { 1 }))
+                    .execute(&db.pool).await.unwrap();
+                }
+                "scheduled_workflow_fires" => {
+                    sqlx::query(
+                        "INSERT INTO scheduled_workflow_fires \
+                         (community_id, workflow_id, scheduled_for, claimed_at) \
+                         VALUES ($1, $2, $3, $3)",
+                    )
+                    .bind(id)
+                    .bind(Uuid::new_v4())
+                    .bind(cutoff - chrono::Duration::hours(1))
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                }
+                "push_match_queue" => {
+                    sqlx::query(
+                        "INSERT INTO push_match_queue (community_id, event_id, attempts) \
+                         VALUES ($1, $2, $3)",
+                    )
+                    .bind(id)
+                    .bind(vec![1_u8; 32])
+                    .bind(super::push::MAX_MATCH_ATTEMPTS)
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        for retry in [false, true] {
+            if retry {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DELETE FROM {schema}.fail_tenant"
+                )))
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            }
+            let count = match table {
+                "relay_invites" => {
+                    super::relay_invite::reap_expired_relay_invites(&db.pool, cutoff).await
+                }
+                "scheduled_workflow_fires" => {
+                    super::workflow::prune_scheduled_workflow_fires_before(&db.pool, cutoff).await
+                }
+                "push_match_queue" => super::push::reap_exhausted_matches(&db.pool).await,
+                _ => unreachable!(),
+            }
+            .expect("per-tenant failures must not stop recurring sweeps");
+            assert_eq!(count, 1, "{table}, retry={retry}");
+            for (id, expected) in [(ids[0], i64::from(!retry)), (ids[1], 0)] {
+                let remaining: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table} WHERE community_id = $1",
+                )))
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+                assert_eq!(remaining, expected, "{table} state for {id}, retry={retry}");
+            }
+        }
     }
 }

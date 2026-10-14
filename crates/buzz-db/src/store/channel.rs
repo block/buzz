@@ -855,7 +855,6 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
            AND c.archived_at IS NULL \
-           AND c.deletion_state = 'active' AND c.deleted_at IS NULL \
          ORDER BY ch.community_id",
     )
     .fetch_all(&mut *connection)
@@ -901,13 +900,8 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
         .await;
         match batch {
             Ok(rows) => reaped.extend(rows),
-            Err(error) if reaped.is_empty() => return Err(error),
-            Err(error) => {
-                return Err(DbError::EphemeralReapPartial {
-                    reaped,
-                    source: Box::new(error),
-                });
-            }
+            Err(error) => tracing::warn!(community_id = %id, error = %error,
+                "Ephemeral channel reap failed; retained rows will retry next tick"),
         }
     }
     Ok(reaped)

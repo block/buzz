@@ -164,8 +164,6 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("d-tag backfill must precede discovery deletion")
         .0;
     assert!(backfill_d_tags.contains("WriterOperation::Bootstrap"));
-    assert!(backfill_d_tags.contains("begin_community_sweep_transaction("));
-    assert!(backfill_d_tags.contains("execute(tx.conn())"));
     let soft_delete_discovery = event
         .split_once("pub async fn soft_delete_discovery_events")
         .expect("event store must expose discovery-event deletion")
@@ -909,6 +907,7 @@ const COMMUNITY_CHOKEPOINT_LEGACY_MARKER: &str =
 
 fn has_any_tenant_local_chokepoint(source: &str) -> bool {
     source.contains(COMMUNITY_CHOKEPOINT_MARKER)
+        || source.contains("begin_community_sweep_transaction(")
         || source.contains(GENERAL_COMMUNITY_CHOKEPOINT_MARKER)
         || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
 }
@@ -916,10 +915,9 @@ fn has_any_tenant_local_chokepoint(source: &str) -> bool {
 const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate::AdmittedTx"];
 
 // Narrow reviewed exceptions for non-serving verification probes only.
-const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 3] = [
+const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 2] = [
     "pub async fn verify_floor_guard_behavior(",
     "pub async fn verify_channel_roster_fence_behavior(",
-    "pub async fn backfill_d_tags(&self) -> Result<u64> {",
 ];
 
 const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(

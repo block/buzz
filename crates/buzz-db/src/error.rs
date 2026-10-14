@@ -37,17 +37,6 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
-    /// A fleet channel sweep failed after earlier tenant transactions committed.
-    /// The caller must still process their returned follow-up work.
-    #[error("ephemeral channel sweep failed after earlier tenant commits: {source}")]
-    EphemeralReapPartial {
-        /// Channels already archived and committed by this sweep.
-        reaped: Vec<crate::channel::ReapedEphemeralChannel>,
-        /// Failure from the later tenant transaction.
-        #[source]
-        source: Box<DbError>,
-    },
-
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),

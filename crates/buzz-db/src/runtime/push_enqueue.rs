@@ -254,22 +254,23 @@ mod tests {
             crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
             for (index, community) in communities[..2].iter().enumerate() {
                 sqlx::query(
-                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
-                 VALUES ($1, $2, $3, to_timestamp(1), 9, '[]', '', $4)",
-            )
-            .bind(community.as_uuid())
-            .bind(vec![index as u8; 32])
-            .bind(vec![1_u8; 32])
-            .bind(vec![2_u8; 64])
-            .execute(&db.pool)
-            .await
-            .expect("seed event");
+                    "INSERT INTO events \
+                     (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+                     VALUES ($1, $2, $3, to_timestamp(1), 9, '[]', '', $4)",
+                )
+                .bind(community.as_uuid())
+                .bind(vec![index as u8; 32])
+                .bind(vec![1_u8; 32])
+                .bind(vec![2_u8; 64])
+                .execute(&db.pool)
+                .await
+                .expect("seed event");
                 sqlx::query(
                     "INSERT INTO push_leases (community_id, author, installation_id, \
-                 source_event_id, source_created_at, generation, active, endpoint_hash, \
-                 endpoint_grant, max_class, subscriptions, expires_at, updated_at) \
-                 VALUES ($1, $2, 'test', $3, 1, 1, true, $4, 'grant', 'default', '[]', \
-                         EXTRACT(EPOCH FROM now())::bigint + 3600, now() - interval '1 hour')",
+                     source_event_id, source_created_at, generation, active, endpoint_hash, \
+                     endpoint_grant, max_class, subscriptions, expires_at, updated_at) \
+                     VALUES ($1, $2, 'test', $3, 1, 1, true, $4, 'grant', 'default', '[]', \
+                             EXTRACT(EPOCH FROM now())::bigint + 3600, now() - interval '1 hour')",
                 )
                 .bind(community.as_uuid())
                 .bind(vec![3_u8; 32])
@@ -289,7 +290,10 @@ mod tests {
                 event_id: vec![1_u8; 32],
                 barrier: None,
             };
-            assert!(enqueue(&db.pool, &quiescing).await.is_err());
+            let err = enqueue(&db.pool, &quiescing)
+                .await
+                .expect_err("quiescing enqueue");
+            assert!(crate::test_support::is_admission_rejection(&err));
             enqueue(&db.pool, &active).await.expect("admitted enqueue");
             for (community, expected) in [(communities[0], 1), (communities[1], 0)] {
                 let count: i64 = sqlx::query_scalar(

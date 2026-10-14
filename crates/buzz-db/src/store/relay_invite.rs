@@ -182,6 +182,7 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
     .await?;
     // Keep the original global expiry order and 1,000-row ceiling. The state
     // read only narrows candidates; admission below is the write authority.
+    // Exclude fenced tenants so they cannot fill the LIMIT page.
     let candidates = sqlx::query(
         "SELECT invite.community_id, invite.id FROM relay_invites invite \
          JOIN communities community ON community.id = invite.community_id \
@@ -208,26 +209,34 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
 
     let mut deleted = 0;
     for id in ordered_communities {
-        let community = CommunityId::from_uuid(id);
-        let Some(mut tx) = crate::begin_community_sweep_transaction(
-            pool,
-            community,
-            crate::observability::WriterOperation::Maintenance,
-        )
-        .await?
-        else {
-            continue;
-        };
-        let result = sqlx::query(
-            "DELETE FROM relay_invites WHERE community_id = $1 AND id = ANY($2) AND expires_at < $3",
-        )
-        .bind(id)
-        .bind(&ids_by_community[&id])
-        .bind(cutoff)
-        .execute(tx.conn())
-        .await?;
-        tx.commit().await?;
-        deleted += result.rows_affected();
+        let batch: Result<u64> = async {
+            let community = CommunityId::from_uuid(id);
+            let Some(mut tx) = crate::begin_community_sweep_transaction(
+                pool,
+                community,
+                crate::observability::WriterOperation::Maintenance,
+            )
+            .await?
+            else {
+                return Ok(0);
+            };
+            let result = sqlx::query(
+                "DELETE FROM relay_invites WHERE community_id = $1 AND id = ANY($2) AND expires_at < $3",
+            )
+            .bind(id)
+            .bind(&ids_by_community[&id])
+            .bind(cutoff)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        }
+        .await;
+        match batch {
+            Ok(count) => deleted += count,
+            Err(error) => tracing::warn!(community_id = %id, error = %error,
+                "Relay invite reap failed; retained rows will retry next tick"),
+        }
     }
     Ok(deleted)
 }

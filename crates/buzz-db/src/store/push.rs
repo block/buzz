@@ -871,6 +871,7 @@ where
         let mut connection =
             acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
                 .await?;
+        // Exclude fenced tenants so they cannot occupy the queue head.
         let candidate: Option<Uuid> = sqlx::query_scalar(
             "SELECT q.community_id FROM push_match_queue q \
              JOIN communities c ON c.id = q.community_id \
@@ -935,8 +936,8 @@ where
     if rows.is_empty() {
         return Ok(None);
     }
-    // Release the admitted connection before loading source events: the
-    // production loader acquires separately and size-one pools must work.
+    // The admitted transaction committed above, so no connection is held
+    // across the loader (size-one pools must work).
     let mut attempts = std::collections::HashMap::with_capacity(rows.len());
     for row in &rows {
         let event_id: Vec<u8> = row.try_get("event_id")?;
@@ -1005,25 +1006,33 @@ pub async fn reap_exhausted_matches(pool: &PgPool) -> Result<u64> {
     drop(connection);
     let mut deleted = 0;
     for id in communities {
-        let Some(mut tx) = crate::begin_community_sweep_transaction(
-            pool,
-            CommunityId::from_uuid(id),
-            crate::observability::WriterOperation::Maintenance,
-        )
-        .await?
-        else {
-            continue;
-        };
-        let result = sqlx::query(
-            "DELETE FROM push_match_queue WHERE community_id = $1 AND attempts >= $2 \
-             AND (state='pending' OR (state='matching' AND lease_until < now()))",
-        )
-        .bind(id)
-        .bind(MAX_MATCH_ATTEMPTS)
-        .execute(tx.conn())
-        .await?;
-        tx.commit().await?;
-        deleted += result.rows_affected();
+        let batch: Result<u64> = async {
+            let Some(mut tx) = crate::begin_community_sweep_transaction(
+                pool,
+                CommunityId::from_uuid(id),
+                crate::observability::WriterOperation::Maintenance,
+            )
+            .await?
+            else {
+                return Ok(0);
+            };
+            let result = sqlx::query(
+                "DELETE FROM push_match_queue WHERE community_id = $1 AND attempts >= $2 \
+                 AND (state='pending' OR (state='matching' AND lease_until < now()))",
+            )
+            .bind(id)
+            .bind(MAX_MATCH_ATTEMPTS)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        }
+        .await;
+        match batch {
+            Ok(count) => deleted += count,
+            Err(error) => tracing::warn!(community_id = %id, error = %error,
+                "Exhausted push-match reap failed; retained rows will retry next tick"),
+        }
     }
     Ok(deleted)
 }
