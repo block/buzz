@@ -486,17 +486,23 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        sqlx::query(
+        let affected = sqlx::query(
             r#"
             UPDATE communities
             SET icon = $2
-            WHERE id = $1
+            WHERE id = $1 AND deletion_state = 'active' AND deleted_at IS NULL
             "#,
         )
         .bind(community_id.as_uuid())
         .bind(icon)
         .execute(&mut *connection)
-        .await?;
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(DbError::AccessDenied(format!(
+                "community {community_id} is missing or write-fenced"
+            )));
+        }
         Ok(())
     }
 
