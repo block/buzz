@@ -1,0 +1,137 @@
+//! Signed enrollment fixtures exercise structure independently of path trust.
+use super::testing::{build_test_attestation_with_auth_data, TEST_ROOT_CA_CERT_PEM};
+use super::{error::AppAttestError as Error, proof};
+use base64::{engine::general_purpose::STANDARD, Engine};
+
+const APP: &str = "TEAMID.test.compatibility";
+const TRANSCRIPT: &str = "test enrollment transcript";
+
+fn verify(change: impl FnOnce(&mut Vec<u8>)) -> Result<(), Error> {
+    let fixture = build_test_attestation_with_auth_data(TRANSCRIPT, APP, change);
+    enroll(&fixture.cbor, &fixture.key_id).map(|_| ())
+}
+
+fn enroll(bytes: &[u8], key_id: &str) -> Result<proof::Enrollment, Error> {
+    proof::enroll(
+        bytes,
+        TRANSCRIPT.as_bytes(),
+        APP,
+        key_id,
+        TEST_ROOT_CA_CERT_PEM,
+        false,
+    )
+}
+
+#[test]
+fn signed_enrollment_accepts_optional_extensions_and_cose_variants() {
+    for tail in [
+        &b""[..],
+        &b"\xa0"[..],
+        &b"\xa1\x66future\x82\xc1\xf8\xff\x01"[..],
+    ] {
+        verify(|auth| auth.extend_from_slice(tail)).unwrap();
+    }
+    // COSE's x coordinate remains the same; y may use its parity form.
+    verify(|auth| {
+        let mut key: ciborium::Value = ciborium::from_reader(&auth[87..]).unwrap();
+        if let ciborium::Value::Map(fields) = &mut key {
+            for (label, value) in fields.iter_mut() {
+                if label == &ciborium::Value::Integer((-3).into()) {
+                    let ciborium::Value::Bytes(y) = value else {
+                        panic!("fixture y")
+                    };
+                    *value = ciborium::Value::Bool(y[31] & 1 == 1);
+                }
+            }
+            fields.reverse();
+        }
+        auth.truncate(87);
+        ciborium::into_writer(&key, auth).unwrap();
+    })
+    .unwrap();
+}
+
+#[test]
+fn signed_enrollment_rejects_incomplete_or_inconsistent_credential_data() {
+    assert!(verify(|auth| auth.truncate(87)).is_err()); // Old fixture omitted COSE.
+    assert!(verify(|auth| auth[54] = 31).is_err());
+    assert!(verify(|auth| auth[54] = 33).is_err());
+    assert!(verify(|auth| auth[55] ^= 1).is_err());
+    assert!(verify(|auth| auth[36] = 1).is_err());
+    assert!(verify(|auth| auth.extend_from_slice(b"\xa0\x00")).is_err());
+    assert!(verify(|auth| auth.extend_from_slice(b"\xa2\x61x\x01\x61x\x02")).is_err());
+    assert!(verify(|auth| {
+        // Valid key with the wrong algorithm label remains invalid even signed.
+        let mut key: ciborium::Value = ciborium::from_reader(&auth[87..]).unwrap();
+        if let ciborium::Value::Map(fields) = &mut key {
+            for (label, value) in fields {
+                if label == &ciborium::Value::Integer(3.into()) {
+                    *value = ciborium::Value::Integer((-8).into());
+                }
+            }
+        }
+        auth.truncate(87);
+        ciborium::into_writer(&key, auth).unwrap();
+    })
+    .is_err());
+}
+
+#[test]
+fn certificate_nonce_authenticates_every_extension_byte() {
+    let fixture = build_test_attestation_with_auth_data(TRANSCRIPT, APP, |a| {
+        a.extend_from_slice(b"\xa1\x61x\x01")
+    });
+    let mut envelope: ciborium::Value = ciborium::from_reader(fixture.cbor.as_slice()).unwrap();
+    if let ciborium::Value::Map(fields) = &mut envelope {
+        for (key, value) in fields {
+            if key == &ciborium::Value::Text("authData".into()) {
+                let ciborium::Value::Bytes(auth) = value else {
+                    panic!("authData")
+                };
+                *auth.last_mut().unwrap() = 2;
+            }
+        }
+    }
+    let mut changed = Vec::new();
+    ciborium::into_writer(&envelope, &mut changed).unwrap();
+    assert!(matches!(
+        enroll(&changed, &fixture.key_id),
+        Err(Error::InvalidNonce)
+    ));
+    assert!(enroll(&fixture.cbor, &STANDARD.encode([0; 32])).is_err());
+}
+
+#[test]
+fn shared_signed_certificate_constraint_corpus() {
+    super::testing::compare_certificate_constraints(
+        super::certificate::verify_chain,
+        super::certificate::verify_nonce,
+    );
+}
+
+#[test]
+fn enrolled_key_verifies_following_assertion() {
+    use super::testing::{build_test_assertion, build_test_attestation};
+    use sha2::{Digest, Sha256};
+    let fixture = build_test_attestation(TRANSCRIPT, APP);
+    let enrolled = enroll(&fixture.cbor, &fixture.key_id).unwrap();
+    let hash = Sha256::digest(TRANSCRIPT.as_bytes());
+    let assertion = build_test_assertion(APP, hash, 0, &fixture.device_key);
+    let checked = proof::assert(
+        &assertion,
+        TRANSCRIPT.as_bytes(),
+        APP,
+        &enrolled.public_key,
+        0,
+    )
+    .unwrap();
+    assert_eq!(checked.counter, 1);
+    assert!(proof::assert(
+        &assertion,
+        TRANSCRIPT.as_bytes(),
+        APP,
+        &enrolled.public_key,
+        1
+    )
+    .is_err());
+}
