@@ -2881,54 +2881,68 @@ mod postgres_tests {
         let [_, artifact_kind] = ARTIFACT_KINDS;
         let artifact_kind = artifact_kind as u16;
 
-        // (label, kind, real tag, newer decoy tag, query)
-        let cases: Vec<(&str, u16, Vec<&str>, Vec<&str>, EventQuery)> = vec![
-            (
-                "custom tag value in name slot",
-                1,
-                vec!["t", "t"],
-                vec!["t", "other"],
-                {
+        struct Case<'a> {
+            label: &'a str,
+            kind: u16,
+            real: Vec<&'a str>,
+            /// Inserted after `real`, so it wins a `limit: 1` read if matched.
+            decoy: Vec<&'a str>,
+            query: EventQuery,
+        }
+        let cases = [
+            Case {
+                label: "custom tag value in name slot",
+                kind: 1,
+                real: vec!["t", "t"],
+                decoy: vec!["t", "other"],
+                query: {
                     let mut q = EventQuery::for_community(community);
                     q.custom_tag = Some(("t".into(), "t".into()));
                     q
                 },
-            ),
-            (
-                "custom tag shifted right",
-                1,
-                vec!["t", "v"],
-                vec!["meta", "t", "v"],
-                {
+            },
+            Case {
+                label: "custom tag shifted right",
+                kind: 1,
+                real: vec!["t", "v"],
+                decoy: vec!["meta", "t", "v"],
+                query: {
                     let mut q = EventQuery::for_community(community);
                     q.custom_tag = Some(("t".into(), "v".into()));
                     q
                 },
-            ),
-            (
-                "e tag shifted right",
-                7,
-                vec!["e", &target],
-                vec!["x", "e", &target],
-                {
+            },
+            Case {
+                label: "e tag shifted right",
+                kind: 7,
+                real: vec!["e", &target],
+                decoy: vec!["x", "e", &target],
+                query: {
                     let mut q = EventQuery::for_community(community);
                     q.e_tags = Some(vec![target.clone()]);
                     q
                 },
-            ),
-            (
-                "artifact d tag shifted right",
-                artifact_kind,
-                vec!["d", "a1"],
-                vec!["x", "d", "a1"],
-                {
+            },
+            Case {
+                label: "artifact d tag shifted right",
+                kind: artifact_kind,
+                real: vec!["d", "a1"],
+                decoy: vec!["x", "d", "a1"],
+                query: {
                     let mut q = EventQuery::for_community(community);
                     q.d_tag_values = Some(vec!["a1".into()]);
                     q
                 },
-            ),
+            },
         ];
-        for (offset, (label, kind, real, decoy, mut q)) in (0u64..).step_by(10).zip(cases) {
+        for (offset, case) in (0u64..).step_by(10).zip(cases) {
+            let Case {
+                label,
+                kind,
+                real,
+                decoy,
+                query: mut q,
+            } = case;
             let real_id = insert(kind, real, now - 1000 + offset).await;
             insert(kind, decoy, now - 995 + offset).await;
             q.kinds = Some(vec![i32::from(kind)]);
