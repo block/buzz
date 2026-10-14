@@ -58,14 +58,6 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
         build_indexes_before_migration(conn, *version, doc, indexes).await?;
     }
     MIGRATOR.run(&mut *conn).await?;
-    // The replica-fence proof (see `replica_fence`) requires the commit-time
-    // `created_at` floor trigger from migration 0021 — correctly shaped — on
-    // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
-    // clones parent triggers, but a partition attached with `ATTACH
-    // PARTITION` or created by an older code path would silently escape the
-    // guard, so migration fails closed if any is missing. (The fence probe
-    // re-runs this same check at startup on non-migrating relays.)
-    crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
     Ok(())
 }
 
@@ -902,7 +894,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 89);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -923,6 +915,11 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("VALIDATE CONSTRAINT workflow_runs_cause_pubkey_check"));
+        // 0089 retires the deferred created_at floor trigger and its function.
+        assert_eq!(migrations[88].version, 89);
+        let retire_floor = strip_sql_comments(migrations[88].sql.as_str());
+        assert!(retire_floor.contains("DROP TRIGGER IF EXISTS events_created_at_floor ON events;"));
+        assert!(retire_floor.contains("DROP FUNCTION IF EXISTS events_created_at_floor_guard();"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -1338,12 +1335,6 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE TABLE join_policy_acceptances"));
 
-        // Replica-fence commit-time floor guard on channel-bearing events.
-        assert_eq!(migrations[20].version, 21);
-        assert!(migrations[20]
-            .sql
-            .as_str()
-            .contains("events_created_at_floor_guard"));
         assert!(!migrations[0]
             .sql
             .as_str()

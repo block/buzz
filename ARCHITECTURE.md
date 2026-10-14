@@ -506,25 +506,30 @@ shape is an explicit transition, not a flag day:
   being absent; inventories still record live fences for older executors.
   Desired-state bootstraps install only explicitly declared legacy fences.
   New tenant-owned tables rely on application admission, without a fence trigger.
-- **Replica floor (transition foundation):** runtime now provides a shared
-  replica-floor lock helper for compliant channel-event writers, and the writer
-  probe handshake takes the exclusive counterpart before sampling `S`, scanning
-  activity, and committing the heartbeat token last. `probe_once` remains the
-  sole token/fence-wall publication path; there is no separately persisted active
-  floor cutoff. Commit-time trigger+GUC enforcement remains authoritative for all
-  paths.
-- **Dual enforcement (current):** application-owned lock+precheck paths run in
-  front of the existing trigger/function enforcement; commit-time trigger checks
-  remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, after every pod tolerates their absence and no rollback below
-  that version is expected.
+- **Replica floor:** supported channel-event insertions check `created_at`
+  against `clock_timestamp()` on their admitted transaction using the shared
+  960-second floor. The ordered heartbeat handshake and activity scan retain
+  the same fence-wall calculation. Migration 0087 retires only the deferred
+  floor trigger/function; writer connections no longer arm its GUC and probe
+  startup no longer requires those objects.
+- **Floor retirement deploy gate:** phase 1 must be deployed to every writer
+  pod/job, with no rollback expected, before applying the destructive contract.
+  Drain old connections/in-flight transactions, stop out-of-band writers, and
+  hold the replica breaker closed through the drop until replay catches up.
+  Already-running old pods do not reverify the trigger on each heartbeat.
+- **Dual enforcement (community fence transition):** application-owned
+  lock+precheck paths run in front of the existing community trigger/function
+  enforcement. Removing those backstops is a separate gated migration, after
+  every pod tolerates their absence and no rollback below that version is
+  expected.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
 - **Unsupported shape:** direct owner SQL that bypasses supported transaction and
   lock protocols is not a supported write path.
-- **Fleet gates and reconciliation:** startup/fence probes verify guard catalog +
-  behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
+- **Fleet gates and reconciliation:** retained guards keep their catalog and
+  behavior checks; heartbeat/epoch and activity checks still fail closed.
+  pgschema bootstraps run reconciliation, and lock/pool metrics remain
   the operational evidence path for rollout safety.
 
 The database end state (a declarative schema source, applied out of band at
