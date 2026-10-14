@@ -2251,9 +2251,36 @@ fn is_channel_null_event_writer(function: &str) -> bool {
     false
 }
 
+/// Whether a `SET` list assigns `created_at` or `channel_id`, including the
+/// row form `(a, b) = (...)`. Stops at the first `WHERE`.
+fn assigns_event_floor_column(assignments: &str) -> bool {
+    let assignments = assignments.split(" where ").next().expect("first part");
+    let mut depth = 0usize;
+    assignments
+        .split(|ch| {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            ch == ',' && depth == 0
+        })
+        .any(|assignment| {
+            assignment.split_once('=').is_some_and(|(columns, _)| {
+                columns
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .split(',')
+                    .any(|column| matches!(column.trim(), "created_at" | "channel_id"))
+            })
+        })
+}
+
 fn updates_event_floor_columns(function: &str) -> bool {
-    let normalized = normalized_sql(function);
-    normalized.match_indices("update ").any(|(index, marker)| {
+    // `SET(` with no space is still a row assignment.
+    let normalized = normalized_sql(function).replace(" set(", " set (");
+    let direct_update = normalized.match_indices("update ").any(|(index, marker)| {
         let Some((target, assignments)) = normalized[index + marker.len()..].split_once(" set ")
         else {
             return false;
@@ -2271,28 +2298,24 @@ fn updates_event_floor_columns(function: &str) -> bool {
         if !matches!(alias.as_slice(), [] | [_] | ["as", _]) {
             return false;
         }
-        let assignments = assignments.split(" where ").next().expect("first part");
-        let mut depth = 0usize;
-        assignments
-            .split(|ch| {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => depth = depth.saturating_sub(1),
-                    _ => {}
-                }
-                ch == ',' && depth == 0
-            })
-            .any(|assignment| {
-                assignment.split_once('=').is_some_and(|(columns, _)| {
-                    columns
-                        .trim()
-                        .trim_start_matches('(')
-                        .trim_end_matches(')')
-                        .split(',')
-                        .any(|column| matches!(column.trim(), "created_at" | "channel_id"))
+        assigns_event_floor_column(assignments)
+    });
+    // `ON CONFLICT ... DO UPDATE SET` names no table: it updates the target of
+    // the INSERT it belongs to, so an events upsert can re-home an existing row.
+    let events_upsert = normalized
+        .match_indices("do update set ")
+        .any(|(index, marker)| {
+            normalized[..index]
+                .rfind("insert into ")
+                .is_some_and(|insert| {
+                    let table = normalized[insert + "insert into ".len()..]
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
+                        .next();
+                    matches!(table, Some("events" | "public.events"))
                 })
-            })
-    })
+                && assigns_event_floor_column(&normalized[index + marker.len()..])
+        });
+    direct_update || events_upsert
 }
 
 fn event_floor_policy_violations(production: &str) -> Vec<String> {
@@ -2366,6 +2389,30 @@ async fn quoted_schema_update(tx: &mut AdmittedTx) {
 async fn delete_only(tx: &mut AdmittedTx) {
     sqlx::query("UPDATE events SET deleted_at=now() WHERE channel_id=$1 AND created_at<$2");
 }
+async fn row_time_no_space(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET(created_at,kind)=($1,1) WHERE id=$2");
+}
+async fn guarded_upsert_rehome(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id, channel_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET channel_id = EXCLUDED.channel_id");
+}
+async fn guarded_upsert_row_time(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET(kind, created_at) = (1, $2)");
+}
+async fn guarded_upsert_other_column(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET tags = EXCLUDED.tags");
+}
+async fn guarded_upsert_do_nothing(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO NOTHING");
+}
+async fn guarded_insert_then_other_table_upsert(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT DO NOTHING");
+    sqlx::query("INSERT INTO parameterized_event_watermarks (d_tag, created_at) VALUES ($1, $2) ON CONFLICT (d_tag) DO UPDATE SET created_at = EXCLUDED.created_at");
+}
 "#;
     assert_eq!(
         event_floor_policy_violations(source),
@@ -2383,6 +2430,9 @@ async fn delete_only(tx: &mut AdmittedTx) {
             "async fn quoted_schema_insert(tx: &mut AdmittedTx) {",
             "async fn quoted_update(tx: &mut AdmittedTx) {",
             "async fn quoted_schema_update(tx: &mut AdmittedTx) {",
+            "async fn row_time_no_space(tx: &mut AdmittedTx) {",
+            "async fn guarded_upsert_rehome(tx: &mut AdmittedTx) {",
+            "async fn guarded_upsert_row_time(tx: &mut AdmittedTx) {",
         ]
     );
 }
