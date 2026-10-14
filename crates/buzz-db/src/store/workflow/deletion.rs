@@ -47,6 +47,7 @@ impl Db {
     /// The returned boolean grants dispatch ownership: either this transaction
     /// inserted the request, or it repaired an older relay's incomplete deletion.
     /// Concurrent identical requests cannot split those two outcomes across commits.
+    /// The returned outcome reports whether anything was actually removed.
     /// Authorization of the coordinate is the caller's responsibility.
     pub async fn insert_workflow_deletion(
         &self,
@@ -54,7 +55,7 @@ impl Db {
         event: &Event,
         owner_pubkey: &[u8],
         d_tag: &str,
-    ) -> Result<(StoredEvent, bool, Option<Uuid>)> {
+    ) -> Result<(StoredEvent, bool, WorkflowDeletionOutcome)> {
         let mut tx = self.begin_event_write_transaction(community_id).await?;
         let (stored, inserted) =
             crate::event::insert_event_in_transaction(&mut tx, event, None).await?;
@@ -71,7 +72,8 @@ impl Db {
         )
         .await?;
         tx.commit().await?;
-        Ok((stored, inserted || outcome.changed, outcome.channel_id))
+        let dispatch = inserted || outcome.changed;
+        Ok((stored, dispatch, outcome))
     }
 }
 

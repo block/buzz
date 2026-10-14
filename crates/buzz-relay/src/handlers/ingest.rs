@@ -2378,6 +2378,10 @@ fn validate_canvas_future_timestamp(event_ts: i64, now: i64) -> Result<(), &'sta
     Ok(())
 }
 
+/// OK message for an accepted workflow deletion that removed nothing: the
+/// workflow does not exist under the addressed owner, or is newer than the request.
+const WORKFLOW_DELETION_NO_MATCH: &str = "info: no matching workflow found for deletion";
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -3398,13 +3402,23 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let mut message = String::new();
     let (stored_event, was_inserted) = if workflow_deletion {
         // A single commit owns public acceptance, domain mutation, and dispatch.
         // Failure rolls everything back; identical concurrent requests cannot
         // divide insertion and repair ownership between two relay workers.
-        crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+        let (stored, dispatch, removed) =
+            crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
+                .await
+                .map_err(|e| {
+                    IngestError::Internal(format!("error: workflow deletion failed: {e}"))
+                })?;
+        // The request is stored either way (NIP-09), but `accepted` alone would
+        // read as success to a client whose deletion matched nothing.
+        if !removed {
+            message = WORKFLOW_DELETION_NO_MATCH.into();
+        }
+        (stored, dispatch)
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
@@ -3581,7 +3595,7 @@ async fn ingest_event_inner(
     Ok(IngestResult {
         event_id: event_id_hex,
         accepted: true,
-        message: String::new(),
+        message,
     })
 }
 
@@ -6915,6 +6929,93 @@ mod postgres_tests {
             .expect("read re-deletion")
             .expect("re-deletion stored");
         assert_eq!(stored.channel_id, Some(channels[0]));
+    }
+
+    /// A workflow deletion that removes nothing is still stored (NIP-09), but
+    /// its OK message says so; a deletion that removes a workflow stays silent.
+    /// Mutation: always report removal from `persist_workflow_deletion` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_deletion_reports_when_nothing_matched() {
+        use nostr::{Keys, Tag};
+
+        let state = ingest_state().await;
+        let host = format!("workflow-delete-noop-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+        let owner = Keys::generate();
+        let owner_bytes = owner.public_key().to_bytes();
+        state
+            .db
+            .ensure_user(community, &owner_bytes)
+            .await
+            .expect("ensure owner");
+        let workflow_id = Uuid::new_v4();
+        state
+            .db
+            .upsert_workflow(
+                community,
+                workflow_id,
+                None,
+                &owner_bytes,
+                "noop-deletion-test",
+                r#"{"trigger":{"on":"manual"},"steps":[]}"#,
+                &[0; 32],
+            )
+            .await
+            .expect("seed workflow");
+
+        let delete = |d_tag: &str| {
+            let coordinate = format!("{KIND_WORKFLOW_DEF}:{}:{d_tag}", owner.public_key());
+            EventBuilder::new(Kind::EventDeletion, "")
+                .tags([Tag::parse(["a", &coordinate]).unwrap()])
+                .sign_with_keys(&owner)
+                .expect("sign deletion")
+        };
+        let auth = || IngestAuth::Http {
+            pubkey: owner.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+
+        let missing = delete(&Uuid::new_v4().to_string());
+        let missing_id = missing.id;
+        let result = ingest_event_inner(&state, &tracer, &tenant, missing, auth())
+            .await
+            .expect("no-op deletion is accepted");
+        assert!(result.accepted);
+        assert_eq!(result.message, WORKFLOW_DELETION_NO_MATCH);
+        assert!(
+            state
+                .db
+                .get_event_by_id(community, missing_id.as_bytes())
+                .await
+                .expect("read request")
+                .is_some(),
+            "the request is stored per NIP-09"
+        );
+
+        let result = ingest_event_inner(
+            &state,
+            &tracer,
+            &tenant,
+            delete(&workflow_id.to_string()),
+            auth(),
+        )
+        .await
+        .expect("deletion is accepted");
+        assert!(result.accepted);
+        assert_eq!(result.message, "");
+        assert!(matches!(
+            state.db.get_workflow(community, workflow_id).await,
+            Err(buzz_db::DbError::NotFound(_))
+        ));
     }
 
     // ── Owner-aware ban/timeout coverage ─────────────────────────────────────

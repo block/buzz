@@ -2327,11 +2327,14 @@ pub(crate) fn is_workflow_deletion(event: &Event) -> bool {
 }
 
 /// Persist an already-authorized workflow deletion and its domain changes atomically.
+///
+/// Returns the stored request, whether this ingest owns dispatch, and whether
+/// the deletion removed a workflow or definition.
 pub(crate) async fn persist_workflow_deletion(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
+) -> anyhow::Result<(buzz_core::StoredEvent, bool, bool)> {
     let coordinate = event
         .tags
         .iter()
@@ -2344,16 +2347,16 @@ pub(crate) async fn persist_workflow_deletion(
     let d_tag = parts
         .next()
         .ok_or_else(|| anyhow::anyhow!("invalid workflow coordinate"))?;
-    let (stored, dispatch, channel_id) = state
+    let (stored, dispatch, outcome) = state
         .db
         .insert_workflow_deletion(tenant.community(), event, &owner, d_tag)
         .await?;
-    if let Some(channel_id) = channel_id {
+    if let Some(channel_id) = outcome.channel_id {
         state
             .workflow_engine
             .invalidate_channel_workflows(tenant.community(), channel_id);
     }
-    Ok((stored, dispatch))
+    Ok((stored, dispatch, outcome.changed))
 }
 
 /// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
