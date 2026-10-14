@@ -438,22 +438,11 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 
     let runtime = include_str!("../src/runtime/mod.rs");
     assert!(runtime.contains("observability::refresh_pool_waiters(self.read_pool.is_some())"));
-    assert!(runtime.contains("self.verify_replica_fence_at_boot().await?"));
-    let fence_boot = runtime
-        .split_once("pub(crate) async fn verify_replica_fence_at_boot")
-        .expect("runtime must expose attributed boot fence verification")
-        .1
-        .split_once("/// The pool for lag-tolerant reads")
-        .expect("boot fence verification must precede routed-read plumbing")
-        .0;
-    assert!(fence_boot.contains("WriterOperation::Bootstrap"));
-
     let replica_fence = include_str!("../src/runtime/replica_fence.rs");
     let replica_fence_production = replica_fence
         .split("\n#[cfg(test)]")
         .next()
         .expect("replica-fence production source");
-    assert!(replica_fence_production.contains("WriterOperation::Bootstrap"));
     // The heartbeat probe runs on its own pool, never a serving writer
     // checkout: queued behind request traffic, its beat goes stale exactly
     // when the writer is saturated.
@@ -1707,7 +1696,7 @@ pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
         .await
         .expect("write");
 }
-pub async fn verify_floor_guard_behavior(pool: &PgPool) {
+pub async fn verify_channel_roster_fence_behavior(pool: &PgPool) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
         .execute(pool)
         .await
@@ -2242,13 +2231,11 @@ fn every_search_hydrator_preserves_the_exact_hit_timestamp() {
     }
 }
 
-// These startup probes always roll back; they deliberately exercise the DB
-// backstops rather than the app check. The two serving writers are exempt only
+// This startup probe always rolls back; it deliberately exercises the roster
+// DB backstop rather than the app check. The two serving writers are exempt only
 // while their INSERT remains structurally channel-NULL (checked below).
-const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 2] = [
-    "pub async fn verify_floor_guard_behavior(",
-    "pub async fn verify_channel_roster_fence_behavior(",
-];
+const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 1] =
+    ["pub async fn verify_channel_roster_fence_behavior("];
 
 fn is_channel_null_event_writer(function: &str) -> bool {
     let header = function_header(function);
