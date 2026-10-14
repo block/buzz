@@ -1291,8 +1291,21 @@ fn should_scan_guarded_write_source_file(path: &std::path::Path) -> bool {
         // Whole files loaded only via `#[cfg(test)] #[path = "..."] mod ...;` are
         // entirely test code but carry no internal `#[cfg(test)]` marker of their
         // own to slice against. Standalone `*_tests.rs` modules share that shape.
+        && file_name != "test_support.rs"
         && file_name != "tests.rs"
         && !file_name.ends_with("_tests.rs")
+}
+
+fn collect_production_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read source directory") {
+        let entry = entry.expect("read directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_production_rs_files(&path, out);
+        } else if should_scan_guarded_write_source_file(&path) {
+            out.push(path);
+        }
+    }
 }
 
 #[test]
@@ -1314,6 +1327,10 @@ fn serving_table_policy_skips_standalone_test_modules() {
         "the suffix-based rule must cover other standalone test-only modules"
     );
     assert!(
+        !should_scan_guarded_write_source_file(Path::new("src/test_support.rs")),
+        "test_support.rs is loaded only under cfg(test)"
+    );
+    assert!(
         should_scan_guarded_write_source_file(Path::new("src/store/event.rs")),
         "production source must remain in scope"
     );
@@ -1321,19 +1338,7 @@ fn serving_table_policy_skips_standalone_test_modules() {
 
 #[test]
 fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
-    use std::path::{Path, PathBuf};
-
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let entry = entry.expect("read directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if should_scan_guarded_write_source_file(&path) {
-                out.push(path);
-            }
-        }
-    }
+    use std::path::Path;
 
     // `buzz-relay` is scanned too: relay code reaches fenced tables only through
     // `buzz-db` helpers, and a direct relay write must meet the same rule.
@@ -1344,7 +1349,7 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
         ("buzz-relay", manifest.join("../buzz-relay/src")),
     ] {
         let mut files = Vec::new();
-        collect_rs_files(&src_root, &mut files);
+        collect_production_rs_files(&src_root, &mut files);
         assert!(
             !files.is_empty(),
             "guarded-table scan must see {crate_name} production source files"
@@ -1858,18 +1863,7 @@ mod tests {
 }
 
 fn production_event_writer_source_files() -> Vec<std::path::PathBuf> {
-    use std::path::{Path, PathBuf};
-
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let path = entry.expect("read directory entry").path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if should_scan_guarded_write_source_file(&path) {
-                out.push(path);
-            }
-        }
-    }
+    use std::path::Path;
 
     let crates_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1878,7 +1872,7 @@ fn production_event_writer_source_files() -> Vec<std::path::PathBuf> {
     for entry in std::fs::read_dir(crates_root).expect("read crates directory") {
         let src = entry.expect("read crates entry").path().join("src");
         if src.is_dir() {
-            collect_rs_files(&src, &mut files);
+            collect_production_rs_files(&src, &mut files);
         }
     }
 
@@ -2587,6 +2581,355 @@ fn admin_seed_refuses_remote_database_before_invoking_psql() {
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("requires a local PostgreSQL target"),
             "{name}: missing refusal"
+        );
+    }
+}
+
+// This policy covers the supported Rust writers while the retiring database
+// guards remain in place for mixed-version pods. SQL is read from the original
+// source; calls and struct fields use the existing masked view.
+const SINGLE_TABLE_GUARD_TABLES: [&str; 5] = [
+    "channels",
+    "communities",
+    "community_deletion_requests",
+    "community_deletion_approvals",
+    "community_deletion_manifest_keys",
+];
+const DELETION_STORE_PATH: &str = "buzz-db/src/store/deletion.rs";
+
+fn sql_table_suffixes<'a>(source: &'a str, verb: &str, table: &str) -> Vec<&'a str> {
+    [format!("{verb} {table}"), format!("{verb} public.{table}")]
+        .iter()
+        .flat_map(|marker| {
+            source.match_indices(marker).filter_map(|(at, found)| {
+                let before = &source[..at];
+                let rest = &source[at + found.len()..];
+                let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+                (!before.chars().next_back().is_some_and(is_ident)
+                    && !rest.chars().next().is_some_and(is_ident))
+                .then_some(rest)
+            })
+        })
+        .collect()
+}
+
+fn sql_update_sets<'a>(source: &'a str, table: &str) -> Vec<&'a str> {
+    sql_table_suffixes(source, "update", table)
+        .into_iter()
+        .filter_map(|rest| {
+            let rest = rest.trim_start();
+            let set = rest.strip_prefix("set ").or_else(|| {
+                // UPDATE table [AS] alias SET ...
+                let (alias, set) = rest.split_once(" set ")?;
+                (alias.split_whitespace().count() <= 2).then_some(set)
+            })?;
+            Some(set.split_once(" where ").map_or(set, |(set, _)| set))
+        })
+        .collect()
+}
+
+fn sql_assigned_columns(set: &str) -> Vec<&str> {
+    set.match_indices('=')
+        .filter_map(|(at, _)| {
+            set[..at]
+                .trim_end()
+                .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .filter(|column| !column.is_empty())
+        })
+        .collect()
+}
+
+fn single_table_guard_violations(path: &str, production: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let code = mask_comments_and_literals(production);
+    if let Some((_, fields)) = code.split_once("struct ChannelUpdate") {
+        let fields = fields
+            .split_once('{')
+            .expect("struct body")
+            .1
+            .split('}')
+            .next()
+            .expect("struct fields");
+        if fields.split(',').any(|field| {
+            field.split_once(':').is_some_and(|(name, _)| {
+                name.split_whitespace()
+                    .last()
+                    .is_some_and(|name| name.starts_with("community"))
+            })
+        }) {
+            violations.push("ChannelUpdate must not expose a community field".to_owned());
+        }
+    }
+    for function in function_slices(production) {
+        let header = function_header(function);
+        let sql = normalized_sql(function);
+        let code = mask_comments_and_literals(function);
+        let mut reject = |reason: &str| violations.push(format!("{header}: {reason}"));
+        let channel_sets = sql_update_sets(&sql, "channels");
+        if channel_sets
+            .iter()
+            .any(|set| sql_assigned_columns(set).contains(&"community_id"))
+            || (!channel_sets.is_empty()
+                && sql.split("set_parts.push(").skip(1).any(|part| {
+                    let assignment = part.split(';').next().expect("dynamic SET fragment");
+                    sql_assigned_columns(assignment).contains(&"community_id")
+                }))
+        {
+            reject("channels.community_id UPDATE");
+        }
+        if sql_update_sets(&sql, "communities").iter().any(|set| {
+            sql_assigned_columns(set).iter().any(|column| {
+                ["deletion_state", "deletion_fence_generation", "deleted_at"].contains(column)
+            })
+        }) && !(path == DELETION_STORE_PATH
+            && header.starts_with("async fn transition_community("))
+        {
+            reject("community lifecycle UPDATE outside transition_community");
+        }
+        if sql_table_suffixes(&sql, "insert into", "communities")
+            .iter()
+            .any(|rest| {
+                rest.trim_start().strip_prefix('(').is_some_and(|columns| {
+                    columns
+                        .split(')')
+                        .next()
+                        .expect("INSERT columns")
+                        .split(',')
+                        .any(|column| {
+                            ["deletion_state", "deletion_fence_generation", "deleted_at"]
+                                .contains(&column.trim())
+                        })
+                })
+            })
+        {
+            reject("community creation sets deletion lifecycle columns");
+        }
+        if !sql_table_suffixes(&sql, "delete from", "communities").is_empty() {
+            reject("production community DELETE");
+        }
+        if sql_update_sets(&sql, "community_deletion_requests")
+            .iter()
+            .any(|set| {
+                sql_assigned_columns(set).iter().any(|column| {
+                    [
+                        "community_id",
+                        "community_host",
+                        "request_origin",
+                        "owner_pubkey",
+                        "mediating_operator_pubkey",
+                        "acknowledgement_version",
+                    ]
+                    .contains(column)
+                })
+            })
+        {
+            reject("deletion request identity/provenance UPDATE");
+        }
+        if ["update", "delete from"]
+            .iter()
+            .any(|verb| !sql_table_suffixes(&sql, verb, "community_deletion_approvals").is_empty())
+        {
+            reject("approval UPDATE or DELETE");
+        }
+        let manifest_writes: usize = ["insert into", "update", "delete from"]
+            .iter()
+            .map(|verb| sql_table_suffixes(&sql, verb, "community_deletion_manifest_keys").len())
+            .sum();
+        if manifest_writes > 0 {
+            let sets = sql_update_sets(&sql, "community_deletion_manifest_keys");
+            let deletion_stamp = header.starts_with("pub async fn mark_manifest_chunk_deleted(")
+                && manifest_writes == 1
+                && sets.len() == 1
+                && sql_assigned_columns(sets[0]) == ["deleted_at"];
+            if path != DELETION_STORE_PATH
+                || !(code.contains("guard_manifest_chunk_write(") || deletion_stamp)
+            {
+                reject("manifest chunk writer must use guard_manifest_chunk_write or the deleted_at-only stamp");
+            }
+        }
+    }
+    violations
+}
+
+#[test]
+fn single_table_policy_rejects_channel_retenanting() {
+    for source in [
+        r#"async fn retenant() { query("UPDATE channels SET community_id = $1 WHERE id = $2"); }"#,
+        r#"async fn retenant() { query("update public.channels as c set name = $1, community_id=$2 where id=$3"); }"#,
+        r#"async fn retenant() { set_parts.push(format!("community_id = $1")); query("UPDATE channels SET {} WHERE id = $2"); }"#,
+        "pub struct ChannelUpdate { pub community_id: Option<CommunityId>, }",
+        "pub struct ChannelUpdate { pub community: CommunityId, }",
+    ] {
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, source).len(),
+            1,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_rejects_community_lifecycle_bypasses() {
+    for column in ["deletion_state", "deletion_fence_generation", "deleted_at"] {
+        let source = format!("async fn bypass() {{ query(\"UPDATE communities SET {column} = $1 WHERE id = $2\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source).len(),
+            1,
+            "{column}"
+        );
+        let transition = source.replace("bypass", "transition_community");
+        assert!(single_table_guard_violations(DELETION_STORE_PATH, &transition).is_empty());
+        assert_eq!(
+            single_table_guard_violations("buzz-relay/src/bypass.rs", &transition).len(),
+            1
+        );
+    }
+    for column in ["deletion_state", "deletion_fence_generation", "deleted_at"] {
+        let source = format!("async fn bypass() {{ query(\"INSERT INTO communities (id, {column}) VALUES ($1, $2)\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source).len(),
+            1,
+            "{column}"
+        );
+    }
+    let deletion = r#"async fn bypass() { query("DELETE FROM communities WHERE id = $1"); }"#;
+    assert_eq!(
+        single_table_guard_violations(DELETION_STORE_PATH, deletion).len(),
+        1
+    );
+}
+
+#[test]
+fn single_table_policy_rejects_request_retargeting() {
+    for column in [
+        "community_id",
+        "community_host",
+        "request_origin",
+        "owner_pubkey",
+        "mediating_operator_pubkey",
+        "acknowledgement_version",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"UPDATE community_deletion_requests SET {column} = $1 WHERE id = $2\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source).len(),
+            1,
+            "{column}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_rejects_approval_mutations() {
+    for sql in [
+        "UPDATE community_deletion_approvals SET approved_by = $1 WHERE request_id = $2",
+        "DELETE FROM community_deletion_approvals WHERE request_id = $1",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source).len(),
+            1,
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_rejects_unguarded_manifest_writers() {
+    for sql in [
+        "INSERT INTO community_deletion_manifest_keys (keys) VALUES ($1)",
+        "UPDATE community_deletion_manifest_keys SET keys = $1 WHERE request_id = $2",
+        "DELETE FROM community_deletion_manifest_keys WHERE request_id = $1",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source).len(),
+            1,
+            "{sql}"
+        );
+        // A guard in another function or a literal does not admit this writer.
+        let mixed = format!("async fn guarded() {{ guard_manifest_chunk_write(); }}\n{source}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &mixed).len(),
+            1
+        );
+        let fake = source.replace("query(", "let _ = \"guard_manifest_chunk_write(\"; query(");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &fake).len(),
+            1
+        );
+        let guarded = source.replace("query(", "guard_manifest_chunk_write(); query(");
+        assert!(single_table_guard_violations(DELETION_STORE_PATH, &guarded).is_empty());
+        assert_eq!(
+            single_table_guard_violations("buzz-relay/src/bypass.rs", &guarded).len(),
+            1
+        );
+    }
+    let stamp = r#"pub async fn mark_manifest_chunk_deleted() {
+        query("UPDATE community_deletion_manifest_keys SET deleted_at = now() WHERE request_id = $1");
+    }"#;
+    assert!(single_table_guard_violations(DELETION_STORE_PATH, stamp).is_empty());
+    let mutating_stamp = stamp.replace("deleted_at = now()", "deleted_at = now(), keys = $2");
+    assert_eq!(
+        single_table_guard_violations(DELETION_STORE_PATH, &mutating_stamp).len(),
+        1
+    );
+}
+
+#[test]
+fn every_production_single_table_guard_writer_preserves_its_invariants() {
+    use std::path::Path;
+
+    let crates_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates root");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(crates_root).expect("read crates directory") {
+        let src = entry.expect("read crate entry").path().join("src");
+        if src.is_dir() {
+            collect_production_rs_files(&src, &mut files);
+        }
+    }
+    let mut writers = [0usize; 5];
+    let mut violations = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path).expect("read production source");
+        let production = strip_cfg_test_items(&source);
+        for function in function_slices(&production) {
+            let sql = normalized_sql(function);
+            for (index, table) in SINGLE_TABLE_GUARD_TABLES.iter().enumerate() {
+                if ["insert into", "update", "delete from"]
+                    .iter()
+                    .any(|verb| !sql_table_suffixes(&sql, verb, table).is_empty())
+                {
+                    writers[index] += 1;
+                }
+            }
+        }
+        let relative = path
+            .strip_prefix(crates_root)
+            .expect("crate source")
+            .to_string_lossy()
+            .replace('\\', "/");
+        violations.extend(
+            single_table_guard_violations(&relative, &production)
+                .into_iter()
+                .map(|violation| format!("{relative}: {violation}")),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "single-table guard policy: {violations:#?}"
+    );
+    // Lower bounds pin discovery without fixing the exact number of writers.
+    for ((table, seen), floor) in SINGLE_TABLE_GUARD_TABLES
+        .iter()
+        .zip(writers)
+        .zip([7, 4, 15, 2, 4])
+    {
+        assert!(
+            seen >= floor,
+            "{table}: expected at least {floor} writers, found {seen}"
         );
     }
 }
