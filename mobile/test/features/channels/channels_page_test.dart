@@ -1,3 +1,4 @@
+import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
@@ -80,7 +81,7 @@ void main() {
     ValueChanged<double>? onSettingsTransitionProgress,
     ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
-    int homeGeneration = 0,
+    bool realHome = false,
   }) {
     return ProviderScope(
       overrides: [
@@ -113,32 +114,35 @@ void main() {
           ),
           child: child!,
         ),
-        home: Stack(
-          key: ValueKey(homeGeneration),
-          children: [
-            ChannelsPage(
-              key: const PageStorageKey('home-channels'),
-              settingsPageBuilder: _buildSettingsPage,
-              communityInvitePageBuilder: (_) =>
-                  const Scaffold(body: Text('Invite destination')),
-              communityAppearancePageBuilder: (_) =>
-                  const Scaffold(body: Text('Appearance destination')),
-              onSettingsTransitionProgress:
-                  onSettingsTransitionProgress ?? (_) {},
-              tabReselection: tabReselection,
-            ),
-            const Positioned.fill(
-              child: ChannelQuickActionsLauncher(
-                visible: true,
-                navigationBarHeight: 60,
-                navigationBarBottomGap: 12,
-                navigationBarWidth: 218,
-                systemBottomInset: 0,
-                rightInset: 16,
+        home: realHome
+            ? HomePage(
+                settingsPageBuilder: _buildSettingsPage,
+                hasUnreadInbox: false,
+              )
+            : Stack(
+                children: [
+                  ChannelsPage(
+                    settingsPageBuilder: _buildSettingsPage,
+                    communityInvitePageBuilder: (_) =>
+                        const Scaffold(body: Text('Invite destination')),
+                    communityAppearancePageBuilder: (_) =>
+                        const Scaffold(body: Text('Appearance destination')),
+                    onSettingsTransitionProgress:
+                        onSettingsTransitionProgress ?? (_) {},
+                    tabReselection: tabReselection,
+                  ),
+                  const Positioned.fill(
+                    child: ChannelQuickActionsLauncher(
+                      visible: true,
+                      navigationBarHeight: 60,
+                      navigationBarBottomGap: 12,
+                      navigationBarWidth: 218,
+                      systemBottomInset: 0,
+                      rightInset: 16,
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -669,23 +673,72 @@ void main() {
     expect(appBar.frostedBlurSigma, 23.12);
   });
 
-  testWidgets('restores header frost with a saved Home scroll position', (
+  testWidgets('Home replays native scroll state when a channel route returns', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(320, 160);
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(390, 600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    final notifier = _FakeNotifier(testChannels);
-    Widget home(int generation) => buildTestable(
-      homeGeneration: generation,
-      topSectionGradient: const LinearGradient(
-        colors: [Colors.yellow, Colors.blue],
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final calls = <int, List<MethodCall>>{};
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method == 'create') {
+        final args = call.arguments as Map;
+        if (args['viewType'] == IosNavigationBar.viewType) {
+          final id = args['id'] as int;
+          calls[id] = [];
+          messenger.setMockMethodCallHandler(
+            MethodChannel('${IosNavigationBar.viewType}/$id'),
+            (call) async {
+              calls[id]!.add(call);
+              return null;
+            },
+          );
+        }
+      }
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+      for (final id in calls.keys) {
+        messenger.setMockMethodCallHandler(
+          MethodChannel('${IosNavigationBar.viewType}/$id'),
+          null,
+        );
+      }
+    });
+    await tester.pumpWidget(
+      buildTestable(
+        realHome: true,
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              List.generate(
+                40,
+                (i) => Channel(
+                  id: 'channel-$i',
+                  description: '',
+                  createdBy: 'test',
+                  createdAt: DateTime(2026),
+                  memberCount: 1,
+                  visibility: 'open',
+                  name: 'channel-$i',
+                  channelType: 'stream',
+                  isMember: true,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
-      overrides: [channelsProvider.overrideWith(() => notifier)],
     );
-    await tester.pumpWidget(home(0));
     await tester.pumpAndSettle();
-    ScrollPosition position() => tester
+    final homeCalls = calls.values.single;
+    final position = tester
         .state<ScrollableState>(
           find
               .descendant(
@@ -695,42 +748,56 @@ void main() {
               .first,
         )
         .position;
-    position().jumpTo(Grid.xxl);
+    position.jumpTo(200);
     await tester.pumpAndSettle();
+    final scrolledOffset =
+        homeCalls.where((call) => call.method == 'scroll').last.arguments
+            as double;
+    expect(scrolledOffset, greaterThan(0));
     final navigator = tester.state<NavigatorState>(
       find.byType(Navigator).first,
     );
     unawaited(
       navigator.push<void>(
         MaterialPageRoute(
-          builder: (_) => const Scaffold(body: Text('Channel route')),
+          builder: (_) => const Scaffold(body: Text('Channel')),
         ),
       ),
     );
     await tester.pumpAndSettle();
+    homeCalls.clear();
     navigator.pop();
     await tester.pumpAndSettle();
-    expect(position().pixels, Grid.xxl);
+    expect(position.pixels, 200);
     expect(
-      tester
-          .widget<FrostedAppBar>(find.byType(FrostedAppBar).last)
-          .frostedBlurSigma,
-      23.12,
+      homeCalls
+          .where((call) => call.method == 'scroll')
+          .map((call) => call.arguments),
+      contains(scrolledOffset),
     );
-    await tester.pumpWidget(home(1));
+    expect(homeCalls.last.method, 'prepareForReveal');
+    // The replay must use the live offset, including returning at the top.
+    position.jumpTo(0);
     await tester.pumpAndSettle();
-    expect(position().pixels, Grid.xxl);
-    final appBar = tester.widget<FrostedAppBar>(
-      find.byType(FrostedAppBar).last,
+    unawaited(
+      navigator.push<void>(
+        MaterialPageRoute(
+          builder: (_) => const Scaffold(body: Text('Channel')),
+        ),
+      ),
     );
-    expect(appBar.frosted, isTrue);
-    expect(appBar.frostedBlurSigma, 23.12);
-    position().jumpTo(0);
+    await tester.pumpAndSettle();
+    homeCalls.clear();
+    navigator.pop();
     await tester.pumpAndSettle();
     expect(
-      tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last).frosted,
-      isFalse,
+      homeCalls
+          .where((call) => call.method == 'scroll')
+          .map((call) => call.arguments),
+      contains(0.0),
     );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('scrolls Home to the top when its tab is selected again', (

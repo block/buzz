@@ -343,6 +343,40 @@ class IosNavigationBar extends HookConsumerWidget {
       return () => offset?.removeListener(sync);
     }, [channel.value, offset, collapseRange]);
 
+    final coveringRoute = ModalRoute.of(context)?.secondaryAnimation;
+    useEffect(() {
+      var active = true;
+      Future<void> restoreOnReveal() async {
+        final current = channel.value;
+        if (current == null) return;
+        try {
+          // Home stays mounted while another route covers its platform view.
+          // Returning does not emit a scroll notification, so replay the live
+          // depth before asking UIKit to lay out the revealed navigation bar.
+          await current.invokeMethod<void>(
+            'scroll',
+            (offset?.value ?? 0).clamp(0.0, collapseRange),
+          );
+          if (!active) return;
+          await current.invokeMethod<void>('prepareForReveal');
+        } on PlatformException catch (error) {
+          debugPrint('Native navigation reveal failed: $error');
+        }
+      }
+
+      void onStatus(AnimationStatus status) {
+        if (status == AnimationStatus.dismissed) {
+          unawaited(restoreOnReveal());
+        }
+      }
+
+      coveringRoute?.addStatusListener(onStatus);
+      return () {
+        active = false;
+        coveringRoute?.removeStatusListener(onStatus);
+      };
+    }, [channel.value, offset, collapseRange, coveringRoute]);
+
     return UiKitView(
       key: viewKey,
       viewType: viewType,

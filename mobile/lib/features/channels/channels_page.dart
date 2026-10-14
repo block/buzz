@@ -220,34 +220,21 @@ class ChannelsPage extends HookConsumerWidget {
     final nativeHeaderReady = useRef(false);
     final bodyReady = useRef(false);
     final communityFlightActive = useState(false);
+    final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final headerFrostProgress = useState(0.0);
-    late final ScrollController channelsScrollController;
-    void updateHeaderTreatment() {
-      final nextProgress = !channelsScrollController.hasClients
-          ? 0.0
-          : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
-                .clamp(0.0, 1.0)
-                .toDouble();
-      if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
-        headerFrostProgress.value = nextProgress;
-      }
-    }
-
-    channelsScrollController = useScrollController(
-      onAttach: (position) {
-        // PageStorage restores pixels without notifying scroll listeners.
-        // Wait until layout completes before updating the header's hook state.
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!context.mounted ||
-              !channelsScrollController.positions.contains(position)) {
-            return;
-          }
-          updateHeaderTreatment();
-        });
-      },
-    );
     useEffect(() {
+      void updateHeaderTreatment() {
+        final nextProgress = !channelsScrollController.hasClients
+            ? 0.0
+            : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
+                  .clamp(0.0, 1.0)
+                  .toDouble();
+        if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
+          headerFrostProgress.value = nextProgress;
+        }
+      }
+
       channelsScrollController.addListener(updateHeaderTreatment);
       return () =>
           channelsScrollController.removeListener(updateHeaderTreatment);
