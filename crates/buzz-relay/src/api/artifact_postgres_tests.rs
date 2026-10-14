@@ -144,25 +144,34 @@ impl Fixture {
 #[ignore = "requires Postgres"]
 async fn project_filter_survives_artifact_query_hook() {
     let f = Fixture::new().await;
-    let project = EventBuilder::new(Kind::Custom(30621), "")
-        .tags([
-            Tag::parse(["d", "review-project"]).unwrap(),
-            Tag::parse(["buzz-channel", &f.home.to_string()]).unwrap(),
-        ])
-        .sign_with_keys(&f.owner)
-        .unwrap();
-    f.state
-        .db
-        .insert_event(f.community, &project, None)
-        .await
-        .unwrap();
-    let filter = json!([{"kinds":[30621],"#buzz-channel":[f.home]}]);
-    let (status, body) = f.request("/query", filter.clone()).await;
-    assert!(status.is_success(), "{status}: {body}");
-    assert_eq!(body.as_array().unwrap().len(), 1);
-    assert_eq!(body[0]["id"], project.id.to_hex());
-    let (status, body) = f.request("/count", filter).await;
-    assert!(status.is_success(), "{status}: {body}");
+    let home = f.home.to_string();
+    // 30621 projects and 30617 repositories bind a channel via `buzz-channel`.
+    for kind in [30621u16, 30617] {
+        let event = |tag: &[&str], at: u64| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .tags([
+                    Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+                    Tag::parse(tag.iter().copied()).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&f.owner)
+                .unwrap()
+        };
+        let now = nostr::Timestamp::now().as_secs();
+        let bound = event(&["buzz-channel", &home], now - 10);
+        // Newer, unbound: `buzz-channel` and the wanted id sit in an unrelated tag.
+        let decoy = event(&["x", "buzz-channel", &home], now);
+        for e in [&bound, &decoy] {
+            f.state.db.insert_event(f.community, e, None).await.unwrap();
+        }
+        let filter = json!([{"kinds":[kind],"#buzz-channel":[f.home],"limit":1}]);
+        let (status, body) = f.request("/query", filter.clone()).await;
+        assert!(status.is_success(), "{kind} {status}: {body}");
+        assert_eq!(body.as_array().unwrap().len(), 1, "{kind}: {body}");
+        assert_eq!(body[0]["id"], bound.id.to_hex(), "{kind}: {body}");
+        let (status, body) = f.request("/count", filter).await;
+        assert!(status.is_success(), "{kind} {status}: {body}");
+    }
 }
 
 #[tokio::test]

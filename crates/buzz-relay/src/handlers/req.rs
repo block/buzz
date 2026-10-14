@@ -1094,7 +1094,7 @@ fn filter_to_query_params(
         }
     });
 
-    // Push #e tag filter into SQL via JSONB containment.
+    // Push #e tag filter into SQL as an exact positional tag match.
     let e_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
     let e_tags = filter.generic_tags.get(&e_tag_key).and_then(|values| {
         if values.is_empty() {
