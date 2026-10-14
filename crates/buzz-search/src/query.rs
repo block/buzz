@@ -423,13 +423,7 @@ pub async fn search_profile_names(
     push_tsquery(&mut qb, SearchMode::Prefix, &search_text);
     qb.push(
         " AS query) AS search_query \
-         CROSS JOIN LATERAL (SELECT CASE WHEN e.content IS JSON OBJECT \
-           THEN e.content::jsonb END AS doc) AS parsed \
-         CROSS JOIN LATERAL (SELECT \
-           CASE WHEN jsonb_typeof(parsed.doc -> 'name') = 'string' \
-             THEN parsed.doc ->> 'name' END AS name, \
-           CASE WHEN jsonb_typeof(parsed.doc -> 'display_name') = 'string' \
-             THEN parsed.doc ->> 'display_name' END AS display_name) AS fields \
+         CROSS JOIN LATERAL profile_name_fields(e.content) AS fields \
          CROSS JOIN LATERAL (SELECT \
            to_tsvector('simple', concat_ws(' ', fields.name, fields.display_name)) AS tsv, \
            regexp_replace(lower(btrim(fields.name)), '\\s+', ' ', 'g') AS name, \

@@ -1732,3 +1732,37 @@ async fn profile_names_match_name_words_only() {
 
     teardown(pool, &schema).await;
 }
+
+/// Stored kind:0 content is whatever the signer sent. Content that cannot
+/// become jsonb must not fail the query for everyone else.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_names_survive_unparsable_content() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "profile-names-unparsable.example").await;
+
+    let plain = put_profile(&pool, c, r#"{"name":"Wes"}"#, 1_700_000_000).await;
+
+    // Valid JSON objects that cannot become jsonb. Each one names Wes; it is
+    // not findable, but it must not break the search.
+    let deep = format!(
+        r#"{{"name":"Wes","nested":{}{}}}"#,
+        "[".repeat(60_000),
+        "]".repeat(60_000)
+    );
+    for (i, poison) in [
+        r#"{"name":"Wes","about":"\u0000"}"#,
+        r#"{"name":"Wes","about":"\ud800"}"#,
+        r#"{"name":"Wes","lud16":1e1000000}"#,
+        deep.as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_profile(&pool, c, poison, 1_700_000_100 + i as i64).await;
+    }
+
+    assert_eq!(profile_names(&pool, c, "wes", 1, 100).await, vec![plain]);
+
+    teardown(pool, &schema).await;
+}

@@ -44,4 +44,7 @@ Results are ordered:
 
 Ties keep the NIP-50 order (relevance, newest first, event id), so pages do
 not overlap. Profile content that is not a JSON object, or a name field that
-is not a string, never matches.
+is not a string, never matches. Content that PostgreSQL cannot read as `jsonb`
+(for example a `\u0000` escape or very deep nesting) has no names, so it
+never matches and never makes the search fail
+(`schema/functions/profile_name_fields.sql`).

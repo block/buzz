@@ -77,6 +77,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i functions/enforce_community_write_fence.sql
 \i functions/enforce_community_tombstone.sql
 \i functions/attach_community_write_fence.sql
+\i functions/profile_name_fields.sql
 
 -- tables
 \i tables/public/communities.sql
