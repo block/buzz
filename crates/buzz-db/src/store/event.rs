@@ -113,17 +113,12 @@ pub struct EventQuery {
     /// private events are excluded from the candidate page rather than
     /// discarded after it.
     ///
-    /// The clause is: `AND (kind NOT IN (...) OR pubkey = $reader OR tags @> ?)`,
-    /// where the `IN` list is [`SHARED_GATED_KINDS`] and `?` is the JSONB
-    /// literal `[["shared","true"]]`.  The GIN index on `tags` (migration 0004,
-    /// jsonb_path_ops) makes the containment check fast.
-    ///
-    /// NOTE: `tags @> '[["shared","true"]]'` uses JSONB containment, which
-    /// matches any tag array that is a superset of `[["shared","true"]]` — it
-    /// would match `["shared","true","extra"]` too.  The ingest `parts.len() ==
-    /// 2` exact-shape check ensures such malformed tags are never stored, so the
-    /// SQL pushdown is sound.  Keeping `event_visible_to_reader` as post-filter
-    /// defense-in-depth catches any residual mismatch.
+    /// The clause is: `AND (kind NOT IN (...) OR pubkey = $reader OR <shared>)`,
+    /// where the `IN` list is [`SHARED_GATED_KINDS`] and `<shared>` requires a
+    /// tag whose element 0 is `shared` and element 1 is `true`. Containment on
+    /// the GIN index (migration 0004, jsonb_path_ops) is the fast first pass;
+    /// containment alone would also admit decoys like `["x","shared","true"]`.
+    /// `event_visible_to_reader` remains the post-filter.
     pub shared_gated_reader: Option<Vec<u8>>,
 }
 
@@ -784,16 +779,12 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     // shared ones off the end of the result set (the catalog query pattern).
     //
     // Clause: AND (kind NOT IN (30175, 30178) OR pubkey = $reader
-    //              OR tags @> '[["shared","true"]]')
+    //              OR <exact ["shared","true",...] tag>)
     //
-    // The JSONB containment check is served by idx_events_tags_gin (migration
-    // 0004, jsonb_path_ops).  `tags @> '[["shared","true"]]'` matches any array
-    // that contains exactly the sub-array — a two-element `["shared","true"]`
-    // tag passes; a tag-absent event does not.  Because ingest requires exactly
-    // two elements for the shared tag (parts.len() == 2), no stored event can
-    // carry a three-element superset.
+    // The shared match is positional, like the other tag pushdowns: plain
+    // containment would admit a private event carrying ["x","shared","true"],
+    // which then wastes a page slot before the post-filter drops it.
     if let Some(ref reader_bytes) = q.shared_gated_reader {
-        let shared_containment = serde_json::json!([["shared", "true"]]);
         qb.push(format!(" AND ({col_prefix}kind NOT IN ("));
         let mut sep = qb.separated(", ");
         for kind in SHARED_GATED_KINDS {
@@ -801,8 +792,8 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         }
         qb.push(format!(") OR {col_prefix}pubkey = "));
         qb.push_bind(reader_bytes.clone());
-        qb.push(format!(" OR {col_prefix}tags @> "));
-        qb.push_bind(shared_containment);
+        qb.push(" OR ");
+        push_exact_tag_match(&mut qb, col_prefix, "shared", &["true".to_owned()]);
         qb.push(")");
     }
 
@@ -1078,6 +1069,11 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
 
     if let Some(ref values) = q.d_tag_values {
         push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
+    }
+
+    if let Some((ref name, ref value)) = q.custom_tag {
+        qb.push(" AND ");
+        push_exact_tag_match(&mut qb, col_prefix, name, std::slice::from_ref(value));
     }
 
     if let Some(s) = q.since {
@@ -2953,11 +2949,44 @@ mod postgres_tests {
             let rows = query_events(&pool, &q).await.unwrap();
             assert_eq!(rows.len(), 1, "{label}");
             assert_eq!(rows[0].event.id.as_bytes().to_vec(), real_id, "{label}");
-            // The COUNT builder has no `custom_tag` pushdown.
-            if q.custom_tag.is_none() {
-                assert_eq!(count_events(&pool, &q).await.unwrap(), 1, "{label} count");
-            }
+            assert_eq!(count_events(&pool, &q).await.unwrap(), 1, "{label} count");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn shared_gate_rejects_positional_decoy() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let (author, reader) = (Keys::generate(), Keys::generate());
+        let kind = SHARED_GATED_KINDS[0];
+        let now = nostr::Timestamp::now().as_secs();
+        let mut ids = Vec::new();
+        // Real shared event, then a newer private one whose shared marker is
+        // shifted right, so it would win a `limit: 1` read if admitted.
+        for (tag, at) in [
+            (["shared", "true"].as_slice(), now - 10),
+            (&["x", "shared", "true"], now),
+        ] {
+            let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags([
+                    Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+                    Tag::parse(tag.iter().copied()).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&author)
+                .unwrap();
+            insert_event(&pool, community, &event, None).await.unwrap();
+            ids.push(event.id.as_bytes().to_vec());
+        }
+        let mut q = EventQuery::for_community(community);
+        q.kinds = Some(vec![kind as i32]);
+        q.pubkey = Some(author.public_key().to_bytes().to_vec());
+        q.shared_gated_reader = Some(reader.public_key().to_bytes().to_vec());
+        q.limit = Some(1);
+        let rows = query_events(&pool, &q).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event.id.as_bytes().to_vec(), ids[0]);
     }
 
     #[tokio::test]

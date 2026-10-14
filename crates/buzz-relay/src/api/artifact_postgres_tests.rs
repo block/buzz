@@ -176,6 +176,34 @@ async fn project_filter_survives_artifact_query_hook() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn count_honors_buzz_channel_filter() {
+    let f = Fixture::new().await;
+    // Two projects bound to `home`, one bound to `private`.
+    for channel in [f.home, f.home, f.private] {
+        let event = EventBuilder::new(Kind::Custom(30621), "")
+            .tags([
+                Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+                Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&f.owner)
+            .unwrap();
+        f.state
+            .db
+            .insert_event(f.community, &event, None)
+            .await
+            .unwrap();
+    }
+    let filter = json!([{"kinds":[30621],"#buzz-channel":[f.home]}]);
+    let (status, body) = f.request("/query", filter.clone()).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body.as_array().unwrap().len(), 2, "{body}");
+    let (status, body) = f.request("/count", filter).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body["count"], 2, "{body}");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn unsupported_predicates_fail_explicitly() {
     let f = Fixture::new().await;
     let create = f.revision(Uuid::new_v4(), "create", None);
