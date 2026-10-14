@@ -153,6 +153,13 @@ class ReactionRow extends HookWidget {
     if (reactions.isEmpty && !showAddButton) return const SizedBox.shrink();
 
     if (combined && reactions.isNotEmpty) {
+      final count = reactions.fold<int>(
+        0,
+        (sum, reaction) => sum + reaction.count,
+      );
+      final ownReaction = reactions.any(
+        (reaction) => reaction.reactedByCurrentUser,
+      );
       void openDetails() => showReactionDetailSheet(
         context: context,
         channelId: channelId,
@@ -170,7 +177,8 @@ class ReactionRow extends HookWidget {
           child: Semantics(
             button: true,
             label:
-                'View ${reactions.fold<int>(0, (sum, reaction) => sum + reaction.count)} reactions',
+                'View $count ${count == 1 ? 'reaction' : 'reactions'}'
+                '${ownReaction ? ', including yours' : ''}',
             child: GestureDetector(
               key: const ValueKey('combined-reaction-tray'),
               behavior: HitTestBehavior.opaque,

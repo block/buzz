@@ -242,6 +242,8 @@ class _ThreadMessageList extends HookWidget {
                           reply.createdAt,
                         );
                         final showAuthor =
+                            reply.hasAttachments ||
+                            previousReply?.hasAttachments == true ||
                             previousReply == null ||
                             showDayDivider ||
                             previousReply.pubkey.toLowerCase() !=
@@ -253,6 +255,8 @@ class _ThreadMessageList extends HookWidget {
                             ? replies[chronologicalIndex + 1]
                             : null;
                         final showAvatar =
+                            reply.hasAttachments ||
+                            nextReply?.hasAttachments == true ||
                             nextReply == null ||
                             !isSameDay(reply.createdAt, nextReply.createdAt) ||
                             nextReply.pubkey.toLowerCase() !=

@@ -60,6 +60,7 @@ bool _selectMessageAction(BuildContext context) {
 }
 
 /// Presents message reactions and grouped actions in the shared bottom sheet.
+/// Grouped rows can supply aggregate reactions and a toggle for all source events.
 /// Snapshot and preview callbacks are not used by the sheet presentation.
 Future<void> showMessageActions({
   required BuildContext context,
@@ -68,6 +69,8 @@ Future<void> showMessageActions({
   required String channelId,
   required bool canManageMessage,
   List<TimelineMessage>? allMessages,
+  List<TimelineReaction>? reactions,
+  ValueChanged<String>? onToggleReaction,
   String? currentPubkey,
   bool isMember = false,
   Rect? anchorRect,
@@ -114,6 +117,8 @@ Future<void> showMessageActions({
                 children: [
                   _QuickReactionRow(
                     message: message,
+                    reactions: reactions ?? message.reactions,
+                    onToggleReaction: onToggleReaction,
                     sheetContext: sheetContext,
                     pageContext: context,
                     pageRef: ref,

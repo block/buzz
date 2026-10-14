@@ -88,6 +88,32 @@ void bubbleContentTests() {
     });
   }
 
+  for (final content in [
+    '- screenshots:\n  ![result](https://example.com/result.png)\n  explanation',
+    '1. screenshots:\n  ![result](https://example.com/result.png)\n  explanation',
+    '> screenshots:\n> ![result](https://example.com/result.png)\n> explanation',
+    '> screenshots:\n![result](https://example.com/result.png)\nexplanation',
+  ]) {
+    testWidgets('nested media retains its Markdown block: $content', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(MessageContent(content: content, bubble: true)),
+      );
+      await tester.pumpAndSettle();
+      expect(bubbles, findsOneWidget);
+      final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
+      expect(markdown.data, content);
+      final media = find.byKey(
+        const ValueKey(
+          'message-media-image-preview:https://example.com/result.png',
+        ),
+      );
+      expect(find.descendant(of: bubbles, matching: media), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('image corners follow the conversation group', (tester) async {
     for (final grouped in [false, true]) {
       await tester.pumpWidget(

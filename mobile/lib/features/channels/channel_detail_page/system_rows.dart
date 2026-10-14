@@ -111,6 +111,8 @@ class _SystemMessageRow extends HookConsumerWidget {
         context: context,
         ref: ref,
         message: message,
+        reactions: reactions,
+        onToggleReaction: toggleGroupedReaction,
         channelId: channelId,
         canManageMessage: false,
         allMessages: null,

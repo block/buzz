@@ -1,8 +1,8 @@
-part of '../message_content.dart';
+import '../message_media.dart';
 
-// Only standalone media leaves the text bubble. Fenced examples remain text,
-// and consecutive image lines stay together for the existing gallery renderer.
-List<({String text, bool attachment})> _bubbleSegments(
+/// Splits top-level media from text without breaking Markdown blocks.
+/// Fenced code, lists and quotes retain their nested content.
+List<({String text, bool attachment})> messageBubbleSegments(
   String content,
   Map<String, ImetaEntry> imeta,
 ) {
@@ -10,6 +10,7 @@ List<({String text, bool attachment})> _bubbleSegments(
   final lines = <String>[];
   bool? attachment;
   String? fence;
+  var nestedBlock = false;
   final embed = RegExp(r'^!?\[[^\]]*\]\((https?://[^)\s]+)\)$');
   void flush() {
     final text = lines.join('\n').trimRight();
@@ -30,7 +31,17 @@ List<({String text, bool attachment})> _bubbleSegments(
         fence = null;
       }
     }
-    final match = inFence ? null : embed.firstMatch(line.trim());
+    if (trimmed.isEmpty) {
+      nestedBlock = false;
+    } else if (RegExp(r'^(?:>|[-+*]\s|\d+[.)]\s)').hasMatch(trimmed)) {
+      nestedBlock = true;
+    }
+    // Indented embeds belong to a list, quote or code block. Lazy block
+    // continuations also stay together until a blank line ends the block.
+    final topLevel = line == trimmed && !nestedBlock;
+    final match = inFence || !topLevel
+        ? null
+        : embed.firstMatch(line.trimRight());
     final isAttachment =
         match != null &&
         (line.trim().startsWith('!') || imeta.containsKey(match.group(1)));

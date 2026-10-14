@@ -53,6 +53,11 @@ class _MessageList extends HookConsumerWidget {
     final stickyDayTimestamp = useValueNotifier<int?>(null);
     final timelineViewportHeight = useRef(MediaQuery.sizeOf(context).height);
     final isLoadingOlder = useState(false);
+    final navigatingOldest = useRef(false);
+    final olderFetchFailed = useRef(false);
+    final oldestNavigationGeneration = useRef(0);
+    final currentDisplayCount = useRef(displayEntries.length);
+    currentDisplayCount.value = displayEntries.length;
     final isAtLatest = useState(true);
     final settledImeBottomInset = useState(
       usesFixedAndroidImeViewport
@@ -514,7 +519,9 @@ class _MessageList extends HookConsumerWidget {
               .reduce((a, b) => a > b ? a : b);
           if (!hasUserScrolled.value ||
               oldestVisible < displayEntries.length - 3 ||
-              isLoadingOlder.value) {
+              isLoadingOlder.value ||
+              navigatingOldest.value ||
+              olderFetchFailed.value) {
             return;
           }
           final notifier = ref.read(
@@ -522,9 +529,14 @@ class _MessageList extends HookConsumerWidget {
           );
           if (notifier.reachedOldest) return;
           isLoadingOlder.value = true;
-          notifier.fetchOlder().whenComplete(
-            () => isLoadingOlder.value = false,
-          );
+          notifier
+              .fetchOlder()
+              .then((loaded) {
+                olderFetchFailed.value = !loaded && !notifier.reachedOldest;
+              })
+              .whenComplete(() {
+                if (context.mounted) isLoadingOlder.value = false;
+              });
         }
 
         var disposed = false;
@@ -683,25 +695,66 @@ class _MessageList extends HookConsumerWidget {
       return null;
     }, [latestEntryId, localSendAnimations]);
 
-    useIosScrollToTop(context, () {
-      if (!itemScrollController.isAttached || displayEntries.isEmpty) return;
+    Future<void> navigateToOldest() async {
+      if (navigatingOldest.value ||
+          !itemScrollController.isAttached ||
+          displayEntries.isEmpty) {
+        return;
+      }
+      navigatingOldest.value = true;
+      olderFetchFailed.value = false;
+      final generation = ++oldestNavigationGeneration.value;
+      bool isCurrent() =>
+          navigatingOldest.value &&
+          oldestNavigationGeneration.value == generation;
+      var ownsFetch = false;
       followsLatest.value = false;
       hasUserScrolled.value = true;
       isAtLatest.value = false;
       if (showUnreadNavigation) detachedWhileUnreadShown.value = true;
-      final index = displayEntries.length - 1;
-      if (MediaQuery.disableAnimationsOf(context)) {
-        itemScrollController.jumpTo(index: index);
-      } else {
-        unawaited(
-          itemScrollController.scrollTo(
+      try {
+        // Wait for an already-running edge fetch before owning pagination.
+        while (isLoadingOlder.value && context.mounted && isCurrent()) {
+          await WidgetsBinding.instance.endOfFrame;
+        }
+        while (context.mounted && isCurrent() && !notifier.reachedOldest) {
+          isLoadingOlder.value = true;
+          ownsFetch = true;
+          final loaded = await notifier.fetchOlder();
+          if (!context.mounted) return;
+          isLoadingOlder.value = false;
+          ownsFetch = false;
+          if (!loaded) {
+            olderFetchFailed.value = !notifier.reachedOldest;
+            break;
+          }
+          await WidgetsBinding.instance.endOfFrame;
+        }
+        if (!context.mounted ||
+            !isCurrent() ||
+            !itemScrollController.isAttached) {
+          return;
+        }
+        final index = currentDisplayCount.value - 1;
+        if (index < 0) return;
+        if (MediaQuery.disableAnimationsOf(context)) {
+          itemScrollController.jumpTo(index: index);
+        } else {
+          await itemScrollController.scrollTo(
             index: index,
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeOutCubic,
-          ),
-        );
+          );
+        }
+      } finally {
+        if (oldestNavigationGeneration.value == generation) {
+          navigatingOldest.value = false;
+        }
+        if (context.mounted && ownsFetch) isLoadingOlder.value = false;
       }
-    });
+    }
+
+    useIosScrollToTop(context, () => unawaited(navigateToOldest()));
 
     if (entries.isEmpty) {
       return Center(
@@ -771,6 +824,9 @@ class _MessageList extends HookConsumerWidget {
             );
             if (notification is UserScrollNotification &&
                 notification.direction != ScrollDirection.idle) {
+              navigatingOldest.value = false;
+              oldestNavigationGeneration.value++;
+              olderFetchFailed.value = false;
               hasUserScrolled.value = true;
               followsLatest.value = false;
               if (showUnreadNavigation) {
@@ -835,6 +891,7 @@ class _MessageList extends HookConsumerWidget {
                 final showAuthor =
                     !message.isSystem &&
                     (message.hasAttachments ||
+                        prevMessage?.hasAttachments == true ||
                         prevMessage == null ||
                         prevMessage.isSystem ||
                         showDayDivider ||
@@ -846,6 +903,7 @@ class _MessageList extends HookConsumerWidget {
                     ? displayEntries[chronIdx + 1].first.message
                     : null;
                 final showAvatar =
+                    message.hasAttachments ||
                     nextMessage == null ||
                     nextMessage.isSystem ||
                     nextMessage.hasAttachments ||

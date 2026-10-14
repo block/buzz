@@ -34,6 +34,7 @@ import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
+import 'message_content/bubble_segments.dart';
 import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
@@ -41,7 +42,6 @@ import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
-part 'message_content/bubble_segments.dart';
 part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
@@ -384,7 +384,7 @@ class MessageContent extends HookConsumerWidget {
       ),
     );
     final segments = bubble
-        ? _bubbleSegments(finalContent, imetaByUrl)
+        ? messageBubbleSegments(finalContent, imetaByUrl)
         : const <({String text, bool attachment})>[];
     final markdown = bubble
         ? Column(

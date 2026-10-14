@@ -2,6 +2,195 @@ part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
   testWidgets(
+    'grouped removal quick reactions remove reactions on later events',
+    (tester) async {
+      final actions = _GroupedReactionActions();
+      await tester.pumpWidget(
+        _buildTestable(
+          signingPubkey: 'self',
+          messages: [
+            for (var index = 0; index < 3; index++)
+              _systemMsg(
+                id: 'removal-$index',
+                payload: {
+                  'type': 'member_removed',
+                  'actor': 'alice',
+                  'target': 'target-$index',
+                },
+                createdAt: 1000 + index,
+              ),
+            for (var index = 1; index < 3; index++)
+              _reaction(
+                id: 'own-$index',
+                targetId: 'removal-$index',
+                pubkey: 'self',
+              ),
+          ],
+          createChannelActions: (_) => actions,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.longPress(
+        find.byKey(const ValueKey('system-message-row-removal-0')),
+      );
+      await tester.pumpAndSettle();
+      final quick = find.byKey(const ValueKey('quick-reaction-👍'));
+      expect(quick, findsOneWidget);
+      expect(
+        find.descendant(
+          of: quick,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.selected == true,
+          ),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(quick);
+      await tester.pumpAndSettle();
+      expect(actions.removed, ['own-1', 'own-2']);
+      expect(actions.added, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'status bar navigation fetches every older page and stops on failure',
+    (tester) async {
+      for (final fail in [false, true]) {
+        final notifier = _FakeMessagesNotifier(
+          [
+            for (var index = 0; index < 30; index++)
+              _textMsg(
+                id: 'recent-$index',
+                pubkey: 'alice',
+                content: 'Recent $index',
+                createdAt: 3000 + index,
+              ),
+          ],
+          olderPages: [
+            [
+              _textMsg(
+                id: 'middle',
+                pubkey: 'alice',
+                content: 'Middle page',
+                createdAt: 2000,
+              ),
+            ],
+            [
+              _textMsg(
+                id: 'oldest',
+                pubkey: 'alice',
+                content: 'First page',
+                createdAt: 1000,
+              ),
+            ],
+          ],
+          failOlderFetch: fail,
+        );
+        await tester.pumpWidget(
+          _buildTestable(messages: const [], messagesNotifier: notifier),
+        );
+        await tester.pumpAndSettle();
+        expect(notifier.fetchOlderCalls, 0);
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          'flutter/status_bar',
+          const JSONMethodCodec().encodeMethodCall(
+            const MethodCall('handleScrollToTop'),
+          ),
+          (_) {},
+        );
+        await tester.pumpAndSettle();
+        expect(notifier.fetchOlderCalls, fail ? 1 : 2);
+        if (!fail) {
+          expect(find.text('First page').hitTestable(), findsOneWidget);
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      }
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  for (final thread in [false, true]) {
+    for (final tagged in [false, true]) {
+      testWidgets(
+        'attachments isolate both group boundaries, thread=$thread tagged=$tagged',
+        (tester) async {
+          final events = [
+            if (thread)
+              _textMsg(
+                id: 'root',
+                pubkey: 'bob',
+                content: 'Root',
+                createdAt: 900,
+              ),
+            for (var index = 0; index < 3; index++)
+              _textMsg(
+                id: 'boundary-$index',
+                pubkey: 'alice',
+                createdAt: 1000 + index,
+                content: index == 1
+                    ? '![photo](https://example.com/photo.png)'
+                    : 'Text $index',
+                extraTags: [
+                  if (thread) ['e', 'root', '', 'reply'],
+                  if (tagged && index == 1)
+                    [
+                      'imeta',
+                      'url https://example.com/photo.png',
+                      'm image/png',
+                    ],
+                ],
+              ),
+          ];
+          final messages = formatTimeline(events);
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: events,
+              home: thread
+                  ? ThreadDetailPage(
+                      threadHead: messages.firstWhere(
+                        (message) => message.id == 'root',
+                      ),
+                      allMessages: messages,
+                      channelId: _channelId,
+                      currentPubkey: 'me',
+                      isMember: true,
+                      isArchived: false,
+                    )
+                  : null,
+            ),
+          );
+          await tester.pumpAndSettle();
+          for (var index = 0; index < 3; index++) {
+            if (thread) {
+              final list = tester.widget<ScrollablePositionedList>(
+                find.byKey(const ValueKey('thread-message-list')),
+              );
+              list.itemScrollController!.jumpTo(index: index + 1);
+              await tester.pumpAndSettle();
+            }
+            final row = find.byKey(
+              ValueKey(
+                '${thread ? 'thread-message-row' : 'message-row'}-boundary-$index',
+              ),
+            );
+            final content = tester.widget<MessageContent>(
+              find.descendant(of: row, matching: find.byType(MessageContent)),
+            );
+            expect(content.bubbleStart, isTrue, reason: 'start $index');
+            expect(content.bubbleEnd, isTrue, reason: 'end $index');
+            expect(
+              find.descendant(of: row, matching: find.byType(AvatarImage)),
+              findsOneWidget,
+            );
+          }
+        },
+      );
+    }
+  }
+
+  testWidgets(
     'legacy purpose activity is hidden without splitting the sender group',
     (tester) async {
       await tester.pumpWidget(
@@ -418,4 +607,15 @@ void bubbleLayoutTests() {
       );
     },
   );
+}
+
+class _GroupedReactionActions implements ChannelActions {
+  final removed = <String>[];
+  final added = <String>[];
+  @override
+  Future<void> removeReaction(String id, String emoji) async => removed.add(id);
+  @override
+  Future<void> addReaction(String id, String emoji) async => added.add(id);
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

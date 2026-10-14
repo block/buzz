@@ -6,6 +6,8 @@ import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/mentions/mention_tags.dart';
 import 'channel_window.dart';
+import 'message_media.dart';
+import 'message_content/bubble_segments.dart';
 
 enum SystemEventType {
   memberJoined,
@@ -212,7 +214,11 @@ class TimelineMessage {
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.
   bool get hasAttachments =>
-      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta');
+      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta') ||
+      messageBubbleSegments(
+        content,
+        parseImetaTags(tags),
+      ).any((segment) => segment.attachment);
 }
 
 @immutable

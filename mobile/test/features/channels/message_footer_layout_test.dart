@@ -3,6 +3,44 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('footer global transforms and semantics include overlap offset', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Align(
+          alignment: Alignment.topLeft,
+          child: MessageFooterLayout(
+            overlap: 8,
+            footer: Semantics(
+              label: 'Reaction footer',
+              child: const SizedBox(
+                key: ValueKey('footer'),
+                width: 100,
+                height: 32,
+              ),
+            ),
+            child: const SizedBox(
+              key: ValueKey('content'),
+              width: 200,
+              height: 60,
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('footer'))),
+      tester.getTopLeft(find.byKey(const ValueKey('content'))) +
+          const Offset(0, 52),
+    );
+    final node = tester.getSemantics(find.bySemanticsLabel('Reaction footer'));
+    expect(node.transform?.getTranslation().y, 52);
+    semantics.dispose();
+  });
+
   for (final reduced in [false, true]) {
     testWidgets('reaction spacing animates both ways, reduced=$reduced', (
       tester,

@@ -1,6 +1,38 @@
 part of '../reaction_row_test.dart';
 
 void combinedReactionTests() {
+  for (final selected in [false, true]) {
+    for (final count in [1, 2]) {
+      testWidgets(
+        'combined tray has one actionable semantics label, selected=$selected count=$count',
+        (tester) async {
+          final semantics = tester.ensureSemantics();
+
+          await _pumpRow(
+            tester,
+            combined: true,
+            reactions: [
+              _reaction(count: count, reactedByCurrentUser: selected),
+            ],
+            onToggle: (_) {},
+          );
+          final label =
+              'View $count ${count == 1 ? 'reaction' : 'reactions'}${selected ? ', including yours' : ''}';
+          final tray = find.bySemanticsLabel(label);
+          expect(tray, findsOneWidget);
+          final node = tester.getSemantics(tray);
+          expect(node.label, label);
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.tap),
+            isTrue,
+          );
+          expect(node.childrenCount, 0);
+          semantics.dispose();
+        },
+      );
+    }
+  }
+
   testWidgets('Android combined tray removes own reaction and stays live', (
     tester,
   ) async {

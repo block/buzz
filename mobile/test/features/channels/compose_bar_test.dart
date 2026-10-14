@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:buzz/features/channels/composer_send_origin.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -3160,6 +3161,79 @@ void main() {
         find.byKey(const ValueKey('photo-gallery-action')).hitTestable(),
         findsOneWidget,
       );
+    });
+
+    testWidgets('ComposeBar retains submitted origin through delayed upload', (
+      tester,
+    ) async {
+      final uploadResponse = Completer<http.Response>();
+      Rect? submittedOrigin;
+      var sent = false;
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((_) => uploadResponse.future),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          XFile.fromData(_pngBytes, name: 'tiny.png'),
+        ],
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sent = true;
+                submittedOrigin = ComposerSendOrigin.current;
+              },
+        ),
+      );
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+      await _expandComposer(tester);
+      final composer = tester.getRect(
+        find.byKey(const ValueKey('composer-surface')),
+      );
+      await tester.tap(
+        find
+            .ancestor(
+              of: find.byIcon(BuzzIcons.arrowUp),
+              matching: find.byType(IconButton),
+            )
+            .hitTestable(),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      expect(sent, isFalse);
+      // Layout changes during upload must not replace the submitted geometry.
+      tester.view.physicalSize = Size(
+        tester.view.physicalSize.width,
+        tester.view.physicalSize.height + 200,
+      );
+      addTearDown(tester.view.resetPhysicalSize);
+      await tester.pump();
+      uploadResponse.complete(
+        http.Response(
+          jsonEncode({
+            'url': 'https://relay.example/media/test.png',
+            'sha256':
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            'size': 16,
+            'type': 'image/png',
+            'uploaded': 1,
+          }),
+          200,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(sent, isTrue);
+      expect(submittedOrigin, isNotNull);
+      expect(submittedOrigin, composer);
+      expect(ComposerSendOrigin.current, isNull);
     });
 
     testWidgets(
