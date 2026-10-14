@@ -989,9 +989,9 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
             }
             _ => {
                 // Any other generic tag (#t, #a, etc.) is not pushed exactly.
-                // #t/#P on group-state kinds reach SQL only as an over-matching
-                // candidate filter (`group_state_tag_values`), so COUNT must
-                // still post-filter them.
+                // #t/#P on group-state kinds are matched in SQL
+                // (`group_state_tag_values`), but this fast path does not
+                // model them, so COUNT still post-filters them.
                 if !tag_values.is_empty() {
                     return false;
                 }
@@ -1192,8 +1192,9 @@ fn filter_to_query_params(
 /// `{kinds:[39000], #t:[<label>], limit:n}` can return fewer than `n`
 /// matches, or none, while older matches exist.
 ///
-/// The SQL match is a candidate filter (see [`EventQuery::tag_values`]); the
-/// caller's NIP-01 post-filter still decides each event.
+/// The SQL match is exact NIP-01 tag matching (see
+/// [`EventQuery::tag_values`]), so no false candidate can take a place in
+/// the page. The caller's NIP-01 post-filter still runs on each event.
 fn group_state_tag_values(filter: &Filter, kinds: Option<&[i32]>) -> Vec<(String, Vec<String>)> {
     let group_state_only = kinds.is_some_and(|ks| {
         !ks.is_empty()

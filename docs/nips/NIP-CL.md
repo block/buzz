@@ -141,9 +141,11 @@ A client that needs one channel per creator and label:
 2. creates the channel only if the query returns nothing; and
 3. when the query returns more than one channel, uses the oldest one.
 
-The oldest channel has the lowest `created_at` tag value. If two channels have
-the same value, the lowest channel ID (`d` tag, compared as a string) wins. A
-channel without a `created_at` tag ranks after every channel that has one.
+The oldest channel has the lowest `created_at` tag value, compared as an
+integer. If two channels have the same value, the lowest channel ID (`d` tag,
+compared as a string) wins. A channel without a `created_at` tag ranks after
+every channel that has one, and two channels without one compare by channel
+ID.
 Every reader that follows this rule picks the same channel, even after either
 channel is edited.
 

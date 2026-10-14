@@ -747,3 +747,53 @@ async fn selective_label_and_creator_reqs_are_not_starved_by_limit() {
         "#t and #P must both match"
     );
 }
+
+/// JSONB containment ignores order and repeats, so `[["t", "stream"]]`
+/// contains `[["t", "t"]]` and a channel named `t` (`["name", "t"]`)
+/// contains `[["t", "name"]]`. Those newer channels must not take the only
+/// place in the page from an older channel with the label.
+/// Mutation: drop the exact `EXISTS` match from `push_tag_value_filters` →
+/// RED (each page holds only the newer channel, which the post-filter drops).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn label_reqs_are_not_starved_by_containment_false_matches() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-containment").await;
+    let creator = Keys::generate();
+    let reader = Keys::generate();
+
+    let labeled_t = create_channel(&state, &tenant, &creator, &[&["t", "t"]]).await;
+    let labeled_name = create_channel(&state, &tenant, &creator, &[&["t", "name"]]).await;
+    let expected_t = vec![metadata_event_id(&state, &tenant, labeled_t).await];
+    let expected_name = vec![metadata_event_id(&state, &tenant, labeled_name).await];
+    // Group-state created_at has one-second resolution; wait so the
+    // unlabeled channel's 39000 is strictly newer.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let unlabeled = create_channel(&state, &tenant, &creator, &[]).await;
+    edit_channel(&state, &tenant, &creator, unlabeled, &[&["name", "t"]])
+        .await
+        .expect("rename to t");
+
+    assert_eq!(
+        req_event_ids(
+            &state,
+            &tenant,
+            &reader,
+            serde_json::json!({"kinds": [39000], "#t": ["t"], "limit": 1}),
+        )
+        .await,
+        expected_t,
+        "label t"
+    );
+    assert_eq!(
+        req_event_ids(
+            &state,
+            &tenant,
+            &reader,
+            serde_json::json!({"kinds": [39000], "#t": ["name"], "limit": 1}),
+        )
+        .await,
+        expected_name,
+        "label name"
+    );
+}
