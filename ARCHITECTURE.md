@@ -525,8 +525,9 @@ shape is an explicit transition, not a flag day:
   behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
   the operational evidence path for rollout safety.
 
-The database end state (declarative schema applied by SchemaBot, no
-triggers, functions, or foreign keys, backfills outside migrations) and the
+The database end state (a declarative schema source, applied out of band at
+scale, where Block uses SchemaBot; no triggers, functions, or foreign keys;
+backfills outside migrations) and the
 expand → deploy → backfill → contract rules every schema change follows are in
 [docs/database.md](docs/database.md).
 
