@@ -240,6 +240,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                   ),
                                 MessageContent(
                                   content: message.content,
+                                  messageId: message.id,
                                   mentionNames: resolvedMentionNames,
                                   mentionLabels: mentionLabels,
                                   agentMentionPubkeys: agentMentionPubkeys,

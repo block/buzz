@@ -430,6 +430,7 @@ class _OriginalPost extends ConsumerWidget {
           const SizedBox(height: Grid.xxs),
           MessageContent(
             content: post.content,
+            messageId: post.eventId,
             mentionNames: mentionNames,
             mentionLabels: mentionLabels,
             agentMentionPubkeys: agentMentionPubkeys,
@@ -568,6 +569,7 @@ class _ReplyRow extends ConsumerWidget {
             padding: const EdgeInsets.only(left: 32, top: Grid.half),
             child: MessageContent(
               content: reply.content,
+              messageId: reply.eventId,
               mentionNames: mentionNames,
               mentionLabels: mentionLabels,
               agentMentionPubkeys: agentMentionPubkeys,

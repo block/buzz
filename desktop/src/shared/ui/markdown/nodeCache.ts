@@ -14,6 +14,9 @@ import remarkCustomEmoji, {
   type CustomEmoji,
 } from "@/shared/lib/remarkCustomEmoji";
 import remarkMentions from "@/shared/lib/remarkMentions";
+import remarkDetails, {
+  prepareDetailsBlocks,
+} from "@/shared/lib/remarkDetails";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 
 import { buzzDeepLinkUrlTransform } from "./utils";
@@ -102,7 +105,8 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   // variant is `MarkdownHooks`), so this returns the parsed element tree
   // directly, which is what lets it live in a module-level cache.
   return ReactMarkdown({
-    children: input.content,
+    // Isolates matched `:::details` marker lines; see remarkDetails.
+    children: prepareDetailsBlocks(input.content),
     components: input.components,
     remarkPlugins: [
       remarkGfm,
@@ -114,6 +118,9 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
       [remarkMentions, { mentionNames: input.mentionNames }],
       [remarkChannelLinks, { channelNames: input.channelNames }],
       [remarkCustomEmoji, { customEmoji: input.customEmoji }],
+      // Last, so it sees the mention, link and emoji nodes it flattens out
+      // of section titles.
+      remarkDetails,
       // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
     ] as any[],
     rehypePlugins,
