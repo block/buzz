@@ -122,6 +122,62 @@ async fn insert_event_floor_rejects_old_and_accepts_fresh() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn insert_event_floor_accepts_expired_duplicate() {
+    let (db, community, channel, keys) = fixture().await;
+    let old = signed(
+        &keys,
+        9,
+        channel,
+        database_clock(&db).await - chrono::Duration::seconds(CREATED_AT_FLOOR_SECS + 60),
+    );
+    crate::test_support::insert_historical_event(db.pool(), community, &old, channel).await;
+    let (_, inserted) = event::insert_event(db.pool(), community, &old, Some(channel))
+        .await
+        .expect("expired duplicate is idempotent");
+    assert!(!inserted);
+    assert_eq!(count(&db, community, &old).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_metadata_event_floor_accepts_expired_duplicate() {
+    let (db, community, channel, keys) = fixture().await;
+    let time = database_clock(&db).await - chrono::Duration::seconds(CREATED_AT_FLOOR_SECS + 60);
+    let old = signed(&keys, 9, channel, time);
+    crate::test_support::insert_historical_event(db.pool(), community, &old, channel).await;
+    let mut tx = begin(&db, community).await;
+    let meta = event::ThreadMetadataParams {
+        event_id: old.id.as_bytes(),
+        event_created_at: DateTime::from_timestamp(old.created_at.as_secs() as i64, 0)
+            .expect("timestamp"),
+        channel_id: channel,
+        parent_event_id: None,
+        parent_event_created_at: None,
+        root_event_id: None,
+        root_event_created_at: None,
+        depth: 0,
+        broadcast: true,
+    };
+    let (_, inserted) =
+        event::insert_event_with_thread_metadata_tx(&mut tx, &old, Some(channel), Some(meta))
+            .await
+            .expect("expired duplicate is idempotent");
+    assert!(!inserted);
+    tx.commit().await.expect("commit duplicate result");
+    assert_eq!(count(&db, community, &old).await, 1);
+    let metadata: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM thread_metadata WHERE community_id=$1 AND event_id=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(old.id.as_bytes().as_slice())
+    .fetch_one(db.pool())
+    .await
+    .expect("metadata count");
+    assert_eq!(metadata, 0, "a duplicate must not run thread follow-ups");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn thread_metadata_event_floor_rejects_old_and_accepts_fresh() {
     let (db, community, channel, keys) = fixture().await;
     let now = database_clock(&db).await;
@@ -264,7 +320,21 @@ async fn cluster_global_event_floor_held_transaction_cannot_write_below_probe_wa
         channel,
         entry.fence_wall - chrono::Duration::seconds(1),
     );
+    sqlx::query("SAVEPOINT rejected_floor_insert")
+        .execute(tx.conn())
+        .await
+        .expect("isolate rejected insert");
     rejected(event::insert_event_in_transaction(&mut tx, &below_wall, Some(channel)).await);
+    // The check runs after INSERT. Roll back that write before continuing in
+    // the same held transaction, just as a caller must on any insert failure.
+    sqlx::query("ROLLBACK TO SAVEPOINT rejected_floor_insert")
+        .execute(tx.conn())
+        .await
+        .expect("roll back rejected row");
+    sqlx::query("RELEASE SAVEPOINT rejected_floor_insert")
+        .execute(tx.conn())
+        .await
+        .expect("release rejection savepoint");
     // Sample just after the probe; a near-floor accepted insert is above its
     // wall even when this transaction commits after the heartbeat.
     let fresh = signed(

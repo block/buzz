@@ -20,6 +20,10 @@ export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
 export PGDATABASE="${PGDATABASE:-buzz}"
 
 # This raw fixture writer is unarmed and must never target a live replica fence.
+if [[ -n "${PGHOSTADDR:-}" || -n "${PGSERVICE:-}" || "${PGHOST}" == *,* ]]; then
+  echo "error: admin seed requires a local PostgreSQL target without PGHOSTADDR, PGSERVICE or multiple hosts" >&2
+  exit 1
+fi
 case "${PGHOST}" in
   localhost|127.0.0.1|::1|/*) ;;
   *)

@@ -4,10 +4,11 @@
 //! contain is provably present on the replica. The proof rests on two parts:
 //!
 //! 1. **Insert-time floor**: supported channel-event writers check `created_at`
-//!    against database `clock_timestamp()` on their admitted transaction before
-//!    INSERT. This is the primary guard. Migration 0021's deferred trigger and
-//!    writer-pool `buzz.created_at_floor` GUC remain the mixed-version backstop
-//!    until phase 2; they also reject rows that age below the floor before COMMIT.
+//!    against database `clock_timestamp()` on their admitted transaction for
+//!    each new row. Duplicate INSERTs need no floor check. This is the primary
+//!    guard. Migration 0021's deferred trigger and the writer-pool
+//!    `buzz.created_at_floor` GUC remain the mixed-version backstop until phase 2;
+//!    they also reject rows that age below the floor before COMMIT.
 //! 2. **Ordered heartbeat handshake** (this module): on one pinned writer
 //!    connection, one transaction first takes the exclusive replica-floor
 //!    advisory lock (draining compliant shared-lock channel writers), then
@@ -82,7 +83,10 @@ pub const CREATED_AT_FLOOR_SECS: i64 = 960;
 
 /// Enforce the channel-event floor on the admitted INSERT connection.
 ///
-/// One preceding SELECT keeps the five existing INSERT shapes intact. Its
+/// One SELECT keeps the five existing INSERT shapes intact. Ordinary/thread
+/// writers check after INSERT only when it inserted a row, before follow-ups;
+/// replacements check after replay exits, before superseding the old head.
+/// The caller must propagate failure and roll back the write transaction. Its
 /// database clock is sampled after BEGIN: transactions open at the probe scan
 /// are bounded by xact_start; transactions starting later sample after S. No
 /// commit hook, candidate tracking or ordering against TTL refresh is needed.
