@@ -836,7 +836,9 @@ async fn reconcile_channels(
                 } else {
                     tags.push(Tag::parse(["public"])?);
                 }
-                if channel.channel_type == "dm" {
+                if channel.channel_type == "dm"
+                    || (channel.channel_type == "system" && channel.visibility == "private")
+                {
                     tags.push(Tag::parse(["hidden"])?);
                 }
                 tags.push(Tag::parse(["closed"])?);

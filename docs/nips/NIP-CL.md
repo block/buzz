@@ -24,12 +24,16 @@ plain NIP-29, a client cannot:
 A client also cannot mark its own channels so that it can find them again.
 Channel labels (below) do this.
 
+Also, every channel that a person belongs to shows in their client as a chat.
+So a group that exists only to control who can read some data appears in
+sidebars, search results and unread counts. System channels (below) fix this.
+
 ## Channel identity tags
 
 On every channel-state event that the relay signs, the relay MUST put these
 tags in this order, before any other `t` or `P` tag:
 
-1. `["t", <channel type>]`, for example `stream`, `forum`, `dm`, `workflow`.
+1. `["t", <channel type>]`, for example `stream`, `forum`, `dm`, `workflow`, `system`.
 2. `["t", <label>]` for each channel label, in stored order (see
    [Channel labels](#channel-labels)).
 3. `["P", <creator public key, hex>]`.
@@ -123,6 +127,44 @@ supported this NIP.
 Values in one tag filter combine with OR, as in NIP-01. So
 `"#t": ["workspace", "notes"]` finds channels with either label. To require a
 label and a creator, use `#t` and `#P` together.
+
+The relay MUST match `#t` and `#P` before it applies `limit`, as NIP-01
+requires. A relay that reads the newest channel events first and matches tags
+after can return a short or empty page while matching channels exist.
+
+## Choosing one channel
+
+The relay does not make labels unique. Many channels can share a label, and
+any owner or admin can set any label. So two creates for the same label can
+both succeed, for example when two processes of one agent start at the same
+time.
+
+A client that needs one channel per creator and label:
+
+1. queries `{"kinds": [39000], "#P": ["<creator>"], "#t": ["<label>"]}`;
+2. creates the channel only if the query returns nothing; and
+3. when the query returns more than one channel, uses the oldest one.
+
+The oldest channel has the lowest `created_at` tag value, compared as an
+integer. If two channels have the same value, the lowest channel ID (`d` tag,
+compared as a string) wins. A channel without a `created_at` tag ranks after
+every channel that has one, and two channels without one compare by channel
+ID.
+Every reader that follows this rule picks the same channel, even after either
+channel is edited.
+
+## System channels
+
+A system channel exists only to control who can read some data, for example
+config that only an agent and its owner can read. It has the channel type
+`system`. In every other way it is an ordinary channel: it has members, roles,
+messages and labels.
+
+**Create.** A kind:9007 with `["channel_type", "system"]` creates a system
+channel. It is private unless the kind:9007 also has `["visibility", "open"]`.
+
+**Hidden.** While a system channel is private, its kind:39000 carries the
+NIP-29 `hidden` tag.
 
 ## Trust
 

@@ -3078,17 +3078,6 @@ async fn ingest_event_inner(
 
         // Validate visibility/channel_type for ALL kind:9007 events (with or without h-tag).
         // This runs pre-storage so invalid enums are rejected before the event is persisted.
-        let visibility_str = event
-            .tags
-            .iter()
-            .find_map(|t| {
-                if t.kind().to_string() == "visibility" {
-                    t.content().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "open".to_string());
         let channel_type_str = event
             .tags
             .iter()
@@ -3100,14 +3089,23 @@ async fn ingest_event_inner(
                 }
             })
             .unwrap_or_else(|| "stream".to_string());
-
-        let visibility: buzz_db::channel::ChannelVisibility = visibility_str
-            .parse()
-            .map_err(|_| IngestError::Rejected(format!("invalid visibility: {visibility_str}")))?;
         let channel_type: buzz_db::channel::ChannelType =
             channel_type_str.parse().map_err(|_| {
                 IngestError::Rejected(format!("invalid channel_type: {channel_type_str}"))
             })?;
+        let visibility: buzz_db::channel::ChannelVisibility =
+            match event.tags.iter().find_map(|t| {
+                if t.kind().to_string() == "visibility" {
+                    t.content().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            }) {
+                Some(visibility_str) => visibility_str.parse().map_err(|_| {
+                    IngestError::Rejected(format!("invalid visibility: {visibility_str}"))
+                })?,
+                None => channel_type.default_visibility(),
+            };
         let labels = super::side_effects::channel_labels_from_tags(&event)
             .transpose()
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?

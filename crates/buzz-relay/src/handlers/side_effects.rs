@@ -1303,8 +1303,12 @@ pub async fn emit_group_discovery_events(
             // making channel visibility self-describing for clients.
             tags.push(Tag::parse(["public"])?);
         }
-        // NIP-29 hidden tag: hint to clients not to show DMs in public group lists.
-        // Not a security boundary — access control is handled by channel-scoped storage.
+        // NIP-29 hidden tag: hide metadata from non-members. Set for DMs and
+        // for private system channels. Not a security boundary — access
+        // control is handled by channel-scoped storage.
+        if channel.channel_type == "system" && channel.visibility == "private" {
+            tags.push(Tag::parse(["hidden"])?);
+        }
         if channel.channel_type == "dm" {
             tags.push(Tag::parse(["hidden"])?);
             // Include participant pubkeys in kind:39000 for DMs so clients can
@@ -2046,17 +2050,18 @@ async fn handle_create_group(
 ) -> anyhow::Result<()> {
     let name =
         extract_tag_value(event, "name").ok_or_else(|| anyhow::anyhow!("missing name tag"))?;
-    let visibility_str =
-        extract_tag_value(event, "visibility").unwrap_or_else(|| "open".to_string());
     let channel_type_str =
         extract_tag_value(event, "channel_type").unwrap_or_else(|| "stream".to_string());
-
-    let visibility: buzz_db::channel::ChannelVisibility = visibility_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid visibility: {visibility_str}"))?;
     let channel_type: buzz_db::channel::ChannelType = channel_type_str
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid channel_type: {channel_type_str}"))?;
+    let visibility: buzz_db::channel::ChannelVisibility =
+        match extract_tag_value(event, "visibility") {
+            Some(visibility_str) => visibility_str
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid visibility: {visibility_str}"))?,
+            None => channel_type.default_visibility(),
+        };
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
     let description = extract_tag_value(event, "about");

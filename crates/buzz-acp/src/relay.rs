@@ -157,7 +157,9 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
             }
         }
     }
-    if declared_type == Some("dm") || is_hidden {
+    // `hidden` marks a DM only on metadata without a declared type; a private
+    // system channel is hidden too.
+    if declared_type == Some("dm") || (declared_type.is_none() && is_hidden) {
         "dm".to_string()
     } else if declared_type == Some("private") || is_private {
         "private".to_string()
@@ -4200,6 +4202,21 @@ mod tests {
             serde_json::json!(["t", "workspace"]),
         ];
         assert_eq!(channel_type_from_tags(&tags), "dm");
+    }
+
+    /// Mutation: treat any `hidden` metadata as a DM → RED.
+    #[test]
+    fn hidden_means_dm_only_without_a_declared_type() {
+        let system = vec![
+            serde_json::json!(["d", "c"]),
+            serde_json::json!(["t", "system"]),
+            serde_json::json!(["private"]),
+            serde_json::json!(["hidden"]),
+        ];
+        assert_eq!(channel_type_from_tags(&system), "private");
+
+        let legacy_dm = vec![serde_json::json!(["d", "c"]), serde_json::json!(["hidden"])];
+        assert_eq!(channel_type_from_tags(&legacy_dm), "dm");
     }
 
     async fn nip11_test_client(
