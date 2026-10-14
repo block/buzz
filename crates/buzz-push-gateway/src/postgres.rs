@@ -10,6 +10,10 @@ use uuid::Uuid;
 #[path = "postgres/bootstrap_tests.rs"]
 mod bootstrap_postgres_tests;
 
+#[cfg(test)]
+#[path = "postgres/desired_schema_postgres_tests.rs"]
+mod desired_schema_postgres_tests;
+
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[cfg(test)]
