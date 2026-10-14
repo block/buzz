@@ -2717,7 +2717,7 @@ impl Db {
     /// Backfill `d_tag` for existing NIP-33 events (kind 30000–39999) that have `d_tag IS NULL`.
     ///
     /// Idempotent — safe to call on every startup. No-ops when all rows are already populated.
-    /// Runs a single UPDATE touching only NIP-33 rows with NULL d_tag.
+    /// Admits each community before updating its NIP-33 rows with NULL d_tag.
     #[datastore_span(name = "backfill_d_tags", system = "postgresql")]
     pub async fn backfill_d_tags(&self) -> Result<u64> {
         let mut connection = crate::observability::acquire_writer(
@@ -2725,19 +2725,40 @@ impl Db {
             crate::observability::WriterOperation::Bootstrap,
         )
         .await?;
-        let result = sqlx::query(
-            "UPDATE events \
+        let communities: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT community_id FROM events \
+             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        drop(connection);
+        let mut updated = 0;
+        for id in communities {
+            let Some(mut tx) = crate::begin_community_sweep_transaction(
+                &self.pool,
+                CommunityId::from_uuid(id),
+                crate::observability::WriterOperation::Bootstrap,
+            )
+            .await?
+            else {
+                continue;
+            };
+            let result = sqlx::query(
+                "UPDATE events \
              SET d_tag = COALESCE( \
                  (SELECT elem->>1 FROM jsonb_array_elements(tags) AS elem \
                   WHERE elem->>0 = 'd' LIMIT 1), \
                  '' \
              ) \
-             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL \
-               AND community_write_allowed(community_id)",
-        )
-        .execute(&mut *connection)
-        .await?;
-        Ok(result.rows_affected())
+             WHERE community_id = $1 AND kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
+            )
+            .bind(id)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            updated += result.rows_affected();
+        }
+        Ok(updated)
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.

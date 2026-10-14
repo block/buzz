@@ -24,6 +24,7 @@ use buzz_core::invite::{
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
+use uuid::Uuid;
 
 use crate::error::Result;
 use crate::{CommunityId, Db};
@@ -179,22 +180,56 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
         crate::observability::WriterOperation::Maintenance,
     )
     .await?;
-    let result = sqlx::query(
-        "DELETE FROM relay_invites \
-         WHERE (community_id, id) IN (\
-             SELECT community_id, id FROM relay_invites \
-             WHERE expires_at < $1 \
-               AND community_write_allowed(community_id) \
-             ORDER BY expires_at \
-             LIMIT $2\
-         )",
+    // Keep the original global expiry order and 1,000-row ceiling. The state
+    // read only narrows candidates; admission below is the write authority.
+    let candidates = sqlx::query(
+        "SELECT invite.community_id, invite.id FROM relay_invites invite \
+         JOIN communities community ON community.id = invite.community_id \
+         WHERE invite.expires_at < $1 AND community.deletion_state = 'active' \
+           AND community.deleted_at IS NULL \
+         ORDER BY invite.expires_at LIMIT $2",
     )
     .bind(cutoff)
     .bind(RETENTION_SWEEP_BATCH_SIZE)
-    .execute(&mut *connection)
+    .fetch_all(&mut *connection)
     .await?;
+    drop(connection);
 
-    Ok(result.rows_affected())
+    let mut ordered_communities = Vec::new();
+    let mut ids_by_community = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
+    for row in candidates {
+        let community: Uuid = row.try_get("community_id")?;
+        let id: Uuid = row.try_get("id")?;
+        if !ids_by_community.contains_key(&community) {
+            ordered_communities.push(community);
+        }
+        ids_by_community.entry(community).or_default().push(id);
+    }
+
+    let mut deleted = 0;
+    for id in ordered_communities {
+        let community = CommunityId::from_uuid(id);
+        let Some(mut tx) = crate::begin_community_sweep_transaction(
+            pool,
+            community,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?
+        else {
+            continue;
+        };
+        let result = sqlx::query(
+            "DELETE FROM relay_invites WHERE community_id = $1 AND id = ANY($2) AND expires_at < $3",
+        )
+        .bind(id)
+        .bind(&ids_by_community[&id])
+        .bind(cutoff)
+        .execute(tx.conn())
+        .await?;
+        tx.commit().await?;
+        deleted += result.rows_affected();
+    }
+    Ok(deleted)
 }
 
 /// Atomically claim a v2 relay invite.

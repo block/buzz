@@ -202,6 +202,20 @@ pub(crate) async fn begin_community_write_transaction(
     .await
 }
 
+/// Begin a fleet sweep's tenant-local mutation, skipping communities whose
+/// deletion lifecycle no longer admits writes. All other failures propagate.
+pub(crate) async fn begin_community_sweep_transaction(
+    pool: &PgPool,
+    community: CommunityId,
+    operation: observability::WriterOperation,
+) -> Result<Option<AdmittedTx>> {
+    match begin_community_write_transaction(pool, community, operation).await {
+        Ok(tx) => Ok(Some(tx)),
+        Err(DbError::AccessDenied(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Database handle. Clone is cheap (Arc-backed pool).
 #[derive(Clone, Debug)]
 pub struct Db {

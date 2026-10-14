@@ -1191,6 +1191,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
                 let expired = match reaper_state.db.reap_expired_ephemeral_channels().await {
                     Ok(ids) => ids,
+                    Err(buzz_db::DbError::EphemeralReapPartial { reaped, source }) => {
+                        error!("Ephemeral reaper tick failed after partial progress: {source}");
+                        reaped
+                    }
                     Err(e) => {
                         error!("Ephemeral reaper tick failed: {e}");
                         continue;

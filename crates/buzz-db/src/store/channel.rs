@@ -847,33 +847,70 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
         crate::observability::WriterOperation::Maintenance,
     )
     .await?;
-    let rows = sqlx::query(
-        "UPDATE channels AS ch SET archived_at = NOW() \
-         FROM communities AS c \
-         WHERE ch.community_id = c.id \
-           AND ch.ttl_seconds IS NOT NULL \
+    let communities: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT ch.community_id FROM channels AS ch \
+         JOIN communities AS c ON ch.community_id = c.id \
+         WHERE ch.ttl_seconds IS NOT NULL \
            AND ch.ttl_deadline < NOW() \
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
            AND c.archived_at IS NULL \
-           AND community_write_allowed(ch.community_id) \
-         RETURNING ch.community_id, c.host, ch.id",
+           AND c.deletion_state = 'active' AND c.deleted_at IS NULL \
+         ORDER BY ch.community_id",
     )
     .fetch_all(&mut *connection)
     .await?;
-
-    rows.into_iter()
-        .map(|row| {
-            let community_id: Uuid = row.try_get("community_id")?;
-            let host: String = row.try_get("host")?;
-            let channel_id: Uuid = row.try_get("id")?;
-            Ok(ReapedEphemeralChannel {
-                community_id: CommunityId::from_uuid(community_id),
-                host,
-                channel_id,
-            })
-        })
-        .collect()
+    drop(connection);
+    let mut reaped = Vec::new();
+    for id in communities {
+        let batch: Result<Vec<ReapedEphemeralChannel>> = async {
+            let Some(mut tx) = crate::begin_community_sweep_transaction(
+                pool,
+                CommunityId::from_uuid(id),
+                crate::observability::WriterOperation::Maintenance,
+            )
+            .await?
+            else {
+                return Ok(Vec::new());
+            };
+            let rows = sqlx::query(
+                "UPDATE channels AS ch SET archived_at = NOW() \
+                 FROM communities AS c \
+                 WHERE ch.community_id = $1 AND ch.community_id = c.id \
+                   AND ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < NOW() \
+                   AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
+                   AND c.archived_at IS NULL \
+                 RETURNING ch.community_id, c.host, ch.id",
+            )
+            .bind(id)
+            .fetch_all(tx.conn())
+            .await?;
+            let parsed = rows
+                .into_iter()
+                .map(|row| {
+                    Ok(ReapedEphemeralChannel {
+                        community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                        host: row.try_get("host")?,
+                        channel_id: row.try_get("id")?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            tx.commit().await?;
+            Ok(parsed)
+        }
+        .await;
+        match batch {
+            Ok(rows) => reaped.extend(rows),
+            Err(error) if reaped.is_empty() => return Err(error),
+            Err(error) => {
+                return Err(DbError::EphemeralReapPartial {
+                    reaped,
+                    source: Box::new(error),
+                });
+            }
+        }
+    }
+    Ok(reaped)
 }
 
 impl Db {

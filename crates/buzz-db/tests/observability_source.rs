@@ -164,7 +164,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("d-tag backfill must precede discovery deletion")
         .0;
     assert!(backfill_d_tags.contains("WriterOperation::Bootstrap"));
-    assert!(backfill_d_tags.contains("execute(&mut *connection)"));
+    assert!(backfill_d_tags.contains("begin_community_sweep_transaction("));
+    assert!(backfill_d_tags.contains("execute(tx.conn())"));
     let soft_delete_discovery = event
         .split_once("pub async fn soft_delete_discovery_events")
         .expect("event store must expose discovery-event deletion")

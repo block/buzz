@@ -8,6 +8,83 @@ pub(crate) fn database_url() -> String {
         .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned())
 }
 
+/// One-session fixture that bypasses ordinary write-fence triggers while
+/// retaining application admission. Communities are active, quiescing, fenced.
+pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 3]) {
+    use buzz_core::CommunityId;
+    use uuid::Uuid;
+
+    let db = crate::Db::new(&crate::DbConfig {
+        database_url: database_url(),
+        max_connections: 1,
+        min_connections: 1,
+        ..crate::DbConfig::default()
+    })
+    .await
+    .expect("connect test database");
+    let pool = &db.pool;
+    let mut communities = [CommunityId::from_uuid(Uuid::nil()); 3];
+    for community in &mut communities {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(format!("admission-{id}.example"))
+            .execute(pool)
+            .await
+            .expect("create community");
+        *community = CommunityId::from_uuid(id);
+    }
+    set_deletion_state(pool, *communities[1].as_uuid(), "quiescing").await;
+    set_deletion_state(pool, *communities[2].as_uuid(), "fenced").await;
+    // The one physical session serves every API call in this fixture.
+    sqlx::query("SET session_replication_role = replica")
+        .execute(pool)
+        .await
+        .expect("disable ordinary triggers");
+    let role: String = sqlx::query_scalar("SHOW session_replication_role")
+        .fetch_one(pool)
+        .await
+        .expect("read replication role");
+    assert_eq!(role, "replica");
+    // A raw write to the fenced tenant proves the DB backstop is bypassed.
+    sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+        .bind(communities[2].as_uuid())
+        .bind(vec![0xfe_u8; 32])
+        .execute(pool)
+        .await
+        .expect("raw fenced insert succeeds with triggers disabled");
+    (db, communities)
+}
+
+/// In one per-test database, make any return to the retired SQL predicate
+/// observable without changing the production function in the public schema.
+pub(crate) async fn reject_legacy_sql_fence_predicate(pool: &sqlx::PgPool) {
+    sqlx::query("CREATE SCHEMA admission_test")
+        .execute(pool)
+        .await
+        .expect("create test-only function schema");
+    sqlx::query(
+        "CREATE FUNCTION admission_test.community_write_allowed(uuid) RETURNS boolean \
+         LANGUAGE plpgsql VOLATILE AS $$ BEGIN \
+           RAISE EXCEPTION 'legacy SQL fence predicate called'; END $$",
+    )
+    .execute(pool)
+    .await
+    .expect("shadow legacy SQL predicate");
+    sqlx::query("SET search_path = admission_test, public")
+        .execute(pool)
+        .await
+        .expect("resolve test-local predicate first");
+    let shadowed: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('community_write_allowed(uuid)') = \
+                to_regprocedure('admission_test.community_write_allowed(uuid)')",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("resolve shadowed predicate");
+    assert!(shadowed);
+}
+
 /// Move a community fixture into a deletion lifecycle state the way the
 /// executor does: the tombstone trigger only accepts lifecycle changes from a
 /// transaction carrying the executor GUCs for that community, including its
