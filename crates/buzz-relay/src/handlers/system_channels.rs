@@ -109,6 +109,57 @@ pub(crate) async fn readable_system_channels_for_filters(
     Ok(readable)
 }
 
+/// Move system channels out of the repaired tail of the implicit set.
+///
+/// A request re-checks membership for named channels missing from its first
+/// lookups, and [`super::req::resolve_request_local_access`] appends each
+/// confirmed one to the implicit set. A system channel lands there when the
+/// reader joins it between the lookups and the re-check. This moves it to
+/// `readable_system`, so only the filters that name it can read it.
+///
+/// `repaired_from` is the length of `implicit` before the re-check. The tail
+/// after it holds the repaired channels; nothing before it is a system
+/// channel.
+pub(crate) async fn keep_repaired_system_channels_named(
+    state: &AppState,
+    community: CommunityId,
+    implicit: &mut Vec<Uuid>,
+    repaired_from: usize,
+    readable_system: &mut Vec<Uuid>,
+) -> Result<(), buzz_db::DbError> {
+    let Some(repaired) = implicit
+        .get(repaired_from..)
+        .filter(|tail| !tail.is_empty())
+    else {
+        return Ok(());
+    };
+    let system = state
+        .db
+        .system_channel_ids_among(community, repaired)
+        .await?;
+    move_system_channels(implicit, repaired_from, &system, readable_system);
+    Ok(())
+}
+
+fn move_system_channels(
+    implicit: &mut Vec<Uuid>,
+    repaired_from: usize,
+    system: &[Uuid],
+    readable_system: &mut Vec<Uuid>,
+) {
+    if system.is_empty() {
+        return;
+    }
+    let repaired = implicit.split_off(repaired_from);
+    for id in repaired {
+        if !system.contains(&id) {
+            implicit.push(id);
+        } else if !readable_system.contains(&id) {
+            readable_system.push(id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +208,29 @@ mod tests {
         assert_eq!(
             filter_channel_scope(&other, &implicit, &readable).as_ref(),
             &[open]
+        );
+    }
+
+    #[test]
+    fn a_repaired_system_channel_stays_in_the_filter_that_names_it() {
+        let open = Uuid::new_v4();
+        let repaired_open = Uuid::new_v4();
+        let joined_system = Uuid::new_v4();
+        let mut implicit = vec![open, repaired_open, joined_system];
+        let mut readable = Vec::new();
+        move_system_channels(&mut implicit, 1, &[joined_system], &mut readable);
+        assert_eq!(implicit, [open, repaired_open]);
+        assert_eq!(readable, [joined_system]);
+
+        let names_it = filter(serde_json::json!({"#h": [joined_system.to_string()]}));
+        assert_eq!(
+            filter_channel_scope(&names_it, &implicit, &readable).as_ref(),
+            &[open, repaired_open, joined_system]
+        );
+        let sibling = filter(serde_json::json!({"kinds": [39000]}));
+        assert_eq!(
+            filter_channel_scope(&sibling, &implicit, &readable).as_ref(),
+            &[open, repaired_open]
         );
     }
 

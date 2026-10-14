@@ -336,6 +336,58 @@ async fn system_channels_are_read_only_by_name() {
     );
 }
 
+/// A reader can join a private system channel after the request loads its
+/// readable system channels and before it re-checks a named channel. The
+/// re-check then confirms membership. The channel must stay in the scope of
+/// the filter that names it, not the request-wide implicit set, so a sibling
+/// filter that never names it cannot read it.
+/// Mutation: drop `keep_repaired_system_channels_named` from
+/// `repair_requested_channel_access` → RED (the sibling filter's scope gets
+/// the channel).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_system_channel_joined_mid_request_stays_in_its_named_filter() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let system = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    let ordinary = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+
+    let filters: Vec<nostr::Filter> = serde_json::from_value(json!([
+        {"kinds": [9], "#h": [system.to_string()]},
+        {"kinds": [39000]},
+    ]))
+    .expect("filters");
+    let mut implicit = f
+        .state
+        .db
+        .get_accessible_channel_ids(f.tenant.community(), &owner.public_key().to_bytes())
+        .await
+        .expect("implicit channels");
+    assert_eq!(implicit, [ordinary]);
+    // The request's system-channel lookup ran before the join.
+    let mut readable_system = Vec::new();
+
+    crate::api::bridge::repair_requested_channel_access(
+        &f.state,
+        &f.tenant,
+        &filters,
+        &owner.public_key().to_bytes(),
+        &mut implicit,
+        &mut readable_system,
+    )
+    .await
+    .expect("repair");
+
+    assert_eq!(implicit, [ordinary], "implicit set stays ordinary");
+    assert_eq!(readable_system, [system]);
+    let scope = |filter| {
+        crate::handlers::system_channels::filter_channel_scope(filter, &implicit, &readable_system)
+            .into_owned()
+    };
+    assert_eq!(scope(&filters[0]), [ordinary, system], "naming filter");
+    assert_eq!(scope(&filters[1]), [ordinary], "sibling filter");
+}
+
 /// Adding a member to a system channel sends no kind:44100 notification,
 /// which an existing client would show as a new channel. An ordinary
 /// channel still sends one, so the check is not vacuous.

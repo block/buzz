@@ -128,7 +128,7 @@ pub async fn handle_req(
     }
     // System channels are outside `accessible_channels`. A filter that names
     // one adds it to its own scope only (see `system_channels`).
-    let readable_system = match super::system_channels::readable_system_channels_for_filters(
+    let mut readable_system = match super::system_channels::readable_system_channels_for_filters(
         &state,
         conn.tenant.community(),
         &pubkey_bytes,
@@ -165,6 +165,7 @@ pub async fn handle_req(
     // is what fixes the search false-miss: a `#h=<just-added>` search would
     // otherwise be scoped against the stale vector and return empty.
     if let Some(requested) = requested_channel_ids.as_ref() {
+        let repaired_from = accessible_channels.len();
         for &ch_id in requested {
             let token_allows = token_channel_ids
                 .as_deref()
@@ -208,6 +209,19 @@ pub async fn handle_req(
                 token_allows,
                 db_is_member,
             );
+        }
+        if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
+            &state,
+            conn.tenant.community(),
+            &mut accessible_channels,
+            repaired_from,
+            &mut readable_system,
+        )
+        .await
+        {
+            warn!(conn_id = %conn_id, "Failed to classify repaired channels: {e}");
+            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            return;
         }
     }
 
@@ -1210,7 +1224,7 @@ fn filter_to_query_params(
         .filter(|values| !values.is_empty())
         .map(|values| values.iter().map(|v| v.to_string()).collect());
 
-    let tag_values = group_state_tag_values(filter, kinds.as_deref());
+    let tag_values = group_state_tag_values(filter);
 
     EventQuery {
         channel_id,
@@ -1241,16 +1255,8 @@ fn filter_to_query_params(
 /// The SQL match is exact NIP-01 tag matching (see
 /// [`EventQuery::tag_values`]), so no false candidate can take a place in
 /// the page. The caller's NIP-01 post-filter still runs on each event.
-fn group_state_tag_values(filter: &Filter, kinds: Option<&[i32]>) -> Vec<(String, Vec<String>)> {
-    let group_state_only = kinds.is_some_and(|ks| {
-        !ks.is_empty()
-            && ks.iter().all(|&k| {
-                (buzz_core::kind::KIND_NIP29_GROUP_METADATA as i32
-                    ..=buzz_core::kind::KIND_NIP29_GROUP_ROLES as i32)
-                    .contains(&k)
-            })
-    });
-    if !group_state_only {
+fn group_state_tag_values(filter: &Filter) -> Vec<(String, Vec<String>)> {
+    if !super::system_channels::filter_is_group_state_only(filter) {
         return Vec::new();
     }
     [

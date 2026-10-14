@@ -255,6 +255,48 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     f.db.validate_deletion_serving_catalog().await.unwrap();
 }
 
+/// An artifact in a system channel is read only by a query whose `#h` names
+/// that channel (NIP-CL), even when the channel is open.
+/// Mutation: drop the `channel_type` condition from `query_artifacts` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn system_channel_artifacts_are_read_only_by_name() {
+    let f = Fixture::new().await;
+    let system = Uuid::new_v4();
+    sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by) VALUES($1,$2,$3,'open','system',$4)")
+        .bind(f.community.as_uuid())
+        .bind(system)
+        .bind(system.to_string())
+        .bind(f.owner.public_key().to_bytes().as_slice())
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    for home in [f.a, system] {
+        let create = f.revision(Uuid::new_v4(), "create", home, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&create, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+    }
+    for reader in [&f.owner, &f.peer] {
+        let (events, _) = f
+            .query(reader, serde_json::json!({"artifact":"current"}), false)
+            .await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(homes, [Some(f.a)], "no #h");
+        assert_eq!(
+            f.count(reader, serde_json::json!({"artifact":"current"}))
+                .await,
+            1
+        );
+        let named = serde_json::json!({"artifact":"current","#h":[system.to_string()]});
+        let (events, _) = f.query(reader, named.clone(), false).await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(homes, [Some(system)], "#h names the system channel");
+        assert_eq!(f.count(reader, named).await, 1);
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn repeated_moves_get_distinct_source_safe_markers() {

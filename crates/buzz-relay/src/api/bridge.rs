@@ -1440,23 +1440,24 @@ async fn query_events_authed(
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
     // System channels are outside `accessible_channels`; a filter that names
     // one reads it in its own scope only (see `handlers::system_channels`).
-    let readable_system = crate::handlers::system_channels::readable_system_channels_for_filters(
-        state,
-        tenant.community(),
-        &pubkey_bytes,
-        &filters,
-        &accessible_channels,
-        None,
-    )
-    .await
-    .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
+    let mut readable_system =
+        crate::handlers::system_channels::readable_system_channels_for_filters(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            &filters,
+            &accessible_channels,
+            None,
+        )
+        .await
+        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
-        &readable_system,
+        &mut readable_system,
     )
     .await?;
 
@@ -1887,14 +1888,15 @@ async fn query_events_authed(
     Ok(Json(Value::Array(events)))
 }
 
-async fn repair_requested_channel_access(
+pub(crate) async fn repair_requested_channel_access(
     state: &AppState,
     tenant: &TenantContext,
     filters: &[nostr::Filter],
     pubkey_bytes: &[u8],
     accessible_channels: &mut Vec<uuid::Uuid>,
-    readable_system: &[uuid::Uuid],
+    readable_system: &mut Vec<uuid::Uuid>,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    let repaired_from = accessible_channels.len();
     for filter in filters {
         let Some(requested) =
             crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
@@ -1919,7 +1921,15 @@ async fn repair_requested_channel_access(
             );
         }
     }
-    Ok(())
+    crate::handlers::system_channels::keep_repaired_system_channels_named(
+        state,
+        tenant.community(),
+        accessible_channels,
+        repaired_from,
+        readable_system,
+    )
+    .await
+    .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -2077,23 +2087,24 @@ async fn count_events_authed(
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
     // System channels are outside `accessible_channels`; a filter that names
     // one reads it in its own scope only (see `handlers::system_channels`).
-    let readable_system = crate::handlers::system_channels::readable_system_channels_for_filters(
-        state,
-        tenant.community(),
-        &pubkey_bytes,
-        &filters,
-        &accessible_channels,
-        None,
-    )
-    .await
-    .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
+    let mut readable_system =
+        crate::handlers::system_channels::readable_system_channels_for_filters(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            &filters,
+            &accessible_channels,
+            None,
+        )
+        .await
+        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
-        &readable_system,
+        &mut readable_system,
     )
     .await?;
 

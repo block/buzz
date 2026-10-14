@@ -101,7 +101,7 @@ pub async fn handle_count(
     }
     // System channels are outside `accessible_channels`; a filter that names
     // one counts it in its own scope only, as in the WS REQ handler.
-    let readable_system = match super::system_channels::readable_system_channels_for_filters(
+    let mut readable_system = match super::system_channels::readable_system_channels_for_filters(
         &state,
         conn.tenant.community(),
         &pubkey_bytes,
@@ -163,6 +163,7 @@ pub async fn handle_count(
             && !result_gated_count_safe_for_pushdown(filter, &authed_pubkey_hex);
 
         if let Some(requested_channels) = requested_channels {
+            let repaired_from = accessible_channels.len();
             for &ch_id in &requested_channels {
                 if accessible_channels.contains(&ch_id) || readable_system.contains(&ch_id) {
                     continue;
@@ -192,6 +193,19 @@ pub async fn handle_count(
                     token_allows,
                     db_is_member,
                 );
+            }
+            if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
+                &state,
+                conn.tenant.community(),
+                &mut accessible_channels,
+                repaired_from,
+                &mut readable_system,
+            )
+            .await
+            {
+                warn!(sub_id = %sub_id, "Failed to classify repaired channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
             }
             let filter_scope = super::system_channels::filter_channel_scope(
                 filter,
