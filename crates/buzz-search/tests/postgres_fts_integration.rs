@@ -1730,6 +1730,15 @@ async fn profile_names_match_name_words_only() {
     assert!(profile_names(&pool, c, "%", 1, 100).await.is_empty());
     assert!(profile_names(&pool, c, "   ", 1, 100).await.is_empty());
 
+    // The query and the names are normalized by the same SQL, so a non-ASCII
+    // exact name is tier 0 whatever the database collation lower-cases.
+    let emile = put_profile(&pool, c, r#"{"name":"Émile"}"#, 1_700_000_200).await;
+    let emilee = put_profile(&pool, c, r#"{"name":"Émilee"}"#, 1_700_000_210).await;
+    assert_eq!(
+        profile_names(&pool, c, "Émile", 1, 100).await,
+        vec![emile, emilee]
+    );
+
     teardown(pool, &schema).await;
 }
 

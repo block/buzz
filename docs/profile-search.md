@@ -42,8 +42,11 @@ Results are ordered:
 3. a name with a later word that starts with the query;
 4. any other match.
 
-Ties keep the NIP-50 order (relevance, newest first, event id), so pages do
-not overlap. Profile content that is not a JSON object, or a name field that
+For these tiers the query and both names are lower-cased, with whitespace
+runs collapsed to one space and trimmed, by the same database expression.
+Ties go by relevance of the query to the two names alone (not the whole
+profile, as in NIP-50), then newest first, then event id, so pages do not
+overlap. Profile content that is not a JSON object, or a name field that
 is not a string, never matches. Content that PostgreSQL cannot read as `jsonb`
 (for example a `\u0000` escape or very deep nesting) has no names, so it
 never matches and never makes the search fail

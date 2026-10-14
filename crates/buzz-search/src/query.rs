@@ -356,6 +356,14 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     Ok(SearchResult { hits, page })
 }
 
+/// The SQL that normalizes a name, and the query, for result tiers, around
+/// its argument: lower-cased, whitespace runs collapsed to one space, trimmed.
+const TIER_TEXT: [&str; 2] = ["btrim(regexp_replace(lower(", "), '\\s+', ' ', 'g'))"];
+
+fn tier_name(column: &str) -> String {
+    format!("{}{column}{}", TIER_TEXT[0], TIER_TEXT[1])
+}
+
 /// Largest page size [`search_profile_names`] accepts.
 pub const PROFILE_NAMES_PER_PAGE_MAX: u32 = 100;
 
@@ -369,9 +377,12 @@ pub const PROFILE_NAMES_PER_PAGE_MAX: u32 = 100;
 /// names; the existing `search_tsv` index stays the access path.
 ///
 /// Order: a name equal to the query, then a name that starts with it, then a
-/// name with a word that starts with it, then any other match. Ties keep the
-/// NIP-50 order (rank, newest first, id), so pages are stable. Pages are
-/// 1-based, like [`SearchQuery::page`].
+/// name with a word that starts with it, then any other match. The query and
+/// names are compared lower-cased with whitespace collapsed, both normalized
+/// by the same SQL. Ties go by relevance of the query to the two names
+/// (`ts_rank_cd` over the names alone, not the whole profile), then newest
+/// first, then event id, so pages are stable. Pages are 1-based, like
+/// [`SearchQuery::page`].
 #[datastore_span(name = "search_profile_names", system = "postgresql")]
 pub async fn search_profile_names(
     pool: &PgPool,
@@ -389,14 +400,8 @@ pub async fn search_profile_names(
     };
     let per_page = per_page.clamp(1, PROFILE_NAMES_PER_PAGE_MAX);
     let offset = ((page - 1) as i64) * (per_page as i64);
-    // Tiers compare the query as typed, with whitespace runs collapsed, to
-    // each lower-cased name (spaces collapsed too).
-    let typed = search_text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-
+    // Tiers compare the query and each name after the same SQL normalization
+    // ([`TIER_TEXT`]), so the two sides agree by construction.
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT id, kind, pubkey, channel_id, created_at_s, rank FROM (\
          SELECT e.id, e.kind, e.pubkey, e.channel_id, \
@@ -405,13 +410,11 @@ pub async fn search_profile_names(
          LEAST(",
     );
     for field in ["names.name", "names.display_name"] {
-        qb.push(format!("CASE WHEN {field} = "));
-        qb.push_bind(typed.clone());
-        qb.push(format!(" THEN 0 WHEN starts_with({field}, "));
-        qb.push_bind(typed.clone());
-        qb.push(format!(") THEN 1 WHEN strpos({field}, ' ' || "));
-        qb.push_bind(typed.clone());
-        qb.push(") > 0 THEN 2 ELSE 3 END");
+        qb.push(format!(
+            "CASE WHEN {field} = search_query.typed THEN 0 \
+             WHEN starts_with({field}, search_query.typed) THEN 1 \
+             WHEN strpos({field}, ' ' || search_query.typed) > 0 THEN 2 ELSE 3 END"
+        ));
         if field == "names.name" {
             qb.push(", ");
         }
@@ -421,15 +424,20 @@ pub async fn search_profile_names(
          FROM events e CROSS JOIN LATERAL (SELECT ",
     );
     push_tsquery(&mut qb, SearchMode::Prefix, &search_text);
-    qb.push(
-        " AS query) AS search_query \
+    qb.push(" AS query, ");
+    qb.push(TIER_TEXT[0]);
+    qb.push_bind(search_text.clone());
+    qb.push(TIER_TEXT[1]);
+    qb.push(format!(
+        " AS typed) AS search_query \
          CROSS JOIN LATERAL profile_name_fields(e.content) AS fields \
          CROSS JOIN LATERAL (SELECT \
            to_tsvector('simple', concat_ws(' ', fields.name, fields.display_name)) AS tsv, \
-           regexp_replace(lower(btrim(fields.name)), '\\s+', ' ', 'g') AS name, \
-           regexp_replace(lower(btrim(fields.display_name)), '\\s+', ' ', 'g') AS display_name) AS names \
+           {} AS name, {} AS display_name) AS names \
          WHERE e.community_id = ",
-    );
+        tier_name("fields.name"),
+        tier_name("fields.display_name"),
+    ));
     qb.push_bind(*community.as_uuid());
     qb.push(
         " AND e.kind = 0 AND e.channel_id IS NULL AND e.deleted_at IS NULL \
