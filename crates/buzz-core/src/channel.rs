@@ -199,6 +199,16 @@ impl ChannelType {
             Self::System => "system",
         }
     }
+
+    /// Visibility of a new channel of this type when its create event has no
+    /// `visibility` tag. A system channel holds access-control data, so it is
+    /// private unless its creator asks for open.
+    pub fn default_visibility(&self) -> ChannelVisibility {
+        match self {
+            Self::System => ChannelVisibility::Private,
+            Self::Stream | Self::Forum | Self::Dm | Self::Workflow => ChannelVisibility::Open,
+        }
+    }
 }
 
 impl fmt::Display for ChannelType {
