@@ -83,6 +83,7 @@ import 'thread_replies_provider.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
