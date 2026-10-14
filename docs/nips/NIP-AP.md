@@ -429,18 +429,6 @@ Team sections are resolved independently (see "Launch with teams"). The client d
 
 A change to the agent's instructions or to any of its teams MUST take effect no later than the agent's next session start. A client MAY apply it sooner, including to an active session between turns, and MAY start a new session to apply it. An active session need not be interrupted. A client that lets local configuration override the resolved instructions SHOULD show the owner that an override is in effect.
 
-### Launch records
-
-A client SHOULD record, for each session start, the config it used:
-
-- the revision ID of the agent's `buzz.agent.settings` artifact, or that it had none;
-- the revision ID of its `buzz.agent.instructions` artifact; or the event ID of the `kind:30175` definition or legacy `kind:30177` event whose prompt it used; or that the layer came from local configuration or was empty;
-- the team id and `buzz.team` revision ID of every team section delivered;
-- a SHA-256 hash of the agent's own layer and of each team section as delivered, after composition and any local override, and the source of any override;
-- a run identifier and the start time.
-
-A launch record shows what the client handed to the harness, not that the harness used it.
-
 ### Deleting an agent
 
 A client deletes an agent by archiving its agent config channel. A client MUST NOT start a new session for an agent whose config channel is archived. An active session need not be interrupted. The archived channel stays discoverable, so the agent can be recovered by unarchiving it. Purging the channel is a separate action. Deleting an agent never purges a team's config or history.
