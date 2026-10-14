@@ -374,7 +374,7 @@ In every case the client keeps only channels whose type is `system`, whose label
 | `buzz.agent.instructions` | agent config | `Agent instructions` | | `{"version": 1, "text": "<string>"}` |
 | `buzz.team` | team config | the team name | `["team", "<team-id>"]` | `{"version": 1, "name": "<string>", "instructions": "<string>"}` |
 
-A config channel holds at most one artifact of each of its types. Its `d` is the UUIDv5 of the type name in the namespace of the channel's UUID, so two clients creating the same artifact collide on `d` and one create fails. A client accepts a config artifact only when its `d`, `type`, and `h` match the config channel it was read from. A `buzz.team` artifact has no member list; members come from the channel (see "Membership").
+A config channel holds at most one artifact of each of its types. Its `d` is the UUIDv5 of the type name in the namespace of the channel's UUID, so two clients creating the same artifact collide on `d` and one create fails. The client whose create fails fetches the current revision and edits it; it MUST NOT choose a different `d`. A client accepts a config artifact only when its `d`, `type`, and `h` match the config channel it was read from. A `buzz.team` artifact has no member list; members come from the channel (see "Membership").
 
 **Team id.** A `buzz.team` artifact carries exactly one `team` tag, whose value is the team id. A client MUST check that the team id's subject label equals the channel's subject label, and MUST treat the artifact as invalid otherwise.
 
@@ -404,7 +404,7 @@ Only an absent artifact lets a client fall back to another source (see "Launch c
 
 Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. Guests can only read them. The owner makes an agent read-only for a config channel by giving it the guest role there.
 
-Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires.
+Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires. An edit MUST keep any JSON fields and tags the client does not recognise.
 
 ### History
 
