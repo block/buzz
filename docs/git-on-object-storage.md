@@ -133,6 +133,61 @@ with the relay event published best-effort afterward — so making manifest-CAS 
 commit, with the event derived from it, is the change, not just a storage swap.
 See §Implementation Correspondence.)
 
+### Default-branch management
+
+`buzz repos default-branch get/set` reads or changes the published manifest's
+symbolic `head`. It selects an **existing** `refs/heads/<branch>`; it never moves
+branch tips, creates/deletes refs, or changes packs. A subsequent push preserves
+that HEAD while the branch exists, and fresh clones check it out.
+
+This is a narrow, intentional exception to the Nostr-first API preference:
+`GET`/`POST /git/{owner}/{repo}/default-branch` completes against the host-local
+Git pointer transaction. A kind:30617 metadata edit is not equivalent: normal
+event ingest persists before side effects and duplicate acknowledgements do not
+rerun them. A new signed command/result lifecycle could drive the same CAS, but
+adds a second completion/retry protocol for this one Git-host operation. Repo
+metadata and ACLs remain in Nostr; kind:30618 remains a derived notification,
+never authoritative Git state. This exception is not a general repository-settings
+HTTP API.
+
+- Both methods require request-specific NIP-98 (exact host-derived URL/method,
+  timestamp, signature, shared fail-closed replay check). POST also requires a
+  payload hash. Reusable Smart HTTP credentials are insufficient.
+- GET requires current membership of the channel bound by the current 30617
+  announcement. POST additionally requires a non-archived channel and the repo
+  author, a named maintainer, or the recorded human owner of an agent-authored
+  repo. Push permission, channel admin status and project membership alone do
+  not grant management. Relay admission and signer/attested-owner bans apply.
+- An agent may inherit management from a verified NIP-OA owner who is also a
+  current channel member and manager. Kind-restricted credentials cannot grant
+  this HTTP authority (there is no event kind); temporal restrictions still
+  apply. Direct signer authority does not depend on an optional owner's channel
+  membership. A stored agent-owner relationship is an ownership lookup, not a
+  live delegation credential.
+- Authorization is **admission-time**: later membership/maintainer removal,
+  rebinding or archival does not cancel an already admitted write. This is
+  narrower than the vision's instantaneous-revocation aspiration. The shared
+  serving-write lease separately fences community deletion through the write.
+
+GET returns `{branch, head, manifest}`. POST accepts only
+`{branch, expected_manifest}` (maximum 4096 bytes) and returns the same snapshot
+plus `changed`. The caller's digest must match the loaded pointer. A changed
+manifest records the prior digest as its parent, then commits with that pointer's
+observed ETag. Even a no-op checks the ETag. A concurrent push or default change
+returns 409 instead of silently reloading and overwriting it.
+
+The pointer CAS is the commit point. Notification failure after commit returns
+an explicit error, not a rollback claim. The CLI sends POST once, with redirects
+disabled. Ambiguous delivery (including server errors or a lost response) is
+non-retryable `delivery_unknown` and retains the original expected digest. Read
+current state before deciding on another write; blindly running `set` without
+`--expected-manifest` would observe a fresh version and can override someone
+else's later decision. A conflict is exit code 5.
+
+Deploy relay support **before** using an updated CLI against that relay. This
+requires no schema migration and changes no live repository merely by deploying.
+See the [CLI examples](../crates/buzz-cli/README.md#default-branch).
+
 ## Axioms
 
 The protocol's safety is proved *relative to* the following properties of the

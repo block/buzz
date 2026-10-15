@@ -31,7 +31,11 @@ export function RightAuxiliaryPane({
   return (
     <aside
       className={cn(
-        "group/right-pane relative isolate flex h-full shrink-0 flex-col overflow-hidden bg-background",
+        // `isolate` lets project sheets cover threads cleanly (#6901) but
+        // traps this pane's z-40 header chrome (X/Edit) below the channel's
+        // shared z-30 header blur strip in split layout. `z-31` lifts the
+        // pane above that backdrop while staying under the z-41 thread drawer.
+        "group/right-pane relative isolate z-31 flex h-full shrink-0 flex-col overflow-hidden bg-background",
         detached
           ? "bg-transparent"
           : "before:pointer-events-none before:absolute before:bottom-0 before:left-0 before:top-0 before:z-50 before:w-px before:bg-border/80 before:content-['']",

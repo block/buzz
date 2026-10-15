@@ -44,13 +44,12 @@ test("agent picker preference skips people", async () => {
   assert.equal(view.result.current.mentionSelectedIndex, 1);
 });
 
-test("primary+Shift+M addresses the default agent or toggles the tray selection", async () => {
+test("primary+Shift+M addresses the default agent or toggles the tray selection in place", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAlwaysAddressShortcut } = await import(
     "./useAlwaysAddressShortcut.ts"
   );
   const { isMacPlatform } = await import("@/shared/lib/platform");
-  const selected = [];
   const toggled = [];
   const suggestion = {
     displayName: "Agent Ada",
@@ -78,7 +77,6 @@ test("primary+Shift+M addresses the default agent or toggles the tray selection"
           suggestions: [suggestion],
         },
         onOpenPicker: () => {},
-        onSelect: (value) => selected.push(value),
         onToggle: (value) => toggled.push(value),
       }),
     { initialProps: { isMentionOpen: false } },
@@ -86,16 +84,13 @@ test("primary+Shift+M addresses the default agent or toggles the tray selection"
 
   act(() => assert.equal(view.result.current(createEvent()), true));
   assert.deepEqual(toggled, [suggestion]);
-  assert.deepEqual(selected, []);
 
   view.rerender({ isMentionOpen: true });
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(toggled, [suggestion]);
-  assert.deepEqual(selected, [suggestion]);
+  assert.deepEqual(toggled, [suggestion, suggestion]);
 
   act(() => assert.equal(view.result.current(createEvent()), true));
-  assert.deepEqual(toggled, [suggestion]);
-  assert.deepEqual(selected, [suggestion, suggestion]);
+  assert.deepEqual(toggled, [suggestion, suggestion, suggestion]);
 });
 
 test("primary+Shift+M removes the current locked agent before choosing a new default", async () => {
@@ -126,7 +121,6 @@ test("primary+Shift+M removes the current locked agent before choosing a new def
         suggestions: [],
       },
       onOpenPicker: () => {},
-      onSelect: () => {},
       onToggle: (value) => toggled.push(value),
     }),
   );
@@ -137,7 +131,7 @@ test("primary+Shift+M removes the current locked agent before choosing a new def
         altKey: false,
         code: "KeyM",
         ctrlKey: !isMacPlatform(),
-        key: "m",
+        key: "M",
         metaKey: isMacPlatform(),
         preventDefault() {},
         repeat: false,
@@ -169,7 +163,6 @@ test("primary+Shift+M opens the picker when no default agent is ready", async ()
       onOpenPicker: () => {
         opened += 1;
       },
-      onSelect: () => {},
       onToggle: () => {},
     }),
   );
@@ -180,7 +173,7 @@ test("primary+Shift+M opens the picker when no default agent is ready", async ()
         altKey: false,
         code: "KeyM",
         ctrlKey: !isMacPlatform(),
-        key: "m",
+        key: "M",
         metaKey: isMacPlatform(),
         preventDefault() {},
         repeat: false,

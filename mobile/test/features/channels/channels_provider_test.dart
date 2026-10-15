@@ -1,18 +1,24 @@
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
+
+part 'channels_provider_live_cases.dart';
+part 'channels_provider_terminal_cases.dart';
+part 'channels_provider_readiness_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
 /// The provider loads membership-backed channels first:
 ///   1. paginated kind:39002 memberships tagged `#p:<my-pubkey>`
 ///   2. kind:39000 metadata for those channel ids
-/// then layers per-channel live subscriptions on the `#h` tag. Browse channels
+/// then layers chunked live subscriptions on the `#h` tag. Browse channels
 /// separately triggers paginated kind:39000 open-channel discovery.
 ///
 /// Tests stub out the relay session by overriding [relaySessionProvider] with
@@ -20,6 +26,7 @@ import 'package:buzz/shared/relay/relay.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _unreadReadinessCases();
   const myPk = 'me';
 
   test(
@@ -289,67 +296,88 @@ void main() {
     );
   });
 
-  test(
-    'ordinary refresh settles a superseded directory load for retry',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [_membership(_channelA, myPk)],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'discoverable'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
+  for (final rebuild in [false, true]) {
+    test(
+      '${rebuild ? 'Same-scope rebuild' : 'Ordinary refresh'} settles a superseded directory load for retry',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'discoverable'),
+          ],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
 
-      expect(
-        (await container.read(
-          channelsProvider.future,
-        )).map((channel) => channel.id),
-        [_channelA],
-      );
+        expect(
+          (await container.read(
+            channelsProvider.future,
+          )).map((channel) => channel.id),
+          [_channelA],
+        );
 
-      session.pauseNextDirectoryQuery();
-      final directory = container
-          .read(channelsProvider.notifier)
-          .retryDirectory();
-      await session.nextDirectoryQueryStarted;
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .retryDirectory();
+        await session.nextDirectoryQueryStarted;
 
-      // A foreground, reconnect, pull-to-refresh, or membership update can
-      // start an ordinary refresh while Browse is still loading discovery.
-      await container.read(channelsProvider.notifier).refresh();
+        if (rebuild) {
+          // A same-scope configuration rebuild can overlap an in-flight
+          // directory request when onboarding settles its community providers.
+          final config = container.read(relayConfigProvider);
+          container
+              .read(relayConfigProvider.notifier)
+              .update(baseUrl: config.baseUrl, nsec: config.nsec);
+          await container.read(channelsProvider.future);
+        } else {
+          await container.read(channelsProvider.notifier).refresh();
+        }
 
-      session.resumePausedDirectoryQuery();
-      await directory;
-      await _settle();
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
 
-      expect(
-        container.read(channelDirectoryLoadStatusProvider).status,
-        ChannelDirectoryLoadStatus.error,
-      );
-      expect(
-        container
-            .read(channelsProvider)
-            .requireValue
-            .map((channel) => channel.id),
-        [_channelA],
-      );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.error,
+        );
+        expect(
+          container
+              .read(channelsProvider)
+              .requireValue
+              .map((channel) => channel.id),
+          [_channelA],
+        );
 
-      await container.read(channelsProvider.notifier).retryDirectory();
+        await container.read(channelsProvider.notifier).retryDirectory();
 
-      expect(
-        container.read(channelDirectoryLoadStatusProvider).status,
-        ChannelDirectoryLoadStatus.loaded,
-      );
-      expect(
-        container
-            .read(channelsProvider)
-            .requireValue
-            .map((channel) => channel.id),
-        unorderedEquals([_channelA, _channelB]),
-      );
-    },
-  );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+        expect(
+          container
+              .read(channelsProvider)
+              .requireValue
+              .map((channel) => channel.id),
+          unorderedEquals([_channelA, _channelB]),
+        );
+      },
+    );
+  }
+
+  test('refresh disposed before directory settlement writes nothing', () async {
+    final session = _FakeRelaySession(memberships: const []);
+    final container = _buildContainer(session: session);
+    await container.read(channelsProvider.future);
+
+    final refresh = container.read(channelsProvider.notifier).refresh();
+    container.dispose();
+
+    await expectLater(refresh, completes);
+  });
 
   test(
     'community switch discards a stale directory success from the old relay',
@@ -545,13 +573,15 @@ void main() {
           .retryDirectory();
       await session.nextSubscribeStarted;
 
-      // Record every list emitted from the switch onward. The live-subscription
-      // queue is serialized, so community B's own subscribe waits behind the
-      // parked one. That makes the observable defect an emission of community
-      // A's channel into the current scope, not just a wrong final state.
+      await staleRefresh;
+      await _settle();
+
+      // The old scope's finite snapshot is allowed to publish before its live
+      // subscription becomes ready. From the actual switch onward, however,
+      // neither that snapshot nor its detached live work may republish.
       final emitted = <List<String>>[];
       container.listen(channelsProvider, (previous, next) {
-        final value = next.value;
+        final value = next.asData?.value;
         if (value != null) {
           emitted.add(value.map((channel) => channel.id).toList());
         }
@@ -562,9 +592,9 @@ void main() {
       container
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
 
       session.resumePausedSubscribe();
-      await staleRefresh;
       await _settle();
 
       expect(
@@ -849,6 +879,117 @@ void main() {
       reason: 'the newer request\'s member snapshot was clobbered',
     );
   });
+
+  test(
+    'presentation waits for unread catch-up without delaying the channel list',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: const [
+          NostrEvent(
+            id: 'initial-mention',
+            pubkey: 'alice',
+            createdAt: 50,
+            kind: 9,
+            tags: [
+              ['h', _channelA],
+              ['p', myPk],
+            ],
+            content: 'hello',
+            sig: 'sig',
+          ),
+        ],
+      )..pauseNextUnreadCatchUpQuery();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      final channels = await container.read(channelsProvider.future);
+      expect(channels.single.name, 'general');
+      final notifier = container.read(channelsProvider.notifier);
+      var ready = false;
+      final presentation = notifier.waitForUnreadCatchUp().then(
+        (_) => ready = true,
+      );
+      await session.nextUnreadCatchUpQueryStarted;
+      await _settle();
+      expect(ready, isFalse);
+      expect(notifier.observedUnreadEventsByChannel, isEmpty);
+
+      session.resumePausedUnreadCatchUpQuery();
+      await presentation;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelA],
+        contains('initial-mention'),
+      );
+      expect(ready, isTrue);
+    },
+  );
+
+  test(
+    'landing waits for destination unread generation after disconnect',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'Alpha')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+
+      session.memberships = [_membership(_channelB, myPk)];
+      session.metadata = [_meta(id: _channelB, name: 'Bravo')];
+      session.pauseNextSubscribe();
+      final subscribing = session.nextSubscribeStarted;
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://bravo.example');
+      expect(
+        (await container.read(channelsProvider.future)).single.id,
+        _channelB,
+      );
+      await subscribing;
+      var ready = false;
+      final landing = notifier.waitForUnreadCatchUp().then((_) => ready = true);
+      session.setStatus(SessionStatus.disconnected);
+      session.resumePausedSubscribe();
+      await _settle();
+      expect(
+        ready,
+        isFalse,
+        reason: 'Alpha history cannot satisfy Bravo readiness',
+      );
+
+      session.recentMessages = const [
+        NostrEvent(
+          id: 'bravo-mention',
+          pubkey: 'alice',
+          createdAt: 50,
+          kind: 9,
+          tags: [
+            ['h', _channelB],
+            ['p', myPk],
+          ],
+          content: 'Bravo mention',
+          sig: 'sig',
+        ),
+      ];
+      session.pauseNextUnreadCatchUpQuery();
+      final catchingUp = session.nextUnreadCatchUpQueryStarted;
+      session.setStatus(SessionStatus.connected);
+      await catchingUp;
+      await _settle();
+      expect(ready, isFalse);
+      session.resumePausedUnreadCatchUpQuery();
+      await landing;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelB],
+        contains('bravo-mention'),
+      );
+      expect(ready, isTrue);
+    },
+  );
 
   test('community switch discards a parked unread catch-up', () async {
     final session = _FakeRelaySession(
@@ -1535,6 +1676,7 @@ void main() {
     expect(channels.map((channel) => channel.id), [_channelA, _channelB]);
     expect(channels.first.isMember, isTrue);
     expect(channels.last.isMember, isFalse);
+    await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
   });
 
@@ -1574,38 +1716,8 @@ void main() {
     },
   );
 
-  test(
-    'subscribes per-channel with #h tags (only joined, non-archived)',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-          _membership(_channelD, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-          // channelD metadata missing -> won't appear in channel list
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-
-      // One subscription per joined, non-archived channel.
-      expect(session.subscribeFilters, hasLength(2));
-      expect(
-        session.subscribeFilters.map((f) => f.tags['#h']?.single).toSet(),
-        {_channelA, _channelB},
-      );
-      for (final filter in session.subscribeFilters) {
-        expect(filter.kinds, EventKind.channelEventKinds);
-        expect(filter.limit, 0);
-      }
-    },
-  );
+  _liveSubscriptionTests();
+  _terminalSubscriptionTests();
 
   test('retains channel-list member snapshots for immediate reuse', () async {
     final joinedAt = DateTime.fromMillisecondsSinceEpoch(1000, isUtc: true);
@@ -1625,174 +1737,6 @@ void main() {
     expect(members.map((member) => member.pubkey), [myPk, 'alice']);
     expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
   });
-
-  test(
-    'refreshing an unchanged channel set issues zero new live REQs',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final initialSubscribeCount = session.totalSubscribeCount;
-
-      await container.read(channelsProvider.notifier).refresh();
-
-      expect(session.totalSubscribeCount, initialSubscribeCount);
-      expect(session.unsubscribeCount, 0);
-      expect(session.subscribeFilters, hasLength(2));
-    },
-  );
-
-  test(
-    'live subscription diff only removes and adds changed channels',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      session.memberships = [
-        _membership(_channelB, myPk),
-        _membership(_channelD, myPk),
-      ];
-      session.metadata = [
-        _meta(id: _channelB, name: 'random'),
-        _meta(id: _channelD, name: 'support'),
-      ];
-
-      await container.read(channelsProvider.notifier).refresh();
-
-      expect(session.totalSubscribeCount, 3);
-      expect(session.unsubscribeCount, 1);
-      expect(
-        session.subscribeFilters
-            .map((filter) => filter.tags['#h']!.single)
-            .toSet(),
-        {_channelB, _channelD},
-      );
-    },
-  );
-
-  test(
-    'empty channel refresh removes every retained live subscription',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      session.memberships = [];
-      session.metadata = [];
-
-      await container.read(channelsProvider.notifier).refresh();
-
-      expect(session.activeChannels, isEmpty);
-      expect(session.activeSubscriptionCount, 0);
-      expect(session.unsubscribeCount, 2);
-    },
-  );
-
-  test(
-    'overlapping refreshes retain one live subscription per desired channel',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      session.pauseNextSubscribe();
-      session.memberships = [
-        _membership(_channelA, myPk),
-        _membership(_channelB, myPk),
-        _membership(_channelD, myPk),
-      ];
-      session.metadata = [
-        _meta(id: _channelA, name: 'general'),
-        _meta(id: _channelB, name: 'random'),
-        _meta(id: _channelD, name: 'support'),
-      ];
-
-      final firstRefresh = container.read(channelsProvider.notifier).refresh();
-      await session.nextSubscribeStarted;
-      final secondRefresh = container.read(channelsProvider.notifier).refresh();
-      session.resumePausedSubscribe();
-      await Future.wait([firstRefresh, secondRefresh]);
-
-      expect(session.activeChannels, {_channelA, _channelB, _channelD});
-      expect(session.activeSubscriptionCount, 3);
-    },
-  );
-
-  test(
-    'community switch replaces retained live subscriptions on the new relay',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [_membership(_channelA, myPk)],
-        metadata: [_meta(id: _channelA, name: 'general')],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      expect(session.activeChannels, {_channelA});
-
-      session.setStatus(SessionStatus.disconnected);
-      session.memberships = [_membership(_channelB, myPk)];
-      session.metadata = [_meta(id: _channelB, name: 'random')];
-      container
-          .read(relayConfigProvider.notifier)
-          .update(baseUrl: 'https://new-community.example');
-      await Future<void>.delayed(Duration.zero);
-      session.setStatus(SessionStatus.connected);
-      await container.read(channelsProvider.future);
-      await _waitUntil(
-        () =>
-            session.activeChannels.length == 1 &&
-            session.activeChannels.contains(_channelB),
-      );
-
-      expect(session.activeChannels, {_channelB});
-      expect(session.activeSubscriptionCount, 1);
-      expect(session.unsubscribeCount, 1);
-    },
-  );
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
@@ -1821,6 +1765,168 @@ void main() {
 
     final channels = container.read(channelsProvider).value!;
     expect(channels.single.lastMessageAt?.millisecondsSinceEpoch, 20 * 1000);
+  });
+
+  group('latest-message batch failure', () {
+    Future<List<NostrFilter>> fallbackFilters(Object error) async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      )..messageBatchError = error;
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.isNotEmpty);
+      await Future<void>.delayed(Duration.zero);
+      return session.historyFilters
+          .where(
+            (filter) =>
+                filter.kinds.contains(EventKind.streamMessageV2) &&
+                (filter.tags['#h']?.contains(_channelA) ?? false),
+          )
+          .toList();
+    }
+
+    test('a relay deadline never reaches the websocket fallback', () async {
+      expect(
+        await fallbackFilters(
+          RelayException(503, '{"error":"query timed out"}'),
+        ),
+        isEmpty,
+      );
+    });
+
+    test('an ordinary failure still uses the websocket fallback', () async {
+      expect(await fallbackFilters(Exception('bridge down')), isNotEmpty);
+    });
+  });
+
+  group('deadline-unavailable channel batches', () {
+    Object deadline() => RelayException(503, '{"error":"query timed out"}');
+    bool isUnread(List<NostrFilter> batch) =>
+        batch.isNotEmpty && batch.every((filter) => filter.since != null);
+    NostrEvent message(String id, int createdAt, {bool mention = false}) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'alice',
+          createdAt: createdAt,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            const ['h', _channelA],
+            if (mention) const ['p', myPk],
+          ],
+          content: 'hi',
+          sig: 'sig',
+        );
+
+    test('a latest-message deadline keeps known timestamps', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('m1', 30)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _settle();
+      session.latestBatchError = deadline();
+      await container.read(channelsProvider.notifier).refresh();
+      await _settle();
+      expect(
+        container.read(channelsProvider).value!.single.lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+      );
+      expect(session.messageHistoryCount, 0);
+    });
+
+    test(
+      'a cold-start latest-message deadline is filled by unread catch-up',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('mention', 30, mention: true)],
+        )..latestBatchError = deadline();
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        final notifier = container.read(channelsProvider.notifier);
+        expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+          'mention',
+        ]);
+        expect(
+          container.read(channelsProvider).value!.single.lastMessageAt,
+          DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+        );
+        expect(session.messageHistoryCount, 0);
+      },
+    );
+
+    test('unread catch-up never moves lastMessageAt backward', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('older', 30, mention: true)],
+      )..pauseNextUnreadCatchUpQuery();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await session.nextUnreadCatchUpQueryStarted;
+      // A newer live event lands while the catch-up is in flight.
+      session.emit(message('newer', 60, mention: true));
+      session.resumePausedUnreadCatchUpQuery();
+      await _settle();
+      expect(
+        container
+            .read(channelsProvider.notifier)
+            .observedUnreadEventsByChannel[_channelA]
+            ?.keys,
+        containsAll(['older', 'newer']),
+      );
+      expect(
+        container.read(channelsProvider).value!.single.lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(60 * 1000, isUtc: true),
+      );
+    });
+
+    // HTTP fails ordinarily, then a per-filter websocket fallback times out:
+    // the batch is unavailable and no later chunk is sent.
+    test('a websocket fallback deadline makes the batch unavailable', () async {
+      final ids = [for (var i = 0; i < 6; i++) 'chunk-channel-$i'];
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          for (final id in ids) _membership(id, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          for (final id in ids) _meta(id: id, name: id),
+        ],
+        recentMessages: [message('m1', 30)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _settle();
+      general() => container
+          .read(channelsProvider)
+          .value!
+          .firstWhere((channel) => channel.id == _channelA);
+      final lastMessageAt = general().lastMessageAt;
+      expect(lastMessageAt, isNotNull);
+      session
+        ..messageBatchError = Exception('bridge down')
+        ..messageHistoryError = deadline();
+      await container.read(channelsProvider.notifier).refresh();
+      await _settle();
+      // Unavailable, not empty: known timestamps survive.
+      expect(general().lastMessageAt, lastMessageAt);
+      // Each batch stops after its first chunk of four filters.
+      expect(session.messageHistoryCount % 4, 0);
+      expect(session.messageHistoryCount, lessThan(2 * ids.length));
+    });
   });
 
   test(
@@ -2196,6 +2302,7 @@ void main() {
 
       final initial = await container.read(channelsProvider.future);
       expect(initial.single.name, 'general');
+      await _waitUntil(() => session.subscribeFilters.length == 1);
       expect(session.subscribeFilters, hasLength(1));
 
       session.setStatus(SessionStatus.reconnecting);
@@ -2208,7 +2315,7 @@ void main() {
   );
 
   test(
-    'refreshes cached channels after a disconnected community switch',
+    'waits for destination channels after a disconnected community switch',
     () async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, myPk)],
@@ -2229,12 +2336,21 @@ void main() {
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://new-community.example');
       await Future<void>.delayed(Duration.zero);
-      expect(container.read(channelsProvider).value?.single.name, 'general');
+      expect(container.read(channelsProvider).isLoading, isTrue);
+      expect(container.read(channelsProvider.notifier).hasLoaded, isFalse);
+      var destinationReady = false;
+      final destination = container.read(channelsProvider.future).then((value) {
+        destinationReady = true;
+        return value;
+      });
+      await _settle();
+      expect(destinationReady, isFalse);
 
       session.setStatus(SessionStatus.connected);
       await Future<void>.delayed(Duration.zero);
 
-      expect(container.read(channelsProvider).value?.single.name, 'random');
+      expect((await destination).single.name, 'random');
+      expect(container.read(channelsProvider).isLoading, isFalse);
     },
   );
 
@@ -2296,6 +2412,7 @@ void main() {
     );
 
     // And one live subscription on the resulting channel.
+    await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
   });
 }
@@ -2304,6 +2421,9 @@ const _channelA = '11111111-1111-4111-8111-111111111111';
 const _channelB = '22222222-2222-4222-8222-222222222222';
 const _channelD = '44444444-4444-4444-8444-444444444444';
 const _otherPk = 'someone-else';
+
+String _generatedChannelId(int index) =>
+    '${index.toString().padLeft(8, '0')}-0000-4000-8000-000000000000';
 
 /// Build a kind:39002 membership event tagged with the channel id and member.
 NostrEvent _membership(
@@ -2447,10 +2567,19 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   final List<NostrFilter> historyFilters = [];
   final List<List<NostrFilter>> queryBatches = [];
+  Object? messageBatchError;
+  Object? latestBatchError;
+  Object? messageHistoryError;
+  int messageHistoryCount = 0;
+
   final List<NostrFilter> directoryQueryFilters = [];
   final List<NostrFilter> membershipQueryFilters = [];
   final List<NostrFilter> subscribeFilters = [];
-  final Map<int, (NostrFilter, void Function(NostrEvent))> _subscriptions = {};
+  final Map<
+    int,
+    (NostrFilter, void Function(NostrEvent), void Function(String message)?)
+  >
+  _subscriptions = {};
   int _nextSubscriptionKey = 0;
   Completer<void>? _pausedSubscribe;
   Completer<void>? _subscribeStarted;
@@ -2470,9 +2599,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _claimedUnreadCatchUp;
   int unsubscribeCount = 0;
   int totalSubscribeCount = 0;
+  int subscribeFailures = 0;
+  int successfulSubscribesBeforeFailure = 0;
 
   Set<String> get activeChannels => {
-    for (final (filter, _) in _subscriptions.values) ?filter.tags['#h']?.single,
+    for (final (filter, _, _) in _subscriptions.values)
+      ...filter.tags['#h'] ?? const <String>[],
   };
 
   int get activeSubscriptionCount => _subscriptions.length;
@@ -2715,6 +2847,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
       // Member metadata query — return only matching `d` tags.
       return metadata.where((e) => ids.contains(e.getTagValue('d'))).toList();
     }
+    // Per-filter websocket fallback of a message batch.
+    messageHistoryCount++;
+    if (messageHistoryError case final error?) throw error;
     return const [];
   }
 
@@ -2793,11 +2928,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return filter.until == null ? directorySnapshot : const [];
     }
     queryBatches.add(filters);
+    if (messageBatchError case final error?) throw error;
     // The unread catch-up is the only batch that carries `since` on every
     // filter; the latest-message batch leaves it null. Snapshot the messages at
     // request time so a parked response reflects the scope that asked for it.
     final isUnreadCatchUp =
         filters.isNotEmpty && filters.every((filter) => filter.since != null);
+    if (!isUnreadCatchUp && latestBatchError != null) throw latestBatchError!;
     final messageSnapshot = List.of(recentMessages);
     if (isUnreadCatchUp) {
       // Claim the parked slot so the refresh that follows the switch can run
@@ -2850,8 +2987,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
       _pausedSubscribe = null;
       _subscribeStarted = null;
     }
+    if (subscribeFailures > 0 && successfulSubscribesBeforeFailure == 0) {
+      subscribeFailures--;
+      subscribeFilters.remove(filter);
+      throw StateError('live subscription failed');
+    }
+    if (successfulSubscribesBeforeFailure > 0) {
+      successfulSubscribesBeforeFailure--;
+    }
     final subscriptionKey = ++_nextSubscriptionKey;
-    _subscriptions[subscriptionKey] = (filter, onEvent);
+    _subscriptions[subscriptionKey] = (filter, onEvent, onClosed);
     return () {
       final subscription = _subscriptions.remove(subscriptionKey);
       if (subscription == null) return;
@@ -2860,13 +3005,22 @@ class _FakeRelaySession extends RelaySessionNotifier {
     };
   }
 
+  void closeSubscriptionContaining(String channelId, String message) {
+    final entry = _subscriptions.entries.singleWhere(
+      (entry) => entry.value.$1.tags['#h']?.contains(channelId) ?? false,
+    );
+    _subscriptions.remove(entry.key);
+    subscribeFilters.remove(entry.value.$1);
+    entry.value.$3?.call(message);
+  }
+
   void setStatus(SessionStatus status) {
     state = SessionState(status: status);
   }
 
   /// Emit a live event to all subscribers.
   void emit(NostrEvent event) {
-    for (final (_, listener) in List.of(_subscriptions.values)) {
+    for (final (_, listener, _) in List.of(_subscriptions.values)) {
       listener(event);
     }
   }

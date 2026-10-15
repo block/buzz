@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -122,6 +123,31 @@ test("open agent access explains the available access before save", async ({
   await page
     .getByRole("dialog", { name: "Manage agent access" })
     .screenshot({ path: `${SHOTS}/selected-people-warning.png` });
+
+  // Compact-variant clipboard regression (D1a): the owner hint's compact
+  // PubKey must expand to and copy the viewer's complete canonical npub —
+  // the truncated trigger is only a recognition aid. The real bridge writes
+  // the browser clipboard and the poll reads it back.
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page
+    .getByTestId("agent-respond-to")
+    .getByRole("button", { name: "Show full public key" })
+    .click();
+  const copyNpubButton = page.getByRole("button", { name: "Copy npub" });
+  await copyNpubButton.click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(npubEncode("deadbeef".repeat(8)));
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "npub copied" }),
+  ).toBeVisible();
+  // Dismiss just the key popover: the access dialog stays open for the
+  // remaining mode assertions below.
+  await page.keyboard.press("Escape");
+  await expect(copyNpubButton).toHaveCount(0);
+  await expect(
+    page.getByRole("dialog", { name: "Manage agent access" }),
+  ).toBeVisible();
 
   // Only me shares nothing, so the warning goes away entirely.
   await accessSelect.selectOption("owner-only");

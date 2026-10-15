@@ -419,7 +419,7 @@
  * SCOPED to the app sidebar container, NOT :root - the `bg-sidebar-active` /
  * `text-sidebar-active-foreground` tokens are also consumed by non-sidebar
  * controls (avatar edit buttons in ProfileSettingsCard / AgentCreationPreview,
- * the selected persona row in PersonaCatalogDialog). A root-level override
+ * the selected row in CommunityCatalogDialog). A root-level override
  * turned those white (white-on-white under Buzz Dark); scoping keeps them on
  * the normal accent-driven active colors.
  */

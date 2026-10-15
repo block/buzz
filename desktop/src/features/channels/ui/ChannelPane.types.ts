@@ -59,7 +59,10 @@ export type ChannelPaneProps = {
   isJoining?: boolean;
   isSinglePanelView?: boolean;
   isSending: boolean;
+  /** Terminal channel-history failure. Cached messages remain visible when present. */
+  isTimelineError?: boolean;
   isTimelineLoading: boolean;
+  onRetryTimeline?: () => void;
   /** Newly-created message that should receive the one-shot conversation arrival motion. */
   entranceMessageId?: string | null;
   onEntranceMessageComplete?: (messageId: string) => void;

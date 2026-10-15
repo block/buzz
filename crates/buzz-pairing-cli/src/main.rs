@@ -96,6 +96,14 @@ enum CliError {
 
 #[tokio::main]
 async fn main() {
+    // Install ring as the process-level rustls CryptoProvider before any WSS
+    // connection. The documented default relay is `wss://relay.damus.io`, and a
+    // multi-package release build unifies both ring and aws-lc-rs across the
+    // workspace, so rustls cannot auto-select a provider. Without this,
+    // `buzz-pair source` panics at rustls crypto/mod.rs after printing the QR.
+    // The `let _ =` swallow is intentional: a second install returns Err.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
     if let Err(e) = run(cli.command).await {
         eprintln!("error: {e}");

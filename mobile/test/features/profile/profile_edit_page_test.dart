@@ -40,6 +40,56 @@ part 'profile_edit_page_test/image_selection_tests.dart';
 const _editorControlBottomForTest = Grid.xl + Grid.xxs;
 
 void main() {
+  testWidgets('native profile title follows every photo editor entry', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/ios_navigation_bar/842');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final header = find.byWidgetPredicate(
+      (widget) =>
+          widget is UiKitView && widget.viewType == 'buzz/ios_navigation_bar',
+    );
+    Widget page({bool direct = false}) => WidgetHelpers.testable(
+      overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+      child: ProfileEditPage(startInPhotoEditor: direct),
+    );
+    await tester.pumpWidget(page());
+    await tester.pumpAndSettle();
+    final native = tester.widget<UiKitView>(header);
+    expect(native.creationParams, containsPair('title', 'Profile'));
+    native.onPlatformViewCreated!(842);
+    await tester.pump();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    expect(
+      calls.where((call) => call.method == 'configure').last.arguments,
+      containsPair('title', 'Edit Photo'),
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(page(direct: true));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<UiKitView>(header).creationParams,
+      containsPair('title', 'Edit Photo'),
+    );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('keeps crop Save disabled while dimensions decode', (
     tester,
   ) async {
@@ -234,6 +284,10 @@ void main() {
       'placeholder': 'Display name',
       'multiline': false,
       'brightness': 'dark',
+      'pageBackgroundArgb': AppTheme.dark().colorScheme.surfaceContainerHighest
+          .toARGB32(),
+      'containerBackgroundArgb': AppTheme.dark().colorScheme.surface.toARGB32(),
+      'containerCornerRadius': Radii.container,
       'allowUnchangedSubmission': false,
     });
     expect(notifier.savedDisplayNames, ['Alice Native']);
@@ -243,6 +297,8 @@ void main() {
   testWidgets('shows profile fields and saves each one from a sheet', (
     tester,
   ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final notifier = _FakeProfileNotifier();
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -288,6 +344,7 @@ void main() {
     expect(notifier.savedDescriptions, [
       'Making collaboration feel effortless.',
     ]);
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('uses an icon-free grouped card with inset dividers', (
@@ -344,6 +401,19 @@ void main() {
     expect(find.text('Animated'), findsOneWidget);
     expect(find.text('Photo'), findsNothing);
     final modeControl = find.byKey(const ValueKey('avatar-mode-control'));
+    final modeIndicator = find.byKey(const ValueKey('avatar-mode-indicator'));
+    final controlRect = tester.getRect(modeControl);
+    final indicatorRect = tester.getRect(modeIndicator);
+    expect(indicatorRect.left - controlRect.left, Grid.quarter);
+    expect(indicatorRect.top - controlRect.top, Grid.quarter);
+    expect(controlRect.bottom - indicatorRect.bottom, Grid.quarter);
+    expect(
+      controlRect.width - Grid.quarter * 2,
+      closeTo(indicatorRect.width * 3, 0.01),
+    );
+    final indicatorDecoration =
+        tester.widget<DecoratedBox>(modeIndicator).decoration as BoxDecoration;
+    expect(indicatorDecoration.boxShadow, isNull);
     final preview = find.descendant(
       of: find.byKey(const ValueKey('avatar-editor-content')),
       matching: find.byType(AvatarImage),

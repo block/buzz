@@ -1,5 +1,10 @@
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 
+import {
+  parsePubkeyInput as parseCanonicalPubkey,
+  safeNpub,
+} from "@/shared/lib/nostrUtils";
+
 import { cronExpressionError } from "./cronExpression";
 import {
   formatDurationSeconds,
@@ -116,6 +121,29 @@ export const ACTION_LABELS: Record<ActionType, string> = {
   set_channel_topic: "Set Channel Topic",
 };
 
+const EXACT_HEX_64 = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * Display form of a DM recipient (`to`) or approver (`from`): an exact 64-char
+ * hex pubkey from stored YAML is shown as its npub; npubs, templates
+ * (`{{trigger.author}}`), roles, and any other free text pass through
+ * unchanged. Encoding failures (non-canonical hex) keep the stored value.
+ */
+function keyDisplayValue(value: string | undefined): string | undefined {
+  if (value === undefined || !EXACT_HEX_64.test(value)) return value;
+  return safeNpub(value.toLowerCase()) ?? value;
+}
+
+/**
+ * Storage form: an exact npub decodes back to the canonical hex pubkey so the
+ * wire YAML keeps its machine-readable hex contract. Hex, templates, roles,
+ * and any other free text pass through unchanged.
+ */
+function keyStorageValue(value: string): string {
+  if (!value.trim().toLowerCase().startsWith("npub1")) return value;
+  return parseCanonicalPubkey(value) ?? value;
+}
+
 function toHeaderRows(
   headers: unknown,
   stepId: string,
@@ -169,7 +197,7 @@ function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
       if (step.replyInThread) fields.reply_in_thread = true;
       break;
     case "send_dm":
-      if (step.to) fields.to = step.to;
+      if (step.to) fields.to = keyStorageValue(step.to);
       if (step.text) fields.text = step.text;
       break;
     case "call_webhook":
@@ -182,7 +210,7 @@ function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
       if (step.body) fields.body = step.body;
       break;
     case "request_approval":
-      if (step.from) fields.from = step.from;
+      if (step.from) fields.from = keyStorageValue(step.from);
       if (step.message) fields.message = step.message;
       if (step.timeout) fields.timeout = step.timeout;
       break;
@@ -624,14 +652,14 @@ export function yamlToFormState(
         text: step.text as string | undefined,
         channel: step.channel as string | undefined,
         replyInThread: step.reply_in_thread === true,
-        to: step.to as string | undefined,
+        to: keyDisplayValue(step.to as string | undefined),
         url: step.url as string | undefined,
         method: step.method as string | undefined,
         headers: toHeaderRows(step.headers, step.id),
         body: step.body as string | undefined,
         emoji: step.emoji as string | undefined,
         topic: step.topic as string | undefined,
-        from: step.from as string | undefined,
+        from: keyDisplayValue(step.from as string | undefined),
         message: step.message as string | undefined,
         timeout: step.timeout as string | undefined,
       });

@@ -590,6 +590,30 @@ test("timeline-body-surface: empty only when live and deferred rows are empty", 
   );
 });
 
+test("timeline-body-surface: terminal history failure never paints false-empty", () => {
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 0,
+      isError: true,
+      isLoading: false,
+      liveCount: 0,
+    }),
+    "error",
+  );
+});
+
+test("timeline-body-surface: cached rows stay visible after a refetch failure", () => {
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 2,
+      isError: true,
+      isLoading: false,
+      liveCount: 2,
+    }),
+    "list",
+  );
+});
+
 test("deferred-snapshot: stale when channel ids diverge during channel switch", () => {
   assert.equal(
     isDeferredTimelineSnapshotStale({

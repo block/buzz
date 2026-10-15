@@ -13,12 +13,129 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  for (final reducedMotion in [false, true]) {
+    testWidgets(
+      'iOS search field rises above tappable chips, reduced motion=$reducedMotion',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            overrides: [
+              searchProvider.overrideWith(
+                () => _FakeSearchNotifier(const SearchState.initial()),
+              ),
+              recentSearchesProvider.overrideWith(
+                () => _FakeRecentSearchesNotifier(const []),
+              ),
+              profileProvider.overrideWith(() => _FakeProfileNotifier()),
+            ],
+            child: MediaQuery(
+              data: MediaQueryData(
+                disableAnimations: reducedMotion,
+                textScaler: TextScaler.linear(reducedMotion ? 2 : 1),
+                padding: const EdgeInsets.only(top: 59),
+              ),
+              child: const SearchPage(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final field = find.byKey(const Key('search-field-container'));
+        final idle = tester.getRect(field);
+        final input = tester.element(find.byType(TextField));
+        await tester.tap(find.byKey(const Key('search-field')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
+        final middle = tester.getRect(field);
+        await tester.pumpAndSettle();
+        final active = tester.getRect(field);
+        final cancel = find.byKey(const Key('search-ios-cancel'));
+        final cancelRect = tester.getRect(cancel);
+        expect(cancel.hitTestable(), findsOneWidget);
+        expect(cancelRect.left - active.right, closeTo(Grid.xxs, 0.01));
+        expect(
+          tester.getRect(find.byType(FrostedAppBar)).right - cancelRect.right,
+          closeTo(Grid.gutter, 0.01),
+        );
+        expect(active.top, lessThan(idle.top));
+        expect(active.width, lessThan(idle.width));
+        expect(active.top, greaterThanOrEqualTo(59));
+        if (!reducedMotion) {
+          expect(middle.top, greaterThan(active.top));
+          expect(middle.top, lessThan(idle.top));
+        }
+        expect(tester.element(find.byType(TextField)), same(input));
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+          isTrue,
+        );
+        final filters = tester.getRect(
+          find.byKey(const Key('search-header-filters')),
+        );
+        expect(filters.top - active.bottom, closeTo(Grid.xxs, 0.01));
+        expect(
+          tester.getRect(find.byType(FrostedAppBar)).bottom,
+          greaterThanOrEqualTo(filters.bottom),
+        );
+        for (final label in ['All', 'Messages', 'Channels', 'People']) {
+          expect(find.text(label).hitTestable(), findsOneWidget);
+        }
+        await tester.enterText(find.byType(TextField), 'design');
+        await tester.tap(cancel);
+        await tester.pumpAndSettle();
+        expect(tester.getRect(field).top, closeTo(idle.top, 0.01));
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
+  testWidgets('iOS recent rows move once through title collapse', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(
+              List.generate(30, (i) => 'Recent query $i'),
+            ),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.text('Recent query 1');
+    final list = find.byKey(const Key('recent-searches-list'));
+    final gesture = await tester.startGesture(tester.getCenter(list));
+    await gesture.moveBy(const Offset(0, -20));
+    await tester.pump();
+    for (var i = 0; i < 5; i++) {
+      final before = tester.getTopLeft(row).dy;
+      await gesture.moveBy(const Offset(0, -20));
+      await tester.pump();
+      expect(before - tester.getTopLeft(row).dy, closeTo(20, 1));
+    }
+    await gesture.up();
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('reselecting Search uses the field activation path', (
     tester,
   ) async {
@@ -653,6 +770,44 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('same-name people results get distinct labels', (tester) async {
+    final first = 'a' * 64, second = 'b' * 64;
+    final state = SearchState(
+      query: 'scout',
+      channelResults: const [],
+      userResults: [
+        DirectoryUser(pubkey: first, displayName: 'Scout'),
+        DirectoryUser(pubkey: second, displayName: 'Scout'),
+      ],
+      messageResults: const [],
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier()),
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(
+              UserProfile(pubkey: first, displayName: 'Scout'),
+            ),
+          ),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    String title(String pubkey) => tester
+        .widget<Text>(find.byKey(ValueKey('search-person-title-$pubkey')))
+        .data!;
+    expect(title(first), isNot(title(second)));
+    expect(title(first), isNot('Scout'));
+  });
+
   testWidgets('uses compact content styles and keeps message time by author', (
     tester,
   ) async {
@@ -878,7 +1033,8 @@ void main() {
       memberCount: 2,
       isMember: true,
     );
-    const agentPubkey = 'agent-pubkey';
+    // Mention tags carry exact 64-hex keys; readers ignore anything else.
+    final agentPubkey = 'a9' * 32;
     const cachedProfile = UserProfile(pubkey: 'author-pubkey');
     final state = SearchState(
       query: 'helper',
@@ -916,7 +1072,7 @@ void main() {
             channel.id,
           ).overrideWith((ref) async => {agentPubkey}),
           agentDirectoryDisplayNamesProvider.overrideWith(
-            (ref) => const {agentPubkey: 'Helper Bot'},
+            (ref) => {agentPubkey: 'Helper Bot'},
           ),
         ],
         child: const SearchPage(),
@@ -927,9 +1083,9 @@ void main() {
     final content = tester.widget<MessageContent>(
       find.byKey(const ValueKey('search-message-body-message-1')),
     );
-    expect(content.mentionNames, const {agentPubkey: 'Helper Bot'});
+    expect(content.mentionNames, {agentPubkey: 'Helper Bot'});
     expect(content.agentMentionPubkeys, contains(agentPubkey));
-    expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+    expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
   });
 
   testWidgets('does not label an unjoined channel as having zero members', (

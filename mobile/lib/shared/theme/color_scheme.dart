@@ -2,70 +2,78 @@ import 'package:flutter/material.dart';
 
 import 'accent_colors.dart';
 
-// Catppuccin Latte (mauve accent) — matches Buzz desktop light theme
+// Buzz desktop design-system tokens: neutral surfaces/text and Radix status roles.
+// Source: buzz-app/src/shared/design-system/styles/tokens.css.
 const lightColorScheme = ColorScheme(
   brightness: Brightness.light,
-  primary: Color(0xFF8839EF), // Latte Mauve
-  onPrimary: Color(0xFFEFF1F5), // Latte Base
-  primaryContainer: Color(0xFFE6E9EF), // Latte Mantle
-  onPrimaryContainer: Color(0xFF4C4F69), // Latte Text
-  secondary: Color(0xFF6C6F85), // Latte Subtext0
+  primary: Color(0xFF262626),
+  onPrimary: Color(0xFFFFFFFF),
+  primaryContainer: Color(0xFFF0F0F0),
+  onPrimaryContainer: Color(0xFF0A0A0A),
+  secondary: Color(0xFF646464),
   onSecondary: Color(0xFFFFFFFF),
-  secondaryContainer: Color(0xFFCCD0DA), // Latte Surface1
-  onSecondaryContainer: Color(0xFF4C4F69), // Latte Text
-  tertiary: Color(0xFF1E66F5), // Latte Blue
+  secondaryContainer: Color(0xFFF0F0F0),
+  onSecondaryContainer: Color(0xFF0A0A0A),
+  tertiary: Color(0xFF0D74CE),
   onTertiary: Color(0xFFFFFFFF),
-  tertiaryContainer: Color(0xFFBCC0CC), // Latte Surface2
-  onTertiaryContainer: Color(0xFF1E66F5), // Latte Blue
-  error: Color(0xFFD20F39), // Latte Red
+  tertiaryContainer: Color(0xFFE6F4FE),
+  onTertiaryContainer: Color(0xFF113264),
+  error: Color(0xFFCE2C31),
   onError: Color(0xFFFFFFFF),
-  errorContainer: Color(0xFFFDD8E0),
-  onErrorContainer: Color(0xFFD20F39),
+  errorContainer: Color(0xFFFEEBEC),
+  onErrorContainer: Color(0xFF641723),
   surface: Color(0xFFFFFFFF),
-  onSurface: Color(0xFF4C4F69), // Latte Text
-  onSurfaceVariant: Color(0xFF6C6F85), // Latte Subtext0
-  outline: Color(0xFFBCC0CC), // Latte Surface2
-  outlineVariant: Color(0xFFCCD0DA), // Latte Surface1
-  inverseSurface: Color(0xFF4C4F69), // Latte Text
-  onInverseSurface: Color(0xFFEFF1F5), // Latte Base
-  inversePrimary: Color(0xFFA875F5), // Macchiato Mauve (saturated)
+  onSurface: Color(0xFF0A0A0A),
+  onSurfaceVariant: Color(0xFF646464),
+  outline: Color(0xFFE8E8E8),
+  outlineVariant: Color(0xFFE8E8E8),
+  inverseSurface: Color(0xFF262626),
+  onInverseSurface: Color(0xFFFFFFFF),
+  inversePrimary: Color(0xFFE5E5E5),
   shadow: Color(0xFF000000),
   scrim: Color(0xFF000000),
-  surfaceTint: Color(0xFF8839EF), // Latte Mauve
-  surfaceContainerHighest: Color(0xFFFFFFFF),
+  surfaceContainerLowest: Color(0xFFFFFFFF),
+  surfaceContainerLow: Color(0xFFF5F5F6),
+  surfaceContainer: Color(0xFFF0F0F0),
+  surfaceContainerHigh: Color(0xFFE8E8E8),
+  surfaceContainerHighest: Color(0xFFF5F5F6),
+  surfaceTint: Colors.transparent,
 );
 
-// Catppuccin Macchiato (mauve accent) — matches Buzz desktop dark theme
 const darkColorScheme = ColorScheme(
   brightness: Brightness.dark,
-  primary: Color(0xFFA875F5), // Macchiato Mauve (saturated)
-  onPrimary: Color(0xFF24273A), // Macchiato Base
-  primaryContainer: Color(0xFF363A4F), // Macchiato Surface0
-  onPrimaryContainer: Color(0xFFCAD3F5), // Macchiato Text
-  secondary: Color(0xFFA5ADCB), // Macchiato Subtext0
-  onSecondary: Color(0xFF24273A), // Macchiato Base
-  secondaryContainer: Color(0xFF494D64), // Macchiato Surface1
-  onSecondaryContainer: Color(0xFFCAD3F5), // Macchiato Text
-  tertiary: Color(0xFF8AADF4), // Macchiato Blue
-  onTertiary: Color(0xFF24273A), // Macchiato Base
-  tertiaryContainer: Color(0xFF363A4F), // Macchiato Surface0
-  onTertiaryContainer: Color(0xFF8AADF4), // Macchiato Blue
-  error: Color(0xFFED8796), // Macchiato Red
-  onError: Color(0xFF24273A), // Macchiato Base
-  errorContainer: Color(0xFF3D2030),
-  onErrorContainer: Color(0xFFED8796),
-  surface: Color(0xFF24273A), // Macchiato Base
-  onSurface: Color(0xFFCAD3F5), // Macchiato Text
-  onSurfaceVariant: Color(0xFFA5ADCB), // Macchiato Subtext0
-  outline: Color(0xFF494D64), // Macchiato Surface1
-  outlineVariant: Color(0xFF363A4F), // Macchiato Surface0
-  inverseSurface: Color(0xFFCAD3F5), // Macchiato Text
-  onInverseSurface: Color(0xFF24273A), // Macchiato Base
-  inversePrimary: Color(0xFF8839EF), // Latte Mauve
+  primary: Color(0xFFE5E5E5),
+  onPrimary: Color(0xFF0F0F0F),
+  primaryContainer: Color(0xFF2A2A2A),
+  onPrimaryContainer: Color(0xFFF5F5F5),
+  secondary: Color(0xFFC1C1C1),
+  onSecondary: Color(0xFF0F0F0F),
+  secondaryContainer: Color(0xFF2A2A2A),
+  onSecondaryContainer: Color(0xFFF5F5F5),
+  tertiary: Color(0xFF70B8FF),
+  onTertiary: Color(0xFF0F0F0F),
+  tertiaryContainer: Color(0xFF0D2847),
+  onTertiaryContainer: Color(0xFFC2E6FF),
+  error: Color(0xFFFF9592),
+  onError: Color(0xFF191111),
+  errorContainer: Color(0xFF3B1219),
+  onErrorContainer: Color(0xFFFFD1D9),
+  surface: Color(0xFF1C1C1C),
+  onSurface: Color(0xFFF5F5F5),
+  onSurfaceVariant: Color(0xFFC1C1C1),
+  outline: Color(0xFF333333),
+  outlineVariant: Color(0xFF333333),
+  inverseSurface: Color(0xFFE5E5E5),
+  onInverseSurface: Color(0xFF0F0F0F),
+  inversePrimary: Color(0xFF262626),
   shadow: Color(0xFF000000),
   scrim: Color(0xFF000000),
-  surfaceTint: Color(0xFFA875F5), // Macchiato Mauve (saturated)
-  surfaceContainerHighest: Color(0xFF1E2030), // Macchiato Mantle
+  surfaceContainerLowest: Color(0xFF0F0F0F),
+  surfaceContainerLow: Color(0xFF161616),
+  surfaceContainer: Color(0xFF232323),
+  surfaceContainerHigh: Color(0xFF2A2A2A),
+  surfaceContainerHighest: Color(0xFF2A2A2A),
+  surfaceTint: Colors.transparent,
 );
 
 /// Compute a contrast-safe foreground color for a given background.

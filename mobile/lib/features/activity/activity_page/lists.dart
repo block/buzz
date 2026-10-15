@@ -31,7 +31,7 @@ class _RemindersList extends ConsumerWidget {
     }
     if (reminders.isEmpty) {
       return const _EmptySurface(
-        icon: LucideIcons.clock,
+        icon: BuzzIcons.clock,
         message: 'No reminders',
         detail: 'Reminders you set will show up here.',
       );
@@ -53,7 +53,7 @@ class _RemindersList extends ConsumerWidget {
           return ListTile(
             key: ValueKey('reminder-row-${reminder.id}'),
             leading: Icon(
-              due ? LucideIcons.bellRing : LucideIcons.clock,
+              due ? BuzzIcons.bellRing : BuzzIcons.clock,
               size: 20,
               color: due
                   ? context.colors.primary
@@ -77,7 +77,7 @@ class _RemindersList extends ConsumerWidget {
 
 /// Drafts surface for the Drafts filter — locally saved unsent composer
 /// text that reopens the target composer.
-class _DraftsList extends StatelessWidget {
+class _DraftsList extends ConsumerWidget {
   final List<ComposeDraft> drafts;
   final ScrollController scrollController;
   final Map<String, Channel> channelById;
@@ -95,10 +95,11 @@ class _DraftsList extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final names = ref.watch(identityNameSourcesProvider);
     if (drafts.isEmpty) {
       return const _EmptySurface(
-        icon: LucideIcons.filePen,
+        icon: BuzzIcons.filePen,
         message: 'No drafts',
         detail: 'Unsent messages you start composing will show up here.',
       );
@@ -114,12 +115,16 @@ class _DraftsList extends StatelessWidget {
         final destination = channel == null
             ? 'Unavailable channel'
             : channel.isDm
-            ? resolveDmChannelDisplayLabel(channel, currentPubkey: myPubkey)
+            ? resolveDmChannelDisplayLabel(
+                channel,
+                currentPubkey: myPubkey,
+                names: names,
+              )
             : '#${channel.name}';
         return ListTile(
           key: ValueKey('draft-row-${draft.key}'),
           leading: Icon(
-            LucideIcons.filePen,
+            BuzzIcons.filePen,
             size: 20,
             color: context.colors.onSurfaceVariant,
           ),
@@ -128,7 +133,7 @@ class _DraftsList extends StatelessWidget {
             draft.threadHeadId != null ? 'Thread in $destination' : destination,
           ),
           trailing: IconButton(
-            icon: const Icon(LucideIcons.trash2, size: 18),
+            icon: const Icon(BuzzIcons.trash2, size: 18),
             tooltip: 'Delete draft',
             onPressed: () => onDelete(draft),
           ),

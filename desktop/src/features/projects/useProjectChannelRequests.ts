@@ -6,6 +6,7 @@ import { subscribeProjectChannelRequests } from "@/features/agents/observerRelay
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
+import { findProjectHomeByChannelId } from "@/features/projects/lib/projectHomeSelection";
 import { useProjectsQuery } from "@/features/projects/hooks";
 import type { ProjectChannelRequest } from "@/features/projects/projectChannelRequest";
 import {
@@ -103,14 +104,10 @@ export function useProjectChannelRequests() {
   const project =
     request == null
       ? null
-      : ([...(projectsQuery.data ?? [])]
-          .filter(
-            (candidate) =>
-              !candidate.legacy &&
-              candidate.visibility !== "unlisted" &&
-              candidate.projectChannelId === request.request.homeChannelId,
-          )
-          .sort((left, right) => left.createdAt - right.createdAt)[0] ?? null);
+      : findProjectHomeByChannelId(
+          request.request.homeChannelId,
+          projectsQuery.data ?? [],
+        );
   const template =
     request?.request.templateName == null
       ? null

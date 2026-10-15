@@ -16,6 +16,21 @@ just test               # unit + integration (starts Docker if needed)
 cargo test -p buzz-test-client -- --ignored
 ```
 
+### Review-Proven Test Standards
+
+Mined from the last 25 PRs' review threads (see Review-Proven Rules in
+[AGENTS.md](AGENTS.md)); this is the test-quality rule reviewers litigated
+most:
+
+**Regression tests must bind the production seam and be falsifiable.**
+A guard whose removal doesn't fail any test protects nothing — mutations
+survived the full mobile suite twice (PRs #6996, #7013). Don't bind a
+regression test to a test-only helper instead of the production code
+path (PR #7013). Give pure predicates a table test over the full input
+combination space (PR #6807). Scope Playwright locators — unscoped
+`getByText` in a required smoke test is a strict-mode flake (PR #6980).
+(PRs #6807, #6980, #6996, #7013)
+
 ---
 
 ## Live Local Relay
@@ -343,7 +358,7 @@ CLI-side, only two matter for testing:
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `relay error 500` or `400: restricted: not a channel member` after a code change | Stale binary | Rebuild and re-export `PATH`; or `cargo run` directly |
-| `Address already in use` on relay start (os error 48 on macOS, 98 on Linux) | Another relay (or stale process) holding `:3000` / `:8080` / `:9102` (or your override ports) | The panic line names the failing port — read it first. Then `lsof -iTCP:3000,8080,9102 -sTCP:LISTEN` (or your override equivalents). Kill the offender (`pkill -f buzz-relay`) or use the port-override block in step 3. If you already overrode and *still* collide, a prior reviewer left a relay running on the same alt ports — kill it or pick fresh ports |
+| `Address already in use` on relay start (os error 48 on macOS, 98 on Linux) | Another relay (or stale process) holding `:3000` / `:8080` / `:9102` (or your override ports) | Metrics-listener failures emit a `metrics_bind` lifecycle terminal with reason `bind`. Check the configured ports with `lsof -iTCP:3000,8080,9102 -sTCP:LISTEN` (or your override equivalents). Kill the offender (`pkill -f buzz-relay`) or use the port-override block in step 3. If you already overrode and *still* collide, a prior reviewer left a relay running on the same alt ports — kill it or pick fresh ports |
 | `auth_error: BUZZ_PRIVATE_KEY is required` | Env not exported into the CLI's shell | `export BUZZ_PRIVATE_KEY=...` (or pass `--private-key`) |
 | `auth_error: BUZZ_AUTH_TAG verification failed … signature verification failed` | A stale `BUZZ_AUTH_TAG` inherited from a parent shell. The local dev relay rejects it. | `unset BUZZ_AUTH_TAG` (see the scrub block in step 1) |
 | `auth-required: verification failed` on a closed relay | NIP-OA attestation needed | Set `BUZZ_AUTH_TAG` to the owner-issued JSON, or relax `BUZZ_REQUIRE_RELAY_MEMBERSHIP` |

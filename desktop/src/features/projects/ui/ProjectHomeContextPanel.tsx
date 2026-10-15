@@ -258,7 +258,7 @@ export function ProjectHomeContextPanel({
 
   return (
     <div
-      className="space-y-4 px-2 pb-8 pt-1"
+      className="space-y-4 px-2 pb-8 pt-3"
       data-testid="project-home-context-panel"
     >
       <ContextSection testId="project-home-context-workspace">

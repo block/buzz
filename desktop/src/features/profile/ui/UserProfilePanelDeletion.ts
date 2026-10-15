@@ -11,7 +11,6 @@ import type {
   AgentPersona,
   Channel,
   ManagedAgent,
-  PresenceLookup,
   RelayAgent,
 } from "@/shared/api/types";
 import { getRelayAgentChannelIds } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -36,7 +35,7 @@ type UseProfileAgentDeletionInput = {
   deleteManagedAgent: DeleteManagedAgentRulesContext["deleteManagedAgent"];
   managedAgent?: ManagedAgent;
   managedAgents?: readonly ManagedAgent[];
-  presenceLookup?: PresenceLookup | null;
+  getAvailability: DeleteManagedAgentRulesContext["getAvailability"];
   relayAgents?: readonly RelayAgent[];
 };
 
@@ -45,7 +44,7 @@ export function useProfileAgentDeletion({
   deleteManagedAgent,
   managedAgent,
   managedAgents,
-  presenceLookup,
+  getAvailability,
   relayAgents,
 }: UseProfileAgentDeletionInput) {
   const queryClient = useQueryClient();
@@ -83,7 +82,7 @@ export function useProfileAgentDeletion({
       deleteProfileManagedAgent(agentToDelete, {
         channels: channels ?? [],
         deleteManagedAgent,
-        presenceLookup,
+        getAvailability,
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         skipRemoteDeleteConfirm: true,
@@ -91,7 +90,7 @@ export function useProfileAgentDeletion({
     [
       channels,
       deleteManagedAgent,
-      presenceLookup,
+      getAvailability,
       relayAgents,
       removeAgentFromAllChannels,
     ],
@@ -103,7 +102,7 @@ export function useProfileAgentDeletion({
         channels: channels ?? [],
         deleteManagedAgent,
         managedAgents: managedAgents ?? [],
-        presenceLookup,
+        getAvailability,
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         selectedAgent: managedAgent,
@@ -113,7 +112,7 @@ export function useProfileAgentDeletion({
       deleteManagedAgent,
       managedAgent,
       managedAgents,
-      presenceLookup,
+      getAvailability,
       relayAgents,
       removeAgentFromAllChannels,
     ],

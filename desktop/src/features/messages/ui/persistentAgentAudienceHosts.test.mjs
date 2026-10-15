@@ -6,7 +6,7 @@ async function source(relativePath) {
   return readFile(new URL(relativePath, import.meta.url), "utf8");
 }
 
-test("supported conversation hosts opt into explicit audience contexts", async () => {
+test("only thread conversation hosts opt into persistent audiences", async () => {
   const [channelPane, threadPanel, newMessage, inboxDetail] = await Promise.all(
     [
       source("../../channels/ui/ChannelPane.tsx"),
@@ -16,9 +16,12 @@ test("supported conversation hosts opt into explicit audience contexts", async (
     ],
   );
 
-  assert.match(channelPane, /audienceContext=\{\{ type: "channel" \}\}/);
+  assert.doesNotMatch(channelPane, /audienceContext=/);
   assert.doesNotMatch(newMessage, /audienceContext=/);
-  assert.match(threadPanel, /audienceContext=\{\{ type: "thread" \}\}/);
+  assert.match(
+    threadPanel,
+    /audienceContext=\{\{[\s\S]*type: "thread",[\s\S]*rootTags: threadHead\.tags,[\s\S]*\}\}/,
+  );
   assert.match(inboxDetail, /type: "thread"/);
   assert.doesNotMatch(threadPanel, /audienceContext=\{[\s\S]*threadRootId/);
   assert.doesNotMatch(inboxDetail, /audienceContext=\{[\s\S]*threadRootId/);

@@ -278,22 +278,20 @@ export async function replayLiveSubscriptions({
       };
     });
 
-  // Sort the visible channel's subscriptions first so the user sees their
-  // active channel recover before others on degraded networks.
-  if (visibleChannelId !== null) {
-    replayRequests.sort((a, b) => {
-      const aVis =
-        (a.subscription.filter["#h"] as string[] | undefined)?.includes(
-          visibleChannelId,
-        ) ?? false;
-      const bVis =
-        (b.subscription.filter["#h"] as string[] | undefined)?.includes(
-          visibleChannelId,
-        ) ?? false;
-      if (aVis === bVis) return 0;
-      return aVis ? -1 : 1;
-    });
-  }
+  // Visible timeline and interactive consumers (including off-screen huddle
+  // speech) recover before cold work. Stable sort preserves registration order
+  // within each tier, including ties between visible and interactive owners.
+  const isForeground = (
+    subscription: Extract<RelaySubscription, { mode: "live" }>,
+  ) =>
+    subscription.priority === "interactive" ||
+    (visibleChannelId !== null &&
+      (subscription.filter["#h"]?.includes(visibleChannelId) ?? false));
+  replayRequests.sort(
+    (a, b) =>
+      Number(isForeground(b.subscription)) -
+      Number(isForeground(a.subscription)),
+  );
 
   // Send live REQs in capped batches with inter-batch delays to avoid
   // triggering per-pubkey admission control on degraded/recovering connections.

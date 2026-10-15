@@ -15,6 +15,11 @@ export type TimelineQueryStatus = {
   dataLength: number | null;
 };
 
+export type TimelineQueryLoadingStatus = TimelineQueryStatus & {
+  isEnabled: boolean;
+  isError: boolean;
+};
+
 export function selectTimelineLoadingState(
   status: TimelineQueryStatus,
   hasSettled = true,
@@ -50,6 +55,7 @@ export function resolveTimelineLoadingLatch(
   settledChannelId: string | null,
   activeChannelId: string | null,
   loadingNow: boolean,
+  canSettle = true,
 ): { settledChannelId: string | null; isLoading: boolean } {
   if (activeChannelId === null) {
     return { settledChannelId, isLoading: loadingNow };
@@ -58,9 +64,37 @@ export function resolveTimelineLoadingLatch(
     // Already settled for this channel — stay loaded through refetch blips.
     return { settledChannelId, isLoading: false };
   }
-  if (!loadingNow) {
+  if (!loadingNow && canSettle) {
     // First settle for this channel; latch it.
     return { settledChannelId: activeChannelId, isLoading: false };
   }
-  return { settledChannelId, isLoading: true };
+  return { settledChannelId, isLoading: loadingNow };
+}
+
+/**
+ * Production coordinator from the messages query state to the channel loading
+ * latch. Keeping the error guard here prevents a cold terminal failure from
+ * being recorded as an authoritative empty result before Retry starts.
+ */
+export function resolveTimelineQueryLoadingState(
+  settledChannelId: string | null,
+  activeChannelId: string | null,
+  status: TimelineQueryLoadingStatus,
+  hasPersistedHydratedChannel = false,
+): { settledChannelId: string | null; isLoading: boolean } {
+  const hasSettledThisChannel =
+    activeChannelId !== null && settledChannelId === activeChannelId;
+  const loadingNow =
+    status.isEnabled &&
+    selectTimelineLoadingState(
+      status,
+      hasSettledThisChannel || hasPersistedHydratedChannel,
+    );
+
+  return resolveTimelineLoadingLatch(
+    settledChannelId,
+    activeChannelId,
+    loadingNow,
+    !status.isError,
+  );
 }

@@ -45,14 +45,19 @@ export type RelaySubscriptionFilter = {
   authors?: string[];
   since?: number;
   until?: number;
+  /** Relay extension: composite pagination tiebreak paired with `until`. */
+  before_id?: string;
 } & Partial<Record<`#${string}`, string[]>>;
 
 type HistorySubscription = {
   mode: "history";
+  filter: RelaySubscriptionFilter;
   events: RelayEvent[];
   resolve: (events: RelayEvent[]) => void;
   reject: (error: Error) => void;
   timeout: number;
+  timeoutMs: number;
+  closedRetryAttempt?: number;
 };
 
 type FirstEventSubscription = {
@@ -68,8 +73,12 @@ export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
+  /** Client-side admission only; interactive consumers still obey cooldown/pacing. */
+  priority?: "interactive";
   onEvent: (event: RelayEvent) => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
+  /** Release readiness/cancellation listeners when this entry is retired. */
+  onRemoved?: () => void;
   lastSeenCreatedAt?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.

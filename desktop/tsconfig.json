@@ -8,6 +8,8 @@
     "paths": {
       "@/*": ["./src/*"],
       "@features-manifest": ["../preview-features.json"],
+      "@protected-features": ["./src/protectedFeatures/public.ts"],
+      "@protected-feature-components": ["./src/protectedFeatures/publicUi.ts"],
       "@model-capabilities-manifest": ["../scripts/model-capabilities.json"]
     },
 

@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BuzzAppGroupIdentifier</key>
+	<string>$(BUZZ_APP_GROUP_IDENTIFIER)</string>
+	<key>BuzzKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)$(BUZZ_KEYCHAIN_ACCESS_GROUP)</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
@@ -48,11 +52,15 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Buzz uses the camera to take profile photos and animated avatars, attach photos to messages, and scan QR codes for device pairing.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Buzz needs microphone access so you can speak in Huddles.</string>
+	<string>Buzz needs microphone access so you can speak in Huddles and record voice notes.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Buzz uses your photo library to select profile photos and images to attach to messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Buzz needs permission to save images to your photo library.</string>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INSendMessageIntent</string>
+	</array>
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

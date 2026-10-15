@@ -26,10 +26,13 @@ const TEAM_ID: &str = "team-seam";
 
 fn member(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
         id: id.to_string(),
         display_name: display_name.to_string(),
+        description: None,
         avatar_url: None,
         system_prompt: "Do the work.".to_string(),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,

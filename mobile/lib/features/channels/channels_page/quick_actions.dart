@@ -122,18 +122,8 @@ class _MorphingQuickActionsButton extends HookWidget {
             key: const Key('quick-actions-surface'),
             width: width,
             height: height,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: context.colors.primary,
-                borderRadius: borderRadius,
-                boxShadow: [
-                  BoxShadow(
-                    color: context.colors.shadow.withValues(alpha: 0.24),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
+            child: _QuickActionsSurface(
+              radius: radius,
               child: ClipRRect(
                 borderRadius: borderRadius,
                 clipBehavior: Clip.antiAlias,
@@ -220,8 +210,12 @@ class _MorphingQuickActionsButton extends HookWidget {
                                             onTap: onToggle,
                                             child: Center(
                                               child: Icon(
-                                                LucideIcons.plus,
-                                                color: context.colors.onPrimary,
+                                                BuzzIcons.plus,
+                                                color:
+                                                    defaultTargetPlatform ==
+                                                        TargetPlatform.iOS
+                                                    ? Colors.white
+                                                    : context.colors.onPrimary,
                                               ),
                                             ),
                                           ),
@@ -247,6 +241,45 @@ class _MorphingQuickActionsButton extends HookWidget {
   }
 }
 
+class _QuickActionsSurface extends StatelessWidget {
+  const _QuickActionsSurface({required this.radius, required this.child});
+
+  final double radius;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: isIos ? null : context.colors.primary,
+        borderRadius: BorderRadius.circular(radius),
+        boxShadow: [
+          BoxShadow(
+            color: context.colors.shadow.withValues(alpha: isIos ? 0.10 : 0.24),
+            blurRadius: isIos ? 20 : 12,
+            offset: Offset(0, isIos ? 8 : 4),
+          ),
+        ],
+      ),
+      child: isIos
+          ? ConcentricSheetSurface(
+              key: const ValueKey('quick-actions-ios-glass'),
+              enabled: true,
+              usesGlass: true,
+              glassTintColor: Colors.black,
+              color: Colors.black,
+              providesSheetSurface: false,
+              padding: EdgeInsets.zero,
+              minimumRadius: radius,
+              contentClipRadius: radius,
+              child: child,
+            )
+          : child,
+    );
+  }
+}
+
 class _QuickActionsMenu extends StatelessWidget {
   final ValueChanged<_QuickAction> onSelected;
 
@@ -262,21 +295,21 @@ class _QuickActionsMenu extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _QuickActionItem(
-            icon: LucideIcons.hash,
+            icon: BuzzIcons.hash,
             title: 'Create channel',
             key: const Key('quick-action-create-channel-card'),
             onTap: () => onSelected(_QuickAction.createChannel),
           ),
           const SizedBox(height: Grid.xxs),
           _QuickActionItem(
-            icon: LucideIcons.messagesSquare,
+            icon: BuzzIcons.messagesSquare,
             title: 'New direct message',
             key: const Key('quick-action-new-dm-card'),
             onTap: () => onSelected(_QuickAction.newDm),
           ),
           const SizedBox(height: Grid.xxs),
           _QuickActionItem(
-            icon: LucideIcons.compass,
+            icon: BuzzIcons.compass,
             title: 'Browse channels',
             key: const Key('quick-action-browse-channels-card'),
             onTap: () => onSelected(_QuickAction.browseChannels),
@@ -301,11 +334,14 @@ class _QuickActionItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final foreground = context.colors.onPrimary;
-    final background = Color.alphaBlend(
-      foreground.withValues(alpha: _kQuickActionCardOverlayOpacity),
-      context.colors.primary,
-    );
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final foreground = isIos ? Colors.white : context.colors.onPrimary;
+    final background = isIos
+        ? foreground.withValues(alpha: _kQuickActionCardOverlayOpacity)
+        : Color.alphaBlend(
+            foreground.withValues(alpha: _kQuickActionCardOverlayOpacity),
+            context.colors.primary,
+          );
 
     return Expanded(
       child: Material(

@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:typed_data';
 
 import 'package:buzz/shared/huddle/huddle.dart';
+import 'package:buzz/features/age_gate/age_signal_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -12,6 +13,47 @@ const _parentChannelId = '11111111-2222-4333-8444-555555555555';
 const _ephemeralChannelId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 void main() {
+  test(
+    'confirmed restriction stops retained Huddle media and transport',
+    () async {
+      final age = _MutableAgeNotifier();
+      final media = _FakeMedia();
+      final transport = _FakeTransport();
+      final container = ProviderContainer(
+        overrides: [
+          ageSignalProvider.overrideWith(() => age),
+          huddleMediaFactoryProvider.overrideWithValue(() => media),
+          huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+        ],
+      );
+      addTearDown(container.dispose);
+      final listener = container.listen(huddleSessionProvider, (_, _) {});
+      addTearDown(listener.close);
+      final controller = container.read(huddleSessionProvider.notifier);
+      await controller.join(_parameters());
+      expect(container.read(huddleSessionProvider).isConnected, isTrue);
+      expect(media.startCalls, 1);
+      expect(media.disposeCalls, 0);
+      age.setState(AgeSignalState.restricted);
+      await Future<void>.delayed(Duration.zero);
+      expect(media.disposeCalls, 1);
+      expect(transport.disposeCalls, 1);
+      expect(
+        container.read(huddleSessionProvider).phase,
+        HuddleSessionPhase.idle,
+      );
+      await expectLater(controller.join(_parameters()), throwsStateError);
+      expect(media.startCalls, 1);
+      expect(transport.connectCalls, 1);
+      age.setState(AgeSignalState.allowed);
+      await Future<void>.delayed(Duration.zero);
+      await controller.join(_parameters());
+      expect(container.read(huddleSessionProvider).isConnected, isTrue);
+      expect(media.startCalls, 2);
+      await controller.leave();
+    },
+  );
+
   test('joins unmuted and bridges remote and local Opus frames', () async {
     final media = _FakeMedia();
     final transport = _FakeTransport();
@@ -594,4 +636,8 @@ Future<void> _waitUntil(bool Function() predicate) async {
     await Future<void>.delayed(Duration.zero);
   }
   fail('Timed out waiting for asynchronous Huddle state');
+}
+
+class _MutableAgeNotifier extends AgeSignalNotifier {
+  void setState(AgeSignalState value) => state = value;
 }

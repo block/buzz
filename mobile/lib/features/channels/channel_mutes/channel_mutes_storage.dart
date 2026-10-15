@@ -85,7 +85,6 @@ class ChannelMutesStorage {
     }
   }
 
-  void write(String pubkey, ChannelMuteStore store) {
-    _prefs.setString(channelMutesKey(pubkey), jsonEncode(store.toJson()));
-  }
+  Future<bool> write(String pubkey, ChannelMuteStore store) =>
+      _prefs.setString(channelMutesKey(pubkey), jsonEncode(store.toJson()));
 }

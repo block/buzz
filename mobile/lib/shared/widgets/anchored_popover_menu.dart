@@ -20,7 +20,7 @@ Color appPopoverColor(BuildContext context) =>
 Color appPopoverShadowColor(BuildContext context) =>
     context.colors.shadow.withValues(alpha: 0.18);
 
-/// Returns the 20px shape and composer-matching hairline shared by popovers.
+/// Returns the grouped-container shape and shared popover hairline.
 RoundedRectangleBorder appPopoverShape(BuildContext context) =>
     RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(Radii.popover),

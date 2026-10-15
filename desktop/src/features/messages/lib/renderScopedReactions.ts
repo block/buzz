@@ -6,6 +6,7 @@ import type { TimelineMessage } from "../types";
 import { relayClient } from "@/shared/api/relayClient";
 import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
 import type { RelayEvent } from "@/shared/api/types";
+import { isQueryDeadlineError } from "@/shared/lib/relayError";
 
 export type RenderScopedReactionDeps = {
   fetchReactionEventsForMessages: (
@@ -24,9 +25,22 @@ const defaultDeps: RenderScopedReactionDeps = {
 };
 
 const hydratedMessageIdsByChannel = new Map<string, Set<string>>();
+// Ids held claimed after a relay deadline, so automatic re-renders skip them
+// until the user reopens the channel.
+const deadlineClaimedIdsByChannel = new Map<string, Set<string>>();
 
 export function resetRenderScopedReactionHydration() {
   hydratedMessageIdsByChannel.clear();
+  deadlineClaimedIdsByChannel.clear();
+}
+
+export function releaseDeadlineClaimedReactionIds(channelId: string) {
+  const ids = deadlineClaimedIdsByChannel.get(channelId);
+  if (!ids) {
+    return;
+  }
+  deadlineClaimedIdsByChannel.delete(channelId);
+  releaseRenderScopedReactionIds(channelId, [...ids]);
 }
 
 function hydratedSetForChannel(channelId: string): Set<string> {
@@ -130,7 +144,19 @@ export async function hydrateRenderScopedReactions(input: {
       (current = []) => sortMessages([...current, ...reactionEvents]),
     );
   } catch (error) {
-    releaseRenderScopedReactionIds(input.channelId, messageIds);
+    // Keep deadline-failed ids claimed: releasing them lets the next render
+    // re-send the same slow `#e` read. Reopening the channel releases them;
+    // other failures stay retryable immediately.
+    if (isQueryDeadlineError(error)) {
+      let held = deadlineClaimedIdsByChannel.get(input.channelId);
+      if (!held) {
+        held = new Set();
+        deadlineClaimedIdsByChannel.set(input.channelId, held);
+      }
+      for (const id of messageIds) held.add(id);
+    } else {
+      releaseRenderScopedReactionIds(input.channelId, messageIds);
+    }
     console.error(
       "Failed to hydrate visible reactions for channel",
       input.channelId,

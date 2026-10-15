@@ -72,7 +72,7 @@ test("activity pod shows workspace details without a create action", () => {
     },
   });
 
-  assert.equal(context.title, "Projects");
+  assert.equal(context.title, "Activity");
   assert.equal(context.detailsTitle, "Details");
   assert.equal(context.action, null);
   assert.deepEqual(

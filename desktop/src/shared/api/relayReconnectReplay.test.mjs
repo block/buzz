@@ -107,7 +107,7 @@ function numericList(source, pattern) {
 test("channel replay lookback stays coupled to relay and DB source constants", async () => {
   const [ingest, fence] = await Promise.all([
     readFile("../crates/buzz-relay/src/handlers/ingest.rs", "utf8"),
-    readFile("../crates/buzz-db/src/replica_fence.rs", "utf8"),
+    readFile("../crates/buzz-db/src/runtime/replica_fence.rs", "utf8"),
   ]);
   assert.match(
     ingest,

@@ -41,6 +41,28 @@ final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
       );
     });
 
+/// Contextual identity labels for one Huddle: its logical participants are
+/// the comparison context, and its bot members are agents.
+final _huddleIdentityNamesProvider = Provider.autoDispose
+    .family<IdentityNames, String>((ref, channelId) {
+      final sources = ref.watch(identityNameSourcesProvider);
+      final members =
+          ref.watch(channelMembersProvider(channelId)).value ??
+          const <ChannelMember>[];
+      final names = sources.scope(
+        ref.watch(_huddleLogicalParticipantPubkeysProvider(channelId)),
+        agentPubkeys: {
+          for (final member in members)
+            if (member.isBot) member.pubkey,
+        },
+        fallbackNames: {
+          for (final member in members) member.pubkey: ?member.displayName,
+        },
+      );
+      loadIdentityNameOwners(ref, names);
+      return names;
+    });
+
 class _HuddleParticipantProfileUpdates extends Notifier<int> {
   _HuddleParticipantProfileUpdates(this.channelId);
 
@@ -158,86 +180,100 @@ class _HuddleButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(huddleSessionProvider);
-    final latestStart = _activeHuddleStart(events);
-    final unavailableFailure =
-        session.phase == HuddleSessionPhase.failed &&
-        _isUnavailableHuddleError(session.error);
-    final activeStart =
-        unavailableFailure &&
-            session.startedEventId == latestStart?.startedEventId
-        ? null
-        : latestStart;
-    final isCurrentParent =
-        session.parentChannelId == channel.id &&
-        session.ephemeralChannelId != null &&
-        session.phase != HuddleSessionPhase.idle &&
-        !unavailableFailure;
-    final disabledByOtherHuddle =
-        session.isInSession && session.parentChannelId != channel.id;
-
+    final action = _huddleNavigationAction(context, ref, channel, events);
     return IconButton(
       key: const ValueKey('channel-huddle-button'),
       color: context.colors.primary,
-      onPressed: disabledByOtherHuddle
-          ? null
-          : () async {
-              if (isCurrentParent) {
-                _showMobileHuddleCall(
-                  context: context,
-                  ref: ref,
-                  invite: _HuddleInvite(
-                    parentChannelId: channel.id,
-                    ephemeralChannelId: session.ephemeralChannelId!,
-                    startedBy: session.isCreator
-                        ? session.currentPubkey ?? ''
-                        : '',
-                    startedEventId: session.startedEventId ?? '',
-                  ),
-                );
-                return;
-              }
-              if (activeStart != null) {
-                _openMobileHuddle(
-                  context: context,
-                  ref: ref,
-                  invite: activeStart,
-                );
-                return;
-              }
-              try {
-                await ref
-                    .read(mobileHuddleControllerProvider.notifier)
-                    .start(parentChannelId: channel.id);
-                if (!context.mounted) return;
-                final started = ref.read(huddleSessionProvider);
-                final ephemeralChannelId = started.ephemeralChannelId;
-                if (ephemeralChannelId == null) return;
-                _showMobileHuddleCall(
-                  context: context,
-                  ref: ref,
-                  invite: _HuddleInvite(
-                    parentChannelId: channel.id,
-                    ephemeralChannelId: ephemeralChannelId,
-                    startedBy: started.currentPubkey ?? '',
-                    startedEventId: started.startedEventId ?? '',
-                  ),
-                );
-              } catch (error) {
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(_huddleActionError(error))),
-                );
-              }
-            },
-      tooltip: disabledByOtherHuddle
-          ? 'Leave your current Huddle first'
-          : activeStart != null || isCurrentParent
-          ? 'Open Huddle'
-          : 'Start Huddle',
-      icon: const Icon(LucideIcons.headphones, size: 22),
+      onPressed: action.onPressed,
+      tooltip: action.label,
+      icon: const Icon(BuzzIcons.headphones, size: 22),
     );
   }
+}
+
+IosNavigationAction _huddleNavigationAction(
+  BuildContext context,
+  WidgetRef ref,
+  Channel channel,
+  List<NostrEvent> events,
+) {
+  final session = ref.watch(huddleSessionProvider);
+  final latestStart = _activeHuddleStart(events);
+  final unavailableFailure =
+      session.phase == HuddleSessionPhase.failed &&
+      _isUnavailableHuddleError(session.error);
+  final activeStart =
+      unavailableFailure &&
+          session.startedEventId == latestStart?.startedEventId
+      ? null
+      : latestStart;
+  final isCurrentParent =
+      session.parentChannelId == channel.id &&
+      session.ephemeralChannelId != null &&
+      session.phase != HuddleSessionPhase.idle &&
+      !unavailableFailure;
+  final disabledByOtherHuddle =
+      session.isInSession && session.parentChannelId != channel.id;
+
+  return IosNavigationAction(
+    symbol: 'headphones',
+    onPressed: disabledByOtherHuddle
+        ? null
+        : () async {
+            if (isCurrentParent) {
+              _showMobileHuddleCall(
+                context: context,
+                ref: ref,
+                invite: _HuddleInvite(
+                  parentChannelId: channel.id,
+                  ephemeralChannelId: session.ephemeralChannelId!,
+                  startedBy: session.isCreator
+                      ? session.currentPubkey ?? ''
+                      : '',
+                  startedEventId: session.startedEventId ?? '',
+                ),
+              );
+              return;
+            }
+            if (activeStart != null) {
+              _openMobileHuddle(
+                context: context,
+                ref: ref,
+                invite: activeStart,
+              );
+              return;
+            }
+            try {
+              await ref
+                  .read(mobileHuddleControllerProvider.notifier)
+                  .start(parentChannelId: channel.id);
+              if (!context.mounted) return;
+              final started = ref.read(huddleSessionProvider);
+              final ephemeralChannelId = started.ephemeralChannelId;
+              if (ephemeralChannelId == null) return;
+              _showMobileHuddleCall(
+                context: context,
+                ref: ref,
+                invite: _HuddleInvite(
+                  parentChannelId: channel.id,
+                  ephemeralChannelId: ephemeralChannelId,
+                  startedBy: started.currentPubkey ?? '',
+                  startedEventId: started.startedEventId ?? '',
+                ),
+              );
+            } catch (error) {
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(_huddleActionError(error))),
+              );
+            }
+          },
+    label: disabledByOtherHuddle
+        ? 'Leave your current Huddle first'
+        : activeStart != null || isCurrentParent
+        ? 'Open Huddle'
+        : 'Start Huddle',
+  );
 }
 
 class _HuddleJoinSurface extends ConsumerWidget {
@@ -309,11 +345,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            Icon(
-              LucideIcons.headphones,
-              size: 20,
-              color: context.colors.primary,
-            ),
+            Icon(BuzzIcons.headphones, size: 20, color: context.colors.primary),
             const SizedBox(width: Grid.xxs),
             Expanded(
               child: Column(
@@ -573,6 +605,12 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     );
     final profiles = ref.watch(userCacheProvider);
     final directoryDisplayNames = ref.watch(agentDirectoryDisplayNamesProvider);
+    final huddleNames = ref.watch(
+      _huddleIdentityNamesProvider(invite.ephemeralChannelId),
+    );
+    final huddleLabels = {
+      for (final pubkey in remotePubkeys) pubkey: huddleNames.labelFor(pubkey),
+    };
     final huddleTypingEntries = ref.watch(
       channelTypingProvider(invite.ephemeralChannelId),
     );
@@ -604,7 +642,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final (retryTooltip, retryIcon, onRetry) = switch (true) {
       _ when unavailable => (
         'Start a new Huddle',
-        LucideIcons.headphones,
+        BuzzIcons.headphones,
         () => unawaited(
           _startReplacementHuddle(
             context: context,
@@ -615,12 +653,12 @@ class _MobileHuddleCallPage extends ConsumerWidget {
       ),
       _ when needsMicrophoneSettings => (
         'Open Settings',
-        LucideIcons.settings,
+        BuzzIcons.settings,
         () => unawaited(sessionController.openMicrophoneSettings()),
       ),
       _ => (
         'Try again',
-        LucideIcons.refreshCw,
+        BuzzIcons.refreshCw,
         () => unawaited(
           lifecycleController.join(
             parentChannelId: invite.parentChannelId,
@@ -679,6 +717,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                         : null,
                     profiles: profiles,
                     fallbackLabels: directoryDisplayNames,
+                    contextualLabels: huddleLabels,
                     remotePubkeys: remotePubkeys,
                     localPubkey: localPubkey,
                     activeSpeakerPubkeys: session.activeSpeakerPubkeys,
@@ -790,13 +829,13 @@ class _HuddleCallHeader extends StatelessWidget {
               unawaited(HapticFeedback.selectionClick());
               onMinimize();
             },
-            icon: const Icon(LucideIcons.chevronDown, size: 32),
+            icon: const Icon(BuzzIcons.chevronDown, size: 32),
           ),
           const Spacer(),
           _HuddleRoundControl(
             key: const ValueKey('huddle-leave'),
             tooltip: 'Leave Huddle',
-            icon: LucideIcons.phoneOff,
+            icon: BuzzIcons.phoneOff,
             foregroundColor: context.colors.error,
             backgroundColor: context.colors.surfaceContainerHighest,
             useHapticFeedback: true,

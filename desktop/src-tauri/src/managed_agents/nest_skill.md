@@ -122,7 +122,7 @@ buzz messages send --channel <UUID> \
 ## Gotchas
 
 1. **`feed get` sorts newest-first** — every other list command sorts oldest-first. Don't assume consistent sort order.
-2. **`users set-presence` is broken** — sends ephemeral kind:20001 via HTTP POST; relay rejects ephemeral kinds over HTTP. Will fail until WebSocket support is added.
+2. **`users set-presence` is broken** — sends ephemeral kind:20001 via HTTP POST; relay accepts presence only over WebSocket (typing, kind:20002, is the one ephemeral kind HTTP accepts). Will fail until WebSocket support is added.
 3. **`workflow runs` always returns `[]`** — run history lives in the relay's database, not as Nostr events.
 4. **`dms open` returns `dm_id`** — use this value as `--channel` for subsequent `messages send/get` commands on that DM.
 5. **Content max 65,536 bytes** (exit 1 if exceeded). Diffs auto-truncate at 61,440 bytes at a hunk boundary.
@@ -163,13 +163,11 @@ Exit code 5 if the value changed since the hash was read (another agent wrote fi
 
 Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict detection (unsafe), `--allow-empty` to permit empty result after patch.
 
-## Polling Pattern
+## Catching Up
 
-The relay has no push or webhook support. Poll with a `--since` cursor:
+An @mention wakes you, so do not loop or sleep waiting for messages. To read what arrived since you last looked, do one read with a `--since` cursor:
 
-1. `buzz messages get --channel <UUID> --limit 50` — note the maximum `created_at` from results
-2. Sleep 10-30 seconds
-3. `buzz messages get --channel <UUID> --since <max_created_at> --limit 50`
-4. Repeat, advancing `--since` each iteration
+1. `buzz messages get --channel <UUID> --since <last_seen_created_at> --limit 50`
+2. Keep the maximum `created_at` from the results as the next cursor
 
-Minimum interval: 5 seconds (relay rate limiting). Use 10s for low-latency, 30s for background monitoring. `feed get` always returns newest-first regardless of `--since`.
+`feed get` always returns newest-first regardless of `--since`.

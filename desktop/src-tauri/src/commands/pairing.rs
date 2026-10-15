@@ -10,7 +10,11 @@ use futures_util::{SinkExt, StreamExt};
 use nostr::ToBech32;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+#[path = "pairing_subscription.rs"]
+mod pairing_subscription;
+use pairing_subscription::wait_for_eose;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -21,6 +25,7 @@ use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override}
 #[derive(Serialize, Clone)]
 struct PairingSasPayload {
     sas: String,
+    code_entry: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -41,10 +46,33 @@ enum PairingMode {
 
 #[derive(Clone)]
 struct PairingTaskContext {
+    payload: Arc<std::sync::Mutex<Option<Zeroizing<String>>>>,
     mode: PairingMode,
     generation: Arc<AtomicU64>,
     generation_fence: Arc<std::sync::Mutex<()>>,
     task_generation: u64,
+}
+
+impl PairingTaskContext {
+    fn take_payload(&self) -> Result<Zeroizing<String>, String> {
+        let _fence = self.generation_fence.lock().map_err(|e| e.to_string())?;
+        ensure_pairing_task_is_current(&self.generation, self.task_generation)?;
+        self.payload
+            .lock()
+            .map_err(|e| e.to_string())?
+            .take()
+            .ok_or_else(|| "Pairing payload missing".into())
+    }
+
+    fn clear_payload_if_current(&self) {
+        let _fence = self
+            .generation_fence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pairing_task_is_current(&self.generation, self.task_generation) {
+            *self.payload.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
 }
 
 /// Managed Tauri state for an active pairing session.
@@ -61,7 +89,7 @@ pub struct PairingHandle {
     outbound_tx: std::sync::Mutex<Option<mpsc::Sender<String>>>,
     /// Pre-built payload string (contains nsec) to send after SAS confirmation.
     /// Wrapped in Zeroizing so the nsec is cleared from memory on drop.
-    payload: std::sync::Mutex<Option<Zeroizing<String>>>,
+    payload: Arc<std::sync::Mutex<Option<Zeroizing<String>>>>,
     mode: Arc<std::sync::Mutex<PairingMode>>,
 }
 
@@ -74,7 +102,7 @@ impl PairingHandle {
             start_lock: tokio::sync::Mutex::new(()),
             cancel: std::sync::Mutex::new(None),
             outbound_tx: std::sync::Mutex::new(None),
-            payload: std::sync::Mutex::new(None),
+            payload: Arc::new(std::sync::Mutex::new(None)),
             mode: Arc::new(std::sync::Mutex::new(PairingMode::SendIdentity)),
         }
     }
@@ -161,21 +189,36 @@ async fn start_pairing_session(
     *pairing.outbound_tx.lock().map_err(|e| e.to_string())? = Some(outbound_tx);
     *pairing.cancel.lock().map_err(|e| e.to_string())? = Some(cancel.clone());
 
+    let (ready_tx, ready_rx) = oneshot::channel();
     tauri::async_runtime::spawn(pairing_ws_task(
         pairing_relay_url,
         Arc::clone(&pairing.session),
         PairingTaskContext {
+            payload: Arc::clone(&pairing.payload),
             mode,
             generation: Arc::clone(&pairing.generation),
             generation_fence: Arc::clone(&pairing.generation_fence),
             task_generation,
         },
-        cancel,
+        cancel.clone(),
         outbound_rx,
         app,
+        ready_tx,
     ));
 
-    Ok(qr_uri)
+    // A QR must not become scannable until its ephemeral subscription is ready.
+    match tokio::time::timeout(Duration::from_secs(35), ready_rx).await {
+        Ok(Ok(Ok(()))) => {
+            ensure_pairing_task_is_current(&pairing.generation, task_generation)?;
+            Ok(qr_uri)
+        }
+        Ok(Ok(Err(error))) => Err(error),
+        Ok(Err(_)) => Err("Pairing connection stopped before it was ready".into()),
+        Err(_) => {
+            cancel.cancel();
+            Err("Pairing connection took too long. Try again.".into())
+        }
+    }
 }
 
 /// User confirmed the SAS codes match. Sends sas-confirm + payload.
@@ -277,21 +320,31 @@ async fn pairing_ws_task(
     cancel: CancellationToken,
     mut outbound_rx: mpsc::Receiver<String>,
     app: AppHandle,
+    ready: oneshot::Sender<Result<(), String>>,
 ) {
-    if let Err(e) = pairing_ws_task_inner(
+    let mut ready = Some(ready);
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err("Pairing was canceled".into()),
+        result = pairing_ws_task_inner(
         &relay_url,
         &session,
         &context,
         &cancel,
         &mut outbound_rx,
         &app,
-    )
-    .await
-    {
+        &mut ready,
+    ) => result,
+    };
+    if let Err(e) = result {
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(Err(e.clone()));
+        }
         if pairing_task_is_current(&context.generation, context.task_generation) {
             let _ = app.emit("pairing-error", PairingErrorPayload { message: e });
         }
     }
+    context.clear_payload_if_current();
     clear_pairing_session_if_current(&session, &context.generation, context.task_generation).await;
 }
 
@@ -302,6 +355,7 @@ async fn pairing_ws_task_inner(
     cancel: &CancellationToken,
     outbound_rx: &mut mpsc::Receiver<String>,
     app: &AppHandle,
+    ready: &mut Option<oneshot::Sender<Result<(), String>>>,
 ) -> Result<(), String> {
     let (ws, _) = connect_async(relay_url)
         .await
@@ -323,9 +377,24 @@ async fn pairing_ws_task_inner(
         .await
         .map_err(|e| format!("subscribe failed: {e}"))?;
 
-    wait_for_eose(&mut read, "pair", Duration::from_secs(10)).await?;
+    let pending = wait_for_eose(&mut read, "pair", Duration::from_secs(10)).await?;
+    ensure_pairing_task_is_current(&context.generation, context.task_generation)?;
+    let hard_timeout = {
+        let guard = session.lock().await;
+        let active = guard.as_ref().ok_or("session gone")?;
+        if active.is_expired() {
+            return Err("Pairing session expired during connection setup".into());
+        }
+        pairing_expiry_timer(active)
+    };
+    // Readiness may have consumed part of the protocol lifetime. Expire the
+    // visible QR at that original deadline, never 130 seconds after readiness.
+    if let Some(ready) = ready.take() {
+        let _ = ready.send(Ok(()));
+    }
+    let mut read = futures_util::stream::iter(pending.into_iter().map(Ok)).chain(read);
 
-    let hard_timeout = tokio::time::sleep(Duration::from_secs(130));
+    let mut code_entry = false;
     tokio::pin!(hard_timeout);
 
     loop {
@@ -361,6 +430,9 @@ async fn pairing_ws_task_inner(
                     }
 
                     let mut guard = session.lock().await;
+                    if !pairing_task_is_current(&context.generation, context.task_generation) {
+                        break;
+                    }
                     let Some(s) = guard.as_mut() else { break };
 
                     if let Ok(reason) = s.handle_abort(&event) {
@@ -372,11 +444,53 @@ async fn pairing_ws_task_inner(
                         break;
                     }
 
-                    if let Ok(sas) = s.handle_offer(&event) {
+                    if let Ok((mut sas, target_code_entry)) = s.handle_offer_with_confirmation(&event) {
+                        code_entry = context.mode == PairingMode::SendIdentity && target_code_entry;
+                        if code_entry {
+                            let (code, challenge) = s.start_desktop_code().map_err(|e| e.to_string())?;
+                            sas = code;
+                            write.send(Message::Text(event_to_relay_json(&challenge).into())).await
+                                .map_err(|e| format!("publish challenge failed: {e}"))?;
+                        }
                         if pairing_task_is_current(&context.generation, context.task_generation) {
-                            let _ = app.emit("pairing-sas-received", PairingSasPayload { sas });
+                            let _ = app.emit("pairing-sas-received", PairingSasPayload { sas, code_entry });
                         }
                         continue;
+                    }
+
+                    if code_entry {
+                        match s.handle_target_code(&event) {
+                            Ok((response, false)) => {
+                                write.send(Message::Text(event_to_relay_json(&response).into())).await
+                                    .map_err(|e| format!("publish rejection failed: {e}"))?;
+                                if s.state() == buzz_core_pkg::pairing::SessionState::Aborted {
+                                    return Err("Too many incorrect codes. Create a new QR code.".into());
+                                }
+                                continue;
+                            }
+                            Ok((proof, true)) => {
+                                let identity = context.take_payload()?;
+                                let transfer = s.send_payload(PayloadType::Custom, identity)
+                                    .map_err(|e| e.to_string())?;
+                                ensure_pairing_task_is_current(&context.generation, context.task_generation)?;
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => break,
+                                    result = async {
+                                        write.send(Message::Text(event_to_relay_json(&proof).into())).await?;
+                                        write.send(Message::Text(event_to_relay_json(&transfer).into())).await
+                                    } => result.map_err(|e| format!("publish pairing failed: {e}"))?,
+                                }
+                                if pairing_task_is_current(&context.generation, context.task_generation) {
+                                    let _ = app.emit("pairing-code-entered", serde_json::json!({}));
+                                }
+                                continue;
+                            }
+                            Err(buzz_core_pkg::pairing::PairingError::TranscriptMismatch) => {
+                                return Err("Code verification failed. Try pairing again.".into());
+                            }
+                            Err(_) => {}
+                        }
                     }
 
                     if context.mode == PairingMode::RecoverIdentity {
@@ -550,6 +664,10 @@ fn finish_recovery(
         }
     }
     Ok(())
+}
+
+fn pairing_expiry_timer(session: &PairingSession) -> tokio::time::Sleep {
+    tokio::time::sleep_until(session.deadline().into())
 }
 
 fn pairing_task_is_current(generation: &AtomicU64, task_generation: u64) -> bool {
@@ -753,35 +871,6 @@ fn parse_auth_challenge(text: &str) -> Option<String> {
         return arr[1].as_str().map(|s| s.to_string());
     }
     None
-}
-
-async fn wait_for_eose<S>(read: &mut S, sub_id: &str, dur: Duration) -> Result<(), String>
-where
-    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    tokio::time::timeout(dur, async {
-        loop {
-            let msg = read
-                .next()
-                .await
-                .ok_or_else(|| "relay closed waiting for EOSE".to_string())?
-                .map_err(|e| format!("WS error waiting for EOSE: {e}"))?;
-            if let Message::Text(text) = msg {
-                if let Ok(arr) = serde_json::from_str::<serde_json::Value>(text.as_str()) {
-                    if let Some(arr) = arr.as_array() {
-                        if arr.len() >= 2
-                            && arr[0].as_str() == Some("EOSE")
-                            && arr[1].as_str() == Some(sub_id)
-                        {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| "timeout waiting for EOSE".to_string())?
 }
 
 #[cfg(test)]

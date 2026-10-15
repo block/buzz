@@ -11,6 +11,7 @@ import { isUnsupportedProjectKindError } from "@/features/projects/projectCreati
 import { buildProjectRelatedChannelPatchTemplate } from "@/features/projects/projectChannelCreation";
 import { addRelatedChannelToProject } from "@/features/projects/projectModels";
 import { publishOwnedAgentProjectAnnouncements } from "@/features/projects/projectOwnerControl";
+import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
 import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import { deleteChannel as deleteChannelApi } from "@/shared/api/tauriChannels";
@@ -183,6 +184,7 @@ export function useAddProjectChannelMutation() {
         createChannel: createChannelMutation.mutateAsync,
       }),
     onSuccess: ({ channel, project }) => {
+      markProjectDataAuthoritative(project, "local-write");
       queryClient.setQueryData<Project[]>(projectsQueryKey, (current = []) =>
         current.map((candidate) =>
           candidate.id === project.id ? project : candidate,

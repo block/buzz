@@ -11,7 +11,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:google_mlkit_selfie_segmentation/google_mlkit_selfie_segmentation.dart';
 import 'package:image/image.dart' as image;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../shared/emoji/emoji_avatar.dart';
@@ -609,7 +609,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                                     semanticLabel: 'Starting camera',
                                   )
                                 : const Icon(
-                                    LucideIcons.cameraOff,
+                                    BuzzIcons.cameraOff,
                                     color: Colors.white,
                                     size: 32,
                                   ),

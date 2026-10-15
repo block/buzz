@@ -292,8 +292,11 @@ fn prefix_matches(token: &str, s: &str) -> bool {
 ///
 /// Databricks Unity Catalog model-service names are catalog data, not model
 /// family hints. Both capability interpreters use this shape check before
-/// family matching so suffixes such as `kimi-k3` cannot inherit endpoint
-/// capabilities accidentally.
+/// family matching so services cannot inherit endpoint capabilities accidentally.
+/// Verified exact records may supply capabilities. Among uncurated services,
+/// Claude routes through Anthropic Messages with no advertised effort choices,
+/// GPT-5+ routes through OpenAI Responses with neutral fallback effort, and all
+/// others retain the provider fallback route.
 pub(crate) fn is_databricks_model_service_fqn(model: &str) -> bool {
     let mut components = model.split('.');
     let (Some(catalog), Some(schema), Some(service)) =
@@ -308,21 +311,51 @@ pub(crate) fn is_databricks_model_service_fqn(model: &str) -> bool {
     }) && components.next().is_none()
 }
 
+/// Route uncurated Claude UC services through Anthropic Messages without
+/// borrowing effort capabilities from the service name.
+fn fqn_requires_anthropic_messages(model: &str) -> bool {
+    let Some(service) = model.rsplit('.').next() else {
+        return false;
+    };
+    let lower = service.to_ascii_lowercase();
+    strip_catalog_prefix(&lower, &manifest().family_tokens).starts_with("claude-")
+}
+
+/// Route GPT-5+ UC services to Responses without borrowing endpoint effort facts.
+/// Match the first family token in the service only, preserving the existing
+/// boundary semantics (e.g. `claude-gpt-5` is not a GPT service).
+fn fqn_requires_responses(model: &str) -> bool {
+    let Some(service) = model.rsplit('.').next() else {
+        return false;
+    };
+    let lower = service.to_ascii_lowercase();
+    let stripped = strip_catalog_prefix(&lower, &manifest().family_tokens);
+    let Some(version) = stripped.strip_prefix("gpt-") else {
+        return false;
+    };
+    let digits = version.bytes().take_while(u8::is_ascii_digit).count();
+    let (major, suffix) = version.split_at(digits);
+    if suffix.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    major.parse::<u32>().is_ok_and(|major| major >= 5)
+}
+
 /// Resolve the capability profile for a `(provider, raw_model_id)` pair.
 pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     let m = manifest();
     let canon = canonical_provider(provider);
     let blank = raw_model_id.trim().is_empty();
 
-    // Unity Catalog FQNs are neutral model-service identities. Resolve them
-    // through the concrete-unknown fallback before any suffix can match a
-    // provider family rule. Routing and effort normalization then share this
-    // one answer in Rust and TypeScript.
+    // Exact records are verified service contracts, not family-name inference.
+    // Among uncurated FQNs, Claude exposes no effort choices; other services
+    // retain neutral fallback effort. Route fallbacks inspect only the service
+    // component, never catalog/schema names.
     let model_service_fqn =
         canon == "databricks_v2" && is_databricks_model_service_fqn(raw_model_id);
 
     // 1. Provider-qualified exact-record lookup (case-insensitive on the id).
-    if !blank && !model_service_fqn {
+    if !blank {
         for rec in &m.exact_records {
             if rec.provider == canon && rec.raw_model_id.eq_ignore_ascii_case(raw_model_id) {
                 return CapabilityResult {
@@ -390,12 +423,33 @@ pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     } else {
         &pair.concrete_unknown
     };
+    let fqn_anthropic_messages = model_service_fqn && fqn_requires_anthropic_messages(raw_model_id);
     CapabilityResult {
+        // Route inference does not prove thinking support. Expose no choices for
+        // an unverified Claude FQN; verified exact records returned above.
         thinking_mode: state.thinking_mode,
-        supported_efforts: &state.supported_efforts,
-        default_effort: state.default_effort,
-        databricks_v2_wire_route: state.databricks_v2_wire_route,
-        normalization_policy: state.normalization_policy,
+        supported_efforts: if fqn_anthropic_messages {
+            &[]
+        } else {
+            &state.supported_efforts
+        },
+        default_effort: if fqn_anthropic_messages {
+            None
+        } else {
+            state.default_effort
+        },
+        databricks_v2_wire_route: if fqn_anthropic_messages {
+            DatabricksV2Route::AnthropicMessages
+        } else if model_service_fqn && fqn_requires_responses(raw_model_id) {
+            DatabricksV2Route::OpenaiResponses
+        } else {
+            state.databricks_v2_wire_route
+        },
+        normalization_policy: if fqn_anthropic_messages {
+            NormalizationPolicy::None
+        } else {
+            state.normalization_policy
+        },
         registry_label: None,
     }
 }
@@ -405,23 +459,41 @@ pub fn databricks_v2_known_models() -> &'static [String] {
     &manifest().databricks_v2_known_models
 }
 
-/// Curated display label for a Databricks endpoint id, or `None` when no exact
-/// record covers it. Exact raw-id hits preserve the resolver's current behavior.
-/// On an exact miss, aliases share a label only when stripping the manifest's
-/// existing family-token prefix from the query and record keys yields exactly one
-/// `databricks_v2` record; no or ambiguous stripped matches deliberately remain
-/// uncurated. This accessor is discovery-only, so `resolve()` retains its exact-
-/// record label contract.
-pub fn databricks_registry_label(raw_model_id: &str) -> Option<&'static str> {
+/// Display label for a Databricks endpoint id, or `None` to show the raw id.
+/// Precedence: exact record → unique alias (family-token-stripped query and
+/// record keys match exactly one `databricks_v2` record) → the generative label
+/// grammar. An ambiguous alias match stays `None` rather than generating. This
+/// accessor is display-only, so `resolve()` retains its exact-record label
+/// contract.
+pub fn databricks_registry_label(raw_model_id: &str) -> Option<String> {
     let m = manifest();
-    registry_label_for_databricks_records(raw_model_id, &m.exact_records, &m.label_family_tokens)
+    registry_label_for_databricks_records(
+        raw_model_id,
+        &m.exact_records,
+        &m.label_family_tokens,
+        true,
+    )
 }
 
-fn registry_label_for_databricks_records<'a>(
+/// Exact-record and unique-alias tiers only, so tests can assert which tier
+/// produced a label.
+#[cfg(test)]
+pub(crate) fn databricks_curated_label(raw_model_id: &str) -> Option<String> {
+    let m = manifest();
+    registry_label_for_databricks_records(
+        raw_model_id,
+        &m.exact_records,
+        &m.label_family_tokens,
+        false,
+    )
+}
+
+fn registry_label_for_databricks_records(
     raw_model_id: &str,
-    records: &'a [ExactRecord],
+    records: &[ExactRecord],
     family_tokens: &[String],
-) -> Option<&'a str> {
+    generate: bool,
+) -> Option<String> {
     if raw_model_id.trim().is_empty() {
         return None;
     }
@@ -429,13 +501,23 @@ fn registry_label_for_databricks_records<'a>(
     if let Some(rec) = records.iter().find(|rec| {
         rec.provider == "databricks_v2" && rec.raw_model_id.eq_ignore_ascii_case(raw_model_id)
     }) {
-        return Some(&rec.registry_label);
+        return Some(rec.registry_label.clone());
     }
 
+    let generated = || {
+        generate
+            .then(|| {
+                crate::databricks_label_grammar::generate_databricks_label(
+                    raw_model_id,
+                    family_tokens,
+                )
+            })
+            .flatten()
+    };
     let query_lower = raw_model_id.to_ascii_lowercase();
     let stripped_query = strip_catalog_prefix(&query_lower, family_tokens);
     if stripped_query == query_lower {
-        return None;
+        return generated();
     }
     let mut matching_record = None;
     for rec in records.iter().filter(|rec| rec.provider == "databricks_v2") {
@@ -446,7 +528,7 @@ fn registry_label_for_databricks_records<'a>(
             return None;
         }
     }
-    matching_record.map(|rec| rec.registry_label.as_str())
+    matching_record.map_or_else(generated, |rec| Some(rec.registry_label.clone()))
 }
 
 /// Semantic invariants that strict typed parsing cannot express. Structural
@@ -622,6 +704,8 @@ mod tests {
     Q::Vector { id: "dbv2-claude-opus-4-7-probe", provider: "databricks_v2", raw_model_id: "claude-opus-4-7", note: None },
     Q::Vector { id: "dbv2-databricks-prefix-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-opus-4-7", note: Some("Probes stripping of the databricks- catalog prefix.") },
     Q::Vector { id: "dbv2-goose-claude-prefix-probe", provider: "databricks_v2", raw_model_id: "goose-claude-fable-5", note: Some("Probes stripping of the goose- catalog prefix.") },
+    Q::Vector { id: "dbv2-goose-claude-4-6-sonnet-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-4-6-sonnet", note: Some("Probes the discovered Goose Sonnet 4.6 endpoint spelling and label.") },
+    Q::Vector { id: "dbv2-goose-claude-4-7-opus-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-4-7-opus", note: Some("Probes the discovered Goose Opus 4.7 endpoint spelling and label.") },
     Q::Vector { id: "dbv2-team-prefix-probe", provider: "databricks_v2", raw_model_id: "team-x-claude-opus-4-7", note: Some("Probes stripping of a team-x- catalog prefix.") },
     Q::Vector { id: "dbv2-consolidated-llama-substring-probe", provider: "databricks_v2", raw_model_id: "consolidated-llama", note: Some("Probes a name where a code word ('sol') appears only as a substring, not a boundary-aligned segment.") },
     Q::Vector { id: "dbv2-terraform-coder-substring-probe", provider: "databricks_v2", raw_model_id: "terraform-coder", note: Some("Probes a name where a code word ('terra') is only a segment prefix, not a full segment.") },
@@ -632,12 +716,14 @@ mod tests {
     Q::Vector { id: "resolver-exact-raw-id-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-5-4-mini", note: Some("Probes a raw id that has an exact record.") },
     Q::Vector { id: "dbv2-claude-fable-5-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-fable-5", note: Some("Probes the canonical Databricks Fable 5 endpoint record.") },
     Q::Vector { id: "dbv2-goose-claude-fable-5-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-fable-5", note: Some("Probes a prefixed alias of the Databricks Fable 5 endpoint.") },
+    Q::Vector { id: "dbv2-claude-fable-5-1-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-fable-5-1", note: Some("Probes the canonical Databricks Fable 5.1 endpoint record.") },
     Q::Vector { id: "dbv2-claude-opus-4-8-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-opus-4-8", note: Some("Probes the canonical Databricks Opus 4.8 endpoint record.") },
     Q::Vector { id: "dbv2-goose-claude-opus-4-8-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-opus-4-8", note: Some("Probes a prefixed alias of the Databricks Opus 4.8 endpoint.") },
     Q::Vector { id: "dbv2-claude-opus-5-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-opus-5", note: Some("Probes the canonical Databricks Opus 5 endpoint record.") },
     Q::Vector { id: "dbv2-goose-claude-opus-5-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-opus-5", note: Some("Probes a prefixed alias of the Databricks Opus 5 endpoint.") },
     Q::Vector { id: "dbv2-claude-sonnet-5-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-sonnet-5", note: Some("Probes the canonical Databricks Sonnet 5 endpoint record.") },
     Q::Vector { id: "dbv2-goose-claude-sonnet-5-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-sonnet-5", note: Some("Probes a prefixed alias of the Databricks Sonnet 5 endpoint.") },
+    Q::Vector { id: "dbv2-kimi-2-7-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-kimi-2-7", note: Some("Probes the canonical Databricks Kimi 2.7 endpoint record.") },
     Q::Vector { id: "dbv2-kimi-k3-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-kimi-k3", note: Some("Probes the canonical Databricks Kimi K3 endpoint record.") },
     Q::Vector { id: "dbv2-goose-kimi-k3-alias-probe", provider: "databricks_v2", raw_model_id: "goose-kimi-k3", note: Some("Probes a prefixed alias of the Databricks Kimi K3 endpoint.") },
     Q::Vector { id: "resolver-prefixed-alias-probe", provider: "databricks_v2", raw_model_id: "team-x-databricks-gpt-5-4-mini", note: Some("Probes a prefixed alias of an exact-record id (raw exact key differs).") },
@@ -720,6 +806,37 @@ mod tests {
     Q::Vector { id: "boundary-claude-3-digit-run-anthropic-probe", provider: "anthropic", raw_model_id: "claude-35", note: Some("Probes whether the claude-3 prefix binds a longer digit run ('35').") },
     Q::Vector { id: "boundary-claude-opus-4-70-anthropic-probe", provider: "anthropic", raw_model_id: "claude-opus-4-70", note: Some("Probes whether the claude-opus-4-7 prefix binds a longer digit run ('70').") },
     Q::Vector { id: "boundary-gpt-5-1234-openai-probe", provider: "openai", raw_model_id: "gpt-5-1234", note: Some("Probes a 4-digit run after the gpt-5 stem.") },
+    Q::Section { group: "Verified Databricks Opus UC service and exact-record boundaries", note: None },
+    Q::Vector { id: "dbv2-opus-uc-exact", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-case", provider: "databricks_v2", raw_model_id: "DATA_WORKFLOW_TOOLS.GOOSE.GOOSE-CLAUDE-OPUS-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-namespace", provider: "databricks_v2", raw_model_id: "other.goose.goose-claude-opus-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-service", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5-preview", note: None },
+    Q::Vector { id: "dbv2-opus-uc-system", provider: "databricks_v2", raw_model_id: "system.ai.claude-opus-5-5", note: None },
+    Q::Vector { id: "dbv2-opus-uc-provider", provider: "openai", raw_model_id: "data_workflow_tools.goose.goose-claude-opus-5-5", note: None },
+    Q::Section { group: "Uncurated Databricks Claude FQN routing", note: Some("Only the service component selects Anthropic Messages; unverified Claude FQNs expose no effort choices.") },
+    Q::Vector { id: "dbv2-fqn-claude-anthropic", provider: "databricks_v2", raw_model_id: "catalog.schema.claude-sonnet-custom", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-case", provider: "databricks_v2", raw_model_id: "catalog.schema.GOOSE-CLAUDE-SONNET-CUSTOM", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-catalog-inert", provider: "databricks_v2", raw_model_id: "claude-catalog.schema.service", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-schema-inert", provider: "databricks_v2", raw_model_id: "catalog.claude-schema.service", note: None },
+    Q::Section { group: "Databricks FQN GPT-5+ Responses routing", note: Some("Only the service component selects Responses; effort capabilities remain neutral.") },
+    Q::Vector { id: "dbv2-fqn-responses-0", provider: "databricks_v2", raw_model_id: "catalog.schema.goose-gpt-6-astra", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-1", provider: "databricks_v2", raw_model_id: "catalog.schema.goose-gpt-5", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-2", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-5-5", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-3", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-10", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-4", provider: "databricks_v2", raw_model_id: "catalog.schema.GOOSE-GPT-6-ASTRA", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-5", provider: "databricks_v2", raw_model_id: "gpt-6.schema.other", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-6", provider: "databricks_v2", raw_model_id: "catalog.gpt-5.other", note: None },
+    Q::Vector { id: "dbv2-fqn-claude-precedes-gpt", provider: "databricks_v2", raw_model_id: "catalog.schema.claude-gpt-6", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-8", provider: "databricks_v2", raw_model_id: "catalog.schema.my-gpt-6-astra", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-9", provider: "databricks_v2", raw_model_id: "catalog.schema.mygpt-6-astra", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-10", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-4", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-11", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-4o", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-12", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-6x", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-13", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-oss-120b", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-14", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-15", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-4294967296", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-16", provider: "databricks_v2", raw_model_id: "catalog.schema.gpt-６", note: None },
+    Q::Vector { id: "dbv2-fqn-responses-17", provider: "databricks_v2", raw_model_id: "catalog.schema.kimi-k3", note: None },
     Q::Section { group: "Databricks UC model-family humanization probes (#6918 follow-up)", note: Some("Exact-record and UC-FQN strip probes for the Gemini/DeepSeek/GLM/Grok/Llama/Qwen/Gemma/Inkling families surfaced by UC discovery.") },
     Q::Vector { id: "dbv2-gemini-3-1-flash-image-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-gemini-3-1-flash-image", note: Some("Probes the Gemini 3.1 Flash Image endpoint record and label.") },
     Q::Vector { id: "dbv2-gemini-3-5-flash-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-gemini-3-5-flash", note: Some("Probes the Gemini 3.5 Flash endpoint record and label.") },
@@ -728,6 +845,7 @@ mod tests {
     Q::Vector { id: "dbv2-gemini-3-pro-image-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-gemini-3-pro-image", note: Some("Probes the Gemini 3 Pro Image endpoint record and label.") },
     Q::Vector { id: "dbv2-deepseek-v4-flash-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-deepseek-v4-flash-0731", note: Some("Probes the DeepSeek V4 Flash endpoint record and label.") },
     Q::Vector { id: "dbv2-deepseek-v4-pro-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-deepseek-v4-pro-0813", note: Some("Probes the DeepSeek V4 Pro endpoint record and label.") },
+    Q::Vector { id: "dbv2-glm-5-3-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-glm-5-3", note: Some("Probes the GLM-5.3 endpoint record and label.") },
     Q::Vector { id: "dbv2-glm-5-3-flash-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-glm-5-3-flash", note: Some("Probes the GLM-5.3 Flash endpoint record and label.") },
     Q::Vector { id: "dbv2-grok-4-6-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-grok-4-6", note: Some("Probes the Grok 4.6 endpoint record and label.") },
     Q::Vector { id: "dbv2-llama-4-maverick-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-llama-4-maverick", note: Some("Probes the Llama 4 Maverick endpoint record and label.") },
@@ -739,7 +857,7 @@ mod tests {
     Q::Vector { id: "dbv2-inkling-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-inkling", note: Some("Probes the Inkling endpoint record and label.") },
     Q::Vector { id: "dbv2-uc-fqn-gemini-3-5-flash-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.gemini-3-5-flash", note: Some("Probes strip parity on a system.ai. UC FQN carrying the gemini- token (resolve carries no label; the alias label path is unit-tested).") },
     Q::Vector { id: "dbv2-uc-fqn-meta-llama-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.meta-llama-3-3-70b-instruct", note: Some("Probes strip parity on a UC FQN where the llama- token strips through meta-.") },
-    Q::Vector { id: "dbv2-uc-goose-deepseek-strip-probe", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-deepseek-v4-pro-0813", note: Some("Probes strip parity on a goose- prefixed UC FQN carrying the deepseek- token.") },
+    Q::Vector { id: "dbv2-uc-fqn-deepseek-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.deepseek-v4-pro-0813", note: Some("Probes strip parity on a UC FQN carrying the deepseek- token.") },
     Q::Vector { id: "dbv2-uc-fqn-inkling-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.inkling", note: Some("Probes strip parity on a UC FQN carrying the bare inkling token.") },
     Q::Section { group: "Label/capability token isolation probes (#6955 review pass 1)", note: Some("Pins that label_family_tokens (the UC-humanization superset) never leaks into capability resolve(): capability stripping still uses only claude-/gpt-/kimi-, so a label token appearing before a gpt- marker must NOT displace the gpt-5-pro exact profile.") },
     Q::Vector { id: "isolation-openai-gemini-gpt-5-pro-probe", provider: "openai", raw_model_id: "tenant-gemini-gpt-5-pro", note: Some("The gemini- label token must not strip here; capability resolve keeps the gpt-5-pro high-only profile.") },
@@ -839,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_has_exactly_135_executable_vectors() {
+    fn corpus_has_exactly_168_executable_vectors() {
         // Locks the vector count so a silent INPUTS edit can't quietly drop
         // coverage; must equal the gate in the TS harness
         // (modelCapabilitiesCorpus.test.mjs).
@@ -848,7 +966,7 @@ mod tests {
             .filter(|q| matches!(q, Q::Vector { .. }))
             .count();
         assert_eq!(
-            vectors, 135,
+            vectors, 168,
             "corpus executable-vector count changed; update this gate deliberately"
         );
     }
@@ -869,7 +987,7 @@ mod tests {
 
     #[test]
     fn databricks_v2_fqn_uses_neutral_concrete_unknown_capabilities() {
-        let fqn = resolve("databricks_v2", "data_workflow_tools.goose.goose-kimi-k3");
+        let fqn = resolve("databricks_v2", "system.ai.kimi-k3");
         let fallback = resolve("databricks_v2", "some-unknown-xyz");
         assert_eq!(fqn.thinking_mode, fallback.thinking_mode);
         assert_eq!(fqn.supported_efforts, fallback.supported_efforts);
@@ -919,7 +1037,9 @@ mod tests {
 
     #[test]
     fn test_every_resolve_yields_a_complete_result() {
-        // Complete-result invariant: supported_efforts is never empty on any path.
+        // Complete-result invariant: ordinary resolution paths advertise at
+        // least one effort; uncurated Claude FQNs intentionally opt out and are
+        // covered by dedicated fallback tests.
         let inputs = [
             ("anthropic", "claude-opus-4-7"),
             ("anthropic", ""),
@@ -993,7 +1113,7 @@ mod tests {
     fn test_databricks_registry_label_lookup() {
         // Exact raw id remains case-insensitive and unchanged.
         assert_eq!(
-            databricks_registry_label("DATABRICKS-GPT-5-5"),
+            databricks_registry_label("DATABRICKS-GPT-5-5").as_deref(),
             Some("GPT-5.5")
         );
         // Exact raw ids preserve their canonical labels.
@@ -1003,28 +1123,31 @@ mod tests {
             ("databricks-kimi-k3", "Kimi K3"),
         ] {
             assert_eq!(
-                databricks_registry_label(model),
+                databricks_registry_label(model).as_deref(),
                 Some(label),
                 "model={model}"
             );
         }
         // Aliases reuse the existing family-token stripper.
         assert_eq!(
-            databricks_registry_label("goose-gpt-5-6-sol"),
+            databricks_registry_label("goose-gpt-5-6-sol").as_deref(),
             Some("GPT-5.6 Sol")
         );
         assert_eq!(
-            databricks_registry_label("goose-claude-fable-5"),
+            databricks_registry_label("goose-claude-fable-5").as_deref(),
             Some("Claude Fable 5")
         );
         for (alias, label) in [
+            ("goose-claude-4-6-sonnet", "Claude Sonnet 4.6"),
+            ("goose-claude-4-7-opus", "Claude Opus 4.7"),
             ("goose-claude-opus-4-8", "Claude Opus 4.8"),
             ("goose-claude-opus-5", "Claude Opus 5"),
             ("goose-claude-sonnet-5", "Claude Sonnet 5"),
+            ("goose-kimi-2-7", "Kimi 2.7"),
             ("goose-kimi-k3", "Kimi K3"),
         ] {
             assert_eq!(
-                databricks_registry_label(alias),
+                databricks_registry_label(alias).as_deref(),
                 Some(label),
                 "alias={alias}"
             );
@@ -1049,17 +1172,16 @@ mod tests {
             ("system.ai.qwen35-122b-a10b", "Qwen3.5 122B A10B"),
             ("system.ai.gemma-3-12b", "Gemma 3 12B"),
             ("system.ai.inkling", "Inkling"),
-            (
-                "data_workflow_tools.goose.goose-deepseek-v4-flash-0731",
-                "DeepSeek V4 Flash",
-            ),
-            (
-                "data_workflow_tools.goose.goose-glm-5-3-flash",
-                "GLM-5.3 Flash",
-            ),
-            ("data_workflow_tools.goose.goose-grok-4-6", "Grok 4.6"),
+            ("system.ai.deepseek-v4-flash-0731", "DeepSeek V4 Flash"),
+            ("system.ai.glm-5-3", "GLM-5.3"),
+            ("system.ai.glm-5-3-flash", "GLM-5.3 Flash"),
+            ("system.ai.grok-4-6", "Grok 4.6"),
         ] {
-            assert_eq!(databricks_registry_label(fqn), Some(label), "fqn={fqn}");
+            assert_eq!(
+                databricks_registry_label(fqn).as_deref(),
+                Some(label),
+                "fqn={fqn}"
+            );
         }
         // Unknown ids, bare family ids, and blanks remain uncurated.
         assert_eq!(databricks_registry_label("custom-unlisted-endpoint"), None);
@@ -1092,7 +1214,7 @@ mod tests {
         let family_tokens = vec!["gpt-".to_string()];
 
         assert_eq!(
-            registry_label_for_databricks_records("goose-gpt-5-6", &records, &family_tokens),
+            registry_label_for_databricks_records("goose-gpt-5-6", &records, &family_tokens, true),
             None
         );
     }

@@ -444,6 +444,7 @@ function MessageOption({
         <UserAvatar
           avatarUrl={profile?.avatarUrl ?? null}
           displayName={author}
+          shape={profile?.isAgent === true ? "squircle" : "circle"}
           size="sm"
         />
       ) : null}

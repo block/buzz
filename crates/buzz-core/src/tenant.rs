@@ -137,6 +137,41 @@ pub fn normalize_host(host: &str) -> String {
     host
 }
 
+/// Validate a client-typed community host (`name[:port]`) and return its
+/// normalized form. Accepts only DNS labels of `[a-z0-9-]` (1–63 chars, no
+/// leading or trailing hyphen, ≤ 253 total) and an optional port 1–65535, so
+/// schemes, paths, queries, userinfo, IP-literal brackets and whitespace are
+/// all rejected rather than normalized away.
+pub fn validate_community_host(raw: &str) -> Result<String, &'static str> {
+    let lower = raw.to_ascii_lowercase();
+    let (name, port) = match lower.split_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (lower.as_str(), None),
+    };
+    if let Some(port) = port {
+        let valid = !port.is_empty()
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|p| p > 0);
+        if !valid {
+            return Err("invalid port");
+        }
+    }
+    if name.is_empty() || name.len() > 253 {
+        return Err("invalid host length");
+    }
+    let label_ok = |l: &str| {
+        (1..=63).contains(&l.len())
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    if !name.split('.').all(label_ok) {
+        return Err("invalid host");
+    }
+    Ok(normalize_host(&lower))
+}
+
 /// Extract the authority (host plus an explicit non-default port, if present)
 /// from a relay URL in the same normalized shape as request `Host` headers and
 /// `communities.host`.
@@ -175,6 +210,48 @@ pub fn relay_url_authority(relay_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_community_host_accepts_only_bare_host_and_port() {
+        for (input, expected) in [
+            ("buzz.example", "buzz.example"),
+            ("Buzz.Example", "buzz.example"),
+            ("buzz.example:443", "buzz.example"),
+            ("localhost:3000", "localhost:3000"),
+            ("a-1.b2", "a-1.b2"),
+        ] {
+            assert_eq!(
+                validate_community_host(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "",
+            " buzz.example",
+            "https://buzz.example",
+            "buzz.example/path",
+            "buzz.example?x=1",
+            "buzz.example#f",
+            "user@buzz.example",
+            "[::1]",
+            "buzz.example:",
+            "buzz.example:0",
+            "buzz.example:65536",
+            "buzz.example:+1",
+            "-buzz.example",
+            "buzz-.example",
+            "buzz..example",
+            "buzz.example.",
+            "bü.example",
+            &format!("{}.example", "a".repeat(64)),
+        ] {
+            assert!(
+                validate_community_host(input).is_err(),
+                "{input:?} must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn community_id_roundtrips_uuid() {

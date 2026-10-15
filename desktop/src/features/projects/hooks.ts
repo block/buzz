@@ -3,7 +3,6 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
-import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import {
@@ -67,13 +66,15 @@ import {
   type Project,
   type Repository,
 } from "./projectModels";
+import { fetchProjectHomeForChannel, fetchProjects } from "./projectFetch";
 import {
-  buildProjectsFromFetcher,
-  type FetchProjectEventsExhaustively,
-  fetchProjectEventsExhaustively,
-} from "./projectEnumeration";
+  markProjectCollectionAuthoritative,
+  persistProjectSnapshot,
+  PROJECT_QUERY_STRUCTURAL_SHARING,
+} from "./projectSnapshot";
 import { projectMatchesRouteId } from "./projectRoutes";
 
+export { fetchProjects } from "./projectFetch";
 export { projectsQueryKey };
 
 export type {
@@ -85,7 +86,6 @@ export type {
 };
 export type ProjectPullRequestCommentDecision = "request-changes";
 
-const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 export type RepoState = {
   branches: Array<{ name: string; commit: string }>;
   tags: Array<{ name: string; commit: string }>;
@@ -134,23 +134,6 @@ export type ProjectIssueListItem = {
   issue: ProjectIssue;
 };
 
-function readHiddenProjectCards(): string[] {
-  if (typeof window === "undefined") {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(
-      window.localStorage.getItem(HIDDEN_PROJECT_CARDS_KEY) ?? "[]",
-    );
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-
 /**
  * Converts a kind:30617 repo announcement into a `Project`.
  *
@@ -168,27 +151,6 @@ export function eventToProject(
     throw new Error("Invalid repository announcement.");
   }
   return repository;
-}
-
-export async function fetchProjects(
-  fetchExhaustively?: FetchProjectEventsExhaustively,
-  signal?: AbortSignal,
-): Promise<Project[]> {
-  // Delegates to `buildProjectsFromFetcher` in `projectEnumeration.ts`, which
-  // is the pure, Tauri-free core of this operation. Its javadoc explains
-  // fail-closed tombstones and NIP-OA owner-deletion suppression.
-  const viewerPubkey = await getIdentity()
-    .then((identity) => identity.pubkey)
-    .catch(() => undefined);
-  const fetcher: FetchProjectEventsExhaustively =
-    fetchExhaustively ??
-    ((kinds, extraFilter) =>
-      fetchProjectEventsExhaustively(kinds, extraFilter, undefined, signal));
-  return buildProjectsFromFetcher(fetcher, {
-    relayOrigin: getCachedRelayOrigin(),
-    hiddenAddresses: new Set(readHiddenProjectCards()),
-    viewerPubkey,
-  });
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {
@@ -650,24 +612,51 @@ export const PROJECT_ACTIVITY_STALE_TIME_MS = 2 * 60_000;
 export const PROJECT_LOCAL_REPOS_STALE_TIME_MS = 2 * 60_000;
 
 export function useProjectsQuery(enabled = true) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: ({ signal }) => fetchProjects(undefined, signal),
+    queryFn: async ({ signal }) => {
+      const projects = await fetchProjects(undefined, signal);
+      markProjectCollectionAuthoritative(queryClient);
+      persistProjectSnapshot(queryClient, projects);
+      return projects;
+    },
     staleTime: PROJECTS_STALE_TIME_MS,
     gcTime: PROJECTS_GC_TIME_MS,
+    structuralSharing: PROJECT_QUERY_STRUCTURAL_SHARING,
     enabled,
   });
 }
 
+export function useProjectHomeForChannelQuery(
+  channelId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["projects", "home-channel", channelId],
+    queryFn: ({ signal }) => fetchProjectHomeForChannel(channelId, signal),
+    staleTime: PROJECTS_STALE_TIME_MS,
+    gcTime: PROJECTS_GC_TIME_MS,
+    enabled: enabled && channelId.length > 0,
+  });
+}
+
 export function useProjectQuery(projectId: string) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: ({ signal }) => fetchProjects(undefined, signal),
+    queryFn: async ({ signal }) => {
+      const projects = await fetchProjects(undefined, signal);
+      markProjectCollectionAuthoritative(queryClient);
+      persistProjectSnapshot(queryClient, projects);
+      return projects;
+    },
     select: (projects) =>
       projects.find((project) => projectMatchesRouteId(project, projectId)) ??
       null,
     staleTime: PROJECTS_STALE_TIME_MS,
     gcTime: PROJECTS_GC_TIME_MS,
+    structuralSharing: PROJECT_QUERY_STRUCTURAL_SHARING,
   });
 }
 

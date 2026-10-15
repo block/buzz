@@ -157,6 +157,8 @@ final class NativeMessageActionRowControl: UIControl {
     )
 
     let iconColumn = UIView()
+    // Decorative content must leave the entire row tappable.
+    iconColumn.isUserInteractionEnabled = false
     iconColumn.translatesAutoresizingMaskIntoConstraints = false
     actionImageView.translatesAutoresizingMaskIntoConstraints = false
     actionTitleLabel.translatesAutoresizingMaskIntoConstraints = false

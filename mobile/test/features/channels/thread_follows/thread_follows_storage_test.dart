@@ -2,6 +2,8 @@ import 'package:buzz/features/channels/thread_follows/thread_follows_storage.dar
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../helpers/thread_ids.dart';
+
 Future<SharedPreferences> _prefs() async {
   SharedPreferences.setMockInitialValues({});
   return SharedPreferences.getInstance();
@@ -13,12 +15,15 @@ void main() {
   test('round-trips entries per pubkey', () async {
     final storage = ThreadFollowsStorage(await _prefs());
     storage.write(pubkey, const [
-      ThreadFollowEntry(rootId: 'root-1', followedAt: 100),
-      ThreadFollowEntry(rootId: 'root-2', followedAt: 200),
+      ThreadFollowEntry(rootId: threadIdRootDash1, followedAt: 100),
+      ThreadFollowEntry(rootId: threadIdRootDash2, followedAt: 200),
     ]);
 
     final entries = storage.read(pubkey);
-    expect(entries.map((e) => e.rootId), ['root-1', 'root-2']);
+    expect(entries.map((e) => e.rootId), [
+      threadIdRootDash1,
+      threadIdRootDash2,
+    ]);
     expect(entries.map((e) => e.followedAt), [100, 200]);
     expect(storage.read('other-pubkey'), isEmpty);
   });
@@ -54,7 +59,7 @@ void main() {
   });
 
   test('capThreadFollowEntries keeps small lists untouched', () {
-    const entries = [ThreadFollowEntry(rootId: 'a', followedAt: 1)];
+    const entries = [ThreadFollowEntry(rootId: threadIdA, followedAt: 1)];
     expect(capThreadFollowEntries(entries), same(entries));
   });
 }

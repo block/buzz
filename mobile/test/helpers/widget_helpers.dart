@@ -7,12 +7,20 @@ class WidgetHelpers {
   static Widget testable({
     required Widget child,
     List<Override> overrides = const [],
+    bool disableAnimations = false,
   }) {
     return ProviderScope(
       overrides: overrides,
       child: MaterialApp(
         theme: AppTheme.light(),
-        home: Scaffold(body: child),
+        home: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(disableAnimations: disableAnimations),
+            child: Scaffold(body: child),
+          ),
+        ),
       ),
     );
   }

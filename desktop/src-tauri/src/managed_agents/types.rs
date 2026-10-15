@@ -17,7 +17,17 @@ pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars), shown on the
+    /// agent's card/profile and carried on the public kind:30175 persona
+    /// event. EXCLUDED from `persona_content_hash` (no restart badge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub system_prompt: String,
+    /// ACP transport command selected alongside the runtime before deployment.
+    /// `None` preserves legacy definitions that predate persona-owned ACP
+    /// selection; linked instances then fall back to their stored command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_command: Option<String>,
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
     /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +104,11 @@ pub struct AgentDefinition {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// ACP conversation boundary for instances launched from this definition.
+    /// Channel preserves the historical behavior for definitions written by
+    /// older clients and is omitted from storage/public events for stable bytes.
+    #[serde(default, skip_serializing_if = "super::AcpSessionPolicy::is_channel")]
+    pub session_policy: super::AcpSessionPolicy,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -112,7 +127,9 @@ impl AgentDefinition {
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: self.avatar_url,
-            acp_command: DEFAULT_ACP_COMMAND.to_string(),
+            acp_command: self
+                .acp_command
+                .unwrap_or_else(|| DEFAULT_ACP_COMMAND.to_string()),
             agent_command: String::new(),
             agent_command_override: None,
             agent_args: Vec::new(),
@@ -121,6 +138,7 @@ impl AgentDefinition {
             idle_timeout_seconds: None,
             max_turn_duration_seconds: None,
             parallelism: default_agent_parallelism(),
+            session_policy: self.session_policy,
             system_prompt: (!self.system_prompt.is_empty()).then_some(self.system_prompt),
             model: self.model,
             provider: self.provider,
@@ -146,6 +164,7 @@ impl AgentDefinition {
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
             display_name: Some(self.display_name),
+            description: self.description,
             slug: Some(self.id),
             runtime: self.runtime,
             name_pool: self.name_pool,
@@ -180,7 +199,10 @@ impl ManagedAgentRecord {
                 .clone()
                 .unwrap_or_else(|| self.name.clone()),
             avatar_url: self.avatar_url.clone(),
+            description: self.description.clone(),
             system_prompt: self.system_prompt.clone().unwrap_or_default(),
+            acp_command: (self.acp_command != DEFAULT_ACP_COMMAND)
+                .then(|| self.acp_command.clone()),
             runtime: self.runtime.clone(),
             model: self.model.clone(),
             provider: self.provider.clone(),
@@ -197,6 +219,7 @@ impl ManagedAgentRecord {
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
             parallelism: self.definition_parallelism,
+            session_policy: self.session_policy,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         })
@@ -283,6 +306,11 @@ pub struct ManagedAgentRecord {
     pub max_turn_duration_seconds: Option<u64>,
     #[serde(default = "default_agent_parallelism")]
     pub parallelism: u32,
+    /// ACP conversation boundary last applied to this record. Linked agents
+    /// are re-pinned from their definition at restart; definition records use
+    /// this same field as their durable value.
+    #[serde(default, skip_serializing_if = "super::AcpSessionPolicy::is_channel")]
+    pub session_policy: super::AcpSessionPolicy,
     pub system_prompt: Option<String>,
     /// Desired LLM model ID. Matches AgentModelInfo.id from discovery.
     /// The harness re-discovers the correct ACP switching metadata at session
@@ -366,6 +394,13 @@ pub struct ManagedAgentRecord {
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Optional short, PUBLIC agent description. Keyless definition records
+    /// carry the authored value; persona-linked instances leave it absent and
+    /// resolve through their definition so a second copy cannot drift.
+    /// Display metadata only (never spawn-relevant, never part of the persona
+    /// content hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Stable definition slug — the former `AgentDefinition.id`. Key-less
     /// records (definitions not yet instantiated) publish kind:30175 at
     /// `d_tag = slug`, preserving the pre-merge event coordinates. `None` for
@@ -452,8 +487,14 @@ pub struct ManagedAgentRecord {
     /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
-    /// Canonical Claude Code effort level. Injected as `BUZZ_ACP_EFFORT_LEVEL` at spawn
-    /// so the harness applies it via `session/set_config_option` at session creation.
+    /// Canonical, harness-agnostic startup effort level. This is the single
+    /// persisted effort authority: at spawn the launch projection
+    /// (`config_bridge::effort`) resolves the effective value over this column
+    /// and all env tiers, then emits it under the destination runtime's native
+    /// key — `GOOSE_THINKING_EFFORT` for Goose, `BUZZ_AGENT_THINKING_EFFORT` for
+    /// buzz-agent, or the `BUZZ_ACP_EFFORT_LEVEL` startup sentinel for
+    /// Claude/Codex and keyless/unknown adapters. Preserved across runtime
+    /// switches (invalid values skip-as-absent at projection time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
 }
@@ -518,6 +559,8 @@ pub struct ManagedAgentSummary {
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
+    /// Effective definition-owned ACP conversation boundary.
+    pub session_policy: super::AcpSessionPolicy,
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
     pub model: Option<String>,
@@ -642,6 +685,18 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
+    /// Canonical accepted effort values for this runtime, in display order.
+    /// Serialized from `KnownAcpRuntime::effort_normalization.canonical` for
+    /// runtimes with a static finite vocabulary (e.g. Goose). `None` for
+    /// runtimes with no canonicalization contract (buzz-agent uses a
+    /// provider/model catalog; Claude/Codex/unknown runtimes accept any string).
+    ///
+    /// The renderer uses this to drive choices and validation, replacing the
+    /// TS-side `GOOSE_EFFORT_CANONICAL_VALUES` duplicate. When non-null, the
+    /// `harnessNative` effort field uses this list exclusively — `off` and all
+    /// other valid Goose values are always present when this is Goose, so
+    /// `useEffortAutoClear` never incorrectly deletes a valid saved value.
+    pub effort_canonical_values: Option<Vec<String>>,
     pub max_tokens_env_var: Option<String>,
     pub context_limit_env_var: Option<String>,
     pub max_rounds_env_var: Option<String>,

@@ -81,6 +81,69 @@ void main() {
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
   });
 
+  group('identity labels', () {
+    // Valid fixture keys whose npub encodings were verified against the
+    // NIP-19 codec independently of the code under test.
+    const alicePubkey =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    const bobPubkey =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+
+    test('member labels honor "You", authored names, and npub fallback', () {
+      final unnamed = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+      );
+      final named = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        displayName: '  Alice  ',
+      );
+
+      // Unnamed members fall back to the compact npub …
+      expect(unnamed.labelFor(null), 'npub15yw…ccpw');
+      // … but only the member's own identity is "You" — never the caller's key.
+      expect(unnamed.labelFor(alicePubkey), 'You');
+      expect(unnamed.labelFor(alicePubkey.toUpperCase()), 'You');
+      expect(unnamed.labelFor(bobPubkey), 'npub15yw…ccpw');
+      // An authored display name wins over every fallback.
+      expect(named.labelFor(bobPubkey), 'Alice');
+    });
+
+    test(
+      'directory labels keep names, one-line npub fallbacks, and initials',
+      () {
+        final unnamed = DirectoryUser(pubkey: alicePubkey);
+        final alsoUnnamed = DirectoryUser(pubkey: bobPubkey);
+        final named = DirectoryUser(
+          pubkey: alicePubkey,
+          displayName: 'Alice',
+          nip05Handle: 'alice@example.com',
+        );
+
+        // Unnamed: the primary label is already the compact key, so a
+        // second key-shaped line would only duplicate it.
+        expect(unnamed.label, 'npub15yw…ccpw');
+        expect(unnamed.secondaryLabel, '');
+        // Initials stay hex-derived — a compact npub would render `N` for all.
+        expect(unnamed.initial, 'A');
+        expect(alsoUnnamed.initial, 'B');
+        // Named: the authored name leads, the handle keys the second line.
+        expect(named.label, 'Alice');
+        expect(named.secondaryLabel, 'alice@example.com');
+        expect(named.initial, 'A');
+      },
+    );
+
+    test('add-members failures identify the member by compact npub', () {
+      const failure = AddMembersException({alicePubkey: 'not a member'});
+
+      expect(failure.message, 'npub15yw…ccpw: not a member');
+    });
+  });
+
   test('propagates archived state from kind:39000 archived tag', () {
     // Regression: previously this mapping ignored the `archived` tag, so
     // `Channel.mergeDetails` would clear the archived flag the list provider

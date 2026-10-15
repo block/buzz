@@ -9,14 +9,12 @@ export function useAlwaysAddressShortcut({
   lockedAgent,
   mentions,
   onOpenPicker,
-  onSelect,
   onToggle,
 }: {
   enabled: boolean;
   lockedAgent?: Pick<MentionSuggestion, "avatarUrl" | "displayName" | "pubkey">;
   mentions: UseMentionsResult;
   onOpenPicker: (insertTrigger?: boolean) => void;
-  onSelect: (suggestion: MentionSuggestion) => void;
   onToggle: (suggestion: MentionSuggestion) => void;
 }) {
   const {
@@ -48,11 +46,7 @@ export function useAlwaysAddressShortcut({
         if (!isMentionOpen) onOpenPicker(false);
         return true;
       }
-      if (isMentionOpen) {
-        onSelect(suggestion);
-      } else {
-        onToggle(suggestion);
-      }
+      onToggle(suggestion);
       return true;
     },
     [
@@ -62,7 +56,6 @@ export function useAlwaysAddressShortcut({
       lockedAgent,
       mentionSelectedIndex,
       onOpenPicker,
-      onSelect,
       onToggle,
       suggestions,
     ],

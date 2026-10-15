@@ -6,7 +6,7 @@
 //! Design goals: tiny surface, no protocol-specific branching, and a
 //! "reasonable resolution" that fits comfortably inside both Anthropic's
 //! recommended ≤1568px / ≤5 MiB image budget and OpenAI's high-detail tile
-//! size sweet spot. The MCP host translates `Content::image(data, mime)`
+//! size sweet spot. The MCP host translates `ContentBlock::image(data, mime)`
 //! into the right provider-native shape on our behalf (see Goose's
 //! `providers::utils::convert_image` for a reference implementation).
 
@@ -18,7 +18,7 @@ use image::{
     DynamicImage, ExtendedColorType, ImageEncoder, ImageReader, Limits,
 };
 use rmcp::{
-    model::{CallToolResult, Content},
+    model::{CallToolResult, ContentBlock},
     ErrorData,
 };
 use schemars::JsonSchema;
@@ -49,8 +49,8 @@ pub(crate) const MAX_DECODER_ALLOC: u64 = 256 * 1024 * 1024;
 /// Connect + read timeout for URL fetches.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Lifetime of a Blossom `t=get` read token for relay media fetches.
-/// Matches the desktop client's `MEDIA_GET_AUTH_EXPIRY_SECS`.
-const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
+/// 60 seconds — matches the NIP-FI strict proof window.
+const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 60;
 
 /// Build the decoder allocation cap. Centralised so the resize path uses the
 /// same value tests can reason about.
@@ -101,8 +101,8 @@ pub async fn run(state: &SharedState, p: ViewImageParams) -> Result<CallToolResu
     );
 
     Ok(CallToolResult::success(vec![
-        Content::text(header),
-        Content::image(encoded, prepared.mime.to_string()),
+        ContentBlock::text(header),
+        ContentBlock::image(encoded, prepared.mime.to_string()),
     ]))
 }
 

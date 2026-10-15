@@ -328,6 +328,32 @@ async fn a_closed_subscription_reopens_without_a_desired_set_change() {
     session.shutdown();
 }
 
+/// A statement deadline on a persistent subscription is transient (archive
+/// subs are `limit: 0` live tails), so it backs off and reopens rather than
+/// latching terminal. Finite requests still fail on it; see
+/// `native_relay_client_finite_tests.rs`.
+#[tokio::test]
+async fn a_deadline_closed_subscription_reopens_after_backoff() {
+    let (relay_url, mut frames, closed) = stub_relay().await;
+    let (session, _events) = start(relay_url, Keys::generate(), None).await;
+
+    session.set_subscriptions(vec![probe_subscription()]).await;
+    assert_eq!(next_req(&mut frames, "the initial REQ").await, PROBE_ID);
+    settle().await;
+
+    closed
+        .send(StubCommand::Closed(
+            PROBE_ID.into(),
+            "error: query timed out".into(),
+        ))
+        .await
+        .expect("stub relay accepts the closed command");
+
+    assert_eq!(next_req(&mut frames, "the reopened REQ").await, PROBE_ID);
+
+    session.shutdown();
+}
+
 /// A relay that rejects on policy must not be re-asked in a tight loop.
 #[tokio::test]
 async fn a_terminal_closed_is_not_retried_on_the_same_socket() {
@@ -487,7 +513,6 @@ async fn a_reconcile_preserves_the_backoff_of_a_still_desired_subscription() {
          reconcile, got {reopened:?}"
     );
 
-    crate::relay_admission::reset_rate_limit_gate();
     session.shutdown();
 }
 
@@ -726,7 +751,6 @@ fn a_rate_limited_closed_waits_at_least_the_relay_hint() {
         due >= Instant::now() + Duration::from_secs(11),
         "a 12s hint must not be undercut by the base backoff"
     );
-    crate::relay_admission::reset_rate_limit_gate();
 }
 
 #[test]
@@ -739,7 +763,6 @@ fn a_hintless_rate_limited_closed_uses_the_shared_default() {
         due >= Instant::now() + CLOSED_RATE_LIMIT_DEFAULT - Duration::from_secs(1),
         "a hintless rate-limit must fall back to the shared default window"
     );
-    crate::relay_admission::reset_rate_limit_gate();
 }
 
 #[test]
@@ -894,3 +917,9 @@ async fn the_first_lease_installs_a_session_the_archive_then_reuses() {
          replacing an identically scoped one"
     );
 }
+
+#[path = "native_relay_client_transport_tests.rs"]
+mod transport_tests;
+
+#[path = "native_relay_client_finite_tests.rs"]
+mod finite_recovery_tests;

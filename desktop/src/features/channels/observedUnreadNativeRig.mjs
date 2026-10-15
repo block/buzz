@@ -374,7 +374,7 @@ export function makeStubRelayClient() {
   return {
     fetchEvents: async () => [],
     fetchFirstEvent: async () => null,
-    subscribeLive: async () => async () => {},
+    subscribeInteractive: async () => async () => {},
     subscribeToReconnects: () => () => {},
     publishEvent: async (event) => event,
   };

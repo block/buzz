@@ -1,5 +1,6 @@
 """The container runtime must launch the production stack, unmodified."""
 
+import asyncio
 import hashlib
 import json
 import re
@@ -341,6 +342,56 @@ async def test_launch_wires_the_desktop_environment(tmp_path, configured, expect
         target == env["BUZZ_ACP_SYSTEM_PROMPT_FILE"]
         for _, target in environment.uploads
     )
+
+
+def test_memory_task_disables_auto_memory_injection(tmp_path):
+    manifest = write_manifest(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = replace(trial_handle((orch,)), task_name="memory-retrieval")
+
+    env = runtime(tmp_path)._agent_env(
+        trial=trial,
+        credential=orch,
+        agent_class=manifest.roster[0],
+        endpoint=EndpointLaunchConfig("anthropic", "ANTHROPIC_API_KEY"),
+        remote_prompt="/prompt.md",
+    )
+
+    assert env["BUZZ_ACP_CHANNELS"] == "channel"
+    assert env["BUZZ_ACP_NO_MEMORY"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_memory_seed_uses_agent_credentials_and_stdin(tmp_path, monkeypatch):
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = replace(trial_handle((orch,)), task_name="memory-retrieval")
+    captured = []
+
+    class Process:
+        def __init__(self, invocation):
+            self.invocation = invocation
+
+        returncode = 0
+
+        async def communicate(self, value):
+            self.invocation["value"] = value
+            return b"", b"wrote memory"
+
+    async def create_subprocess_exec(*args, **kwargs):
+        invocation = {"args": args, "env": kwargs["env"]}
+        captured.append(invocation)
+        return Process(invocation)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    await runtime(tmp_path)._seed_memories(orch, trial)
+
+    seeds = fixture_for("memory-retrieval").memory_seeds
+    assert len(captured) == len(seeds)
+    for invocation, seed in zip(captured, seeds, strict=True):
+        assert invocation["args"][1:] == ("mem", "set", seed.slug, "-")
+        assert invocation["env"]["BUZZ_PRIVATE_KEY"] == orch.nostr_secret_key
+        assert invocation["value"] == seed.value.encode()
 
 
 def test_runtime_validates_construction_bounds(tmp_path):

@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import 'message_action_backdrop_state.dart';
@@ -33,6 +33,7 @@ class JumpToLatestButton extends HookWidget {
     final nativeChannel = useState<MethodChannel?>(null);
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;
+    final routeIsCurrent = ModalRoute.isCurrentOf(context) ?? true;
 
     useEffect(() {
       final channel = nativeChannel.value;
@@ -78,7 +79,7 @@ class JumpToLatestButton extends HookWidget {
                     border: Border.all(color: borderColor),
                   ),
                   child: Icon(
-                    LucideIcons.arrowDown,
+                    BuzzIcons.arrowDown,
                     size: Grid.gutter,
                     color: context.colors.onSurfaceVariant,
                   ),
@@ -101,6 +102,7 @@ class JumpToLatestButton extends HookWidget {
           child: ValueListenableBuilder<bool>(
             valueListenable: messageActionBackdropActive,
             builder: (context, backdropActive, _) {
+              if (!routeIsCurrent) return const SizedBox.shrink();
               if (!usesNativeIosGlass || backdropActive) {
                 return buildFlutterSurface();
               }

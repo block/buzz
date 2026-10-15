@@ -9,6 +9,7 @@ import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/community/community_storage_test.dart';
@@ -157,6 +158,74 @@ void main() {
     expect(destination.link, same(link));
   });
 
+  testWidgets('switches to the notification community before dispatch', (
+    tester,
+  ) async {
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    await storage.save(_firstCommunity);
+    await storage.save(_notificationCommunity);
+    await storage.saveActiveId(_firstCommunity.id);
+    const link = MessageDeepLink(
+      communityId: 'community-2',
+      channelId: 'channel-1',
+      messageId: 'message-2',
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+        pendingDeepLinkProvider.overrideWith(
+          () => _FakePendingDeepLinkNotifier(link),
+        ),
+        channelsProvider.overrideWith(
+          () => _FakeChannelsNotifier(Future.value([_channel])),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            key: const ValueKey('before-community-switch'),
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(await storage.loadActiveId(), _notificationCommunity.id);
+    expect(container.read(pendingDeepLinkProvider), link);
+
+    // Production remounts the community-scoped app subtree after a switch.
+    // The parked link is consumed by the replacement dispatcher.
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            key: const ValueKey('after-community-switch'),
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.link, link);
+  });
+
   testWidgets('retains invite and surfaces prepare failure', (tester) async {
     const link = InviteDeepLink(
       relayUrl: 'wss://relay.example.com',
@@ -274,7 +343,7 @@ void main() {
           name: 'Relay',
           relayUrl: relayUrl,
           pubkey: 'pubkey',
-          nsec: 'nsec',
+          nsec: nostr.Keys.generate().nsec,
           addedAt: DateTime.utc(2026),
           starterSetupIncomplete: true,
         ),
@@ -348,7 +417,7 @@ void main() {
         name: 'Relay',
         relayUrl: relayUrl,
         pubkey: 'pubkey',
-        nsec: 'nsec',
+        nsec: nostr.Keys.generate().nsec,
         addedAt: DateTime.utc(2026),
         starterSetupIncomplete: true,
       ),
@@ -619,6 +688,19 @@ final _channel = Channel(
   isMember: true,
 );
 
+final _firstCommunity = Community(
+  id: 'community-1',
+  name: 'First',
+  relayUrl: 'wss://first.example',
+  addedAt: DateTime(2026),
+);
+
+final _notificationCommunity = Community(
+  id: 'community-2',
+  name: 'Notification',
+  relayUrl: 'wss://notification.example',
+  addedAt: DateTime(2026),
+);
 final _welcomeEveryoneChannel = Channel(
   id: 'welcome-everyone-id',
   name: 'welcome-everyone',

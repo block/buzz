@@ -167,6 +167,8 @@ class BuzzContainerRuntime:
                     "--name",
                     credential.agent_id,
                 )
+            await self._seed_memories(orchestrator, trial)
+            for credential in trial.credentials:
                 agents.append(
                     await self._launch_agent(
                         environment=environment,
@@ -785,6 +787,39 @@ class BuzzContainerRuntime:
                 "M1 pre-verifier sanity probe failed: /app/hello.txt must exist "
                 f"and its stripped text must equal 'Hello, world!' ({detail})"
             )
+
+    async def _seed_memories(
+        self, credential: AgentCredential, trial: TrialHandle
+    ) -> None:
+        """Seed task-declared cold memory without exposing its value to the agent."""
+        for seed in fixture_for(trial.task_name).memory_seeds:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    self.buzz_cli_binary,
+                    "mem",
+                    "set",
+                    seed.slug,
+                    "-",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env={
+                        **os.environ,
+                        "BUZZ_RELAY_URL": self._user_relay_url(trial),
+                        "BUZZ_PRIVATE_KEY": credential.nostr_secret_key,
+                        "BUZZ_AUTH_TAG": credential.nostr_auth_tag,
+                    },
+                )
+                _, stderr = await process.communicate(seed.value.encode())
+            except OSError as error:
+                raise RuntimeLaunchError(
+                    f"cannot seed cold memory {seed.slug!r}: {error}"
+                ) from None
+            if process.returncode != 0:
+                detail = stderr.decode(errors="replace").strip()
+                raise RuntimeLaunchError(
+                    f"buzz mem set {seed.slug} - exited {process.returncode}: {detail}"
+                )
 
     async def _send(
         self,

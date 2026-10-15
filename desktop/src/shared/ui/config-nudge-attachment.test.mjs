@@ -28,6 +28,7 @@ globalThis.window = {
 
 import {
   focusTargetForRequirement,
+  missingBinaryRecoveryMessage,
   shouldOpenDoctor,
 } from "./config-nudge-attachment.tsx";
 import {
@@ -57,6 +58,21 @@ test("shouldOpenDoctor_regularMixedRequirements_routesToEditAgent", () => {
       { surface: "normalized_field", field: "model" },
     ]),
     false,
+  );
+});
+
+test("shouldOpenDoctor_missingBinary_routesToAgentRuntimes", () => {
+  assert.equal(
+    shouldOpenDoctor([{ surface: "missing_binary", command: "buzz-pi-acp" }]),
+    true,
+    "a missing runtime binary must route to Agent runtimes",
+  );
+});
+
+test("missingBinaryRecoveryMessage_requiresBuzzRestart", () => {
+  assert.equal(
+    missingBinaryRecoveryMessage(),
+    "not found in PATH — install it or update PATH, then restart Buzz",
   );
 });
 

@@ -7,7 +7,7 @@ fn nest_dir_is_under_home() {
         // whether init_nest_dir was called before this test ran.
         let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
         assert!(
-            name == NEST_DIR_PROD || name == NEST_DIR_DEV,
+            name == NEST_DIR_PROD || name == crate::build_identity::nest_name(true),
             "nest_dir must end with .buzz or .buzz-dev, got {dir:?}"
         );
     }
@@ -23,7 +23,7 @@ fn init_nest_dir_prod_sets_buzz() {
     if let Some(d) = dir {
         let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
         assert!(
-            name == NEST_DIR_PROD || name == NEST_DIR_DEV,
+            name == NEST_DIR_PROD || name == crate::build_identity::nest_name(true),
             "nest_dir suffix must be .buzz or .buzz-dev, got {d:?}"
         );
     }
@@ -42,17 +42,12 @@ fn nest_skill_contains_safe_mention_workflow() {
 }
 
 #[test]
-fn nest_agents_template_separates_commit_attribution_claims() {
+fn nest_agents_template_defers_commit_policy_to_repositories() {
     assert_eq!(AGENTS_MD.matches("## Git Commit Attribution").count(), 1);
-    assert!(AGENTS_MD.contains(
-        "Git authorship, co-authorship, DCO sign-off, and cryptographic signing are separate claims"
-    ));
-    assert!(AGENTS_MD
-        .contains("Request, approval, review, or accountability alone is not co-authorship"));
-    assert!(AGENTS_MD.contains("A sign-off is not an approval marker"));
-    assert!(AGENTS_MD.contains("Never use another person's signing key"));
-    assert!(AGENTS_MD.contains("inspect every outgoing commit against the actual upstream or base"));
-    assert!(AGENTS_MD.contains("An agent-owned repository may use the agent as author"));
+    assert!(AGENTS_MD.contains("the runtime sets a default git identity and signing"));
+    assert!(AGENTS_MD.contains("`BUZZ_GIT_IDENTITY=user`"));
+    assert!(AGENTS_MD.contains("Credit the other party with a `Co-authored-by` trailer"));
+    assert!(AGENTS_MD.contains("Follow each repository's own `AGENTS.md` for sign-off (DCO)"));
     assert!(!AGENTS_MD.contains("every commit MUST include a `Signed-off-by`"));
 }
 
@@ -357,13 +352,19 @@ fn ensure_skill_symlinks_skip_dangling_symlink() {
 }
 
 #[test]
-fn cli_link_name_prod_is_buzz() {
-    assert_eq!(cli_link_name(false), "buzz");
+fn cli_link_name_prod_follows_build_identity() {
+    let expected = crate::build_identity::demo_slug()
+        .map(|slug| format!("buzz-demo-{slug}"))
+        .unwrap_or_else(|| "buzz".to_string());
+    assert_eq!(cli_link_name(false), expected);
 }
 
 #[test]
-fn cli_link_name_dev_is_buzz_dev() {
-    assert_eq!(cli_link_name(true), "buzz-dev");
+fn cli_link_name_dev_follows_build_identity() {
+    let expected = crate::build_identity::demo_slug()
+        .map(|slug| format!("buzz-demo-{slug}"))
+        .unwrap_or_else(|| "buzz-dev".to_string());
+    assert_eq!(cli_link_name(true), expected);
 }
 
 #[cfg(unix)]
@@ -395,8 +396,8 @@ fn ensure_cli_symlink_creates_symlink_dev() {
     let local_bin = tmp.path().join("local_bin");
     fs::create_dir_all(&local_bin).unwrap();
 
-    // Dev link must be "buzz-dev", never "buzz".
-    assert_eq!(cli_link_name(true), "buzz-dev");
+    // Dev and demo links must never overwrite production's "buzz".
+    assert_ne!(cli_link_name(true), "buzz");
 
     let link = local_bin.join(cli_link_name(true));
     std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();

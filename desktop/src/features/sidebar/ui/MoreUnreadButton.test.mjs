@@ -77,17 +77,7 @@ describe("MoreUnreadButton model", () => {
         position: "bottom",
         targetChannelId: "dm",
       }),
-      "Go to unread direct message from Alice. 2 new messages below.",
-    );
-    assert.equal(
-      unreadDmAccessibleLabel({
-        count: 2,
-        dmPreviews: [preview("dm", "Alice")],
-        label: "2 new activity",
-        position: "bottom",
-        targetChannelId: "dm",
-      }),
-      "Go to unread direct message from Alice. 2 new activity below.",
+      "Go to unread direct message from Alice. 2 unread below.",
     );
     assert.equal(
       unreadDmAccessibleLabel({
@@ -96,7 +86,7 @@ describe("MoreUnreadButton model", () => {
         position: "bottom",
         targetChannelId: "near-group",
       }),
-      "2 new messages below",
+      "2 unread below",
     );
     assert.equal(
       unreadDmAccessibleLabel({
@@ -104,7 +94,7 @@ describe("MoreUnreadButton model", () => {
         dmPreviews: [],
         position: "top",
       }),
-      "1 new message above",
+      "1 unread above",
     );
   });
 
@@ -118,6 +108,7 @@ describe("MoreUnreadButton model", () => {
           preview("dm-three", "Group DM"),
           preview("dm-four", "Dana"),
         ],
+        emphasis: "primary",
         onClick() {},
         position: "bottom",
         targetChannelId: "dm-one",
@@ -126,13 +117,10 @@ describe("MoreUnreadButton model", () => {
     );
 
     assert.match(markup, /class="[^"]*overflow-hidden[^"]*"/);
+    assert.match(markup, /<span class="min-w-0 truncate">5 unread<\/span>/);
     assert.match(
       markup,
-      /<span class="min-w-0 truncate">5 new messages<\/span>/,
-    );
-    assert.match(
-      markup,
-      /aria-label="Go to unread direct message from Alice\. 5 new messages below\."/,
+      /aria-label="Go to unread direct message from Alice\. 5 unread below\."/,
     );
     assert.doesNotMatch(markup, />Next<\/span>/);
     assert.match(markup, />·<\/span>/);

@@ -5,8 +5,8 @@ use url::Url;
 
 use super::{
     apply_image_result, fetch_sanitized_image, normalize_metadata_description,
-    normalize_metadata_text, read_limited_bytes, send_pinned_request, ImageFetchError,
-    LinkPreviewImageFetchState, LinkPreviewMetadata, PREVIEW_FETCH_TIMEOUT,
+    normalize_metadata_text, read_limited_bytes, send_pinned_request, LinkPreviewImageFetchState,
+    LinkPreviewMetadata,
 };
 
 const MAX_OEMBED_FETCH_BYTES: usize = 64 * 1024;
@@ -54,17 +54,7 @@ pub(super) async fn fetch_oembed_metadata(
         return Ok(None);
     };
     let image_result = match thumbnail_url {
-        Some(thumbnail_url) => Some(
-            tokio::time::timeout(
-                PREVIEW_FETCH_TIMEOUT,
-                fetch_sanitized_image(thumbnail_url, false),
-            )
-            .await
-            .unwrap_or(Err(ImageFetchError::Transient {
-                retry_after: None,
-                retry_inline: false,
-            })),
-        ),
+        Some(thumbnail_url) => Some(fetch_sanitized_image(thumbnail_url, false).await),
         None => None,
     };
     apply_image_result(&mut metadata, image_result);

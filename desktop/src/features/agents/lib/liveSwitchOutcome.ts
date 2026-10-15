@@ -41,6 +41,9 @@ import type { ControlResultFrame } from "@/shared/api/types";
  * Both fail-fast to `"not_delivered"`, distinct from `"pending"` (which DID
  * ride the requeued session): here the switch never landed at all.
  *
+ * `ambiguous_target` rejects a channel-only pick when the harness knows more
+ * than one session scope in that channel. No sibling session was changed.
+ *
  * Any other status — a `sent` provisional ack, or an unknown future status — is
  * inert: it is never counted as success. A new producer status that should
  * settle the pick must add its own explicit branch.
@@ -79,16 +82,24 @@ export async function awaitLiveSwitchOutcome({
   sendSwitches: () => Promise<void>;
   /** Schedule the no-reply fallback; returns a cancel function. */
   scheduleTimeout: (onTimeout: () => void) => () => void;
-}): Promise<"ok" | "unsupported" | "failed" | "not_delivered" | "pending"> {
+}): Promise<
+  "ok" | "unsupported" | "failed" | "not_delivered" | "pending" | "ambiguous"
+> {
   const expected = new Set(channelIds);
   const settled = new Promise<
-    "ok" | "unsupported" | "failed" | "not_delivered" | "pending"
+    "ok" | "unsupported" | "failed" | "not_delivered" | "pending" | "ambiguous"
   >((resolve) => {
     let unsubscribe = () => {};
     let cancelTimeout = () => {};
     const succeeded = new Set<string>();
     const finish = (
-      outcome: "ok" | "unsupported" | "failed" | "not_delivered" | "pending",
+      outcome:
+        | "ok"
+        | "unsupported"
+        | "failed"
+        | "not_delivered"
+        | "pending"
+        | "ambiguous",
     ) => {
       cancelTimeout();
       unsubscribe();
@@ -110,6 +121,10 @@ export async function awaitLiveSwitchOutcome({
         return;
       }
       if (!frame.channelId || !expected.has(frame.channelId)) {
+        return;
+      }
+      if (frame.status === "ambiguous_target") {
+        finish("ambiguous");
         return;
       }
       if (frame.status === "unsupported_model") {

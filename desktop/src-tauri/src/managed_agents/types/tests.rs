@@ -1,4 +1,5 @@
 use super::{AgentDefinition, CatalogSource, ManagedAgentRecord};
+use crate::managed_agents::AcpSessionPolicy;
 use std::path::PathBuf;
 
 #[test]
@@ -459,6 +460,19 @@ fn pending_provider_policy_round_trips() {
     assert!(reloaded.provider_policy_pending);
 }
 
+#[test]
+fn stored_record_unknown_or_null_session_policy_degrades_to_channel() {
+    for session_policy in [serde_json::json!("future"), serde_json::Value::Null] {
+        let mut value = serde_json::to_value(sample_agent_record()).expect("serialize fixture");
+        value["session_policy"] = session_policy;
+        let records: Vec<ManagedAgentRecord> = serde_json::from_value(serde_json::json!([value]))
+            .unwrap_or_else(|error| panic!("one policy must not drop the agent store: {error}"));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].session_policy, AcpSessionPolicy::Channel);
+    }
+}
+
 fn sample_agent_record() -> ManagedAgentRecord {
     serde_json::from_str(
         r#"{
@@ -487,10 +501,13 @@ fn sample_agent_record() -> ManagedAgentRecord {
 
 fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
         system_prompt: "You help.".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("gpt-x".to_string()),
         provider: Some("openai".to_string()),
@@ -565,6 +582,20 @@ fn persona_into_agent_record_is_keyless_and_slugged() {
     assert_eq!(record.runtime.as_deref(), Some("goose"));
     assert_eq!(record.source_team.as_deref(), Some("team-1"));
     assert_eq!(record.env_vars.get("K").map(String::as_str), Some("v"));
+}
+
+#[test]
+fn alternate_acp_command_survives_the_agent_store_fold() {
+    let mut persona = sample_persona();
+    persona.acp_command = Some("buzz-janet-acp".to_string());
+
+    let view = persona
+        .clone()
+        .into_agent_record()
+        .to_definition_view()
+        .expect("slugged record must present a persona view");
+
+    assert_eq!(view.acp_command, persona.acp_command);
 }
 
 #[test]
@@ -717,6 +748,7 @@ fn summary_fixture(
     restart_diff: Vec<crate::managed_agents::spawn_snapshot::RestartDiffEntry>,
 ) -> super::ManagedAgentSummary {
     super::ManagedAgentSummary {
+        session_policy: Default::default(),
         pubkey: "aa".repeat(32),
         name: "test".into(),
         persona_id: None,
