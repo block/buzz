@@ -66,7 +66,10 @@ void main() {
       pubkey: 'alice',
       createdAt: 150,
       content: '',
-      systemEvent: const SystemEvent(type: SystemEventType.huddleEnded),
+      systemEvent: const SystemEvent(
+        type: SystemEventType.huddleEnded,
+        ephemeralChannelId: 'room',
+      ),
     );
     Map<String, int> marks(List<TimelineMessage> loaded, int now) =>
         readingMarks(
@@ -74,7 +77,19 @@ void main() {
           channelId: _channel,
           isDm: false,
           currentPubkey: _self,
-          loaded: loaded,
+          loaded: [
+            TimelineMessage(
+              id: 'start',
+              pubkey: 'alice',
+              createdAt: 50,
+              content: '',
+              systemEvent: const SystemEvent(
+                type: SystemEventType.huddleStarted,
+                ephemeralChannelId: 'room',
+              ),
+            ),
+            ...loaded,
+          ],
           visible: [],
           bottom: bottom,
           now: now,

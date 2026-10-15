@@ -1,3 +1,4 @@
+import 'huddle_timeline.dart';
 import 'dart:async';
 
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -99,8 +100,7 @@ MapEntry<String, int>? _catchUpMark({
   // the live bottom, for example after a jump into history.
   final showsNewest = !loaded.any(
     (message) =>
-        (threadRootId != null ||
-            message.systemEvent?.type != SystemEventType.huddleEnded) &&
+        (threadRootId != null || !isCollapsedHuddleEnding(message, loaded)) &&
         message.createdAt > bottom.createdAt &&
         (threadRootId != null
             ? _threadRootOf(message) == threadRootId

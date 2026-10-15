@@ -23,8 +23,7 @@ class _SystemMessageRow extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final spotlightKey = useMemoized(() => GlobalKey());
     final systemEvent = message.systemEvent;
-    if (systemEvent == null ||
-        systemEvent.type == SystemEventType.huddleEnded) {
+    if (systemEvent == null) {
       return const SizedBox.shrink();
     }
 

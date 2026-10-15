@@ -2181,6 +2181,11 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: [
+            _huddleMsg(
+              id: 'represented-start',
+              kind: EventKind.huddleStarted,
+              createdAt: 900,
+            ),
             _textMsg(
               id: 'msg1',
               pubkey: 'alice',
@@ -9220,6 +9225,12 @@ void main() {
           await tester.pumpWidget(
             _buildTestable(
               messages: [
+                if (huddleEvent.kind == EventKind.huddleEnded)
+                  _huddleMsg(
+                    id: 'represented-start',
+                    kind: EventKind.huddleStarted,
+                    createdAt: 900,
+                  ),
                 _textMsg(
                   id: 'regular-message',
                   pubkey: 'alice',

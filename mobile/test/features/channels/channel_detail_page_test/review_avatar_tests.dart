@@ -9,7 +9,7 @@ void reviewAvatarTests() {
     '{"ephemeral_channel_id":""}',
     '{"ephemeral_channel_id":" "}',
     '{"ephemeral_channel_id":"not-a-uuid"}',
-    '{"ephemeral_channel_id":"8d764100fd8f44cf9c986d8fbd739b8c"}',
+    '{"ephemeral_channel_id":"8d764100fd8f44cf9c986d8fbd739b8z"}',
   ]) {
     testWidgets('invalid huddle has fallback and no invitation: $payload', (
       tester,
@@ -40,9 +40,133 @@ void reviewAvatarTests() {
       );
       expect(find.widgetWithText(FilledButton, 'Join'), findsNothing);
       expect(find.byTooltip('Join Huddle'), findsNothing);
+      expect(find.byTooltip('Open Huddle'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
     });
   }
+  for (final room in [
+    _huddleChannelId,
+    _huddleChannelId.toUpperCase(),
+    _huddleChannelId.replaceAll('-', ''),
+    'urn:uuid:$_huddleChannelId',
+    '{$_huddleChannelId}',
+  ]) {
+    testWidgets(
+      'relay-valid huddle UUID has row and header invitation: $room',
+      (tester) async {
+        final event = _huddleMsg(
+          id: 'valid-room',
+          kind: EventKind.huddleStarted,
+          createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          ephemeralChannelId: room,
+        );
+        expect(
+          SystemEvent.fromHuddleEvent(event)!.ephemeralChannelId,
+          _huddleChannelId,
+        );
+        await tester.pumpWidget(
+          _buildTestable(messages: [event], huddleLifecycle: [event]),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('huddle-card-valid-room')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-Join-$_huddleChannelId')),
+          findsOneWidget,
+        );
+        expect(find.byTooltip('Open Huddle'), findsOneWidget);
+      },
+    );
+  }
+  testWidgets(
+    'bounded window retains orphan ending and reads its visible bottom',
+    (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final events = [
+        _huddleMsg(
+          id: 'different-start',
+          kind: EventKind.huddleStarted,
+          createdAt: 999,
+          ephemeralChannelId: '9d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+        ),
+        for (var i = 0; i < 198; i++)
+          _textMsg(
+            id: 'window-$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+        _huddleMsg(
+          id: 'orphan-end',
+          kind: EventKind.huddleEnded,
+          createdAt: 1300,
+        ),
+      ];
+      await tester.pumpWidget(
+        _buildTestable(messages: events, readStateNotifier: readState),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('ended the huddle'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('activity-card-orphan-end')),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(readState.markedContexts['activity:$_channelId'], 1300);
+    },
+  );
+  testWidgets(
+    'paired huddle ending with reactions retains its reaction surface',
+    (tester) async {
+      late _EndingReactionActions actions;
+      await tester.pumpWidget(
+        _buildTestable(
+          createChannelActions: (ref) => actions = _EndingReactionActions(ref),
+          messages: [
+            _huddleMsg(id: 'paired-start', kind: EventKind.huddleStarted),
+            _huddleMsg(
+              id: 'reacted-end',
+              kind: EventKind.huddleEnded,
+              createdAt: 1100,
+            ),
+            _reaction(
+              id: 'end-reaction',
+              targetId: 'reacted-end',
+              pubkey: 'self',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('activity-card-reacted-end')),
+        findsOneWidget,
+      );
+      final reactions = tester.widgetList<ReactionRow>(
+        find.byType(ReactionRow),
+      );
+      expect(
+        reactions.any(
+          (row) =>
+              row.messageId == 'reacted-end' &&
+              row.reactions.any((reaction) => reaction.emoji == '👍'),
+        ),
+        isTrue,
+      );
+      await tester.tap(find.text('👍').first);
+      await tester.pump();
+      expect(actions.removed, 'end-reaction');
+    },
+  );
   for (final thread in [false, true]) {
     testWidgets(
       'production gallery profile semantics and caption edit thread=$thread',
@@ -193,5 +317,14 @@ void reviewAvatarTests() {
         );
       },
     );
+  }
+}
+
+class _EndingReactionActions extends _FakeChannelActions {
+  _EndingReactionActions(super.ref);
+  String? removed;
+  @override
+  Future<void> removeReaction(String reactionEventId, String emoji) async {
+    removed = reactionEventId;
   }
 }
