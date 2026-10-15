@@ -398,14 +398,18 @@ export function extractThemeInfo(
   const gitColors = extractGitColors(
     theme.colors as Record<string, string> | undefined,
   );
+  // Shiki's bundled themes carry their scope rules on `tokenColors`; `settings`
+  // is the raw TextMate spelling and stays supported for hand-written themes.
+  // Reading only `settings` silently returned the fallback for every bundled
+  // theme, which collapsed --muted-foreground onto --foreground.
+  const tokenSettings = (theme.tokenColors ?? theme.settings) as
+    | ReadonlyArray<ThemeSetting>
+    | undefined;
   return {
     name: themeName,
     bg,
     fg,
-    comment: extractCommentColor(
-      theme.settings as ReadonlyArray<ThemeSetting> | undefined,
-      fg,
-    ),
+    comment: extractCommentColor(tokenSettings, fg),
     ...gitColors,
     terminalPalette: extractTerminalPalette(theme),
   };
