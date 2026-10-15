@@ -225,6 +225,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli_install_hint: None,
         underlying_cli_install_instructions_url: None,
     },
+    PresetHarness {
+        id: "cline",
+        label: "Cline",
+        command: "cline",
+        args: &["--acp"],
+        install_instructions_url: "https://docs.cline.bot/cli/overview",
+        install_hint: "Buzz talks to Cline through its CLI's ACP mode (cline --acp).",
+        underlying_cli: None,
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
