@@ -836,12 +836,15 @@ async fn reconcile_channels(
                 } else {
                     tags.push(Tag::parse(["public"])?);
                 }
-                if channel.channel_type == "dm" {
+                if channel.channel_type == "dm"
+                    || (channel.channel_type == "system" && channel.visibility == "private")
+                {
                     tags.push(Tag::parse(["hidden"])?);
                 }
                 tags.push(Tag::parse(["closed"])?);
                 tags.extend(group_state_identity_tags(
                     &channel.channel_type,
+                    &channel.labels,
                     &channel.created_by,
                 )?);
                 tags.push(channel_created_at_tag(channel.created_at.timestamp())?);
@@ -859,6 +862,7 @@ async fn reconcile_channels(
                 let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
                 tags.extend(group_state_identity_tags(
                     &channel.channel_type,
+                    &channel.labels,
                     &channel.created_by,
                 )?);
                 for m in members
@@ -882,6 +886,7 @@ async fn reconcile_channels(
             let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
             tags.extend(group_state_identity_tags(
                 &channel.channel_type,
+                &channel.labels,
                 &channel.created_by,
             )?);
             for m in &members {

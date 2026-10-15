@@ -874,6 +874,10 @@ async fn push_gateway_profile_migration_converges_brownfield_authority() {
 
 /// Insert identical community + channel rows into a database so the same
 /// (community, channel) ids resolve in both writer and replica.
+///
+/// Raw SQL with only columns from the initial schema: some callers seed a
+/// scratch database migrated to an older version, which lacks columns that
+/// the current channel store writes (for example `labels`).
 async fn seed_community_channel(
     pool: &PgPool,
     community: Uuid,
@@ -886,19 +890,28 @@ async fn seed_community_channel(
         .execute(pool)
         .await
         .expect("insert community");
-    crate::channel::create_channel_with_id(
-        pool,
-        CommunityId::from_uuid(community),
-        channel,
-        &format!("replica-routing-{channel}"),
-        crate::channel::ChannelType::Stream,
-        crate::channel::ChannelVisibility::Open,
-        None,
-        author.public_key().to_bytes().as_slice(),
-        None,
+    let author = author.public_key().to_bytes();
+    sqlx::query(
+        "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+         VALUES ($1, $2, $3, 'stream', 'open', $4)",
     )
+    .bind(channel)
+    .bind(community)
+    .bind(format!("replica-routing-{channel}"))
+    .bind(author.as_slice())
+    .execute(pool)
     .await
     .expect("create channel");
+    sqlx::query(
+        "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+         VALUES ($1, $2, $3, 'owner', $3)",
+    )
+    .bind(community)
+    .bind(channel)
+    .bind(author.as_slice())
+    .execute(pool)
+    .await
+    .expect("add channel owner");
 }
 
 fn signed_event_at(keys: &nostr::Keys, content: &str, secs: u64) -> nostr::Event {

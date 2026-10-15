@@ -3228,6 +3228,7 @@ mod postgres_tests {
             None,
             keys.public_key().to_bytes().as_slice(),
             None,
+            &[],
         )
         .await
         .expect("channel");

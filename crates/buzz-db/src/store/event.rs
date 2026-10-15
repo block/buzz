@@ -92,6 +92,11 @@ pub struct EventQuery {
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
+    /// Restrict results to events that, for every `(name, values)` entry,
+    /// have a tag whose name is `name` and whose first value is one of
+    /// `values` (NIP-01 tag matching), before SQL `LIMIT`. Entries with no
+    /// values are ignored.
+    pub tag_values: Vec<(String, Vec<String>)>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -152,6 +157,7 @@ impl EventQuery {
             e_tags: None,
             d_tag_values: None,
             custom_tag: None,
+            tag_values: Vec::new(),
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -580,7 +586,10 @@ pub(crate) async fn query_events_on(
     let rows = if q.e_tags.is_some() {
         fetch_with_e_tag_deadline(conn, &mut qb).await?
     } else {
-        qb.build().fetch_all(&mut *conn).await?
+        qb.build()
+            .persistent(!has_tag_values(q))
+            .fetch_all(&mut *conn)
+            .await?
     };
 
     let mut out = Vec::with_capacity(rows.len());
@@ -741,6 +750,8 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
             .push_bind(containment);
     }
 
+    push_tag_value_filters(&mut qb, col_prefix, &q.tag_values);
+
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))
             .push_bind(s);
@@ -863,6 +874,51 @@ fn push_e_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, e_
     qb.push(format!(" AND {col_prefix}tags @> ANY("))
         .push_bind(containments)
         .push("::jsonb[])");
+}
+
+/// Whether `q` carries a [`EventQuery::tag_values`] match. Such a query runs
+/// as an unnamed statement, so Postgres plans it with the bound values. After
+/// a few runs, a cached generic plan ignores the value and can scan every
+/// group-state row in the community instead of using the `tags` GIN index.
+fn has_tag_values(q: &EventQuery) -> bool {
+    q.tag_values.iter().any(|(_, values)| !values.is_empty())
+}
+
+/// Two tests per [`EventQuery::tag_values`] entry, so each entry is an OR
+/// over its values and entries are ANDed:
+///
+/// - `tags @> ANY(...)` lets Postgres use the `tags` GIN index. On its own
+///   it over-matches, because JSONB containment ignores order and repeats:
+///   `[["t", "stream"]]` contains `[["t", "t"]]`, and `[["name", "t"]]`
+///   contains `[["t", "name"]]`. Those false candidates could fill the page
+///   before `LIMIT` and hide a real match.
+/// - The `EXISTS` test then keeps only rows with a tag whose name is
+///   exactly `name` and whose first value is one of `values`.
+fn push_tag_value_filters(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    tag_values: &[(String, Vec<String>)],
+) {
+    for (name, values) in tag_values {
+        if values.is_empty() {
+            continue;
+        }
+        let containments: Vec<serde_json::Value> = values
+            .iter()
+            .map(|value| serde_json::json!([[name, value]]))
+            .collect();
+        qb.push(format!(" AND {col_prefix}tags @> ANY("))
+            .push_bind(containments)
+            .push("::jsonb[])");
+        qb.push(format!(
+            " AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
+             WHERE tag->>0 = "
+        ))
+        .push_bind(name.clone())
+        .push(" AND tag->>1 = ANY(")
+        .push_bind(values.clone())
+        .push("::text[]))");
+    }
 }
 
 /// Match `#d` on artifact rows before `LIMIT` while leaving other kinds to the
@@ -1063,6 +1119,8 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
         push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
     }
 
+    push_tag_value_filters(&mut qb, col_prefix, &q.tag_values);
+
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))
             .push_bind(s);
@@ -1094,7 +1152,10 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
             .next()
             .ok_or_else(|| DbError::InvalidData("COUNT returned no rows".to_string()))?
     } else {
-        qb.build().fetch_one(&mut *conn).await?
+        qb.build()
+            .persistent(!has_tag_values(q))
+            .fetch_one(&mut *conn)
+            .await?
     };
     let cnt: i64 = row.try_get("cnt")?;
 
@@ -2820,6 +2881,44 @@ mod postgres_tests {
         .await
         .expect("insert test channel");
         id
+    }
+
+    /// Statements on `conn` that Postgres holds as prepared, matching `like`.
+    async fn prepared_like(conn: &mut sqlx::PgConnection, like: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM pg_prepared_statements WHERE statement LIKE $1")
+            .bind(like)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read prepared statements")
+    }
+
+    /// A label or creator match must keep parameter-aware planning. A cached
+    /// generic plan ignores the label value and scans every group-state row in
+    /// the community instead of using the `tags` GIN index.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn tag_value_queries_are_not_cached_as_prepared_statements() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("DEALLOCATE ALL")
+            .execute(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let mut q = EventQuery::for_community(community);
+        q.kinds = Some(vec![39000]);
+        q.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
+        for _ in 0..6 {
+            query_events_on(&mut conn, &q).await.expect("label query");
+            count_events_on(&mut conn, &q).await.expect("label count");
+        }
+        assert_eq!(prepared_like(&mut conn, "%tags @> ANY(%").await, 0);
+
+        // Control: the same query without a tag match stays a cached statement,
+        // so the check above can see one.
+        q.tag_values.clear();
+        query_events_on(&mut conn, &q).await.expect("plain query");
+        assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
     }
 
     /// Effective `statement_timeout` observed *inside* the e-tag deadline, and

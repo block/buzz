@@ -76,6 +76,8 @@ pub struct ChannelRecord {
     pub ttl_seconds: Option<i32>,
     /// Deadline by which a new message must arrive or the channel is auto-archived.
     pub ttl_deadline: Option<DateTime<Utc>>,
+    /// Labels published as `["t", <label>]` after the channel type tag.
+    pub labels: Vec<String>,
 }
 
 impl ChannelRecord {
@@ -83,6 +85,7 @@ impl ChannelRecord {
     pub fn identity(&self) -> ChannelIdentity {
         ChannelIdentity {
             channel_type: self.channel_type.clone(),
+            labels: self.labels.clone(),
             created_by: self.created_by.clone(),
         }
     }
@@ -99,6 +102,7 @@ pub async fn create_channel(
     description: Option<&str>,
     created_by: &[u8],
     ttl_seconds: Option<i32>,
+    labels: &[String],
 ) -> Result<ChannelRecord> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -123,9 +127,9 @@ pub async fn create_channel(
 
     sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
         "#,
     )
     .bind(id)
@@ -136,6 +140,7 @@ pub async fn create_channel(
     .bind(description)
     .bind(created_by)
     .bind(ttl_seconds)
+    .bind(labels)
     .execute(tx.conn())
     .await?;
 
@@ -164,7 +169,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, labels
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -193,6 +198,7 @@ pub async fn create_channel_with_id(
     description: Option<&str>,
     created_by: &[u8],
     ttl_seconds: Option<i32>,
+    labels: &[String],
 ) -> Result<(ChannelRecord, bool)> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -221,9 +227,9 @@ pub async fn create_channel_with_id(
 
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -235,6 +241,7 @@ pub async fn create_channel_with_id(
     .bind(description)
     .bind(created_by)
     .bind(ttl_seconds)
+    .bind(labels)
     .execute(tx.conn())
     .await?
     .rows_affected();
@@ -269,7 +276,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, labels
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -313,7 +320,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, labels
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -402,7 +409,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, labels
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -422,7 +429,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, labels
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -486,6 +493,7 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         purpose_set_at,
         ttl_seconds,
         ttl_deadline,
+        labels: row.try_get("labels")?,
     })
 }
 
@@ -503,6 +511,9 @@ pub struct ChannelUpdate {
     /// ephemeral TTL (channel becomes permanent), `Some(Some(secs))` sets it.
     /// On any change the `ttl_deadline` is reset to `NOW() + ttl_seconds`.
     pub ttl_seconds: Option<Option<i32>>,
+    /// Replacement label set (empty clears it), or `None` to leave unchanged.
+    /// Callers validate with `buzz_core::channel::parse_channel_labels`.
+    pub labels: Option<Vec<String>>,
 }
 
 /// Updates channel metadata dynamically.
@@ -519,6 +530,7 @@ pub async fn update_channel(
         && updates.description.is_none()
         && updates.visibility.is_none()
         && updates.ttl_seconds.is_none()
+        && updates.labels.is_none()
     {
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
@@ -560,6 +572,10 @@ pub async fn update_channel(
             None => set_parts.push("ttl_deadline = NULL".to_string()),
         }
     }
+    if updates.labels.is_some() {
+        set_parts.push(format!("labels = ${param_idx}"));
+        param_idx += 1;
+    }
     let channel_param_idx = param_idx + 1;
     let sql = format!(
         "UPDATE channels SET {}, updated_at = NOW() WHERE community_id = ${param_idx} AND id = ${channel_param_idx} AND deleted_at IS NULL",
@@ -578,6 +594,9 @@ pub async fn update_channel(
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
+    }
+    if let Some(ref labels) = updates.labels {
+        q = q.bind(labels);
     }
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
@@ -879,6 +898,7 @@ impl Db {
             description,
             created_by,
             ttl_seconds,
+            &[],
         )
         .await
     }
@@ -909,6 +929,68 @@ impl Db {
             description,
             created_by,
             ttl_seconds,
+            &[],
+        )
+        .await
+    }
+
+    /// Creates a channel with a client-supplied UUID and an initial label set.
+    ///
+    /// The same as [`Db::create_channel_with_id`], plus `labels`, which the
+    /// caller has validated with `buzz_core::channel::parse_channel_labels`.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_labeled_channel_with_id", system = "postgresql")]
+    pub async fn create_labeled_channel_with_id(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        description: Option<&str>,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+        labels: &[String],
+    ) -> Result<(ChannelRecord, bool)> {
+        create_channel_with_id(
+            &self.pool,
+            community_id,
+            channel_id,
+            name,
+            channel_type,
+            visibility,
+            description,
+            created_by,
+            ttl_seconds,
+            labels,
+        )
+        .await
+    }
+
+    /// Creates a channel with a relay-chosen UUID and an initial label set.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_labeled_channel", system = "postgresql")]
+    pub async fn create_labeled_channel(
+        &self,
+        community_id: CommunityId,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        description: Option<&str>,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+        labels: &[String],
+    ) -> Result<ChannelRecord> {
+        create_channel(
+            &self.pool,
+            community_id,
+            name,
+            channel_type,
+            visibility,
+            description,
+            created_by,
+            ttl_seconds,
+            labels,
         )
         .await
     }

@@ -21,13 +21,22 @@ plain NIP-29, a client cannot:
 - tell which of two channels is older. The `created_at` of a kind:39000 event
   is the time of the last edit, not the time of creation.
 
+A client also cannot mark its own channels so that it can find them again.
+Channel labels (below) do this.
+
+Also, every channel that a person belongs to shows in their client as a chat.
+So a group that exists only to control who can read some data appears in
+sidebars, search results and unread counts. System channels (below) fix this.
+
 ## Channel identity tags
 
 On every channel-state event that the relay signs, the relay MUST put these
 tags in this order, before any other `t` or `P` tag:
 
-1. `["t", <channel type>]`, for example `stream`, `forum`, `dm`, `workflow`.
-2. `["P", <creator public key, hex>]`.
+1. `["t", <channel type>]`, for example `stream`, `forum`, `dm`, `workflow`, `system`.
+2. `["t", <label>]` for each channel label, in stored order (see
+   [Channel labels](#channel-labels)).
+3. `["P", <creator public key, hex>]`.
 
 kind:39000 also carries `["created_at", <unix seconds>]`.
 
@@ -42,6 +51,7 @@ Example kind:39000 (signing fields and unrelated tags omitted):
     ["d", "9b353519-f4fe-4757-aef4-bec6cc0ae54c"],
     ["name", "agent-config"],
     ["t", "stream"],
+    ["t", "agent-config"],
     ["P", "<creator public key>"],
     ["created_at", "1759939200"]
   ]
@@ -51,11 +61,12 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 | Tag | Kinds | Meaning |
 | --- | --- | --- |
 | first `t` | 39000–39002 | Channel type. |
+| later `t` | 39000–39002 | Channel labels. |
 | `P` | 39000–39002 | Public key that signed the kind:9007 that created the channel. |
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
-A relay can add other `t` tags after it.
+Later `t` tags are labels.
 
 **Creator.** The relay writes `P` from its own record of the kind:9007 that
 created the channel. No client can set it. It does not change when ownership
@@ -76,6 +87,28 @@ until the channel next changes, for example on an edit or a membership
 change. A client MUST treat a missing tag as unknown. A missing `P` does not
 mean that a key did not create the channel.
 
+## Channel labels
+
+A label groups channels across channel types, for example `workspace` or
+`agent-config`. Labels have no meaning to the relay.
+
+**Set labels.** A kind:9007 (create group) MAY carry up to 8 distinct
+labels as `["t", <label>]` tags. On kind:9002 (edit metadata):
+
+- `t` tags replace the whole label set;
+- `["t", ""]` tags and no other `t` tag clear the set;
+- no `t` tag leaves the labels as they are.
+
+Only an owner or admin of the channel MAY change its labels.
+
+**Rules.** A label is 1–64 characters from `a-z`, `0-9`, `.`, `:` and `-`. A
+label MUST NOT be `stream`, `forum`, `dm`, `workflow` or `system`. These are
+channel type names, so this rule stops a label from making a channel look like
+another type. The relay MUST reject the whole event if it has more than 8
+distinct labels, an invalid label, a reserved name, or `["t", ""]` together
+with other labels. The relay stores repeated labels once, so a repeat does
+not count toward the 8, and repeated `["t", ""]` tags clear the set like one.
+
 ## Finding channels
 
 Use ordinary NIP-01 filters on the channel-state kinds.
@@ -83,16 +116,63 @@ Use ordinary NIP-01 filters on the channel-state kinds.
 | To find | Filter |
 | --- | --- |
 | Channels that a key created | `{"kinds": [39000], "#P": ["<creator>"]}` |
+| Channels with a label | `{"kinds": [39000], "#t": ["<label>"]}` |
+| One creator's channels with a label | `{"kinds": [39000], "#P": ["<creator>"], "#t": ["<label>"]}` |
 | Channels of one type | `{"kinds": [39000], "#t": ["<type>"]}` |
 
 A `#P` filter does not return a channel whose events lack `P` (see
 **Older events**). So it can miss channels that a key created before the relay
 supported this NIP.
 
+Values in one tag filter combine with OR, as in NIP-01. So
+`"#t": ["workspace", "notes"]` finds channels with either label. To require a
+label and a creator, use `#t` and `#P` together.
+
+The relay MUST match `#t` and `#P` before it applies `limit`, as NIP-01
+requires. A relay that reads the newest channel events first and matches tags
+after can return a short or empty page while matching channels exist.
+
+## Choosing one channel
+
+The relay does not make labels unique. Many channels can share a label, and
+any owner or admin can set any label. So two creates for the same label can
+both succeed, for example when two processes of one agent start at the same
+time.
+
+A client that needs one channel per creator and label:
+
+1. queries `{"kinds": [39000], "#P": ["<creator>"], "#t": ["<label>"]}`;
+2. creates the channel only if the query returns nothing; and
+3. when the query returns more than one channel, uses the oldest one.
+
+The oldest channel has the lowest `created_at` tag value, compared as an
+integer. If two channels have the same value, the lowest channel ID (`d` tag,
+compared as a string) wins. A channel without a `created_at` tag ranks after
+every channel that has one, and two channels without one compare by channel
+ID.
+Every reader that follows this rule picks the same channel, even after either
+channel is edited.
+
+## System channels
+
+A system channel exists only to control who can read some data, for example
+config that only an agent and its owner can read. It has the channel type
+`system`. In every other way it is an ordinary channel: it has members, roles,
+messages and labels.
+
+**Create.** A kind:9007 with `["channel_type", "system"]` creates a system
+channel. It is private unless the kind:9007 also has `["visibility", "open"]`.
+
+**Hidden.** While a system channel is private, its kind:39000 carries the
+NIP-29 `hidden` tag.
+
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the
 event, as for all NIP-29 group-state events.
+
+Labels give no trust. Any owner or admin can set them. Only `P` says who
+created a channel.
 
 ## Relation to other NIPs
 

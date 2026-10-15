@@ -50,7 +50,7 @@ void main() {
       expect(rows, hasLength(1));
       expect(rows.single.conversationId, root);
       expect(rows.single.threadRootId, root);
-      expect(rows.single.deepLinkTarget(10).id, 'target');
+      expect(rows.single.deepLinkTarget((e) => e.createdAt <= 10).id, 'target');
       expect(threadReferenceOf(target.tags).parentId, parent);
       expect(isThreadReply(tags), isTrue);
       expect(
@@ -219,20 +219,29 @@ void main() {
       ),
     ]);
 
+    bool readUpTo(int time, FeedItem event) => event.createdAt <= time;
+
     test('targets the oldest unread event', () {
-      expect(rows.single.deepLinkTarget(15).id, threadIdInboxB);
+      expect(
+        rows.single.deepLinkTarget((e) => readUpTo(15, e)).id,
+        threadIdInboxB,
+      );
     });
 
     test('targets the oldest event when nothing is read', () {
-      expect(rows.single.deepLinkTarget(5).id, threadIdInboxA);
+      expect(rows.single.deepLinkTarget((_) => false).id, threadIdInboxA);
     });
 
     test('falls back to the latest event when all are read', () {
-      expect(rows.single.deepLinkTarget(99).id, 'c');
+      expect(rows.single.deepLinkTarget((_) => true).id, 'c');
     });
 
-    test('falls back to the latest event without a read marker', () {
-      expect(rows.single.deepLinkTarget(null).id, 'c');
+    test('checks each event, not a single time', () {
+      // Only the middle reply is unread, though the newest is read.
+      expect(
+        rows.single.deepLinkTarget((e) => e.id != threadIdInboxB).id,
+        threadIdInboxB,
+      );
     });
   });
 

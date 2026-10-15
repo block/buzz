@@ -105,6 +105,23 @@ void main() {
     },
   );
 
+  test(
+    'clearing a channel force keeps its marker and message forces',
+    () async {
+      final notifier = await pumpNotifier();
+
+      notifier.markContextUnread(channelId, channelId: channelId);
+      notifier.markContextUnread(msgKey, channelId: channelId);
+
+      // Reading to the bottom ends the channel force without reading anything.
+      notifier.clearForcedUnread(channelId);
+
+      expect(state().isForcedUnread(channelId), isFalse);
+      expect(state().isForcedUnread(msgKey), isTrue);
+      expect(state().effectiveTimestamp(channelId), isNull);
+    },
+  );
+
   test('automatic channel-open read still clears a channel-level force for '
       'the same channel', () async {
     final notifier = await pumpNotifier();

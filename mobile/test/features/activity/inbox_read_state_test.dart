@@ -32,36 +32,51 @@ int? Function(String) markers(Map<String, int> map) =>
     (contextId) => map[contextId];
 
 void main() {
-  group('resolveInboxItemReadAt', () {
-    test('channel rows use the channel marker', () {
-      final row = buildInboxItems([item(id: threadIdInboxA)]).single;
-      expect(resolveInboxItemReadAt(row, markerOf: markers({'ch1': 42})), 42);
-    });
-
-    test('thread rows use max of thread and msg markers', () {
-      final row = buildInboxItems([
-        item(
-          id: threadIdInboxA,
-          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
-        ),
-      ]).single;
+  group('inboxEventReadAt', () {
+    test('a top-level event uses the channel and its own mark', () {
+      final event = item(id: threadIdInboxA, createdAt: 60);
+      expect(inboxEventReadAt(event, markerOf: markers({'ch1': 42})), 42);
       expect(
-        resolveInboxItemReadAt(
-          row,
-          markerOf: markers({
-            'thread:$threadIdInboxRoot1': 10,
-            'msg:$threadIdInboxA': 25,
-          }),
+        inboxEventReadAt(
+          event,
+          markerOf: markers({'ch1': 42, 'msg:$threadIdInboxA': 60}),
         ),
-        25,
+        60,
       );
     });
 
-    test('channel-less rows have no marker', () {
-      final row = buildInboxItems([
-        item(id: threadIdInboxA, channelId: null),
-      ]).single;
-      expect(resolveInboxItemReadAt(row, markerOf: markers({})), isNull);
+    test('a reply also uses its thread marks', () {
+      final event = item(
+        id: threadIdInboxA,
+        tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+      );
+      expect(
+        inboxEventReadAt(
+          event,
+          markerOf: markers({
+            'thread:$threadIdInboxRoot1': 10,
+            'thread-activity:$threadIdInboxRoot1': 30,
+          }),
+        ),
+        30,
+      );
+    });
+
+    test('channel catch-up never reads an Activity event', () {
+      final event = item(
+        id: threadIdInboxA,
+        createdAt: 60,
+        category: 'activity',
+      );
+      expect(
+        inboxEventReadAt(event, markerOf: markers({'activity:ch1': 99})),
+        isNull,
+      );
+    });
+
+    test('an event without a channel has no marker', () {
+      final event = item(id: threadIdInboxA, channelId: null);
+      expect(inboxEventReadAt(event, markerOf: markers({})), isNull);
     });
   });
 
@@ -88,6 +103,45 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('a channel mention read by its own mark is done', () {
+      // Reading a channel writes `msg:` for a mention, not the channel mark.
+      final row = buildInboxItems([item(id: 'm', createdAt: 50)]).single;
+      expect(
+        isInboxItemDone(
+          row,
+          markerOf: markers({'ch1': 10, 'msg:m': 50}),
+          localUnreadOverrides: const {},
+          localDoneSet: const {},
+        ),
+        isTrue,
+      );
+    });
+
+    test('a thread mention needs every grouped reply read', () {
+      final row = buildInboxItems([
+        item(
+          id: threadIdR1,
+          createdAt: 40,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ),
+        item(
+          id: 'r2',
+          createdAt: 50,
+          tags: replyTags(threadIdInboxRoot1, threadIdR1),
+        ),
+      ]).single;
+      bool done(Map<String, int> marks) => isInboxItemDone(
+        row,
+        markerOf: markers(marks),
+        localUnreadOverrides: const {},
+        localDoneSet: const {},
+      );
+      // Seeing only the newest reply leaves the older mention unread.
+      expect(done({'msg:r2': 50}), isFalse);
+      expect(done({'msg:$threadIdR1': 40, 'msg:r2': 50}), isTrue);
+      expect(done({'thread-activity:$threadIdInboxRoot1': 50}), isTrue);
     });
 
     test('a local unread override always wins', () {
@@ -139,7 +193,7 @@ void main() {
           tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
         ),
         item(
-          id: 'b',
+          id: threadIdInboxB,
           createdAt: 30,
           tags: replyTags(threadIdInboxRoot1, threadIdInboxA),
         ),
@@ -153,7 +207,7 @@ void main() {
       final row = buildInboxItems([
         item(id: threadIdInboxRoot1, createdAt: 10),
         item(
-          id: 'b',
+          id: threadIdInboxB,
           createdAt: 30,
           tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
         ),

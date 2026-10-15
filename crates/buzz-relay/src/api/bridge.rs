@@ -2449,6 +2449,24 @@ pub async fn workflow_webhook(
         .await
         .map_err(|_| not_found("workflow not found"))?;
 
+    // Verify webhook secret. Prefer header (not logged by proxies); fall back to query param.
+    // Until the caller proves the secret, every failure answers like a missing
+    // workflow, so the response never reveals that the workflow exists, its
+    // trigger type, or whether a secret was configured.
+    let stored_secret = crate::webhook_secret::extract_secret(&workflow.definition);
+    let provided_secret = headers
+        .get("x-webhook-secret")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| query.secret.clone())
+        .unwrap_or_default();
+    if !stored_secret
+        .is_some_and(|secret| crate::webhook_secret::verify_secret(&provided_secret, &secret))
+    {
+        tracing::warn!("webhook: missing or invalid secret for workflow {id}");
+        return Err(not_found("workflow not found"));
+    }
+
     let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
         .map_err(|e| super::internal_error(&format!("corrupt workflow definition: {e}")))?;
 
@@ -2457,30 +2475,6 @@ pub async fn workflow_webhook(
             StatusCode::BAD_REQUEST,
             "workflow does not have a webhook trigger",
         ));
-    }
-
-    // Verify webhook secret. Prefer header (not logged by proxies); fall back to query param.
-    let stored_secret = crate::webhook_secret::extract_secret(&workflow.definition);
-    let provided_secret = headers
-        .get("x-webhook-secret")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| query.secret.clone())
-        .unwrap_or_default();
-
-    match &stored_secret {
-        Some(secret) => {
-            if !crate::webhook_secret::verify_secret(&provided_secret, secret) {
-                tracing::warn!("webhook: invalid secret for workflow {id}");
-                return Err(api_error(StatusCode::UNAUTHORIZED, "authentication failed"));
-            }
-        }
-        None => {
-            return Err(api_error(
-                StatusCode::UNAUTHORIZED,
-                "webhook secret required but not configured — re-save the workflow to generate one",
-            ));
-        }
     }
 
     // Parse optional JSON body as trigger context.
@@ -4439,6 +4433,73 @@ pub(crate) mod postgres_tests {
             .await
             .expect("read response body");
         (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// A workflow row without a channel has no readers, so even its owner
+    /// reads its runs exactly like a workflow that does not exist. Ingest
+    /// refuses channelless definitions, so the row is seeded directly.
+    /// Mutation: let a `None` channel through `authorize_workflow_read` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channelless_workflow_runs_read_as_missing() {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres not reachable");
+        let host = format!("channelless-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let owner = Keys::generate();
+        state
+            .db
+            .ensure_user(community, owner.public_key().as_bytes())
+            .await
+            .expect("ensure user");
+        let workflow = state
+            .db
+            .create_workflow(
+                community,
+                None,
+                owner.public_key().as_bytes(),
+                "channelless",
+                "{}",
+                &[0u8; 32],
+            )
+            .await
+            .expect("seed workflow");
+        let read = |id: uuid::Uuid| {
+            let state = state.clone();
+            let host = host.clone();
+            let owner = owner.public_key().to_hex();
+            async move {
+                let resp = crate::router::build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/workflows/{id}/runs"))
+                            .header(header::HOST, host)
+                            .header("x-pubkey", owner)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("oneshot");
+                let status = resp.status();
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                (status, body)
+            }
+        };
+        let missing = read(uuid::Uuid::new_v4()).await;
+        assert_eq!(missing.0, axum::http::StatusCode::NOT_FOUND, "{missing:?}");
+        assert_eq!(read(workflow).await, missing);
     }
 
     /// Collect buzz_events_rejected_total with (transport, reason) labels from
@@ -7707,6 +7768,7 @@ pub(crate) mod postgres_tests {
                     None,
                     author.public_key().to_bytes().as_slice(),
                     None,
+                    &[],
                 )
                 .await
                 .expect("create channel");
@@ -7945,6 +8007,7 @@ pub(crate) mod postgres_tests {
                 None,
                 author.public_key().to_bytes().as_slice(),
                 None,
+                &[],
             )
             .await
             .expect("create channel");

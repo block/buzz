@@ -50,14 +50,14 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Reactions (kind:7)** | ✅ | Standard NIP-25; channel derived from target event's `#e` tag (client `#h` ignored) |
 | **Deletions (kind:5)** | ✅ | Standard NIP-09; self-authored only. `#h` optional, `#e` required |
 | **User profiles (kind:0)** | ✅ | NIP-01 metadata; synced to users table (display_name, avatar, about, NIP-05). NIP-05 handles must canonicalize to this relay's domain — off-domain or invalid handles are silently cleared. If a NIP-05 handle collides with another user's (UNIQUE constraint), the handle is skipped but other profile fields (display_name, avatar, about) are still synced. |
-| **Group creation (kind:9007)** | ✅ | NIP-29; include `name` tag, optional `visibility` and `channel_type` |
+| **Group creation (kind:9007)** | ✅ | NIP-29; include `name` tag, optional `visibility`, `channel_type` and label `t` tags |
 | **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. |
 | **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about` tags: owner/admin. `topic`/`purpose` tags: any member. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t` tags: owner/admin. `topic`/`purpose` tags: any member. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
-| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `closed`, `["t", <channel_type>]`, `["P", <creator>]` and `["created_at", <unix seconds>]` tags; `about` only if description non-empty; `private` if applicable; `hidden` for DM channels |
+| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `closed`, `["t", <channel_type>]`, `["P", <creator>]` and `["created_at", <unix seconds>]` tags; `about` only if description non-empty; `private` if applicable; `hidden` for DM channels and private system channels |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags with roles (`owner`, `admin`) |
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags for all members |
 | **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
@@ -109,11 +109,13 @@ All discovery events include a `d` tag set to the channel UUID (NIP-29 addressab
 
 | Kind | Tags | Content |
 |------|------|---------|
-| **39000** | `d=<uuid>`, `name`, `closed`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels only) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Buzz channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
+| **39000** | `d=<uuid>`, `name`, `closed`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels and private system channels) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Buzz channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
 | **39001** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags with role label (`owner`, `admin`) | Admin list |
 | **39002** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags for all members | Member list |
 
-On all three kinds the channel type `t` tag comes first, then `P`. `P` is
+On all three kinds the channel type `t` tag comes first, then one `t` tag
+per channel label, then `P`. Clients read the first `t` value as the
+channel type. `P` is
 the public key that signed the channel's kind:9007. The relay writes it
 from the database, and it does not change when ownership moves. Uppercase
 `P` follows NIP-22, NIP-34 and NIP-72, where it names the author of the root
@@ -123,6 +125,16 @@ kinds.
 kind:39000 also carries `["created_at", <unix seconds>]`: the time the
 channel was created. The event's own `created_at` is the time of the last
 edit, so use the tag to find the older of two channels.
+
+**Channel labels.** A label groups channels across channel types, for
+example `["t", "workspace"]`. Set labels with `["t", <label>]` tags on
+kind:9007. On kind:9002 the `t` tags replace the whole set, and
+`["t", ""]` with no other `t` tag clears it; a kind:9002 without `t` tags
+leaves the labels as they are. Only an owner or admin may change labels.
+The relay refuses a label set with more than 8 distinct labels, a label
+that is not 1-64 characters from `a-z`, `0-9`, `.`, `:` and `-`, or a
+label equal to a channel type name (`stream`, `forum`, `dm`, `workflow`,
+`system`).
 
 Events are stored **channel-scoped** so access control applies — private channel member lists are
 only visible to members. Discover groups via historical REQ:
