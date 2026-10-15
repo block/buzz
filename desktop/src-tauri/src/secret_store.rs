@@ -1,9 +1,8 @@
 //! OS keyring access for desktop nsec private keys.
 //!
-//! All secrets are stored as a single JSON blob under one keychain entry
-//! (service = the store's service name, username = `"secrets"`). This means
-//! exactly one OS prompt per process lifetime regardless of how many keys are
-//! stored — the same pattern used by Goose.
+//! Windows stores one Credential Manager entry per logical key to stay below
+//! the platform's 2,560-byte credential limit. macOS and Linux retain the
+//! aggregate JSON blob format (service name + username `"secrets"`).
 //!
 //! The chosen backend is selected at compile time by the per-target feature in
 //! `Cargo.toml`. On macOS the legacy `keyring` crate (SecKeychain API) is used
@@ -94,6 +93,15 @@ fn blob_lockfile_path(service: &str) -> PathBuf {
 /// On non-Unix/non-Windows platforms this is a no-op that returns a stub.
 #[cfg(feature = "system-keyring")]
 fn acquire_blob_lock(service: &str) -> Result<BlobLockGuard, String> {
+    // Windows Credential Manager operations can fail transiently when unrelated
+    // entries are read and written concurrently. Serialize the backend globally
+    // on Windows; Unix keychains retain the narrower per-service blob lock.
+    #[cfg(windows)]
+    let path = {
+        let _ = service;
+        blob_lockfile_path("windows-credential-manager")
+    };
+    #[cfg(not(windows))]
     let path = blob_lockfile_path(service);
     BlobLockGuard::acquire(&path)
 }
@@ -298,6 +306,47 @@ fn dpk_opts(service: &str, key: &str) -> PasswordOptions {
 }
 
 impl SecretStore {
+    /// Read one Windows Credential Manager entry. Each logical key maps to its
+    /// own OS credential username under the shared service.
+    #[cfg(all(feature = "system-keyring", target_os = "windows"))]
+    fn read_windows_entry(&self, key: &str) -> Result<Option<String>, String> {
+        let _lock = acquire_blob_lock(&self.service)?;
+        let entry = keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) if is_keyring_availability_error(&e.to_string()) => {
+                Err(format!("keyring unavailable: {e}"))
+            }
+            Err(e) => Err(format!("keyring read: {e}")),
+        }
+    }
+
+    /// Persist one Windows credential and prove durability with a newly
+    /// constructed entry and fresh OS read before reporting success.
+    #[cfg(all(feature = "system-keyring", target_os = "windows"))]
+    fn store_windows_entry_verified(&self, key: &str, value: &str) -> Result<(), String> {
+        let _lock = acquire_blob_lock(&self.service)?;
+        let entry = keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
+        entry
+            .set_password(value)
+            .map_err(|e| format!("keyring write: {e}"))?;
+
+        match self.read_windows_entry(key)? {
+            Some(stored) if stored == value => self.remove_from_legacy_windows_blob(key),
+            _ => Err("keyring read-back verify failed".to_string()),
+        }
+    }
+
+    /// Remove a migrated/deleted key from the legacy Windows aggregate. New
+    /// Windows values are never added to this blob.
+    #[cfg(all(feature = "system-keyring", target_os = "windows"))]
+    fn remove_from_legacy_windows_blob(&self, key: &str) -> Result<(), String> {
+        self.mutate_blob(|map| {
+            map.remove(key);
+        })
+    }
+
     /// Read the blob from the keychain and return the deserialized map.
     ///
     /// Returns `Ok(None)` when no blob entry exists yet (first launch or
@@ -353,6 +402,8 @@ impl SecretStore {
     /// builds that lack hardened-runtime entitlements).
     #[cfg(feature = "system-keyring")]
     fn read_blob_raw_keyring(&self) -> Result<Option<Vec<u8>>, String> {
+        #[cfg(target_os = "windows")]
+        let _lock = acquire_blob_lock(&self.service)?;
         let entry =
             keyring_entry(&self.service, BLOB_KEY).map_err(|e| format!("keyring entry: {e}"))?;
         match entry.get_password() {
@@ -464,6 +515,8 @@ impl SecretStore {
 
     #[cfg(feature = "system-keyring")]
     fn write_blob_raw_keyring(&self, bytes: &[u8]) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        let _lock = acquire_blob_lock(&self.service)?;
         let value = std::str::from_utf8(bytes).map_err(|e| format!("blob utf8 encode: {e}"))?;
         let entry =
             keyring_entry(&self.service, BLOB_KEY).map_err(|e| format!("keyring entry: {e}"))?;
@@ -476,6 +529,20 @@ impl SecretStore {
     pub fn probe(&self, key: &str) -> KeyringProbe {
         #[cfg(feature = "system-keyring")]
         {
+            #[cfg(target_os = "windows")]
+            {
+                return match self.read_windows_entry(key) {
+                    Ok(Some(_)) => KeyringProbe::Present,
+                    Ok(None) => match self.load_blob() {
+                        Ok(Some(map)) if map.contains_key(key) => KeyringProbe::Present,
+                        Ok(_) => KeyringProbe::ReachableButEmpty,
+                        Err(_) => KeyringProbe::Unreachable,
+                    },
+                    Err(_) => KeyringProbe::Unreachable,
+                };
+            }
+
+            #[cfg(not(target_os = "windows"))]
             match self.load_blob() {
                 Ok(Some(map)) => {
                     if map.contains_key(key) {
@@ -516,12 +583,15 @@ impl SecretStore {
         }
     }
 
-    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
+    #[cfg(all(
+        feature = "system-keyring",
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
     fn probe_legacy_key(&self, key: &str) -> KeyringProbe {
         self.probe_legacy_key_keyring(key)
     }
 
-    #[cfg(feature = "system-keyring")]
+    #[cfg(all(feature = "system-keyring", not(target_os = "windows")))]
     fn probe_legacy_key_keyring(&self, key: &str) -> KeyringProbe {
         match keyring_entry(&self.service, key) {
             Ok(entry) => match entry.get_password() {
@@ -549,6 +619,19 @@ impl SecretStore {
     pub fn load(&self, key: &str) -> Result<Option<String>, String> {
         #[cfg(feature = "system-keyring")]
         {
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(value) = self.read_windows_entry(key)? {
+                    return Ok(Some(value));
+                }
+                let Some(value) = self.load_blob()?.and_then(|map| map.get(key).cloned()) else {
+                    return Ok(None);
+                };
+                self.store_windows_entry_verified(key, &value)?;
+                return Ok(Some(value));
+            }
+
+            #[cfg(not(target_os = "windows"))]
             match self.load_blob() {
                 Ok(Some(map)) => {
                     if let Some(value) = map.get(key) {
@@ -601,6 +684,15 @@ impl SecretStore {
     pub fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
         {
+            #[cfg(target_os = "windows")]
+            {
+                for (key, value) in entries {
+                    self.store_windows_entry_verified(key, value)?;
+                }
+                return Ok(());
+            }
+
+            #[cfg(not(target_os = "windows"))]
             self.mutate_blob(|map| {
                 for (k, v) in entries {
                     map.insert(k.clone(), v.clone());
@@ -672,7 +764,10 @@ impl SecretStore {
         }
     }
 
-    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
+    #[cfg(all(
+        feature = "system-keyring",
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
     fn migrate_legacy_key(&self, key: &str) -> Result<Option<String>, String> {
         // Non-macOS: no DPK, just check the old keyring-crate per-key entry.
         self.migrate_legacy_key_keyring(key)
@@ -680,7 +775,7 @@ impl SecretStore {
 
     /// Check the old per-key `keyring` crate entry (pre-#1264 format) and
     /// migrate it into the blob if found.
-    #[cfg(feature = "system-keyring")]
+    #[cfg(all(feature = "system-keyring", not(target_os = "windows")))]
     fn migrate_legacy_key_keyring(&self, key: &str) -> Result<Option<String>, String> {
         let entry = keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
         match entry.get_password() {
@@ -705,15 +800,26 @@ impl SecretStore {
     pub fn verify_stored_raw(&self, key: &str, expected: &str) -> Result<bool, String> {
         #[cfg(feature = "system-keyring")]
         {
-            let raw = self.read_blob_raw()?;
-            match raw {
-                None => Ok(false),
-                Some(bytes) => {
-                    let json = String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
-                    let map =
-                        serde_json::from_str::<std::collections::HashMap<String, String>>(&json)
+            #[cfg(target_os = "windows")]
+            {
+                return Ok(self.read_windows_entry(key)?.as_deref() == Some(expected));
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let raw = self.read_blob_raw()?;
+                match raw {
+                    None => Ok(false),
+                    Some(bytes) => {
+                        let json =
+                            String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
+                        let map =
+                            serde_json::from_str::<std::collections::HashMap<String, String>>(
+                                &json,
+                            )
                             .map_err(|e| format!("blob json: {e}"))?;
-                    Ok(map.get(key).is_some_and(|v| v == expected))
+                        Ok(map.get(key).is_some_and(|v| v == expected))
+                    }
                 }
             }
         }
@@ -729,6 +835,12 @@ impl SecretStore {
     pub fn store(&self, key: &str, value: &str) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
         {
+            #[cfg(target_os = "windows")]
+            {
+                return self.store_windows_entry_verified(key, value);
+            }
+
+            #[cfg(not(target_os = "windows"))]
             self.mutate_blob(|map| {
                 map.insert(key.to_string(), value.to_string());
             })
@@ -753,7 +865,7 @@ impl SecretStore {
     /// This is the correct wipe path for sign-out: the old `delete_all` skipped
     /// step 1–3 so stale per-key entries could be re-imported on the next launch
     /// via `migrate_legacy_key`. This method prevents that resurrection.
-    pub fn delete_all_with_legacy_cleanup(&self) -> Result<(), String> {
+    pub fn delete_all_with_legacy_cleanup(&self, known_keys: &[String]) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
         {
             let _lock = acquire_blob_lock(&self.service)?;
@@ -774,6 +886,11 @@ impl SecretStore {
             let mut all_keys = blob_keys;
             if !all_keys.contains(&"identity".to_string()) {
                 all_keys.push("identity".to_string());
+            }
+            for key in known_keys {
+                if !all_keys.contains(key) {
+                    all_keys.push(key.clone());
+                }
             }
 
             // Steps 2 & 3: delete legacy per-key entries for every key.
@@ -845,7 +962,7 @@ impl SecretStore {
     /// Returns `true` when all three shapes are absent (or inaccessible in an
     /// expected way), `false` when any entry is found or the keychain is
     /// unavailable (fail-closed).
-    pub fn verify_fully_wiped(&self) -> bool {
+    pub fn verify_fully_wiped(&self, known_keys: &[String]) -> bool {
         #[cfg(feature = "system-keyring")]
         {
             // 1. Main blob must be absent.
@@ -854,17 +971,21 @@ impl SecretStore {
                 Ok(Some(_)) => return false,
                 Err(_) => return false,
             }
-            // 2. Per-key "identity" via legacy keyring must be absent.
-            match keyring_entry(&self.service, "identity") {
-                Ok(entry) => match entry.get_password() {
-                    Err(keyring::Error::NoEntry) => {}
-                    Ok(_) => return false,
-                    // Any other error (availability, unknown, transient) → fail closed.
-                    // Only explicit NoEntry is proof of absence.
+            // 2. Every known direct/per-key credential must be absent.
+            let mut all_keys = vec!["identity".to_string()];
+            for key in known_keys {
+                if !all_keys.contains(key) {
+                    all_keys.push(key.clone());
+                }
+            }
+            for key in &all_keys {
+                match keyring_entry(&self.service, key) {
+                    Ok(entry) => match entry.get_password() {
+                        Err(keyring::Error::NoEntry) => {}
+                        Ok(_) | Err(_) => return false,
+                    },
                     Err(_) => return false,
-                },
-                // Constructor failure → cannot verify → fail closed.
-                Err(_) => return false,
+                }
             }
             // 3. DPK blob (macOS only).
             #[cfg(target_os = "macos")]
@@ -878,15 +999,14 @@ impl SecretStore {
                     // Any other error → fail closed (not proof of absence).
                     Err(_) => return false,
                 }
-                // 4. Per-key DPK "identity" (macOS only).
-                match generic_password(dpk_opts(&self.service, "identity")) {
-                    Err(ref e) if is_not_found(e) => {}
-                    // dpk-unavailable: symmetric with load() — if load() can't
-                    // read DPK, a surviving entry can't resurrect identity.
-                    Err(ref e) if is_dpk_unavailable(e) => {}
-                    Ok(_) => return false,
-                    // Any other error → fail closed.
-                    Err(_) => return false,
+                // 4. Every known per-key DPK entry (macOS only).
+                for key in &all_keys {
+                    match generic_password(dpk_opts(&self.service, key)) {
+                        Err(ref e) if is_not_found(e) => {}
+                        // If DPK is inaccessible, load cannot resurrect it either.
+                        Err(ref e) if is_dpk_unavailable(e) => {}
+                        Ok(_) | Err(_) => return false,
+                    }
                 }
             }
             true
@@ -901,17 +1021,34 @@ impl SecretStore {
     pub fn delete(&self, key: &str) -> Result<(), String> {
         #[cfg(feature = "system-keyring")]
         {
-            self.mutate_blob(|map| {
-                map.remove(key);
-            })?;
-            // Best-effort: also delete any old per-key entry for this key to
-            // prevent resurrection on the next probe/load (migration path).
-            #[cfg(target_os = "macos")]
-            let _ = delete_generic_password_options(dpk_opts(&self.service, key));
-            if let Ok(entry) = keyring_entry(&self.service, key) {
-                let _ = entry.delete_credential();
+            #[cfg(target_os = "windows")]
+            {
+                let _lock = acquire_blob_lock(&self.service)?;
+                // Remove the legacy copy first. If direct deletion then fails,
+                // the still-present direct entry remains authoritative.
+                self.remove_from_legacy_windows_blob(key)?;
+                let entry = keyring_entry(&self.service, key)
+                    .map_err(|e| format!("keyring entry constructor {key}: {e}"))?;
+                return match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                    Err(e) => Err(format!("keyring delete {key}: {e}")),
+                };
             }
-            Ok(())
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.mutate_blob(|map| {
+                    map.remove(key);
+                })?;
+                // Best-effort: also delete any old per-key entry for this key to
+                // prevent resurrection on the next probe/load (migration path).
+                #[cfg(target_os = "macos")]
+                let _ = delete_generic_password_options(dpk_opts(&self.service, key));
+                if let Ok(entry) = keyring_entry(&self.service, key) {
+                    let _ = entry.delete_credential();
+                }
+                Ok(())
+            }
         }
         #[cfg(not(feature = "system-keyring"))]
         {
@@ -935,6 +1072,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn probe_returns_present_when_key_in_cache() {
         let mut map = HashMap::new();
@@ -945,6 +1083,7 @@ mod tests {
         assert_eq!(store.probe("identity"), KeyringProbe::Present);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn load_returns_value_when_key_in_cache() {
         let mut map = HashMap::new();
@@ -959,6 +1098,109 @@ mod tests {
     }
 
     // ── Cross-process race tests (require real OS keychain) ────────────────
+
+    #[cfg(target_os = "windows")]
+    #[ignore = "requires Windows Credential Manager (run locally)"]
+    #[test]
+    fn windows_stores_at_least_40_nsec_values_without_aggregate_capacity_limit() {
+        let service = "buzz-test-windows-per-key-capacity";
+        let store = SecretStore::keyring(service);
+        let entries: Vec<(String, String)> = (0..40)
+            .map(|index| {
+                let nsec =
+                    nostr::ToBech32::to_bech32(nostr::Keys::generate().secret_key()).unwrap();
+                (format!("agent:{index:064x}"), nsec)
+            })
+            .collect();
+        let keys: Vec<String> = entries.iter().map(|(key, _)| key.clone()).collect();
+        let _ = store.delete_all_with_legacy_cleanup(&keys);
+
+        for (index, (key, value)) in entries.iter().enumerate() {
+            store
+                .store(key, value)
+                .unwrap_or_else(|error| panic!("store {index} failed: {error}"));
+        }
+
+        let reader = SecretStore::keyring(service);
+        for (key, value) in &entries {
+            assert_eq!(reader.load(key).unwrap().as_deref(), Some(value.as_str()));
+        }
+
+        store.delete_all_with_legacy_cleanup(&keys).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[ignore = "requires Windows Credential Manager (run locally)"]
+    #[test]
+    fn windows_migrates_legacy_blob_without_overwriting_direct_entry() {
+        let service = "buzz-test-windows-legacy-migration";
+        let key = "agent:legacy";
+        let known = vec![key.to_string(), "agent:other".to_string()];
+        for name in &known {
+            let _ = keyring_entry(service, name).unwrap().delete_credential();
+        }
+        let blob_entry = keyring_entry(service, BLOB_KEY).unwrap();
+        let _ = blob_entry.delete_credential();
+
+        let legacy = HashMap::from([
+            (key.to_string(), "nsec1legacyvalue".to_string()),
+            ("agent:other".to_string(), "nsec1othervalue".to_string()),
+        ]);
+        blob_entry
+            .set_password(&serde_json::to_string(&legacy).unwrap())
+            .unwrap();
+        let store = SecretStore::keyring(service);
+
+        assert_eq!(
+            store.load(key).unwrap().as_deref(),
+            Some("nsec1legacyvalue")
+        );
+        assert_eq!(
+            store.read_windows_entry(key).unwrap().as_deref(),
+            Some("nsec1legacyvalue")
+        );
+        assert!(!store.load_blob().unwrap().unwrap().contains_key(key));
+
+        let stale = HashMap::from([(key.to_string(), "nsec1stalelegacy".to_string())]);
+        store
+            .write_blob_raw(serde_json::to_string(&stale).unwrap().as_bytes())
+            .unwrap();
+        store.store(key, "nsec1directvalue").unwrap();
+        assert_eq!(
+            store.load(key).unwrap().as_deref(),
+            Some("nsec1directvalue")
+        );
+        let raw = store.read_blob_raw().unwrap().unwrap();
+        let remaining: HashMap<String, String> = serde_json::from_slice(&raw).unwrap();
+        assert!(!remaining.contains_key(key));
+
+        store.delete(key).unwrap();
+        store.delete("agent:other").unwrap();
+        let _ = keyring_entry(service, BLOB_KEY)
+            .unwrap()
+            .delete_credential();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[ignore = "requires Windows Credential Manager (run locally)"]
+    #[test]
+    fn windows_delete_one_preserves_other_direct_credentials() {
+        let service = "buzz-test-windows-delete-one";
+        let store = SecretStore::keyring(service);
+        let _ = store.delete("agent:one");
+        let _ = store.delete("agent:two");
+        store.store("agent:one", "nsec1one").unwrap();
+        store.store("agent:two", "nsec1two").unwrap();
+
+        store.delete("agent:one").unwrap();
+
+        assert_eq!(store.load("agent:one").unwrap(), None);
+        assert_eq!(
+            store.load("agent:two").unwrap().as_deref(),
+            Some("nsec1two")
+        );
+        store.delete("agent:two").unwrap();
+    }
 
     #[ignore = "requires real OS keychain (run locally)"]
     #[test]
@@ -1286,7 +1528,9 @@ mod tests {
         assert_eq!(store2.probe(key), KeyringProbe::Present);
 
         // Wipe everything via the sign-out path.
-        store2.delete_all_with_legacy_cleanup().unwrap();
+        store2
+            .delete_all_with_legacy_cleanup(&["agent:abc123".to_string()])
+            .unwrap();
 
         // Fresh store — neither the blob nor the per-key entry should remain.
         let store3 = SecretStore::keyring(svc);
