@@ -8,11 +8,12 @@ profiles, channel details or avatar images for notifications.
 
 ## Display behavior
 
-The extension uses cached profiles and channel details for one hour after their
-last successful check. Reading a record does not extend that period. When a
-record is older, the extension tries to refresh it and can use the previous
-record if the refresh fails. This setting does not extend authorization.
-Image responses follow HTTP caching rules.
+The extension uses one freshness threshold of one hour for profiles, channel
+details, and avatar refresh checks. The period starts at the last successful
+check. Reading a record does not extend it. When a record is older, the
+extension tries to refresh it and can use the previous record if the refresh
+fails. This setting does not extend authorization. Image requests also follow
+HTTP caching rules, which can avoid downloading unchanged image data again.
 
 After it resolves the message, the extension allows up to 1.5 seconds for the
 sender and channel details. It then delivers the best available notification.
