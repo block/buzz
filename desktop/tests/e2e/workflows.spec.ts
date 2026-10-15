@@ -96,7 +96,13 @@ async function createWorkflow(
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  // The inspector swaps from the trigger to the new step after the click; an
+  // unscoped fill can land in the trigger's message-text condition instead.
+  const stepInspector = dialog.getByTestId("workflow-node-inspector");
+  await expect(
+    stepInspector.getByRole("button", { name: "Action", exact: true }),
+  ).toBeVisible();
+  await stepInspector.getByLabel("Message text").fill("Workflow notification");
   if (options?.stepName) {
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);

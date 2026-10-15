@@ -943,6 +943,11 @@ test("starting a duplicate voice-note player pauses the other instance", async (
 
   const cards = page.getByTestId("audio-message-attachment");
   await expect(cards).toHaveCount(2);
+  // The ping fixture lasts about one second, so it can finish before the
+  // playing state is observed. Loop it so only exclusivity pauses a player.
+  await cards.locator("audio").evaluateAll((audios) => {
+    for (const audio of audios) (audio as HTMLAudioElement).loop = true;
+  });
   const firstAudio = cards.nth(0).locator("audio");
   const secondAudio = cards.nth(1).locator("audio");
 
