@@ -33,7 +33,7 @@ pub mod rate_limit;
 pub mod scope;
 
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
-pub use error::AuthError;
+pub use error::{AuthError, NIP98_URL_MISMATCH_PREFIX};
 pub use nip42::{generate_challenge, verify_nip42_event};
 pub use nip98::verify_nip98_event;
 pub use nip98_replay::{
