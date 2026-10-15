@@ -991,9 +991,25 @@ fn gate_team_ingress(
     Some(ingress)
 }
 
+fn ignore_self_with_team_count(
+    team_loop: &mut team_loop::TeamLoop,
+    ignore_self: bool,
+    own_pubkey: &str,
+    channel_id: Uuid,
+    is_dm: bool,
+    event: &nostr::Event,
+) -> bool {
+    if !ignore_self || event.pubkey.to_hex() != own_pubkey {
+        return false;
+    }
+    team_loop.observe_self_event(channel_id, is_dm, event);
+    true
+}
+
 /// One authorized event's complete team and subscription path. An author-gate
 /// rejection is represented by `None` and cannot touch the reset counter.
 struct TeamListenerContext<'a> {
+    channel_id: Uuid,
     owner: Option<&'a str>,
     allowlist: &'a HashSet<String>,
     rules: &'a [SubscriptionRule],
@@ -1009,6 +1025,9 @@ async fn process_team_listener_event(
     context: TeamListenerContext<'_>,
 ) -> Option<NormalListenerIngress> {
     let authorized = authorized?;
+    if authorized.event().channel_id != context.channel_id {
+        return None;
+    }
     if team_loop.enabled() {
         if admitted_human_can_reset(
             &authorized,
@@ -1361,6 +1380,7 @@ mod team_loop_listener_tests {
             auth_tag_json: None,
         };
         let context = || TeamListenerContext {
+            channel_id,
             owner: None,
             allowlist: &allowlist,
             rules: &rules,
@@ -1454,7 +1474,14 @@ mod team_loop_listener_tests {
             ])
             .sign_with_keys(&agent)
             .unwrap();
-        guard.observe_self_event(channel_id, false, &self_event);
+        assert!(ignore_self_with_team_count(
+            &mut guard,
+            true,
+            &agent.public_key().to_hex(),
+            channel_id,
+            false,
+            &self_event,
+        ));
         let peer_event = EventBuilder::new(Kind::Custom(9), "reply")
             .tags(vec![nostr::Tag::parse(vec![
                 "p",
@@ -4070,12 +4097,21 @@ async fn run_harness(
                                 continue;
                             }
 
-                            if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
-                                team_loop.observe_self_event(
+                            let self_is_dm = if config.ignore_self
+                                && buzz_event.event.pubkey.to_hex() == pubkey_hex
+                            {
+                                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await
+                            } else {
+                                false
+                            };
+                            if ignore_self_with_team_count(
+                                &mut team_loop,
+                                config.ignore_self,
+                                &pubkey_hex,
                                     buzz_event.channel_id,
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
+                                    self_is_dm,
                                     &buzz_event.event,
-                                );
+                            ) {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -4222,6 +4258,7 @@ async fn run_harness(
                             // OwnerOnly and default Allowlist accept same-owner
                             // sibling agents. Strict Allowlist admits only explicit
                             // pubkeys, so a managed agent can ignore its siblings.
+                            let channel_id = buzz_event.channel_id;
                             let authorized_event = authorize_normal_listener_event(
                                 &mut author_gate_ctx,
                                 buzz_event,
@@ -4242,6 +4279,7 @@ async fn run_harness(
                                 &mut team_loop,
                                 &mut human_reset_cache,
                                 TeamListenerContext {
+                                    channel_id,
                                     owner: owner_cache.get(),
                                     allowlist: &config.respond_to_allowlist,
                                     rules: &rules,
