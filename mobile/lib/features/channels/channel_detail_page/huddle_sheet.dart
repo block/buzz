@@ -330,15 +330,12 @@ class _HuddleJoinSurface extends ConsumerWidget {
           };
 
     return Padding(
-      padding: const EdgeInsets.only(
-        left: messageAvatarSize + messageAvatarContentGap,
-        top: Grid.xxs,
-      ),
+      padding: const EdgeInsets.only(top: Grid.xxs),
       child: Container(
         padding: const EdgeInsets.all(Grid.twelve),
         decoration: BoxDecoration(
           color: context.colors.primary.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(Radii.md),
+          borderRadius: conversationAttachmentCorners,
           border: Border.all(
             color: context.colors.primary.withValues(alpha: 0.18),
           ),

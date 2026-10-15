@@ -1,5 +1,12 @@
 import 'package:flutter/widgets.dart';
 
+import '../theme/app_theme.dart';
+
+/// Shared conversation corners for media, voice notes, and huddle cards.
+const conversationAttachmentCorners = BorderRadius.all(
+  Radius.circular(Radii.container),
+);
+
 /// Shares conversation corner geometry with attachment surfaces.
 class MessageAttachmentCorners extends InheritedWidget {
   final BorderRadius borderRadius;

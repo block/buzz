@@ -1,3 +1,4 @@
+import 'package:buzz/shared/theme/mobile_appearance.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'dart:async';
 import 'dart:convert';

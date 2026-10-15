@@ -67,6 +67,8 @@ import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
+import '../../shared/widgets/message_attachment_corners.dart';
+import 'message_media_avatar.dart';
 import 'message_skeleton_body.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
@@ -611,7 +613,13 @@ class ChannelDetailPage extends HookConsumerWidget {
             currentPubkey: currentPubkey,
           );
     final timelineEntries = buildMainTimelineEntries(
-      timelineMessages,
+      // End events still update the original card through allMessages.
+      timelineMessages
+          .where(
+            (message) =>
+                message.systemEvent?.type != SystemEventType.huddleEnded,
+          )
+          .toList(),
       relaySummaries: ref
           .read(channelMessagesProvider(channel.id).notifier)
           .threadSummaries,
