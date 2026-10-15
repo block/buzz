@@ -192,9 +192,8 @@ class MessageContent extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final markdownTheme = GptMarkdownTheme.of(context);
-    final ownTextColor = context.colors.brightness == Brightness.dark
-        ? Colors.black
-        : Colors.white;
+    final chatColors = ChatColors.of(context);
+    final ownTextColor = chatColors.foreground;
     final baseTextStyle =
         (baseStyle ??
                 context.textTheme.bodyMedium?.copyWith(
@@ -409,9 +408,7 @@ class MessageContent extends HookConsumerWidget {
                     padding: const EdgeInsets.only(bottom: Grid.quarter),
                     child: LocalSendBubbleSurface(
                       color: ownMessage
-                          ? (context.colors.brightness == Brightness.dark
-                                ? const Color(0xFFF2F2F2)
-                                : Colors.black)
+                          ? chatColors.outgoing
                           : context.colors.secondaryContainer,
                       shape: _MessageBubbleShape(
                         start: bubbleStart && index == 0,

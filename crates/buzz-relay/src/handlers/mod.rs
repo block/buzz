@@ -42,6 +42,10 @@ pub mod report_resolution;
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.
 pub mod side_effects;
+#[cfg(test)]
+mod system_channel_postgres_tests;
+/// Per-filter query scope for system channels.
+pub(crate) mod system_channels;
 
 /// Extract an optional TTL (in seconds) from a Nostr event's `ttl` tag,
 /// applying the server-side override when configured.

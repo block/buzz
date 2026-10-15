@@ -36,7 +36,7 @@ Future<void> showAccentColorPickerSheet({
   required ValueChanged<int> onSelected,
 }) => showBuzzModalBottomSheet<void>(
   context: context,
-  title: 'Accent color',
+  title: 'Chat color',
   showDragHandle: true,
   builder: (_) => _AccentColorPicker(
     colorScheme: colorScheme,
@@ -204,10 +204,10 @@ class _AccentColorPicker extends HookWidget {
             crossAxisSpacing: Grid.xxs,
             mainAxisSpacing: Grid.xs,
           ),
-          itemCount: accentColors.length,
+          itemCount: chatColorChoices.length,
           itemBuilder: (context, index) => _AccentSheetOption(
             index: index,
-            color: accentColorForScheme(colorScheme, index),
+            color: chatColorForScheme(colorScheme, index),
             selected: selected.value == index,
             onTap: () {
               unawaited(HapticFeedback.selectionClick());
@@ -236,7 +236,7 @@ class _AccentSheetOption extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Semantics(
-    label: '${accentColors[index].name} accent color',
+    label: '${chatColorChoices[index].name} chat color',
     button: true,
     selected: selected,
     child: InkResponse(

@@ -5530,7 +5530,8 @@ void main() {
             );
             final subscription = container.listen(profileProvider, (_, _) {});
             addTearDown(subscription.close);
-            final expected = dark ? const Color(0xFFF2F2F2) : Colors.black;
+            final expected =
+                (dark ? AppTheme.dark() : AppTheme.light()).colorScheme.primary;
             expect(ownColor(), expected);
             for (final state in <AsyncValue<UserProfile?>>[
               const AsyncLoading(),

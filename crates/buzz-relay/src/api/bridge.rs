@@ -1438,12 +1438,26 @@ async fn query_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    // System channels are outside `accessible_channels`; a filter that names
+    // one reads it in its own scope only (see `handlers::system_channels`).
+    let mut readable_system =
+        crate::handlers::system_channels::readable_system_channels_for_filters(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            &filters,
+            &accessible_channels,
+            None,
+        )
+        .await
+        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
+        &mut readable_system,
     )
     .await?;
 
@@ -1459,6 +1473,7 @@ async fn query_events_authed(
             &raw_filters,
             &filters,
             &accessible_channels,
+            &readable_system,
             tenant,
             &authed_pubkey_hex,
             &pubkey_bytes,
@@ -1490,7 +1505,12 @@ async fn query_events_authed(
     // Resolve reply owners from retained thread metadata, including tombstones.
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if extension_flag(raw, "resolve_thread_roots") {
-            events.extend(thread_roots::query(state, tenant, filter, &accessible_channels).await?);
+            let scope = crate::handlers::system_channels::filter_channel_scope(
+                filter,
+                &accessible_channels,
+                &readable_system,
+            );
+            events.extend(thread_roots::query(state, tenant, filter, &scope).await?);
             handled.insert(idx);
         }
     }
@@ -1506,7 +1526,11 @@ async fn query_events_authed(
             tenant,
             raw,
             filter,
-            &accessible_channels,
+            &crate::handlers::system_channels::filter_channel_scope(
+                filter,
+                &accessible_channels,
+                &readable_system,
+            ),
             &pubkey_bytes,
             &mut events,
         )
@@ -1628,6 +1652,11 @@ async fn query_events_authed(
             Ok(b) if b.len() == 32 => b,
             _ => continue,
         };
+        let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
+            filter,
+            &accessible_channels,
+            &readable_system,
+        );
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             if !accessible_channels.contains(&ch_id) {
@@ -1717,6 +1746,11 @@ async fn query_events_authed(
         if handled.contains(&idx) {
             continue;
         }
+        let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
+            filter,
+            &accessible_channels,
+            &readable_system,
+        );
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             if !accessible_channels.contains(&ch_id) {
@@ -1818,6 +1852,11 @@ async fn query_events_authed(
     // Phase 3 — post-processing, strictly in filter order.
     while let Some((idx, filter_events)) = catchall_results.next().await {
         let filter = &filters[idx];
+        let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
+            filter,
+            &accessible_channels,
+            &readable_system,
+        );
         match filter_events {
             Ok(stored_events) => {
                 for se in stored_events {
@@ -1849,13 +1888,15 @@ async fn query_events_authed(
     Ok(Json(Value::Array(events)))
 }
 
-async fn repair_requested_channel_access(
+pub(crate) async fn repair_requested_channel_access(
     state: &AppState,
     tenant: &TenantContext,
     filters: &[nostr::Filter],
     pubkey_bytes: &[u8],
     accessible_channels: &mut Vec<uuid::Uuid>,
+    readable_system: &mut Vec<uuid::Uuid>,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    let repaired_from = accessible_channels.len();
     for filter in filters {
         let Some(requested) =
             crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
@@ -1863,7 +1904,8 @@ async fn repair_requested_channel_access(
             continue;
         };
         for channel_id in requested {
-            if accessible_channels.contains(&channel_id) {
+            // A readable system channel stays out of the request-wide set.
+            if accessible_channels.contains(&channel_id) || readable_system.contains(&channel_id) {
                 continue;
             }
             let is_member = state
@@ -1879,7 +1921,15 @@ async fn repair_requested_channel_access(
             );
         }
     }
-    Ok(())
+    crate::handlers::system_channels::keep_repaired_system_channels_named(
+        state,
+        tenant.community(),
+        accessible_channels,
+        repaired_from,
+        readable_system,
+    )
+    .await
+    .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -2035,17 +2085,36 @@ async fn count_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    // System channels are outside `accessible_channels`; a filter that names
+    // one reads it in its own scope only (see `handlers::system_channels`).
+    let mut readable_system =
+        crate::handlers::system_channels::readable_system_channels_for_filters(
+            state,
+            tenant.community(),
+            &pubkey_bytes,
+            &filters,
+            &accessible_channels,
+            None,
+        )
+        .await
+        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
+        &mut readable_system,
     )
     .await?;
 
     let mut total: u64 = 0;
     for (raw, filter) in raw.iter().zip(&filters) {
+        let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
+            filter,
+            &accessible_channels,
+            &readable_system,
+        );
         let needs_author_only_filtering =
             crate::handlers::req::filter_can_match_author_only_kinds(filter);
         // Same result-gated guard as the WS COUNT handler: force the per-event
@@ -2270,26 +2339,17 @@ fn search_hit_accepted(
 
 /// Handle search filters by routing to Postgres FTS, then fetching full events
 /// from DB. Supports a bridge-only `page` extension over the FTS result set.
+#[allow(clippy::too_many_arguments)]
 async fn handle_bridge_search(
     state: &AppState,
     raw_filters: &[Value],
     filters: &[nostr::Filter],
-    accessible_channels: &[uuid::Uuid],
+    implicit_channels: &[uuid::Uuid],
+    readable_system: &[uuid::Uuid],
     tenant: &buzz_core::tenant::TenantContext,
     reader_pubkey_hex: &str,
     pubkey_bytes: &[u8],
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // Bridge always includes global (channel-less) events — same as WS with
-    // full scopes. `None` means no accessible channels and no global access →
-    // empty result set (the caller short-circuits exactly as the WS door EOSEs).
-    let channel_scope = match crate::handlers::req::build_search_channel_scope_filter(
-        accessible_channels,
-        true, // include_global
-    ) {
-        Some(scope) => scope,
-        None => return Ok(Json(Value::Array(Vec::new()))),
-    };
-
     let mut events: Vec<Value> = Vec::new();
     let mut seen_ids: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
@@ -2305,6 +2365,13 @@ async fn handle_bridge_search(
         if limit == 0 {
             continue;
         }
+        // Implicit channels plus the readable system channels this filter
+        // names; never another filter's.
+        let accessible_channels = &*crate::handlers::system_channels::filter_channel_scope(
+            filter,
+            implicit_channels,
+            readable_system,
+        );
 
         // Scope by channel — push the #h tag (intersected with accessible
         // channels) if present, else the community-wide scope.
@@ -2321,7 +2388,15 @@ async fn handle_bridge_search(
                 }
                 buzz_search::ChannelScope::Channels(valid)
             } else {
-                channel_scope.clone()
+                // Bridge always includes global (channel-less) events — same
+                // as WS with full scopes.
+                match crate::handlers::req::build_search_channel_scope_filter(
+                    accessible_channels,
+                    true, // include_global
+                ) {
+                    Some(scope) => scope,
+                    None => continue,
+                }
             };
 
         let kinds = filter.kinds.as_ref().and_then(|ks| {

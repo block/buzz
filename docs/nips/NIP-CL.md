@@ -166,6 +166,65 @@ channel. It is private unless the kind:9007 also has `["visibility", "open"]`.
 **Hidden.** While a system channel is private, its kind:39000 carries the
 NIP-29 `hidden` tag.
 
+### Reads that leave system channels out
+
+The relay leaves system channels out of every read that does not name them.
+Clients that do not know about system channels then stay correct with no
+change. This applies to:
+
+- a filter without `#h`, for example the channels or messages a reader can see;
+- kind:39002 `#p:["<reader>"]`, the channels a reader belongs to;
+- COUNT and NIP-50 search; and
+- any relay-specific query API that does the same reads.
+
+A filter **names** a system channel when it has the channel ID in `#h`, or in
+`#d` on a filter whose kinds are all 39000–39003. Then the ordinary read rules
+apply: the reader can read the channel if they are a member or if it is open.
+A client that has the ID, for example from a link, can open the channel. Thus
+a system channel stays an ordinary NIP-29 group.
+
+The relay decides this for each filter. A filter that names a system channel
+does not add it to another filter in the same request.
+
+The relay MUST NOT send push notifications or kind:44100/44101 membership
+notifications for system channels. A client that received one would show the
+channel.
+
+### Asking for system channels
+
+A filter whose kinds are all 39000–39003 also returns the system channels that
+the reader can read when it has:
+
+- `"#t"` with the value `system`; or
+- any `"#P"`. A query for the channels of named creators returns a small
+  result, so it does not fill generic channel lists.
+
+The filter then matches as usual. A label alone does not ask for system
+channels.
+
+| To find | Filter |
+| --- | --- |
+| My system channels | `{"kinds": [39002], "#p": ["<me>"], "#t": ["system"]}`, then their kind:39000 by `#d` |
+| Open system channels | `{"kinds": [39000], "#t": ["system"]}` |
+| One creator's channel with a label, system or not | `{"kinds": [39000], "#P": ["<creator>"], "#t": ["<label>"]}` |
+
+`"#t": ["system", "<label>"]` means `system` **or** the label. It does not
+mean "a system channel with this label". Use `#P` and the label instead.
+
+Private system channels stay hidden from non-members, as for every private
+channel.
+
+## Advertising support
+
+Until this draft has an upstream integer NIP number, relays MUST NOT advertise
+it in NIP-11 `supported_nips`. A relay that supports this NIP adds `"nip-cl"`
+to its NIP-11 `supported_extensions` string array.
+
+A relay without this NIP drops label tags on create and refuses
+`channel_type=system`. So a client SHOULD NOT create a channel with labels or
+a system channel on a relay whose NIP-11 document does not contain `"nip-cl"`.
+Lookups by label on such a relay find nothing, which is safe.
+
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the

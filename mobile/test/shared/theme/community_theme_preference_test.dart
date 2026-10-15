@@ -99,6 +99,46 @@ void main() {
     expect(storage.readOutbox('pk', 'wss://relay.example'), isNull);
   });
 
+  for (final color in chatColorChoices) {
+    for (final mode in ThemeMode.values) {
+      test(
+        'local ${color.name} ${mode.name} survives a storage restart',
+        () async {
+          SharedPreferences.setMockInitialValues({
+            'buzz_accent_color': 0,
+            'buzz_theme_mode': 'light',
+          });
+          final prefs = await SharedPreferences.getInstance();
+          final preference = CommunityThemePreference(
+            theme: mode == ThemeMode.dark ? buzzDarkThemeName : buzzThemeName,
+            accent: color.wireValue,
+            followSystem: mode == ThemeMode.system,
+          );
+          await CommunityThemeStorage(prefs).writeLegacy(preference);
+          // Recreate preferences and storage from only the persisted snapshot.
+          final disk = {
+            for (final key in prefs.getKeys()) key: prefs.get(key)!,
+          };
+          SharedPreferences.setMockInitialValues(disk);
+          final restarted = CommunityThemeStorage(
+            await SharedPreferences.getInstance(),
+          );
+          expect(restarted.legacyPreference(), preference);
+          expect(restarted.legacyPreference().mode, mode);
+        },
+      );
+    }
+  }
+
+  test('invalid local snapshot falls back to historical migration', () async {
+    SharedPreferences.setMockInitialValues({
+      'buzz-local-theme.v1': '{"version":99}',
+      'buzz_accent_color': 8,
+    });
+    final prefs = await SharedPreferences.getInstance();
+    expect(CommunityThemeStorage(prefs).legacyPreference().accent, 'neutral');
+  });
+
   test('legacy accent indexes migrate without inventing wire values', () async {
     SharedPreferences.setMockInitialValues({
       'buzz_theme_mode': 'dark',

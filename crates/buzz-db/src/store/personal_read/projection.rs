@@ -99,6 +99,8 @@ impl Db {
                 WHERE cm.community_id=$1 AND cm.pubkey=$2 AND cm.removed_at IS NULL
                     AND c.deleted_at IS NULL AND ($3::uuid IS NULL OR c.id>$3)
                     AND ($9::uuid[] IS NULL OR c.id=ANY($9))
+                    -- System channels only when the request names them.
+                    AND ($9::uuid[] IS NOT NULL OR c.channel_type<>'system')
                 ORDER BY c.id LIMIT $4
              )
              SELECT r.*, COALESCE(e.latest_id, latest.latest_id) AS latest_id,
