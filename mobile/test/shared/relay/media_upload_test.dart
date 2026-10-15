@@ -470,6 +470,44 @@ void main() {
       },
     );
 
+    test(
+      'retries the legacy upload route when the standard route resets',
+      () async {
+        final requests = <Uri>[];
+        final client = http_testing.MockClient((request) async {
+          requests.add(request.url);
+          if (request.url.path == '/upload') {
+            throw http.ClientException('Connection reset by peer', request.url);
+          }
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.png',
+              'sha256': request.headers['X-SHA-256'],
+              'size': _pngBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            HttpStatus.ok,
+          );
+        });
+        final service = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: client,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+
+        final descriptor = await service.uploadBytes(
+          _pngBytes,
+          mimeType: 'image/png',
+        );
+
+        expect(descriptor.type, 'image/png');
+        expect(requests.map((url) => url.path), ['/upload', '/media/upload']);
+      },
+    );
+
     for (final statusCode in [
       HttpStatus.unsupportedMediaType,
       HttpStatus.unprocessableEntity,
