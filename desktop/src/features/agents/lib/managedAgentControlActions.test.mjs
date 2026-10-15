@@ -2,9 +2,59 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isProviderDeployedManagedAgent,
+  providerDeployedAgentForPersonaDelete,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
+
+test("isProviderDeployedManagedAgent requires a provider backend and deployment id", () => {
+  assert.equal(
+    isProviderDeployedManagedAgent({
+      backend: { type: "provider", id: "blox" },
+      backendAgentId: "remote-1",
+    }),
+    true,
+  );
+  assert.equal(
+    isProviderDeployedManagedAgent({
+      backend: { type: "provider", id: "blox" },
+      backendAgentId: null,
+    }),
+    false,
+  );
+  assert.equal(
+    isProviderDeployedManagedAgent({
+      backend: { type: "local" },
+      backendAgentId: null,
+    }),
+    false,
+  );
+});
+
+test("providerDeployedAgentForPersonaDelete returns the profile provider instance", () => {
+  const personaId = "persona-1";
+  const local = agent({
+    personaId,
+    backend: { type: "local" },
+  });
+  const provider = agent({
+    personaId,
+    pubkey: "aa".repeat(32),
+    backend: { type: "provider", id: "blox" },
+    backendAgentId: "remote-1",
+  });
+
+  assert.equal(
+    providerDeployedAgentForPersonaDelete(personaId, [local, provider], provider)
+      ?.pubkey,
+    provider.pubkey,
+  );
+  assert.equal(
+    providerDeployedAgentForPersonaDelete(personaId, [local], local),
+    null,
+  );
+});
 
 function agent(overrides = {}) {
   return {
