@@ -16,6 +16,10 @@
  */
 
 import type { SearchHit } from "@/shared/api/searchTypes";
+import {
+  countCharacters,
+  truncateByCharacters,
+} from "@/shared/lib/truncateByCharacters";
 
 export type DiscussionChannel = {
   id: string;
@@ -178,8 +182,8 @@ export function discussionSnippet(content: string): string {
   if (cleaned.length === 0) {
     return "Shared a link to this.";
   }
-  if (cleaned.length <= SNIPPET_MAX_CHARS) {
+  if (countCharacters(cleaned) <= SNIPPET_MAX_CHARS) {
     return cleaned;
   }
-  return `${cleaned.slice(0, SNIPPET_MAX_CHARS - 1).trimEnd()}…`;
+  return `${truncateByCharacters(cleaned, SNIPPET_MAX_CHARS - 1).trimEnd()}…`;
 }
