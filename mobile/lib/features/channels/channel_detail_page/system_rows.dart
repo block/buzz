@@ -611,9 +611,10 @@ class _ThreadSummaryRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final participants = summary.participantPubkeys.take(3).toList();
-    final userCache = ref.watch(userCacheProvider);
-    return GestureDetector(
+    return ReplySummaryLink(
+      key: ValueKey('thread-summary-${message.id}'),
+      summary: summary,
+      hasReactions: message.reactions.isNotEmpty,
       onTap: () {
         Navigator.of(context).push(
           MaterialPageRoute<void>(
@@ -628,61 +629,6 @@ class _ThreadSummaryRow extends ConsumerWidget {
           ),
         );
       },
-      child: Semantics(
-        button: true,
-        child: Container(
-          key: ValueKey('thread-summary-${message.id}'),
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.xxs + Grid.quarter,
-            vertical: Grid.half,
-          ),
-          decoration: BoxDecoration(
-            color: context.colors.secondaryContainer,
-            borderRadius: BorderRadius.circular(Radii.container),
-            border: Border.all(color: context.colors.surface, width: 2),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (participants.isNotEmpty) ...[
-                ExcludeSemantics(
-                  child: SizedBox(
-                    width:
-                        Grid.gutter + (participants.length - 1) * Grid.twelve,
-                    height: Grid.gutter,
-                    child: Stack(
-                      children: [
-                        for (var i = 0; i < participants.length; i++)
-                          Positioned(
-                            left: i * Grid.twelve,
-                            child: SmallAvatar(
-                              pubkey: participants[i],
-                              userCache: userCache,
-                              size: Grid.gutter,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: Grid.half),
-              ],
-              Flexible(
-                child: Text(
-                  summary.isCountPending
-                      ? 'Replies'
-                      : '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.textTheme.labelMedium?.copyWith(
-                    color: context.colors.onSurface,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

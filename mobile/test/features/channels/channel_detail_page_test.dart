@@ -4253,7 +4253,7 @@ void main() {
       },
     );
 
-    testWidgets('attaches replies after reactions with an eight pixel gap', (
+    testWidgets('places connected reply links below the reaction tray', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -4300,15 +4300,15 @@ void main() {
       }
       final pill = find.byKey(const ValueKey('thread-summary-$threadIdRoot'));
       final tray = find.byKey(const ValueKey('combined-reaction-tray'));
-      expect(tester.getTopLeft(pill).dx - tester.getTopRight(tray).dx, 8);
       expect(
-        tester.getCenter(pill).dy,
-        closeTo(tester.getCenter(tray).dy, 0.1),
+        tester.getTopLeft(pill).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(tray).dy),
       );
+      expect(tester.getSize(pill).height, greaterThanOrEqualTo(44));
       final body = find.text('Thread head', findRichText: true);
       expect(
         tester.getTopLeft(pill).dy,
-        lessThan(tester.getBottomLeft(body).dy + 24),
+        lessThan(tester.getBottomLeft(body).dy + 64),
       );
       await tester.tap(pill);
       await tester.pumpAndSettle();

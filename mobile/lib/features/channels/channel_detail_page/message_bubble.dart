@@ -167,9 +167,7 @@ class _MessageBubble extends HookConsumerWidget {
               ),
               child: MessageFooterLayout(
                 animateSize: true,
-                overlap: message.reactions.isNotEmpty || replyFooter != null
-                    ? Grid.xs
-                    : 0,
+                overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
                 footer: message.reactions.isNotEmpty || replyFooter != null
                     ? Padding(
                         padding: const EdgeInsets.only(
@@ -178,10 +176,9 @@ class _MessageBubble extends HookConsumerWidget {
                               messageAvatarContentGap +
                               Grid.xxs,
                         ),
-                        child: Wrap(
-                          spacing: Grid.xxs,
-                          runSpacing: Grid.half,
-                          crossAxisAlignment: WrapCrossAlignment.center,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             if (message.reactions.isNotEmpty)
                               ReactionRow(
