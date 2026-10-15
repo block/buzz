@@ -131,10 +131,20 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
+  String? _relayUrl;
+
+  /// The relay origin this session serves. Switching community rebuilds the
+  /// session in place, so work begun for another community compares this
+  /// before reading from or publishing through it.
+  String? get relayUrl => _relayUrl;
+
+  @visibleForTesting
+  set debugRelayUrl(String? value) => _relayUrl = value;
 
   @override
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
+    _relayUrl = config.baseUrl;
     final authState = ref.watch(authProvider);
     _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 

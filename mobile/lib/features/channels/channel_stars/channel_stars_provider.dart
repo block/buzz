@@ -63,6 +63,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
     late final ChannelStarsManager manager;
     manager = ChannelStarsManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),

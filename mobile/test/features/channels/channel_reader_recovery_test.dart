@@ -8,6 +8,7 @@ import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -51,6 +52,7 @@ final _lanes = [
   _Lane('channel-stars', 'starred', (prefs, relay) {
     final m = ChannelStarsManager(
       pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: ChannelStarsCrypto(relay.keys.nsec, relay.pubkey),
       relaySession: relay.session,
@@ -71,6 +73,7 @@ final _lanes = [
   _Lane('channel-mutes', 'muted', (prefs, relay) {
     final m = ChannelMutesManager(
       pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: ChannelMutesCrypto(relay.keys.nsec, relay.pubkey),
       relaySession: relay.session,
@@ -268,6 +271,7 @@ void main() {
     List<String> names() => [
       for (final s in c.read(channelSectionsProvider).store.sections) s.name,
     ];
+    c.read(relaySessionProvider);
     relay.stored.add(
       relay.event('channel-sections', {
         'version': 1,
@@ -282,7 +286,6 @@ void main() {
     expect(names(), ['Studio']);
 
     // The same identity in a second community that has no groups.
-    relay.stored.clear();
     config.switchTo('https://second.example');
     clock.elapse(const Duration(seconds: 1));
     expect(names(), isEmpty);
@@ -296,6 +299,78 @@ void main() {
     held.complete();
     c.dispose();
   });
+
+  // Each lane: what it shows, and one local change to it.
+  final scopedLanes =
+      <
+        String,
+        (
+          Set<String> Function(ProviderContainer),
+          void Function(ProviderContainer, String),
+        )
+      >{
+        'channel-stars': (
+          (c) => c.read(channelStarsProvider).store.channels.keys.toSet(),
+          (c, id) => c.read(channelStarsProvider.notifier).starChannel(id),
+        ),
+        'channel-mutes': (
+          (c) => c.read(channelMutesProvider).store.channels.keys.toSet(),
+          (c, id) => c.read(channelMutesProvider.notifier).muteChannel(id),
+        ),
+        'channel-sections': (
+          (c) => {
+            for (final s in c.read(channelSectionsProvider).store.sections)
+              s.name,
+          },
+          (c, name) =>
+              c.read(channelSectionsProvider.notifier).createSection(name),
+        ),
+        'read-state': (
+          (c) => c.read(readStateProvider).contexts.keys.toSet(),
+          (c, id) => c
+              .read(readStateProvider.notifier)
+              .markContextRead(id, nowSeconds()),
+        ),
+      };
+  for (final MapEntry(key: dTag, value: (values, set)) in scopedLanes.entries) {
+    fakeAsyncTest('$dTag stay with the community they were set in', (clock) {
+      final relay = SidebarRelay();
+      final config = _SwitchableConfig(relay.keys.nsec);
+      final c = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          relayConfigProvider.overrideWith(() => config),
+          relaySessionProvider.overrideWith(() => relay.session),
+          activeCommunityProvider.overrideWith((ref) async => null),
+          appLifecycleProvider.overrideWith(_Lifecycle.new),
+        ],
+      );
+      for (final p in [
+        channelStarsProvider,
+        channelMutesProvider,
+        channelSectionsProvider,
+        readStateProvider,
+      ]) {
+        c.listen(p, (_, _) {});
+      }
+      clock.elapse(const Duration(seconds: 1));
+      set(c, 'chan-a');
+
+      // The session rebuilds for the second community before the first
+      // community's manager is retired, so its pending change must not be
+      // flushed through it.
+      config.switchTo('https://second.example');
+      c.read(relaySessionProvider);
+      clock.elapse(const Duration(seconds: 10));
+      expect(relay.publishedTo, isNot(contains('https://second.example')));
+      expect(values(c), isEmpty);
+
+      config.switchTo('https://relay.example');
+      clock.elapse(const Duration(seconds: 1));
+      expect(values(c), {'chan-a'});
+      c.dispose();
+    });
+  }
 
   for (final lane in _lanes) {
     Map<String, Object> blob(Map<String, (bool, int)> entries) => {
