@@ -8,9 +8,17 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { matchBackForwardChord } from "@/app/navigation/backForwardChords";
-import { traverseHistory } from "@/app/navigation/navigationGuard";
+import {
+  createNavigationHistoryState,
+  getBackHistoryEntries,
+  getForwardHistoryEntries,
+  recordHistoryVisit,
+} from "@/app/navigation/navigationHistory";
+import {
+  traverseHistory,
+  traverseHistoryBy,
+} from "@/app/navigation/navigationGuard";
 import { isMacPlatform } from "@/shared/lib/platform";
-import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 
 type RouterHistoryState = {
   __TSR_index?: number;
@@ -18,7 +26,7 @@ type RouterHistoryState = {
   key?: string;
 };
 
-export function useBackForwardControls() {
+export function useBackForwardControls(currentLabel: string) {
   const router = useRouter();
   const canGoBack = useCanGoBack();
   const locationState = useRouterState({
@@ -27,33 +35,38 @@ export function useBackForwardControls() {
   const locationIndex = locationState.__TSR_index ?? 0;
   const locationKey =
     locationState.__TSR_key ?? locationState.key ?? String(locationIndex);
-  const keysByIndexRef = React.useRef(new Map<number, string>());
-  const [maxIndex, setMaxIndex] = React.useState(locationIndex);
+  const [historyState, setHistoryState] = React.useState(() =>
+    createNavigationHistoryState({
+      index: locationIndex,
+      key: locationKey,
+      label: currentLabel,
+    }),
+  );
 
   React.useEffect(() => {
-    const keysByIndex = keysByIndexRef.current;
-    const currentKey = keysByIndex.get(locationIndex);
+    setHistoryState((current) =>
+      recordHistoryVisit(current, {
+        index: locationIndex,
+        key: locationKey,
+        label: currentLabel,
+      }),
+    );
+  }, [currentLabel, locationIndex, locationKey]);
 
-    if (currentKey && currentKey !== locationKey) {
-      for (const storedIndex of [...keysByIndex.keys()]) {
-        if (storedIndex >= locationIndex) {
-          keysByIndex.delete(storedIndex);
-        }
-      }
-    }
-
-    keysByIndex.set(locationIndex, locationKey);
-    trimMapToSize(keysByIndex, 200);
-    setMaxIndex((current: number) => {
-      if (currentKey && currentKey !== locationKey) {
-        return locationIndex;
-      }
-
-      return Math.max(current, locationIndex);
-    });
-  }, [locationIndex, locationKey]);
-
-  const canGoForward = locationIndex < maxIndex;
+  const canGoForward = locationIndex < historyState.maxIndex;
+  const backHistory = React.useMemo(
+    () => getBackHistoryEntries(historyState.entriesByIndex, locationIndex),
+    [historyState.entriesByIndex, locationIndex],
+  );
+  const forwardHistory = React.useMemo(
+    () =>
+      getForwardHistoryEntries(
+        historyState.entriesByIndex,
+        locationIndex,
+        historyState.maxIndex,
+      ),
+    [historyState.entriesByIndex, historyState.maxIndex, locationIndex],
+  );
 
   const goBack = React.useCallback(() => {
     if (!canGoBack) {
@@ -70,6 +83,30 @@ export function useBackForwardControls() {
 
     traverseHistory(router.history, "forward");
   }, [canGoForward, router.history]);
+
+  const goBackTo = React.useCallback(
+    (index: number) => {
+      const delta = index - locationIndex;
+      if (delta >= 0 || !historyState.entriesByIndex.has(index)) {
+        return;
+      }
+
+      traverseHistoryBy(router.history, delta);
+    },
+    [historyState.entriesByIndex, locationIndex, router.history],
+  );
+
+  const goForwardTo = React.useCallback(
+    (index: number) => {
+      const delta = index - locationIndex;
+      if (delta <= 0 || !historyState.entriesByIndex.has(index)) {
+        return;
+      }
+
+      traverseHistoryBy(router.history, delta);
+    },
+    [historyState.entriesByIndex, locationIndex, router.history],
+  );
 
   const handleKeyDown = React.useEffectEvent((event: KeyboardEvent) => {
     // Note: the chords deliberately fire even when focus is inside an
@@ -129,9 +166,13 @@ export function useBackForwardControls() {
   }, []);
 
   return {
+    backHistory,
     canGoBack,
     canGoForward,
+    forwardHistory,
     goBack,
+    goBackTo,
     goForward,
+    goForwardTo,
   };
 }
