@@ -10494,6 +10494,34 @@ void main() {
     );
   }
 
+  testWidgets(
+    'affirmative ordinary route sends without waiting for Solo lookup',
+    (tester) async {
+      final sender = _RecordingOrdinarySender();
+      final pending = StreamController<MeGroups>();
+      addTearDown(pending.close);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          sender: sender,
+          organization: pending.stream,
+          home: ChannelDetailPage(
+            channel: _testChannel,
+            placement: ChannelRoutePlacement.ordinary,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byType(ComposeBar), findsOneWidget);
+      await tester
+          .widget<ComposeBar>(find.byType(ComposeBar))
+          .onSend('Immediate', []);
+      expect(sender.sent, ['Immediate']);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 3));
+    },
+  );
+
   testWidgets('affirmative Solo route never falls back to ordinary sending', (
     tester,
   ) async {

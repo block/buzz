@@ -144,6 +144,22 @@ void main() {
       expect(find.text('Retry offline save'), findsNothing);
       expect(find.text('Saved chat'), findsOneWidget);
       expect(service.cachedSnapshot()?.event?.id, fresh.id);
+      relay.closeSubscription!('terminal CLOSED');
+      await tester.pumpAndSettle();
+      expect(find.text('Saved chat'), findsOneWidget);
+      expect(find.text('Retry live updates'), findsOneWidget);
+      final pendingRefresh = Completer<List<NostrEvent>>();
+      relay.pendingRead = pendingRefresh.future;
+      await tester.tap(find.text('Retry live updates'));
+      await tester.pumpAndSettle();
+      expect(find.text('Saved chat'), findsOneWidget);
+      expect(find.text('Retry live updates'), findsOneWidget);
+      pendingRefresh.complete([fresh]);
+      await tester.pumpAndSettle();
+      expect(find.text('Retry live updates'), findsNothing);
+      relay.closeSubscription!('closed again');
+      await tester.pumpAndSettle();
+      expect(find.text('Retry live updates'), findsOneWidget);
     },
   );
 }

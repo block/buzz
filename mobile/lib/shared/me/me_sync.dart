@@ -31,6 +31,7 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
   void Function()? unsubscribe;
   NostrEvent? latest;
   var hasSnapshot = false;
+  var subscriptionClosed = false;
   Future<void> accept(NostrEvent event) async {
     if (disposed ||
         (latest != null &&
@@ -93,7 +94,10 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         service.filter,
         accept,
         onClosed: (_) {
-          if (!disposed && !hasSnapshot) {
+          if (disposed) return;
+          subscriptionClosed = true;
+          service.syncClosed.value = true;
+          if (!hasSnapshot) {
             controller.addError(
               StateError('Couldn’t sync Solo. Reconnect and try again.'),
             );
@@ -105,6 +109,7 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         return;
       }
       await refresh();
+      if (!disposed && !subscriptionClosed) service.syncClosed.value = false;
     } catch (error, stack) {
       if (!disposed && !hasSnapshot) controller.addError(error, stack);
     }
@@ -131,6 +136,20 @@ final meOfflineSaveWarningProvider = StreamProvider<bool>((ref) {
   changed();
   ref.onDispose(() {
     service.cacheWriteFailed.removeListener(changed);
+    unawaited(controller.close());
+  });
+  return controller.stream;
+});
+
+/// Retryable live-sync interruption without hiding cached organization.
+final meSyncWarningProvider = StreamProvider<bool>((ref) {
+  final service = ref.watch(meSyncProvider);
+  final controller = StreamController<bool>();
+  void changed() => controller.add(service.syncClosed.value);
+  service.syncClosed.addListener(changed);
+  changed();
+  ref.onDispose(() {
+    service.syncClosed.removeListener(changed);
     unawaited(controller.close());
   });
   return controller.stream;
@@ -211,6 +230,9 @@ class MeSync {
 
   /// False only after the newest candidate is durably written.
   final cacheWriteFailed = ValueNotifier(false);
+
+  /// A terminal subscription close requires explicit reader recovery.
+  final syncClosed = ValueNotifier(false);
 
   /// Serialize writes and report failures so callers can expose a retry.
   Future<void> cache(NostrEvent? event) {

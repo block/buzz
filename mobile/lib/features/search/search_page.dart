@@ -4,7 +4,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
-import '../../shared/me/me_search_placement.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
@@ -516,7 +515,7 @@ class _ChannelsSection extends ConsumerWidget {
                 : null,
             onTap: () {
               onResultSelected();
-              _openSearchChannel(context, ref, channel);
+              _openSearchChannel(context, channel);
             },
           ),
       ],
@@ -640,22 +639,13 @@ extension on _SearchFilter {
   };
 }
 
-/// Resolve personal placement before opening a result so sessions retain their
-/// flat conversation and assistant controls, including on a fresh app launch.
-Future<void> _openSearchChannel(
-  BuildContext context,
-  WidgetRef ref,
-  Channel channel,
-) async {
+/// Let the destination resolve placement once, including on a fresh launch.
+Future<void> _openSearchChannel(BuildContext context, Channel channel) async {
   try {
-    final personal = await ref.read(
-      meSearchPlacementProvider(channel.id).future,
-    );
     if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            ChannelDetailPage(channel: channel, personalChat: personal),
+        builder: (_) => ChannelDetailPage(channel: channel),
       ),
     );
   } catch (_) {

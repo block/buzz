@@ -1,7 +1,7 @@
 part of '../channel_detail_page.dart';
 
 /// Explicit destination identity; generic entries allow ordinary sending.
-enum ChannelRoutePlacement { ordinary, solo, unresolved }
+enum ChannelRoutePlacement { lookup, ordinary, solo, unresolved }
 
 /// Resolves Solo placement at the destination, including Activity/deep links.
 class ChannelDetailPage extends ConsumerWidget {
@@ -19,7 +19,7 @@ class ChannelDetailPage extends ConsumerWidget {
     super.key,
     required this.channel,
     this.personalChat = false,
-    this.placement = ChannelRoutePlacement.ordinary,
+    this.placement = ChannelRoutePlacement.lookup,
     this.initialAssistant,
     this.initialMessageId,
     this.initialThreadRootId,
@@ -34,7 +34,10 @@ class ChannelDetailPage extends ConsumerWidget {
         placement == ChannelRoutePlacement.solo ||
         (groups?.channels.contains(channel.id) ?? false);
     final lookup = ref.watch(meSearchPlacementProvider(channel.id));
-    if (!placed && groups == null && lookup.isLoading) {
+    if (!placed &&
+        placement != ChannelRoutePlacement.ordinary &&
+        groups == null &&
+        lookup.isLoading) {
       return Scaffold(
         appBar: AppBar(title: Text(channel.name)),
         body: const Center(child: BuzzLoadingIndicator()),
