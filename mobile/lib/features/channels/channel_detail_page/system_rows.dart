@@ -133,7 +133,9 @@ class _SystemMessageRow extends HookConsumerWidget {
       );
     }
 
-    final isHuddle = systemEvent.type == SystemEventType.huddleStarted;
+    final isHuddle =
+        systemEvent.type == SystemEventType.huddleStarted &&
+        systemEvent.ephemeralChannelId != null;
     final actor = (systemEvent.actorPubkey ?? message.pubkey).toLowerCase();
     Widget withActor(Widget content) {
       if (!isHuddle) return content;
@@ -141,16 +143,27 @@ class _SystemMessageRow extends HookConsumerWidget {
         key: ValueKey('huddle-activity-${message.id}'),
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          GestureDetector(
+          Semantics(
+            label: 'Open ${resolveLabel(actor)} profile',
+            button: true,
+            excludeSemantics: true,
             onTap: () => showUserProfileSheet(
               context,
               actor,
               names: channelIdentityNamesProvider(channelId),
             ),
-            child: _UserAvatar(
-              profile: userCache[actor],
-              pubkey: actor,
-              isAgent: userCache[actor]?.ownerPubkey != null,
+            child: GestureDetector(
+              excludeFromSemantics: true,
+              onTap: () => showUserProfileSheet(
+                context,
+                actor,
+                names: channelIdentityNamesProvider(channelId),
+              ),
+              child: _UserAvatar(
+                profile: userCache[actor],
+                pubkey: actor,
+                isAgent: userCache[actor]?.ownerPubkey != null,
+              ),
             ),
           ),
           const SizedBox(width: messageAvatarContentGap),

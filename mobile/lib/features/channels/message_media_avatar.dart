@@ -33,7 +33,7 @@ class MessageMediaAvatar extends StatelessWidget {
     valueListenable: offset,
     child: child,
     builder: (context, offset, child) {
-      final visibility = 1 - (offset.abs() / messageAvatarSize).clamp(0.0, 1.0);
+      final visibility = 1 - (offset / messageAvatarSize).clamp(0.0, 1.0);
       return IgnorePointer(
         ignoring: visibility < 1,
         child: ExcludeSemantics(

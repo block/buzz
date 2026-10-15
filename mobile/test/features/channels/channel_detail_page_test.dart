@@ -2163,6 +2163,55 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('hidden huddle end does not block bottom catch-up', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'First',
+              createdAt: 1100,
+            ),
+            _textMsg(
+              id: 'msg2',
+              pubkey: 'alice',
+              content: 'Latest',
+              createdAt: 1200,
+            ),
+            _huddleMsg(
+              id: 'hidden-end',
+              kind: EventKind.huddleEnded,
+              createdAt: 1300,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      await tester.pump();
+      // Opening the channel does not read it; holding still at the bottom
+      // does, without moving the channel mark.
+      expect(readState.markedContexts, isEmpty);
+
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('reading the bottom ends a manual channel unread only', (
       tester,
     ) async {
@@ -9530,9 +9579,42 @@ void main() {
       },
     );
 
+    testWidgets('malformed huddle start keeps its fallback activity row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            const NostrEvent(
+              id: 'malformed-huddle',
+              pubkey: 'alice',
+              createdAt: 1000,
+              kind: EventKind.huddleStarted,
+              tags: [
+                ['h', _channelId],
+              ],
+              content: '{}',
+              sig: '',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('activity-card-malformed-huddle')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-activity-malformed-huddle')),
+        findsNothing,
+      );
+    });
+
     testWidgets('opens a profile sheet from a huddle card avatar', (
       tester,
     ) async {
+      final semantics = tester.ensureSemantics();
+
       await tester.pumpWidget(
         _buildTestable(
           messages: [
@@ -9549,6 +9631,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      expect(find.bySemanticsLabel(RegExp(r'Open .+ profile')), findsOneWidget);
+      semantics.dispose();
       await tester.tap(find.byType(AvatarImage).first);
       await tester.pumpAndSettle();
 

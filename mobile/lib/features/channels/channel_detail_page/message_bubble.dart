@@ -393,16 +393,16 @@ class _MessageBubble extends HookConsumerWidget {
                         Positioned(
                           left: 0,
                           bottom: 0,
-                          child: GestureDetector(
-                            onTap: () => showUserProfileSheet(
-                              context,
-                              message.pubkey,
-                              names: channelIdentityNamesProvider(
-                                currentChannelId,
+                          child: MessageMediaAvatar(
+                            offset: mediaOffset,
+                            child: GestureDetector(
+                              onTap: () => showUserProfileSheet(
+                                context,
+                                message.pubkey,
+                                names: channelIdentityNamesProvider(
+                                  currentChannelId,
+                                ),
                               ),
-                            ),
-                            child: MessageMediaAvatar(
-                              offset: mediaOffset,
                               child: _UserAvatar(
                                 profile: profile,
                                 pubkey: message.pubkey,

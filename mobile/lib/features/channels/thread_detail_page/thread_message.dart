@@ -370,14 +370,16 @@ class _ThreadMessage extends HookConsumerWidget {
                           Positioned(
                             left: 0,
                             bottom: 0,
-                            child: GestureDetector(
-                              onTap: () => showUserProfileSheet(
-                                context,
-                                message.pubkey,
-                                names: channelIdentityNamesProvider(channelId),
-                              ),
-                              child: MessageMediaAvatar(
-                                offset: mediaOffset,
+                            child: MessageMediaAvatar(
+                              offset: mediaOffset,
+                              child: GestureDetector(
+                                onTap: () => showUserProfileSheet(
+                                  context,
+                                  message.pubkey,
+                                  names: channelIdentityNamesProvider(
+                                    channelId,
+                                  ),
+                                ),
                                 child: _Avatar(
                                   profile: profile,
                                   pubkey: message.pubkey,
