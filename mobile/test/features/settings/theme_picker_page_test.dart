@@ -82,6 +82,79 @@ void main() {
     expect(notifier.lastPreference?.accent, chatColorChoices[green].wireValue);
   });
 
+  for (final brightness in Brightness.values) {
+    testWidgets('${brightness.name} chat preview follows draft colors only', (
+      tester,
+    ) async {
+      final notifier = _RecordingCommunityThemeNotifier();
+      await _pumpPicker(tester, themeNotifier: () => notifier);
+      // System starts with the test platform's light appearance.
+      if (brightness == Brightness.dark) {
+        for (var i = 0; i < 2; i++) {
+          await tester.tap(
+            find.byKey(
+              const ValueKey('theme-preview-appearance-action-button'),
+            ),
+          );
+          await tester.pumpAndSettle();
+        }
+      }
+      Color bubbleColor() =>
+          (tester
+                      .widget<DecoratedBox>(
+                        find.byKey(
+                          const ValueKey('theme-chat-outgoing-bubble'),
+                        ),
+                      )
+                      .decoration
+                  as BoxDecoration)
+              .color!;
+      Color foregroundColor() =>
+          (tester
+                      .widget<DecoratedBox>(
+                        find.byKey(
+                          const ValueKey('theme-chat-outgoing-line-206.0'),
+                        ),
+                      )
+                      .decoration
+                  as BoxDecoration)
+              .color!;
+      Color surfaceColor() => tester
+          .widget<ColoredBox>(
+            find.byKey(const ValueKey('theme-chat-preview-surface')),
+          )
+          .color;
+      final surface = surfaceColor();
+      final fills = <Color>[];
+      for (final name in ['Blue', 'Green', 'Neutral']) {
+        await tester.tap(
+          find.byKey(const ValueKey('theme-preview-accent-action-button')),
+        );
+        await tester.pumpAndSettle();
+        final index = chatColorChoices.indexWhere(
+          (color) => color.name == name,
+        );
+        final option = find.byKey(ValueKey('accent-option-$index'));
+        await tester.tap(option);
+        await tester.pumpAndSettle();
+        Navigator.of(tester.element(option)).pop();
+        await tester.pumpAndSettle();
+        final theme = mobileAppearanceTheme(
+          brightness,
+          chatColorChoices[index].wireValue,
+        );
+        final chat = theme.extension<ChatColors>()!;
+        expect(bubbleColor(), chat.outgoing);
+        expect(foregroundColor(), chat.foreground);
+        expect(surfaceColor(), surface);
+        expect(notifier.preferenceWrites, 0);
+        fills.add(bubbleColor());
+      }
+      expect(fills.toSet(), hasLength(3));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('Close discards mode changes', (tester) async {
     final notifier = _RecordingCommunityThemeNotifier();
     await _pumpPicker(tester, themeNotifier: () => notifier);
