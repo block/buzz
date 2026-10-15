@@ -39,7 +39,7 @@ final class BuzzNotificationEnrichmentOperationTests: XCTestCase {
       refresh: { needsProfile, _, completion in
         XCTAssertTrue(needsProfile)
         // The deadline is already queued. This callback queues processing after it.
-        completion(profile, nil, nil)
+        completion(.profile(profile))
       },
       completion: { resolution in
         deliveryCount += 1
@@ -100,7 +100,7 @@ final class BuzzNotificationEnrichmentOperationTests: XCTestCase {
         if let deadlineAction {
           operationQueue?.async(execute: DispatchWorkItem(block: deadlineAction))
         }
-        completion(profile, nil, nil)
+        completion(.profile(profile))
         operationQueue?.async { finished.fulfill() }
       },
       completion: { resolution in
@@ -214,19 +214,55 @@ final class BuzzNotificationEnrichmentOperationTests: XCTestCase {
     XCTAssertEqual(try cache.avatar(scope: scope, pubkey: message.pubkey), saved)
   }
 
-  private func signedEvent(kind: Int, content: String) throws -> VerifiedNostrEvent {
+  func testSlowChannelDoesNotBlockProfileAndAvatarAtDeadline() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let message = try signedEvent(kind: 9, content: "Hello", tags: [["h", "room"]])
+    let profile = try signedEvent(
+      kind: 0,
+      content: #"{"name":"Alice","picture":"https://images.example/avatar.png"}"#)
+    let community = PushLeaseCommunity(
+      id: "community", name: "Test",
+      relayUrl: "wss://relay.example", pubkey: message.pubkey, policies: [],
+      notificationSessionID: "session")
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community))
+    let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+    let delivered = expectation(description: "Available profile and avatar at deadline")
+    let image = Data([1, 2, 3])
+    let operation = BuzzNotificationEnrichmentOperation(
+      event: message, community: community, scope: scope, cache: cache, avatarLoader: nil,
+      now: Date.init, isCurrent: { true },
+      loadAvatar: { _, _, completion in completion(.success(image)) },
+      refresh: { profileNeeded, channelNeeded, completion in
+        XCTAssertTrue(profileNeeded)
+        XCTAssertTrue(channelNeeded)
+        completion(.profile(profile))
+        // The channel response remains pending beyond the delivery deadline.
+      },
+      completion: { resolution in
+        XCTAssertEqual(resolution?.title, "Alice")
+        XCTAssertEqual(resolution?.senderAvatarPNG, image)
+        delivered.fulfill()
+      })
+    operation.start()
+    wait(for: [delivered], timeout: 3)
+  }
+
+  private func signedEvent(kind: Int, content: String, tags: [[String]] = []) throws
+    -> VerifiedNostrEvent
+  {
     let key = try P256K.Schnorr.PrivateKey(
       dataRepresentation: Array(repeating: UInt8(1), count: 32))
     let pubkey = VerifiedNostrEvent.hex(key.xonly.bytes)
     let serialization = try VerifiedNostrEvent.canonicalSerialization(
-      pubkey: pubkey, createdAt: 1, kind: kind, tags: [], content: content)
+      pubkey: pubkey, createdAt: 1, kind: kind, tags: tags, content: content)
     let digest = Array(SHA256.hash(data: serialization))
     var message = digest
     var randomness = Array(repeating: UInt8(2), count: 32)
     let signature = try key.signature(message: &message, auxiliaryRand: &randomness)
     return VerifiedNostrEvent(
       id: VerifiedNostrEvent.hex(digest), pubkey: pubkey,
-      createdAt: 1, kind: kind, tags: [], content: content,
+      createdAt: 1, kind: kind, tags: tags, content: content,
       sig: VerifiedNostrEvent.hex(signature.dataRepresentation))
   }
 }

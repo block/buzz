@@ -2,9 +2,11 @@ import Foundation
 
 /// One notification's presentation deadline, independent of the lifetime of its fetches.
 final class BuzzNotificationEnrichmentOperation {
-  typealias Refresh = (
-    Bool, Bool, @escaping (VerifiedNostrEvent?, VerifiedNostrEvent?, VerifiedNostrEvent?) -> Void
-  ) -> Void
+  enum RefreshResult {
+    case profile(VerifiedNostrEvent?)
+    case channel(VerifiedNostrEvent?, VerifiedNostrEvent?)
+  }
+  typealias Refresh = (Bool, Bool, @escaping (RefreshResult) -> Void) -> Void
   private let event: VerifiedNostrEvent
   private let community: PushLeaseCommunity
   private let scope: BuzzNotificationCacheScope
@@ -20,6 +22,11 @@ final class BuzzNotificationEnrichmentOperation {
   private let refresh: Refresh
   private var completion: ((BuzzPushResolution?) -> Void)?
   private let queue = DispatchQueue(label: "buzz.notification.enrichment")
+  private let workQueue = DispatchQueue(
+    label: "buzz.notification.enrichment.storage", qos: .utility)
+  private var pendingProfile = false
+  private var pendingChannel = false
+  private var avatarLoading = false
   private var profile: BuzzNotificationMetadata?
   private var channel: BuzzNotificationMetadata?
   private var membership: BuzzNotificationMetadata?
@@ -62,19 +69,30 @@ final class BuzzNotificationEnrichmentOperation {
           channelID != nil
           && (channel?.isFresh(at: now()) != true || membership?.isFresh(at: now()) != true)
         if refreshProfile || refreshChannel {
-          refresh(refreshProfile, refreshChannel) { [self] profile, channel, membership in
-            DispatchQueue.global(qos: .utility).async { [self] in
+          pendingProfile = refreshProfile
+          pendingChannel = refreshChannel
+          refresh(refreshProfile, refreshChannel) { [self] result in
+            workQueue.async { [self] in
               if isCurrent() {
-                if let profile {
-                  do { try cache.save(event: profile, scope: scope) } catch { report(error) }
-                }
                 do {
-                  try cache.save(events: [channel, membership].compactMap { $0 }, scope: scope)
+                  switch result {
+                  case .profile(let profile):
+                    if let profile { try cache.save(event: profile, scope: scope) }
+                  case .channel(let channel, let membership):
+                    try cache.save(events: [channel, membership].compactMap { $0 }, scope: scope)
+                  }
                 } catch { report(error) }
               }
-              readCache { [self] in fetchAvatar() }
+              readCache { [self] in
+                switch result {
+                case .profile: pendingProfile = false
+                case .channel: pendingChannel = false
+                }
+                if !pendingProfile { fetchAvatar() }
+              }
             }
           }
+          if !pendingProfile { fetchAvatar() }
         } else {
           fetchAvatar()
         }
@@ -87,7 +105,7 @@ final class BuzzNotificationEnrichmentOperation {
   }
 
   private func readCache(completion: @escaping () -> Void) {
-    DispatchQueue.global(qos: .utility).async { [self] in
+    workQueue.async { [self] in
       var loaded = BuzzNotificationCache.Presentation()
       do {
         loaded = try cache.presentation(
@@ -112,31 +130,39 @@ final class BuzzNotificationEnrichmentOperation {
   }
 
   private func fetchAvatar() {
+    guard !avatarLoading else { return }
     guard isCurrent(), let profile, let source = BuzzNotificationCache.picture(profile.event),
       avatar?.source != source || !avatarIsFresh, let loadAvatar
     else {
-      deliver()
+      deliverIfReady()
       return
     }
+    avatarLoading = true
     // Decoding and persistence cannot occupy the delivery deadline's queue.
-    DispatchQueue.global(qos: .utility).async { [self] in
+    workQueue.async { [self] in
       let requestID: String
       do {
         guard
           let registered = try cache.beginAvatarRequest(
             profileID: profile.event.id, pubkey: event.pubkey, scope: scope)
         else {
-          readCache { [self] in deliver() }
+          readCache { [self] in
+            avatarLoading = false
+            deliverIfReady()
+          }
           return
         }
         requestID = registered
       } catch {
         report(error)
-        readCache { [self] in deliver() }
+        readCache { [self] in
+          avatarLoading = false
+          deliverIfReady()
+        }
         return
       }
       loadAvatar(source, scope) { [self] result in
-        DispatchQueue.global(qos: .utility).async { [self] in
+        workQueue.async { [self] in
           switch result {
           case .success(let data):
             do {
@@ -146,10 +172,17 @@ final class BuzzNotificationEnrichmentOperation {
             } catch { report(error) }
           case .failure(let error): report(error)
           }
-          readCache { [self] in deliver() }
+          readCache { [self] in
+            avatarLoading = false
+            deliverIfReady()
+          }
         }
       }
     }
+  }
+
+  private func deliverIfReady() {
+    if !pendingProfile && !pendingChannel && !avatarLoading { deliver() }
   }
 
   private func deliver() {

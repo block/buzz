@@ -32,13 +32,16 @@ are rendered natively. Image decoding has size limits; SVG decoding also limits
 nesting and repeated references. Embedded fonts, external SVG resources and
 recursive references are rejected. An image that cannot be decoded follows the
 same stale-image or missing-image behavior as a failed download.
+An empty profile query is not a verified removal and does not clear stale data.
 
 ## Fetching and storage
 
 The extension uses native networking and its own persistent storage. Image
 responses use URLSession and URLCache; verified profiles and channel details
 have a separate bounded store. Each account and relay has separate cache data.
-Credentials are not stored in these caches.
+Credentials are not stored in these caches. Profile and channel requests run
+independently, so a large or slow channel roster cannot block a sender profile
+or avatar that is available before the delivery deadline.
 
 Delivery happens only once. Ordinary requests can continue after delivery if
 iOS keeps the process alive. A late profile response can start an avatar fetch,

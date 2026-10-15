@@ -54,8 +54,8 @@ public protocol BuzzPushNotificationResolving {
 
 /// Reads configured Buzz communities and resolves their newest unread event.
 public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
-  // One refresh can contain a profile, channel metadata, and membership.
-  // Allow their bounded 256 KiB contents plus JSON escaping, tags, and envelopes.
+  // Each independent refresh has a hard transfer limit, allowing bounded
+  // content plus JSON escaping, tags, and envelopes.
   // Each record still passes the cache's separate content and signature checks.
   static let maximumPresentationResponseBytes = 2 * 1_024 * 1_024
 
@@ -202,62 +202,62 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   }
 
   private func refreshPresentation(
-    event: VerifiedNostrEvent,
-    community: PushLeaseCommunity,
-    refreshProfile: Bool,
-    refreshChannel: Bool,
-    completion:
-      @escaping (
-        VerifiedNostrEvent?, VerifiedNostrEvent?, VerifiedNostrEvent?
-      ) -> Void
+    event: VerifiedNostrEvent, community: PushLeaseCommunity,
+    refreshProfile: Bool, refreshChannel: Bool,
+    completion: @escaping (BuzzNotificationEnrichmentOperation.RefreshResult) -> Void
+  ) {
+    // A full channel roster can be much larger than a profile. Keep these
+    // transfers independent so its size or latency cannot hide the sender.
+    if refreshProfile {
+      queryPresentation(
+        filters: [["kinds": [0], "authors": [event.pubkey.lowercased()], "limit": 1]],
+        community: community
+      ) { events in
+        completion(.profile(Self.newest(events.filter {
+          $0.kind == 0 && $0.pubkey.lowercased() == event.pubkey.lowercased()
+        })))
+      }
+    }
+    if refreshChannel {
+      guard let channelID = Self.tagValue("h", in: event),
+        let authority = community.relayMetadataPubkey?.lowercased()
+      else {
+        completion(.channel(nil, nil))
+        return
+      }
+      queryPresentation(filters: [39000, 39002].map { kind in
+        ["kinds": [kind], "authors": [authority], "#d": [channelID], "limit": 1]
+      }, community: community) { events in
+        let matching = events.filter {
+          $0.pubkey.lowercased() == authority && Self.tagValue("d", in: $0) == channelID
+        }
+        completion(.channel(
+          Self.newest(matching.filter { $0.kind == 39000 }),
+          Self.newest(matching.filter { $0.kind == 39002 })))
+      }
+    }
+  }
+
+  private func queryPresentation(
+    filters: [[String: Any]], community: PushLeaseCommunity,
+    completion: @escaping ([VerifiedNostrEvent]) -> Void
   ) {
     guard let privateKey = loadPrivateKey(community.id),
       let relayURL = community.relayURL,
-      let url = URL(string: "/query", relativeTo: relayURL)
-    else {
-      completion(nil, nil, nil)
-      return
-    }
-    let channelID = Self.tagValue("h", in: event)
-    let relayMetadataPubkey = community.relayMetadataPubkey?.lowercased()
-    var filters: [[String: Any]] = []
-    if refreshProfile {
-      filters.append(["kinds": [0], "authors": [event.pubkey.lowercased()], "limit": 1])
-    }
-    if refreshChannel, let channelID, let relayMetadataPubkey {
-      filters.append([
-        "kinds": [39_000],
-        "authors": [relayMetadataPubkey],
-        "#d": [channelID],
-        "limit": 1,
-      ])
-      filters.append([
-        "kinds": [39_002],
-        "authors": [relayMetadataPubkey],
-        "#d": [channelID],
-        "limit": 1,
-      ])
-    }
-    guard !filters.isEmpty,
+      let url = URL(string: "/query", relativeTo: relayURL),
       let body = try? JSONSerialization.data(withJSONObject: filters)
     else {
-      completion(nil, nil, nil)
+      completion([])
       return
     }
-
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = body
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    guard
-      let auth = try? NostrHTTPAuth.authorizationHeader(
-        url: url,
-        method: "POST",
-        body: body,
-        privateKeyHex: privateKey
-      )
+    guard let auth = try? NostrHTTPAuth.authorizationHeader(
+      url: url, method: "POST", body: body, privateKeyHex: privateKey)
     else {
-      completion(nil, nil, nil)
+      completion([])
       return
     }
     request.setValue(auth, forHTTPHeaderField: "Authorization")
@@ -268,37 +268,10 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       guard case .success(let data) = result,
         let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
       else {
-        completion(nil, nil, nil)
+        completion([])
         return
       }
-      let verified = events.filter { $0.hasValidIDAndSignature() }
-      let profile =
-        refreshProfile
-        ? Self.newest(
-          verified.filter {
-            $0.kind == 0 && $0.pubkey.lowercased() == event.pubkey.lowercased()
-          }) : nil
-      let channel =
-        refreshChannel
-        ? channelID.flatMap { channelID in
-          Self.newest(
-            verified.filter {
-              $0.kind == 39_000
-                && $0.pubkey.lowercased() == relayMetadataPubkey
-                && Self.tagValue("d", in: $0) == channelID
-            })
-        } : nil
-      let membership =
-        refreshChannel
-        ? channelID.flatMap { channelID in
-          Self.newest(
-            verified.filter {
-              $0.kind == 39_002
-                && $0.pubkey.lowercased() == relayMetadataPubkey
-                && Self.tagValue("d", in: $0) == channelID
-            })
-        } : nil
-      completion(profile, channel, membership)
+      completion(events.filter { $0.hasValidIDAndSignature() })
     }
   }
 

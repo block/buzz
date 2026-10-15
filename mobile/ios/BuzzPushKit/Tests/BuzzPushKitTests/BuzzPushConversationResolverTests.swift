@@ -99,7 +99,7 @@ extension BuzzPushNotificationResolverTests {
     XCTAssertEqual(result.subtitle, "Community")
   }
 
-  func testFreshEvictedMembershipDigestsTriggerOneBoundedRefresh() throws {
+  func testFreshEvictedMembershipDigestsTriggerBoundedRefreshes() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,
       createdAt: Self.now,
@@ -162,7 +162,7 @@ extension BuzzPushNotificationResolverTests {
 
     XCTAssertEqual(result.conversationDisplayName, "#General")
     XCTAssertEqual(result.conversationRecipientCount, 1)
-    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+    XCTAssertEqual(URLProtocolStub.requests.count, 3)
   }
 
   func testTwoPersonDMUsesDirectCommunicationPresentation() throws {
