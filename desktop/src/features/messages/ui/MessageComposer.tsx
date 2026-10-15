@@ -461,8 +461,9 @@ function MessageComposerImpl({
     audience: persistentAudience,
     audienceScope,
     mentions,
-    onAddressAgentMention: (suggestion) =>
+    onAddressAgentMention: (suggestion, options) =>
       promoteExplicitlyAddressedAgents({
+        persist: options?.persist,
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       }),
     onAutoPinAgentMention: (suggestion, options) => {
