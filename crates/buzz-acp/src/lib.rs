@@ -1242,6 +1242,20 @@ mod team_loop_listener_tests {
     use nostr::{EventBuilder, Keys, Kind};
 
     #[test]
+    fn human_classification_cache_is_per_channel_and_expires() {
+        let mut cache = HumanResetCache::default();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        cache.insert(first, "human", true);
+        assert_eq!(cache.get(first, "human"), Some(true));
+        assert_eq!(cache.get(second, "human"), None);
+        assert_eq!(cache.get(first, "other"), None);
+        cache.entries.get_mut(&(first, "human".into())).unwrap().0 =
+            std::time::Instant::now() - Duration::from_secs(61);
+        assert_eq!(cache.get(first, "human"), None);
+    }
+
+    #[test]
     fn admitted_teammate_edits_and_messages_drop_after_self_spends_budget() {
         let teammate = Keys::generate();
         let agent = Keys::generate();
