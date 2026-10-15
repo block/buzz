@@ -178,6 +178,152 @@ pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
     }
 }
 
+/// Like [`read_or_stdin`], then decode JSON-style `\n` at Markdown
+/// paragraph/list boundaries when the value came from argv.
+///
+/// `--content -` (stdin) is returned byte-exact so callers who already
+/// stream real LF, or who need a literal backslash-n in prose, are unchanged.
+/// Do not use this for YAML, diffs, or other non-Markdown payloads.
+pub fn read_markdown_or_stdin(value: &str) -> Result<String, CliError> {
+    let from_stdin = value == "-";
+    let content = read_or_stdin(value)?;
+    if from_stdin {
+        Ok(content)
+    } else {
+        Ok(decode_argv_multiline_escapes(&content))
+    }
+}
+
+/// Decode JSON-style `\n` escapes at Markdown paragraph/list boundaries.
+///
+/// Agents (especially Codex) JSON-escape a body then pass
+/// `--content 'para1\n\n- item'`. Bash does not expand `\n` in quotes, so
+/// the two-character sequence would otherwise be signed and rendered
+/// literally. Isolated `\n` (Windows paths, prose, code samples) is left
+/// intact. Real LF bytes are untouched.
+pub fn decode_argv_multiline_escapes(content: &str) -> String {
+    let bytes = content.as_bytes();
+    if !bytes.windows(2).any(|w| w == [b'\\', b'n']) {
+        return content.to_string();
+    }
+    let in_code = markdown_code_mask(content);
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if !in_code[i]
+            && bytes[i] == b'\\'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'n'
+            && escaped_nl_is_markdown_boundary(bytes, i)
+        {
+            out.push('\n');
+            i += 2;
+            continue;
+        }
+        let Some(ch) = content[i..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn escaped_nl_is_markdown_boundary(bytes: &[u8], i: usize) -> bool {
+    let rest = &bytes[i + 2..];
+    if rest.starts_with(br"\n")
+        || rest.starts_with(b"- ")
+        || rest.starts_with(b"* ")
+        || rest.starts_with(b"# ")
+        || rest.starts_with(b"> ")
+        || rest.starts_with(b"```")
+        || rest_is_ordered_list(rest)
+    {
+        return true;
+    }
+    i >= 2 && bytes[i - 2] == b'\\' && bytes[i - 1] == b'n'
+}
+
+fn rest_is_ordered_list(rest: &[u8]) -> bool {
+    match rest.first() {
+        Some(b) if b.is_ascii_digit() => {}
+        _ => return false,
+    }
+    let mut j = 0;
+    while j < rest.len() && rest[j].is_ascii_digit() {
+        j += 1;
+    }
+    j + 1 < rest.len() && rest[j] == b'.' && rest[j + 1] == b' '
+}
+
+/// Byte mask of Markdown fenced blocks and inline code spans. Mirrors
+/// `buzz_sdk::mentions::strip_code_regions` so `\n` inside code is not
+/// rewritten.
+fn markdown_code_mask(content: &str) -> Vec<bool> {
+    let mut mask = vec![false; content.len()];
+    let mut i = 0;
+    while i < content.len() {
+        if content[i..].starts_with("```") && at_line_start(content, i) {
+            let after_fence = i + 3;
+            let rest = &content[after_fence..];
+            let line_end = rest
+                .find('\n')
+                .map_or(content.len(), |p| after_fence + p + 1);
+            let mut search_from = line_end;
+            let close_end = loop {
+                if search_from >= content.len() {
+                    break content.len();
+                }
+                if let Some(pos) = content[search_from..].find("```") {
+                    let abs_pos = search_from + pos;
+                    if at_line_start(content, abs_pos) {
+                        let after_close = abs_pos + 3;
+                        break content[after_close..]
+                            .find('\n')
+                            .map_or(content.len(), |p| after_close + p + 1);
+                    }
+                    search_from = abs_pos + 3;
+                } else {
+                    break content.len();
+                }
+            };
+            mask[i..close_end].fill(true);
+            i = close_end;
+            continue;
+        }
+        if content.as_bytes()[i] == b'`' {
+            let after_tick = i + 1;
+            if after_tick < content.len() {
+                if let Some(rel_end) = content[after_tick..].find('`') {
+                    let close_pos = after_tick + rel_end;
+                    if !content[after_tick..close_pos].contains('\n') {
+                        mask[i..=close_pos].fill(true);
+                        i = close_pos + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        let Some(ch) = content[i..].chars().next() else {
+            break;
+        };
+        i += ch.len_utf8();
+    }
+    mask
+}
+
+fn at_line_start(content: &str, i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let before = &content[..i];
+    before.ends_with('\n')
+        || before.chars().all(|c| c.is_ascii_whitespace())
+        || before
+            .rsplit_once('\n')
+            .is_some_and(|(_, after_nl)| after_nl.chars().all(|c| c.is_ascii_whitespace()))
+}
+
 /// Read content from a file path, or stdin if the value is "-".
 ///
 /// Unlike [`read_or_stdin`], `value` is never treated as literal content —
@@ -474,6 +620,69 @@ mod tests {
     #[test]
     fn read_or_stdin_passthrough_empty_string() {
         assert_eq!(super::read_or_stdin("").unwrap(), "");
+    }
+
+    // --- decode_argv_multiline_escapes ---
+
+    #[test]
+    fn json_escaped_markdown_boundaries_decode_to_lf() {
+        let content = r"First paragraph.\n\n- first item\n- second item";
+        let decoded = super::decode_argv_multiline_escapes(content);
+        assert_eq!(decoded, "First paragraph.\n\n- first item\n- second item");
+        assert!(decoded.as_bytes().contains(&0x0a));
+        assert!(!decoded.contains(r"\n"));
+    }
+
+    #[test]
+    fn multiline_markdown_keeps_real_lf_bytes() {
+        let content = "First paragraph.\n\n- first item\n- second item";
+        assert_eq!(super::decode_argv_multiline_escapes(content), content);
+    }
+
+    #[test]
+    fn intentional_backslash_n_in_code_is_preserved() {
+        let content = r"Use `printf 'first\n\n- literal'` in this code sample.";
+        let decoded = super::decode_argv_multiline_escapes(content);
+        assert_eq!(decoded, content);
+        assert!(decoded.contains(r"\n\n"));
+    }
+
+    #[test]
+    fn fenced_code_backslash_n_is_preserved() {
+        let content = "before\n```\nprintf 'a\\n\\nb'\n```\nafter";
+        assert_eq!(super::decode_argv_multiline_escapes(content), content);
+    }
+
+    #[test]
+    fn isolated_backslash_n_is_not_decoded() {
+        let content = r"Path C:\new\tmp and the token \n in prose.";
+        assert_eq!(super::decode_argv_multiline_escapes(content), content);
+    }
+
+    #[test]
+    fn ordered_list_and_heading_boundaries_decode() {
+        let content = r"Intro.\n\n1. first\n2. second\n\n# Title";
+        let decoded = super::decode_argv_multiline_escapes(content);
+        assert_eq!(decoded, "Intro.\n\n1. first\n2. second\n\n# Title");
+    }
+
+    #[test]
+    fn mixed_real_and_escaped_newlines_decode_only_escapes() {
+        let content = "Real break.\n\nThen escaped.\\n\\n- item";
+        let decoded = super::decode_argv_multiline_escapes(content);
+        assert_eq!(decoded, "Real break.\n\nThen escaped.\n\n- item");
+    }
+
+    #[test]
+    fn read_markdown_or_stdin_decodes_argv() {
+        let got = super::read_markdown_or_stdin(r"para\n\n- item").unwrap();
+        assert_eq!(got, "para\n\n- item");
+    }
+
+    #[test]
+    fn read_or_stdin_does_not_decode_argv() {
+        let raw = r"para\n\n- item";
+        assert_eq!(super::read_or_stdin(raw).unwrap(), raw);
     }
 
     // --- read_file_or_stdin ---
