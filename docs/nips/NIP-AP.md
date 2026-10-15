@@ -398,7 +398,7 @@ When a client reads a config artifact, the artifact is in one of these states:
 
 Only an absent artifact lets a client fall back to another source (see "Launch composition"). An invalid, deleted, or unavailable artifact blocks the start: the client MUST show the error and MUST NOT substitute an older revision, another source, or local config, except as "Offline start" below allows for an unavailable artifact. A deleted artifact is recovered with NIP-AR `restore`.
 
-**Offline start.** When the relay cannot be reached, because the read failed in transport rather than returning an answer, a client MAY start the agent from the last revision it confirmed as present and kept locally. It MUST NOT do so after it has read that the artifact is invalid or deleted, that its current revision was redacted, that the config channel is archived, or that it has lost access to the channel, and it MUST NOT use any other source.
+**Offline start.** When the relay cannot be reached, because the read failed in transport rather than returning an answer, a client MAY start the agent from the last revision it confirmed as present and kept locally. It MUST NOT do so if the most recent answer it read from the relay showed that the artifact is invalid or deleted, that its current revision was redacted, that the config channel is archived, or that it has lost access to the channel, and it MUST NOT use any other source.
 
 ### Editing
 
