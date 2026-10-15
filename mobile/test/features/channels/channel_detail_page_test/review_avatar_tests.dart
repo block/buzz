@@ -49,11 +49,11 @@ void reviewAvatarTests() {
       (tester) async {
         final handle = tester.ensureSemantics();
         final alice = 'a' * 64;
-        NostrEvent message(String caption) => _textMsg(
+        NostrEvent message(String caption, [String second = 'two']) => _textMsg(
           id: threadIdRoot,
           pubkey: alice,
           content:
-              '$caption\n![One](https://example.com/one.png)\n![Two](https://example.com/two.png)',
+              '$caption\n![One](https://example.com/one.png)\n![Two](https://example.com/$second.png)',
         );
         final notifier = _FakeMessagesNotifier([message('Original')]);
         await tester.pumpWidget(
@@ -87,7 +87,10 @@ void reviewAvatarTests() {
         final avatar = find
             .descendant(of: gate, matching: find.byType(AvatarImage))
             .first;
-        final profile = tester.getSemantics(avatar);
+        final profile = tester.getSemantics(
+          find.bySemanticsLabel('Open Alice profile'),
+        );
+        expect(profile.getSemanticsData().flagsCollection.isButton, isTrue);
         expect(
           profile.getSemanticsData().hasAction(SemanticsAction.tap),
           isTrue,
@@ -151,7 +154,43 @@ void reviewAvatarTests() {
               .hasAction(SemanticsAction.tap),
           isTrue,
         );
+        controller.jumpToPage(1);
+        await tester.pumpAndSettle();
+        notifier.setMessages([message('New media', 'replacement')]);
+        await tester.pumpAndSettle();
+        final replacementController =
+            tester
+                    .widget<CustomScrollView>(
+                      find.descendant(
+                        of: carousel,
+                        matching: find.byType(CustomScrollView),
+                      ),
+                    )
+                    .controller!
+                as PageController;
+        expect(replacementController.page, 0);
+        final restored = tester.getSemantics(
+          find.bySemanticsLabel('Open Alice profile'),
+        );
+        expect(restored.getSemanticsData().flagsCollection.isButton, isTrue);
+        expect(
+          restored.getSemanticsData().hasAction(SemanticsAction.tap),
+          isTrue,
+        );
+        tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+          restored.id,
+          SemanticsAction.tap,
+        );
         handle.dispose();
+        await tester.pumpAndSettle();
+        expect(find.byType(UserProfileSheet), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(UserProfileSheet),
+            matching: find.text('Alice'),
+          ),
+          findsWidgets,
+        );
       },
     );
   }

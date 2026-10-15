@@ -108,19 +108,9 @@ MapEntry<String, int>? _catchUpMark({
   );
   if (!showsNewest) return null;
 
-  // At the live boundary, include hidden huddle endings so their observed
-  // unread dots clear too. Never advance through replies or past the clock.
-  var latest = bottom.createdAt;
-  if (threadRootId == null) {
-    for (final message in loaded) {
-      if (message.systemEvent?.type == SystemEventType.huddleEnded &&
-          message.parentId == null &&
-          message.createdAt > latest) {
-        latest = message.createdAt;
-      }
-    }
-  }
-  final cut = latest < now ? latest : now;
+  // Never read beyond the last rendered message: a message between that
+  // row and a hidden lifecycle event may still arrive out of order.
+  final cut = bottom.createdAt < now ? bottom.createdAt : now;
   final key = threadRootId != null
       ? threadActivityContextKey(threadRootId)
       : activityContextKey(channelId);

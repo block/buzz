@@ -391,7 +391,11 @@ class _MessageBubble extends HookConsumerWidget {
                           bottom: 0,
                           child: MessageMediaAvatar(
                             offset: mediaOffset,
-                            child: GestureDetector(
+                            child: Semantics(
+                              container: true,
+                              label: 'Open $displayName profile',
+                              button: true,
+                              excludeSemantics: true,
                               onTap: () => showUserProfileSheet(
                                 context,
                                 message.pubkey,
@@ -399,10 +403,19 @@ class _MessageBubble extends HookConsumerWidget {
                                   currentChannelId,
                                 ),
                               ),
-                              child: _UserAvatar(
-                                profile: profile,
-                                pubkey: message.pubkey,
-                                isAgent: isAgent,
+                              child: GestureDetector(
+                                onTap: () => showUserProfileSheet(
+                                  context,
+                                  message.pubkey,
+                                  names: channelIdentityNamesProvider(
+                                    currentChannelId,
+                                  ),
+                                ),
+                                child: _UserAvatar(
+                                  profile: profile,
+                                  pubkey: message.pubkey,
+                                  isAgent: isAgent,
+                                ),
                               ),
                             ),
                           ),
