@@ -675,8 +675,8 @@ struct BuzzPushPresentationCacheTests {
     #expect(snapshot.channels.count == 1)
   }
 
-  @Test("Community removal prunes profile and channel state")
-  func communityPruning() throws {
+  @Test("Account sync discards old presentation exports even for a retained account")
+  func discardLegacyExports() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = BuzzPushPresentationCacheStore(containerURL: directory)
@@ -687,12 +687,12 @@ struct BuzzPushPresentationCacheTests {
       tags: [["d", "opaque"], ["name", "General"]]
     )
     try store.updateProfiles(
-      communityID: "removed",
+      communityID: "retained",
       relayOrigin: "https://relay.example",
       updates: [BuzzPushProfileCacheUpdate(event: profile)]
     )
     try store.updateChannels(
-      communityID: "removed",
+      communityID: "retained",
       relayOrigin: "https://relay.example",
       relayMetadataPubkey: try pubkey(for: relayKey),
       metadataEvents: [channel],

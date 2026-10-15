@@ -15,6 +15,8 @@ public struct PushLeaseCommunity: Codable, Equatable, Sendable {
   /// Relay NIP-11 `self` key used to verify NIP-29 channel metadata.
   public let relayMetadataPubkey: String?
   public let pubkey: String?
+  /// Identity of this local sign-in, renewed after account removal.
+  public var notificationSessionID: String?
   public let policies: [PushResolutionPolicy]
 
   public init(
@@ -23,7 +25,8 @@ public struct PushLeaseCommunity: Codable, Equatable, Sendable {
     relayUrl: String,
     relayMetadataPubkey: String? = nil,
     pubkey: String?,
-    policies: [PushResolutionPolicy]
+    policies: [PushResolutionPolicy],
+    notificationSessionID: String? = nil
   ) {
     self.id = id
     self.name = name
@@ -31,6 +34,7 @@ public struct PushLeaseCommunity: Codable, Equatable, Sendable {
     self.relayMetadataPubkey = relayMetadataPubkey
     self.pubkey = pubkey
     self.policies = policies
+    self.notificationSessionID = notificationSessionID
   }
 }
 

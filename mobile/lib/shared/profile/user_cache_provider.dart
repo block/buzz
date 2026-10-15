@@ -2,9 +2,6 @@ import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../community/community_provider.dart';
-import '../push/push_presentation_cache.dart';
-import '../push/push_presentation_export_recovery.dart';
 import '../relay/relay.dart';
 import 'user_profile.dart';
 import 'profile_event_parser.dart';
@@ -19,7 +16,6 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   static const _maximumProfilesPerQuery = 1000;
 
   final Set<String> _pending = {};
-  final _pushExport = PushPresentationExportRecovery();
   final Map<String, ({int createdAt, String eventId})> _profileEventOrders = {};
   int _generation = 0;
   bool _flushInFlight = false;
@@ -131,7 +127,6 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final generation = _generation;
     var succeeded = false;
     try {
-      final communityID = ref.read(activeCommunityProvider).value?.id;
       final session = ref.read(relaySessionProvider.notifier);
       var remaining = pubkeys.length;
       for (final batch in _profileQueryBatches(pubkeys)) {
@@ -143,16 +138,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (!await _verifyAndMerge(events, generation)) return;
         remaining -= batch.length;
         if (remaining == 0) {
-          // All requested pages are ready. Native export does not gate readers.
+          // All requested pages are ready.
           succeeded = true;
           completer?.complete(true);
-        }
-        if (communityID != null) {
-          // Drain each page before fetching another, retaining at most one raw
-          // response while later requests coalesce as pubkeys in _pending.
-          await _pushExport.export(
-            () => cacheBuzzPushProfileEvents(communityID, events),
-          );
         }
       }
     } catch (_) {

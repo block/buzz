@@ -28,11 +28,16 @@ final class NostrHTTPAuthTests: XCTestCase {
         XCTAssertEqual(event.createdAt, 1_700_000_000)
         XCTAssertEqual(event.kind, 27235)
         XCTAssertEqual(event.content, "")
-        XCTAssertEqual(event.tags, [
+        XCTAssertEqual(Array(event.tags.prefix(3)), [
             ["u", "https://relay.example/query"],
             ["method", "POST"],
             ["payload", SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()],
         ])
+        XCTAssertEqual(event.tags.count, 4)
+        let nonce = try XCTUnwrap(event.tags.last)
+        XCTAssertEqual(nonce.first, "nonce")
+        XCTAssertEqual(nonce.count, 2)
+        XCTAssertNotNil(UUID(uuidString: nonce[1]))
         XCTAssertTrue(event.hasValidIDAndSignature())
     }
 
@@ -42,6 +47,15 @@ final class NostrHTTPAuthTests: XCTestCase {
         XCTAssertFalse(copy(event, id: String(repeating: "0", count: 64)).hasValidIDAndSignature())
         XCTAssertFalse(copy(event, sig: String(repeating: "0", count: 128)).hasValidIDAndSignature())
         XCTAssertFalse(copy(event, content: "tampered").hasValidIDAndSignature())
+    }
+
+    func testSeparateRequestsInTheSameSecondHaveDistinctEventIDs() throws {
+        let first = try makeEvent()
+        let second = try makeEvent()
+        XCTAssertTrue(first.hasValidIDAndSignature())
+        XCTAssertTrue(second.hasValidIDAndSignature())
+        XCTAssertNotEqual(first.id, second.id,
+            "The relay rejects a second request with the same authentication event ID as a replay")
     }
 
     private func makeEvent() throws -> VerifiedNostrEvent {

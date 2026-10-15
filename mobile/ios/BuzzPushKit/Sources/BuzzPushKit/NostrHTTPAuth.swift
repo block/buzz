@@ -104,6 +104,8 @@ public enum NostrHTTPAuth {
                 ["u", url.absoluteString],
                 ["method", method.uppercased()],
                 ["payload", payload],
+                // Separate requests in the same second must not reuse an event ID.
+                ["nonce", UUID().uuidString.lowercased()],
             ]
             let serialized = try VerifiedNostrEvent.canonicalSerialization(
                 pubkey: pubkey, createdAt: createdAt, kind: 27235,

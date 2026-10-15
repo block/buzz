@@ -5,35 +5,18 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  const bridge = MethodChannel('buzz/push');
-  final messenger =
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
   test(
-    'pending profiles drain in bounded queries after delayed export',
+    'pending profiles drain in bounded queries after a delayed relay query',
     () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final entered = Completer<void>();
       final release = Completer<void>();
-      messenger.setMockMethodCallHandler(bridge, (_) async {
-        if (!entered.isCompleted) {
-          entered.complete();
-          await release.future;
-        }
-        return null;
-      });
-      addTearDown(() {
-        messenger.setMockMethodCallHandler(bridge, null);
-        debugDefaultTargetPlatformOverride = null;
-      });
       final signed = NostrEvent.fromJson(
         nostr.Event.from(
           kind: 0,
@@ -43,7 +26,15 @@ void main() {
           secretKey: '1'.padLeft(64, '0'),
         ).toMap(),
       );
-      final session = _ClampingSession(first: signed);
+      final session = _ClampingSession(
+        first: signed,
+        beforeFetch: (index) async {
+          if (index == 0) {
+            entered.complete();
+            await release.future;
+          }
+        },
+      );
       final container = ProviderContainer(
         overrides: [
           relaySessionProvider.overrideWith(() => session),
@@ -60,7 +51,7 @@ void main() {
       addTearDown(container.dispose);
       await container.read(activeCommunityProvider.future);
       final cache = container.read(userCacheProvider.notifier);
-      expect(await cache.preload([signed.pubkey]), isTrue);
+      final first = cache.preload([signed.pubkey]);
       await entered.future.timeout(const Duration(seconds: 5));
       final keys = List.generate(1001, (i) => 'profile-$i');
       var completed = false;
@@ -76,6 +67,7 @@ void main() {
       } finally {
         release.complete();
       }
+      expect(await first, isTrue);
       expect(await pending, isTrue);
       expect(await duplicate, isTrue);
       expect(container.read(userCacheProvider).keys, containsAll(keys));
