@@ -39,18 +39,24 @@ class SidebarRelay {
 
   String get pubkey => keys.public;
 
-  NostrEvent event(String dTag, Object payload, int createdAt, {String? id}) =>
-      NostrEvent(
-        id: id ?? 'e$createdAt'.padRight(64, 'f'),
-        pubkey: pubkey,
-        createdAt: createdAt,
-        kind: EventKind.readState,
-        tags: [
-          ['d', dTag],
-        ],
-        content: nip44Encrypt(_key, jsonEncode(payload)),
-        sig: 'sig',
-      );
+  NostrEvent event(
+    String dTag,
+    Object payload,
+    int createdAt, {
+    String? id,
+    List<List<String>> tags = const [],
+  }) => NostrEvent(
+    id: id ?? 'e$createdAt'.padRight(64, 'f'),
+    pubkey: pubkey,
+    createdAt: createdAt,
+    kind: EventKind.readState,
+    tags: [
+      ['d', dTag],
+      ...tags,
+    ],
+    content: nip44Encrypt(_key, jsonEncode(payload)),
+    sig: 'sig',
+  );
 
   Object? decrypt(NostrEvent event) =>
       jsonDecode(nip44Decrypt(_key, event.content));
@@ -65,9 +71,11 @@ class SidebarRelay {
       if ((req[1] as String).startsWith(prefix) && _dTagOf(req) == dTag) req,
   ];
 
+  /// Delivers [event] on the live subscription for its `d` tag, or else on
+  /// the one filtered by `#t` alone.
   void emit(NostrEvent event) => session.debugHandleMessage([
     'EVENT',
-    _liveSubIds[event.getTagValue('d')],
+    _liveSubIds[event.getTagValue('d')] ?? _liveSubIds[null],
     event.toJson(),
   ]);
 
@@ -108,6 +116,13 @@ class SidebarRelay {
     if (historyFailures > 0) {
       historyFailures--;
       return _reply(['CLOSED', subId, 'error: overloaded']);
+    }
+    // A `#t` filter reaches every slot it tags; a `#d` filter, one head.
+    if (dTag == null) {
+      for (final e in stored.where((e) => e.getTagValue('t') != null)) {
+        _reply(['EVENT', subId, e.toJson()]);
+      }
+      return _reply(['EOSE', subId]);
     }
     final heads = stored.where((e) => e.getTagValue('d') == dTag).toList()
       ..sort(

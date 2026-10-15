@@ -224,7 +224,6 @@ class ReadStateManager {
           limit: readStateFetchLimit,
         ),
       );
-      if (!_servesThisCommunity) return;
       _mergeEvents(events);
       _persistLocalState();
       _onChanged();
@@ -234,6 +233,8 @@ class ReadStateManager {
   }
 
   void _mergeEvents(List<NostrEvent> events) {
+    // Another community's marks must never reach this community's state.
+    if (!_servesThisCommunity) return;
     ReadStateBlob? ownBlob;
     var ownBlobCreatedAt = 0;
 
@@ -324,7 +325,7 @@ class ReadStateManager {
   }
 
   void _handleIncomingEvent(NostrEvent event) {
-    if (_disposed) return;
+    if (_disposed || !_servesThisCommunity) return;
     debugPrint(
       '[ReadStateManager] incoming event=${event.id.substring(0, 8)}… created_at=${event.createdAt}',
     );
@@ -529,7 +530,6 @@ class ReadStateManager {
           limit: readStateFetchLimit,
         ),
       );
-      if (!_servesThisCommunity) return;
       _mergeEvents(events);
       _persistLocalState();
       if (!_disposed) {
@@ -540,8 +540,8 @@ class ReadStateManager {
     }
   }
 
-  /// A flush left running after a community switch must not read from or
-  /// publish through the session, which is rebuilt in place for the new one.
+  /// Switching community rebuilds the session in place before this manager
+  /// is retired, so in between it must neither take in nor publish data.
   bool get _servesThisCommunity {
     final served = _relaySession?.relayUrl;
     return served == null || served == relayUrl;

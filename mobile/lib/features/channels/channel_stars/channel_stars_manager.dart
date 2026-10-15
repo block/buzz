@@ -285,6 +285,8 @@ class ChannelStarsManager {
   /// then stays put so the same head is retried. An undecodable head is
   /// skipped without holding startup open.
   Future<bool> _applyEvents(List<NostrEvent> events) async {
+    // Another community's head must never reach this community's store.
+    if (!_servesThisCommunity) return true;
     var applied = true;
     for (final event in events) {
       if (event.pubkey != pubkey || event.getTagValue('d') != 'channel-stars') {
@@ -345,7 +347,6 @@ class ChannelStarsManager {
 
     // Read-before-write: merge remote state before publishing
     final events = await _fetchHead();
-    if (!_servesThisCommunity) return;
     if (events != null) await _applyEvents(events);
     if (!_disposed) _onChanged();
 
@@ -382,8 +383,8 @@ class ChannelStarsManager {
     }
   }
 
-  /// A flush left running after a community switch must not read from or
-  /// publish through the session, which is rebuilt in place for the new one.
+  /// Switching community rebuilds the session in place before this manager
+  /// is retired, so in between it must neither take in nor publish data.
   bool get _servesThisCommunity {
     final served = _relaySession?.relayUrl;
     return served == null || served == relayUrl;
