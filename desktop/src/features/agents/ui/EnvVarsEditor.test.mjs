@@ -10,10 +10,19 @@
  *      — the guard fires when skipKeys changes, even if value is unchanged.
  *   4. inheritedRows: render/exclusion/override/no-serialize invariants.
  *   5. getBakedProviderInheritLabel: label helper correctness.
+ *   6. That reprojection happens in place: `reconcileRows` keeps the existing
+ *      row objects (and so their ids) instead of rebuilding from `value`.
  *
  * These are pure-logic tests — no React renderer needed. The transition tests
- * (Invariant 3) exercise the real exported `skipKeysEqual` guard that controls
- * whether the effect calls `setRows(toRows(value, skipKeys))`.
+ * (Invariant 3) exercise the real exported `skipKeysEqual` guard that decides
+ * whether the effect reprojects at all; Invariant 6 covers what it reprojects
+ * to. Note that a skipKeys change no longer means a full
+ * `setRows(toRows(value, skipKeys))` rebuild — that path is now reserved for a
+ * `value` the editor did not emit.
+ *
+ * Row identity here is object identity, which is necessary but not sufficient:
+ * `envVarsEditorCatalogRerender.test.mjs` mounts the component in jsdom and
+ * asserts the focused DOM input itself survives the update.
  */
 
 import { test } from "node:test";
@@ -24,6 +33,7 @@ import {
   toRecord,
   skipKeysEqual,
   isRequiredKeyMissing,
+  reconcileRows,
   buildRecord as buildRecordUtil,
 } from "./EnvVarsEditor.tsx";
 import { getBakedProviderInheritLabel } from "./bakedEnvHelpers.ts";
@@ -924,4 +934,72 @@ test("buildRecord_clearing_structured_field_allows_placeholder_to_return", () =>
     "Inherit (25)",
     "numeric input must show Inherit (<global value>) when a global override exists",
   );
+});
+
+// ── Invariant 6: a skip-key change re-projects without remounting rows ─────
+//
+// `toRows` mints a new id per row, and a new id remounts the input under the
+// user's cursor. The runtime catalog resolves seconds after a harness switch,
+// so that remount lands mid-typing and the rest of the keystrokes are lost.
+
+test("reconcileRows_keeps_row_identity_for_untouched_rows", () => {
+  const prev = [
+    { id: "row-1", key: "BUZZ_AC", value: "" },
+    { id: "row-2", key: "EDITOR", value: "vim" },
+  ];
+  const next = reconcileRows(prev, { EDITOR: "vim" }, new Set());
+  assert.deepEqual(next, prev);
+  // Same objects, so React reuses the same inputs and the caret survives.
+  assert.equal(next[0], prev[0]);
+  assert.equal(next[1], prev[1]);
+});
+
+test("reconcileRows_drops_a_row_whose_key_just_became_required", () => {
+  const prev = [
+    { id: "row-1", key: "ANTHROPIC_API_KEY", value: "sk-x" },
+    { id: "row-2", key: "EDITOR", value: "vim" },
+  ];
+  const next = reconcileRows(
+    prev,
+    { ANTHROPIC_API_KEY: "sk-x", EDITOR: "vim" },
+    new Set(["ANTHROPIC_API_KEY"]),
+  );
+  assert.deepEqual(
+    next.map((row) => row.key),
+    ["EDITOR"],
+  );
+});
+
+test("reconcileRows_restores_a_key_that_stopped_being_required", () => {
+  const prev = [{ id: "row-2", key: "EDITOR", value: "vim" }];
+  const next = reconcileRows(
+    prev,
+    { ANTHROPIC_API_KEY: "sk-x", EDITOR: "vim" },
+    new Set(),
+  );
+  assert.deepEqual(
+    next.map((row) => row.key),
+    ["EDITOR", "ANTHROPIC_API_KEY"],
+  );
+  assert.equal(next[0], prev[0]);
+});
+
+test("reconcileRows_keeps_a_half_typed_key_absent_from_value", () => {
+  // The row being typed into has no entry in `value` yet — `toRecord` skips
+  // empty keys and the parent has not seen the partial one either.
+  const prev = [
+    { id: "row-1", key: "", value: "" },
+    { id: "row-2", key: "BUZZ_AC", value: "" },
+  ];
+  const next = reconcileRows(prev, {}, new Set(["ANTHROPIC_API_KEY"]));
+  assert.deepEqual(next, prev);
+});
+
+test("reconcileRows_does_not_duplicate_a_key_already_present", () => {
+  const prev = [{ id: "row-1", key: "EDITOR", value: "nano" }];
+  const next = reconcileRows(prev, { EDITOR: "vim" }, new Set());
+  assert.deepEqual(next, prev);
+  // The row's own text wins while it is being edited; the parent record
+  // catches up on the next emit.
+  assert.equal(next[0].value, "nano");
 });

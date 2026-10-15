@@ -18,11 +18,11 @@
  *      triggers a re-run).
  *
  * Why not a full component render test?
- * The project's test runner is plain Node `node:test` with no jsdom setup;
- * mounting a full React + Radix Dialog tree would require wiring up jsdom,
- * happy-dom, and React Testing Library — infrastructure that doesn't exist
- * in this repo. The logic under test is the focus-dispatch predicate and
- * one-shot guard, both of which are fully exercisable without a browser DOM.
+ * The logic under test is the focus-dispatch predicate and the one-shot guard,
+ * both fully exercisable without a browser DOM. (This file used to say the
+ * repo had no jsdom infrastructure. It does — `jsdom` and
+ * `@testing-library/react` are devDependencies and several suites mount
+ * components, including `envVarsEditorCatalogRerender.test.mjs` next door.)
  */
 
 import { test } from "node:test";
