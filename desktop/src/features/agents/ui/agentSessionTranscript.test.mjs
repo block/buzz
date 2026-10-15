@@ -2125,3 +2125,59 @@ test("buildTranscript session/new bare systemPrompt field takes precedence over 
     "_meta.systemPrompt.append must not appear when bare field is present",
   );
 });
+
+test("goose's custom system-prompt request renders the same System prompt card", () => {
+  // Goose takes its standing context through a separate request after
+  // session/new (`_goose/unstable/session/system-prompt/set`, acp.rs), not a
+  // field on it. Before this was read, goose agents showed no System prompt
+  // card at all while every other runtime did.
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-08-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: { _meta: { sessionTitle: "Goosey #general" } },
+      },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-08-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "_goose/unstable/session/system-prompt/set",
+        params: {
+          sessionId: "sess-1",
+          mode: "append",
+          key: "buzz",
+          text: "[Base]\nYou are helpful.\n\n[System]\nObserver.",
+        },
+      },
+    },
+  ];
+
+  const items = flattenDisplayBlocks(
+    buildTranscriptDisplayBlocks(buildTranscript(events)),
+  );
+  const cards = items.filter((i) => i.title === "System prompt");
+  assert.equal(cards.length, 1, "expected exactly one System prompt card");
+  assert.deepEqual(
+    cards[0].sections.map((s) => s.title),
+    ["Base", "System"],
+  );
+  // Placed like the other two routes: standalone, out of any turn bucket.
+  assert.equal(cards[0].turnId ?? null, null);
+});
