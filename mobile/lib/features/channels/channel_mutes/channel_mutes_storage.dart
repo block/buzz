@@ -2,7 +2,15 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelMutesKey(String pubkey) => 'buzz.channel-mutes.v1:$pubkey';
+import '../../../shared/theme/community_theme_preference.dart';
+
+/// Channel ids belong to one community, so the cache is keyed by relay as
+/// well as identity. One identity can be paired with several communities.
+String channelMutesKey(String pubkey, String relayUrl) =>
+    'buzz.channel-mutes.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyChannelMutesKey(String pubkey) => 'buzz.channel-mutes.v1:$pubkey';
 
 class ChannelMuteEntry {
   final bool muted;
@@ -65,8 +73,19 @@ class ChannelMutesStorage {
 
   ChannelMutesStorage(this._prefs);
 
-  ChannelMuteStore read(String pubkey) {
-    final raw = _prefs.getString(channelMutesKey(pubkey));
+  ChannelMuteStore read(String pubkey, String relayUrl) {
+    final key = channelMutesKey(pubkey, relayUrl);
+    // The first community to open claims the shared entry, which may hold
+    // changes not yet published. Its channel ids only match that community's
+    // channels, and the relay copy it merges with is already shared the same way.
+    final legacyKey = legacyChannelMutesKey(pubkey);
+    final legacy = _prefs.getString(legacyKey);
+    if (legacy != null) {
+      _prefs.remove(legacyKey);
+      if (!_prefs.containsKey(key)) _prefs.setString(key, legacy);
+    }
+
+    final raw = _prefs.getString(key);
     if (raw == null || raw.isEmpty) {
       return const ChannelMuteStore();
     }
@@ -85,6 +104,9 @@ class ChannelMutesStorage {
     }
   }
 
-  Future<bool> write(String pubkey, ChannelMuteStore store) =>
-      _prefs.setString(channelMutesKey(pubkey), jsonEncode(store.toJson()));
+  Future<bool> write(String pubkey, String relayUrl, ChannelMuteStore store) =>
+      _prefs.setString(
+        channelMutesKey(pubkey, relayUrl),
+        jsonEncode(store.toJson()),
+      );
 }

@@ -463,15 +463,19 @@ class ChannelSectionsManager {
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
-        _signedEventRelay == null) {
+        _signedEventRelay == null ||
+        !_servesThisCommunity) {
       return;
     }
 
     // Read-before-write: merge remote state before publishing
-    await _fetchAndMerge(allowDisposed: allowDisposed);
+    await _fetchAndMerge(
+      allowDisposed: allowDisposed,
+      isCurrent: () => _servesThisCommunity,
+    );
 
     // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished()) return;
+    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
 
     final submitted = _store;
     final revision = _localRevision;
@@ -513,6 +517,13 @@ class ChannelSectionsManager {
     } catch (error) {
       debugPrint('[ChannelSectionsManager] publish failed: $error');
     }
+  }
+
+  /// A flush left running after a community switch must not read from or
+  /// publish through the session, which is rebuilt in place for the new one.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
   }
 
   /// A retired manager never writes the prefs key its successor now owns.

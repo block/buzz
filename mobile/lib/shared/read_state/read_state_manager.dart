@@ -224,6 +224,7 @@ class ReadStateManager {
           limit: readStateFetchLimit,
         ),
       );
+      if (!_servesThisCommunity) return;
       _mergeEvents(events);
       _persistLocalState();
       _onChanged();
@@ -448,9 +449,11 @@ class ReadStateManager {
   }
 
   Future<void> _publishOnce(SignedEventRelay signedEventRelay) async {
+    if (!_servesThisCommunity) return;
     debugPrint('[ReadStateManager] publish starting slotId=$_slotId');
     try {
       await _fetchOwnBlobBeforePublish();
+      if (!_servesThisCommunity) return;
 
       final contexts = _currentContexts();
       if (contexts == null) {
@@ -526,6 +529,7 @@ class ReadStateManager {
           limit: readStateFetchLimit,
         ),
       );
+      if (!_servesThisCommunity) return;
       _mergeEvents(events);
       _persistLocalState();
       if (!_disposed) {
@@ -534,6 +538,13 @@ class ReadStateManager {
     } catch (e) {
       debugPrint('[ReadStateManager] fetchOwnBlobBeforePublish failed: $e');
     }
+  }
+
+  /// A flush left running after a community switch must not read from or
+  /// publish through the session, which is rebuilt in place for the new one.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
   }
 
   bool _isIdenticalToLastPublished(Map<String, int>? contexts) {

@@ -19,10 +19,18 @@ class SidebarRelay {
   final keys = nostr.Keys.generate();
   final session = ConnectedRelaySession();
   late final signer = SignedEventRelay(session: session, nsec: keys.nsec);
-  final stored = <NostrEvent>[];
+  final _storedByRelay = <String?, List<NostrEvent>>{};
+
+  /// Heads retained by the relay [session] currently serves, so a community
+  /// switch reaches a different relay's store.
+  List<NostrEvent> get stored =>
+      _storedByRelay.putIfAbsent(session.relayUrl, () => <NostrEvent>[]);
   final published = <NostrEvent>[];
+
+  /// The relay [session] served when each [published] event was sent.
+  final publishedTo = <String?>[];
   final reqs = <List<dynamic>>[];
-  final _liveSubIds = <String, String>{};
+  final _liveSubIds = <String?, String>{};
   int historyFailures = 0;
   Completer<void>? holdHistory;
   Completer<void>? holdOk;
@@ -70,6 +78,7 @@ class SidebarRelay {
     if (message.first == 'EVENT') {
       final event = NostrEvent.fromJson(message[1] as Map<String, dynamic>);
       published.add(event);
+      publishedTo.add(session.relayUrl);
       stored.add(event);
       final ok = ['OK', event.id, true, ''];
       final hold = holdOk;
@@ -94,7 +103,7 @@ class SidebarRelay {
     );
   }
 
-  Future<void> _answerHistory(String subId, String dTag) async {
+  Future<void> _answerHistory(String subId, String? dTag) async {
     await holdHistory?.future;
     if (historyFailures > 0) {
       historyFailures--;
@@ -112,13 +121,18 @@ class SidebarRelay {
 
   void _reply(List<dynamic> message) => session.debugHandleMessage(message);
 
-  static String _dTagOf(List<dynamic> req) =>
-      ((req[2] as Map<String, dynamic>)['#d'] as List).single as String;
+  /// Null for a filter by `#t` alone, such as read state's slot discovery.
+  static String? _dTagOf(List<dynamic> req) =>
+      ((req[2] as Map<String, dynamic>)['#d'] as List?)?.single as String?;
 }
 
 class ConnectedRelaySession extends RelaySessionNotifier {
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() {
+    // Follows the active community, as the production session does.
+    debugRelayUrl = ref.watch(relayConfigProvider).baseUrl;
+    return const SessionState(status: SessionStatus.connected);
+  }
 }
 
 class _ScriptedSocket extends RelaySocket {

@@ -30,6 +30,7 @@ class ChannelMutesCrypto {
 
 class ChannelMutesManager {
   final String pubkey;
+  final String relayUrl;
   final ChannelMutesStorage _storage;
   final ChannelMutesCrypto _crypto;
   final RelaySessionNotifier? _relaySession;
@@ -58,6 +59,7 @@ class ChannelMutesManager {
 
   ChannelMutesManager({
     required this.pubkey,
+    required this.relayUrl,
     required SharedPreferences prefs,
     required ChannelMutesCrypto crypto,
     required RelaySessionNotifier? relaySession,
@@ -73,7 +75,7 @@ class ChannelMutesManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelMutesStorage(prefs).read(pubkey);
+       _store = ChannelMutesStorage(prefs).read(pubkey, relayUrl);
 
   ChannelMuteStore get store => _store;
 
@@ -336,17 +338,19 @@ class ChannelMutesManager {
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
-        _signedEventRelay == null) {
+        _signedEventRelay == null ||
+        !_servesThisCommunity) {
       return;
     }
 
     // Read-before-write: merge remote state before publishing
     final events = await _fetchHead();
+    if (!_servesThisCommunity) return;
     if (events != null) await _applyEvents(events);
     if (!_disposed) _onChanged();
 
     // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished()) return;
+    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
 
     try {
       final payload = jsonEncode(_store.toJson());
@@ -378,9 +382,16 @@ class ChannelMutesManager {
     }
   }
 
+  /// A flush left running after a community switch must not read from or
+  /// publish through the session, which is rebuilt in place for the new one.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
+  }
+
   Future<bool> _persist() async {
     try {
-      if (await _storage.write(pubkey, _store)) return true;
+      if (await _storage.write(pubkey, relayUrl, _store)) return true;
       debugPrint('[ChannelMutesManager] persist returned false');
     } catch (error) {
       debugPrint('[ChannelMutesManager] persist failed: $error');

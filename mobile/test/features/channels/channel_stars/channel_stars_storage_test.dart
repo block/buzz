@@ -1,8 +1,36 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart'
+    show ChannelMutesStorage, legacyChannelMutesKey;
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Tests for [ChannelStarStore] parsing and [mergeStores] last-writer-wins.
 void main() {
+  test(
+    'the first community to open claims the shared stars and mutes',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        legacyChannelStarsKey(
+          'pk',
+        ): '{"version":1,"channels":{"chan-a":{"starred":true,"updatedAt":1}}}',
+        legacyChannelMutesKey('pk'):
+            '{"version":1,"channels":{"chan-a":{"muted":true,"updatedAt":1}}}',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      const a = 'https://relay-a.example';
+      const b = 'https://relay-b.example';
+      final stars = ChannelStarsStorage(prefs);
+      final mutes = ChannelMutesStorage(prefs);
+
+      expect(stars.read('pk', a).channels.keys, ['chan-a']);
+      expect(mutes.read('pk', a).channels.keys, ['chan-a']);
+      expect(stars.read('pk', b).channels, isEmpty);
+      expect(mutes.read('pk', b).channels, isEmpty);
+      expect(stars.read('pk', a).channels.keys, ['chan-a']);
+      expect(mutes.read('pk', a).channels.keys, ['chan-a']);
+    },
+  );
+
   group('ChannelStarStore.fromJson', () {
     test('parses a valid payload', () {
       final store = ChannelStarStore.fromJson({
