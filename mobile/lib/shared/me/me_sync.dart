@@ -29,26 +29,25 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     }
     try {
       final value = service.decode(event);
-      await service.cache(event);
-      if (disposed ||
-          (latest != null &&
-              event.id != latest!.id &&
-              !meEventIsNewer(event, latest!))) {
-        return;
-      }
+      // Reserve the highest verified head before any awaited persistence.
       latest = event;
       hasSnapshot = true;
       controller.add(value);
+      await service.cache(event);
     } catch (error, stack) {
-      if (!disposed && (!hasSnapshot || error is MeCacheException)) {
-        controller.addError(error, stack);
-      }
+      if (!disposed && !hasSnapshot) controller.addError(error, stack);
     }
   }
 
   Future<void> refresh() async {
     try {
-      final event = await service.head();
+      final remote = await service.head();
+      final candidate = service.latestCacheCandidate;
+      final event =
+          candidate != null &&
+              (remote == null || meEventIsNewer(candidate, remote))
+          ? candidate
+          : remote;
       if (disposed) return;
       if (event != null) {
         await accept(event);
@@ -59,15 +58,16 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         controller.add(const MeGroups());
       }
     } catch (error, stack) {
-      if (!disposed && (!hasSnapshot || error is MeCacheException)) {
-        controller.addError(error, stack);
-      }
+      if (!disposed && !hasSnapshot) controller.addError(error, stack);
     }
   }
 
   Future<void> start() async {
     try {
-      final cached = service.cachedSnapshot();
+      final candidate = service.latestCacheCandidate;
+      final cached = candidate == null
+          ? service.cachedSnapshot()
+          : (event: candidate, groups: service.decode(candidate));
       if (cached != null) {
         latest = cached.event;
         hasSnapshot = true;
@@ -110,6 +110,20 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
   unawaited(start());
   return controller.stream;
 }, retry: (_, _) => null);
+
+/// Non-disruptive offline-save status, retained across reader retries.
+final meOfflineSaveWarningProvider = StreamProvider<bool>((ref) {
+  final service = ref.watch(meSyncProvider);
+  final controller = StreamController<bool>();
+  void changed() => controller.add(service.cacheWriteFailed.value);
+  service.cacheWriteFailed.addListener(changed);
+  changed();
+  ref.onDispose(() {
+    service.cacheWriteFailed.removeListener(changed);
+    unawaited(controller.close());
+  });
+  return controller.stream;
+});
 
 /// NIP-01 replacement ordering: smallest ID wins an equal timestamp.
 bool meEventIsNewer(NostrEvent a, NostrEvent b) =>
@@ -167,9 +181,34 @@ class MeSync {
 
   Future<void> _cacheQueue = Future.value();
   bool _cacheDirty = false;
+  NostrEvent? _latestCacheCandidate;
+
+  /// Highest verified candidate survives a reader retry after failed storage.
+  NostrEvent? get latestCacheCandidate => _latestCacheCandidate;
+
+  /// False only after the newest candidate is durably written.
+  final cacheWriteFailed = ValueNotifier(false);
 
   /// Serialize writes and report failures so callers can expose a retry.
   Future<void> cache(NostrEvent? event) {
+    if (event != null) decode(event);
+    var highest = _latestCacheCandidate;
+    try {
+      final persisted = cachedSnapshot()?.event;
+      if (persisted != null &&
+          (highest == null || meEventIsNewer(persisted, highest))) {
+        highest = persisted;
+      }
+    } catch (_) {
+      // Verified relay data can replace an unreadable cache.
+    }
+    if (highest != null &&
+        (event == null ||
+            (highest.id != event.id && !meEventIsNewer(event, highest)))) {
+      _latestCacheCandidate = highest;
+      return Future.value();
+    }
+    _latestCacheCandidate = event;
     final operation = _cacheQueue.then((_) => _writeCache(event));
     _cacheQueue = operation.catchError((Object _) {});
     return operation;
@@ -177,6 +216,8 @@ class MeSync {
 
   Future<void> _writeCache(NostrEvent? event) async {
     if (disposed || config.nsec == null || prefs == null) return;
+    final highest = _latestCacheCandidate;
+    if (highest != null && highest.id != event?.id) return;
     if (event != null) decode(event);
     try {
       final previous = cachedSnapshot()?.event;
@@ -199,10 +240,14 @@ class MeSync {
         throw const MeCacheException();
       }
       _cacheDirty = false;
+      if (_latestCacheCandidate?.id == event?.id) {
+        cacheWriteFailed.value = false;
+      }
     } catch (_) {
       // SharedPreferences updates its memory cache even if the disk write fails.
       // Reload so Retry cannot mistake that optimistic value for durable data.
       _cacheDirty = true;
+      if (_latestCacheCandidate?.id == event?.id) cacheWriteFailed.value = true;
       try {
         await prefs!.reload();
       } finally {
@@ -267,6 +312,29 @@ class MeSync {
     }
   }
 
+  Future<void> _clearConfirmedPending(String expected) async {
+    final storage = prefs;
+    if (storage == null) return;
+    await storage.reload();
+    check();
+    final current = storage.getString(pendingKey);
+    if (current == null) return;
+    if (current != expected) {
+      throw StateError('The pending save changed. Review it again.');
+    }
+    try {
+      if (!await storage.remove(pendingKey)) {
+        throw StateError('Local cleanup failed.');
+      }
+    } catch (_) {
+      // remove() mutates the in-memory preferences even when disk removal fails.
+      await storage.reload();
+      throw StateError(
+        'Saved to your community, but cleanup on this phone failed. Retry to finish the pending save.',
+      );
+    }
+  }
+
   /// Refresh before applying an intent, then confirm the selected signed event.
   Future<void> update(MeGroups Function(MeGroups) change) async {
     check();
@@ -309,7 +377,7 @@ class MeSync {
               );
             }
           }
-          await prefs?.remove(pendingKey);
+          await _clearConfirmedPending(pending);
           throw StateError(
             'Your previous Solo save is confirmed. Review your projects before making another change.',
           );
@@ -355,11 +423,11 @@ class MeSync {
           ],
         ).toMap(),
       );
-      if (prefs != null &&
-          !await prefs!.setString(
-            pendingKey,
-            jsonEncode({'event': signed.toJson(), 'base': before?.toJson()}),
-          )) {
+      final pendingRecord = jsonEncode({
+        'event': signed.toJson(),
+        'base': before?.toJson(),
+      });
+      if (prefs != null && !await prefs!.setString(pendingKey, pendingRecord)) {
         throw StateError('Couldn’t save this change on your phone. Try again.');
       }
       check();
@@ -370,7 +438,7 @@ class MeSync {
           'Another Solo change is selected. Refresh to see the latest projects.',
         );
       }
-      await prefs?.remove(pendingKey);
+      await _clearConfirmedPending(pendingRecord);
       if (recovered != null) {
         throw StateError(
           'Your previous Solo save was recovered alongside the desktop changes. Review your projects before making another change.',

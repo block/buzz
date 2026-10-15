@@ -904,6 +904,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                 entries: typingEntries,
                               ),
                       ),
+                      ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,

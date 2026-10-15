@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/agent_reply_handoff.dart';
 import 'package:buzz/features/channels/me/me_messages_provider.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -283,6 +284,7 @@ Widget _buildTestable({
   VideoPreviewFrameLoader? videoPreviewLoader,
   Widget? home,
   Stream<MeGroups>? organization,
+  SendMessage? sender,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final navigatorKey = GlobalKey<NavigatorState>();
@@ -293,6 +295,7 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
+      if (sender != null) sendMessageProvider.overrideWithValue(sender),
       meGroupsProvider.overrideWith(
         (ref) =>
             organization ??
@@ -10242,6 +10245,25 @@ void main() {
     });
   });
 
+  testWidgets('ordinary send survives a Solo offline-cache failure', (
+    tester,
+  ) async {
+    final sender = _RecordingOrdinarySender();
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [],
+        disableRetries: true,
+        sender: sender,
+        organization: Stream.error(const MeCacheException()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester
+        .widget<ComposeBar>(find.byType(ComposeBar))
+        .onSend('Still usable', []);
+    expect(sender.sent, ['Still usable']);
+  });
+
   testWidgets('unknown Solo placement remains readable but cannot send', (
     tester,
   ) async {
@@ -10249,6 +10271,17 @@ void main() {
       _buildTestable(
         disableRetries: true,
         organization: Stream.error(StateError('offline')),
+        channel: Channel(
+          id: _channelId,
+          name: 'Unresolved private chat',
+          channelType: 'stream',
+          visibility: 'private',
+          description: '',
+          createdBy: 'self',
+          createdAt: DateTime(2026),
+          memberCount: 2,
+          isMember: true,
+        ),
         messages: [
           _textMsg(id: 'visible', pubkey: 'alice', content: 'Cached message'),
         ],
@@ -10281,7 +10314,17 @@ void main() {
             ),
           ],
           home: ChannelDetailPage(
-            channel: _testChannel,
+            channel: Channel(
+              id: _channelId,
+              name: 'Solo chat',
+              channelType: 'stream',
+              visibility: 'private',
+              description: '',
+              createdBy: 'self',
+              createdAt: DateTime(2026),
+              memberCount: 2,
+              isMember: true,
+            ),
             initialMessageId: threadIdReplyZero,
             initialThreadRootId: threadIdRoot,
           ),
@@ -17310,4 +17353,20 @@ class _MutableColorProfileNotifier extends ProfileNotifier {
   Future<UserProfile?> build() => SynchronousFuture(null);
 
   void setProfileState(AsyncValue<UserProfile?> value) => state = value;
+}
+
+class _RecordingOrdinarySender implements SendMessage {
+  final sent = <String>[];
+  @override
+  Future<void> call({
+    required String channelId,
+    required String content,
+    String? parentEventId,
+    String? rootEventId,
+    List<String>? mentionPubkeys,
+    Channel? channel,
+    List<List<String>> mediaTags = const [],
+  }) async {
+    sent.add(content);
+  }
 }

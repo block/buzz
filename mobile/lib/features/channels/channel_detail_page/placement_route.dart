@@ -23,10 +23,15 @@ class ChannelDetailPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final groups = ref.watch(meGroupsProvider).value;
     final fallback = ref.watch(meSearchPlacementProvider(channel.id));
+    // Solo chats are private streams. Public channels, forums and DMs do not
+    // depend on the optional Solo record to use their ordinary send path.
+    final ordinary =
+        !personalChat &&
+        (channel.visibility == 'open' || channel.isDm || channel.isForum);
     final placed = groups?.channels.contains(channel.id) ?? personalChat;
     // Bounded waiting keeps ordinary search results readable during an outage.
     // Unknown placement may be read, but cannot send via an unverified path.
-    if (!placed && groups == null && fallback.isLoading) {
+    if (!ordinary && !placed && groups == null && fallback.isLoading) {
       return Scaffold(
         appBar: AppBar(title: Text(channel.name)),
         body: const Center(child: BuzzLoadingIndicator()),
@@ -36,7 +41,7 @@ class ChannelDetailPage extends ConsumerWidget {
       key: ValueKey((channel.id, placed)),
       channel: channel,
       personalChat: placed,
-      placementKnown: groups != null || personalChat,
+      placementKnown: ordinary || groups != null || personalChat,
       initialAssistant: initialAssistant,
       initialMessageId: initialMessageId,
       initialThreadRootId: initialThreadRootId,

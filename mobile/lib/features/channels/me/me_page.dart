@@ -62,6 +62,8 @@ class MePage extends HookConsumerWidget {
       return null;
     }, [assistants]);
     final groups = ref.watch(meGroupsProvider);
+    final offlineSaveFailed =
+        ref.watch(meOfflineSaveWarningProvider).value ?? false;
     final channels = ref.watch(channelsProvider);
     final unreadIds = ref.watch(meUnreadChannelIdsProvider);
     final busy = useState(false);
@@ -209,6 +211,21 @@ class MePage extends HookConsumerWidget {
                 ),
                 physics: const AlwaysScrollableScrollPhysics(),
                 children: [
+                  if (offlineSaveFailed)
+                    Semantics(
+                      liveRegion: true,
+                      child: Column(
+                        children: [
+                          const Text(
+                            'Your chats are available, but couldn’t be saved for offline use.',
+                          ),
+                          TextButton(
+                            onPressed: () => ref.invalidate(meGroupsProvider),
+                            child: const Text('Retry offline save'),
+                          ),
+                        ],
+                      ),
+                    ),
                   if (organization.channels.isEmpty &&
                       organization.groups.isEmpty)
                     Padding(

@@ -15,6 +15,7 @@ class FakeRelay extends RelaySessionNotifier {
   List<NostrEvent> events = [];
   Future<List<NostrEvent>>? pendingRead;
   void Function(String)? closeSubscription;
+  void Function(NostrEvent)? emit;
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
@@ -22,6 +23,7 @@ class FakeRelay extends RelaySessionNotifier {
     void Function(String message)? onClosed,
   }) async {
     closeSubscription = onClosed;
+    emit = onEvent;
     return () {};
   }
 
@@ -51,14 +53,28 @@ class FakeRelay extends RelaySessionNotifier {
 
 class _FailingCacheStore extends InMemorySharedPreferencesStore {
   String? failure;
+  String? removeFailure;
+  Completer<bool>? blockedWrite;
+  int cacheWrites = 0;
   _FailingCacheStore() : super.empty();
   @override
   Future<bool> setValue(String type, String key, Object value) {
     if (key.startsWith('flutter.me-cache:')) {
+      cacheWrites++;
+      if (blockedWrite != null) return blockedWrite!.future;
       if (failure == 'throw') throw StateError('disk error');
       if (failure == 'false') return Future.value(false);
     }
     return super.setValue(type, key, value);
+  }
+
+  @override
+  Future<bool> remove(String key) async {
+    if (key.startsWith('flutter.me-pending:')) {
+      if (removeFailure == 'false') return false;
+      if (removeFailure == 'throw') throw StateError('remove failed');
+    }
+    return super.remove(key);
   }
 }
 
@@ -89,6 +105,168 @@ void main() {
       verify: false,
     ).toMap(),
   );
+  test(
+    'newer failed cache fences older arrivals and Retry retains newest',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = _FailingCacheStore();
+      SharedPreferencesStorePlatform.instance = store;
+      final prefs = await SharedPreferences.getInstance();
+      final relay = FakeRelay();
+      final service = MeSync(
+        relay,
+        RelayConfig(baseUrl: origin, nsec: nsec),
+        prefs: prefs,
+      );
+      final initial = signed(timestamp: 1);
+      await service.cache(initial);
+      relay.events = [initial];
+      final container = ProviderContainer(
+        overrides: [meSyncProvider.overrideWithValue(service)],
+      );
+      addTearDown(container.dispose);
+      final seen = <String>[];
+      container.listen(meGroupsProvider, (_, value) {
+        if (value.hasValue) {
+          seen.add(
+            value.value!.groups.firstOrNull?['name'] as String? ?? 'initial',
+          );
+        }
+      });
+      container.listen(meOfflineSaveWarningProvider, (_, _) {});
+      await container.read(meGroupsProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      final newer = signed(
+        timestamp: 3,
+        groups: const MeGroups(
+          groups: [
+            {'id': 'new', 'name': 'New', 'defaultTemplateId': ''},
+          ],
+        ),
+      );
+      final older = signed(
+        timestamp: 2,
+        groups: const MeGroups(
+          groups: [
+            {'id': 'old', 'name': 'Old', 'defaultTemplateId': ''},
+          ],
+        ),
+      );
+      store.blockedWrite = Completer<bool>();
+      relay.emit!(newer);
+      await Future<void>.delayed(Duration.zero);
+      final writes = store.cacheWrites;
+      relay.emit!(older);
+      // Also exercise the persistence fence independently of the reader.
+      final olderWrite = service.cache(older);
+      final blockedWrite = store.blockedWrite!;
+      store.blockedWrite = null;
+      blockedWrite.complete(false);
+      await olderWrite;
+      await Future<void>.delayed(Duration.zero);
+      expect(store.cacheWrites, writes);
+      expect(seen, isNot(contains('Old')));
+      expect(
+        container.read(meGroupsProvider).value!.groups.single['name'],
+        'New',
+      );
+      expect(service.cacheWriteFailed.value, isTrue);
+      expect(service.cachedSnapshot()?.event?.id, initial.id);
+      store.blockedWrite = null;
+      relay.events = [older];
+      container.invalidate(meGroupsProvider);
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(service.cacheWriteFailed.value, isFalse);
+      expect(service.cachedSnapshot()?.event?.id, newer.id);
+    },
+  );
+
+  for (final absent in [false, true]) {
+    test(
+      'confirmed cleanup preserves ${absent ? 'already absent' : 'replaced'} journal',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final relay = FakeRelay();
+        final service = MeSync(
+          relay,
+          RelayConfig(baseUrl: origin, nsec: nsec),
+          prefs: prefs,
+        );
+        relay.beforeRead = () {
+          if (relay.writes > 0) {
+            if (absent) {
+              unawaited(prefs.remove(service.pendingKey));
+            } else {
+              unawaited(
+                prefs.setString(service.pendingKey, 'another pending record'),
+              );
+            }
+          }
+        };
+        if (absent) {
+          await service.update((v) => v);
+          expect(prefs.getString(service.pendingKey), isNull);
+        } else {
+          await expectLater(service.update((v) => v), throwsStateError);
+          expect(prefs.getString(service.pendingKey), 'another pending record');
+        }
+      },
+    );
+  }
+  for (final recovered in [false, true]) {
+    for (final failure in ['false', 'throw']) {
+      test(
+        'confirmed ${recovered ? 'recovery' : 'normal'} cleanup $failure remains retryable',
+        () async {
+          SharedPreferences.setMockInitialValues({});
+          final store = _FailingCacheStore();
+          SharedPreferencesStorePlatform.instance = store;
+          final prefs = await SharedPreferences.getInstance();
+          final relay = FakeRelay();
+          final config = RelayConfig(baseUrl: origin, nsec: nsec);
+          var service = MeSync(relay, config, prefs: prefs);
+          if (recovered) {
+            relay.loseAcknowledgment = true;
+            await expectLater(
+              service.update((v) => v),
+              throwsA(isA<TimeoutException>()),
+            );
+            relay.loseAcknowledgment = false;
+            service = MeSync(relay, config, prefs: prefs);
+          }
+          store.removeFailure = failure;
+          await expectLater(
+            service.update((v) => v),
+            throwsA(
+              isA<StateError>().having(
+                (e) => e.message,
+                'message',
+                contains('cleanup on this phone failed'),
+              ),
+            ),
+          );
+          await prefs.reload();
+          expect(prefs.getString(service.pendingKey), isNotNull);
+          expect(relay.writes, 1);
+          store.removeFailure = null;
+          await expectLater(
+            MeSync(relay, config, prefs: prefs).update((v) => v),
+            throwsA(
+              isA<StateError>().having(
+                (e) => e.message,
+                'message',
+                contains('previous Solo save is confirmed'),
+              ),
+            ),
+          );
+          expect(prefs.getString(service.pendingKey), isNull);
+          expect(relay.writes, 1);
+        },
+      );
+    }
+  }
   for (final failure in ['false', 'throw']) {
     test(
       'snapshot write $failure exposes failure and Retry persists the same event',
@@ -115,23 +293,22 @@ void main() {
         );
         addTearDown(container.dispose);
         final failed = Completer<void>();
-        container.listen(meGroupsProvider, (_, next) {
-          if (next.hasError && !failed.isCompleted) failed.complete();
+        container.listen(meGroupsProvider, (_, _) {});
+        container.listen(meOfflineSaveWarningProvider, (_, next) {
+          if (next.value == true && !failed.isCompleted) failed.complete();
         });
         await failed.future;
-        expect(container.read(meGroupsProvider).error, isA<MeCacheException>());
+        expect(container.read(meGroupsProvider).hasError, isFalse);
+        expect(container.read(meOfflineSaveWarningProvider).value, isTrue);
         expect(service.cachedSnapshot()?.event?.id, old.id);
         store.failure = null;
         container.invalidate(meGroupsProvider);
         final restored = Completer<void>();
-        final subscription = container.listen(meGroupsProvider, (_, next) {
-          if (next.value?.channels.contains(
-                    '11111111-1111-4111-8111-111111111111',
-                  ) ==
-                  true &&
-              !restored.isCompleted) {
-            restored.complete();
-          }
+        final subscription = container.listen(meOfflineSaveWarningProvider, (
+          _,
+          next,
+        ) {
+          if (next.value == false && !restored.isCompleted) restored.complete();
         });
         await restored.future;
         subscription.close();

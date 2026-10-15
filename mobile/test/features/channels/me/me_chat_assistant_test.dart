@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show SemanticsAction;
 
 import 'package:buzz/features/channels/me/me_chat_assistant.dart';
 import 'package:buzz/features/channels/me/me_assistant_picker.dart';
@@ -41,79 +42,123 @@ class _Harness extends HookConsumerWidget {
     );
     return Scaffold(
       appBar: AppBar(actions: [assistant.action]),
-      body: TextButton(
-        onPressed: () async => onSend(
-          await meRecipients(ref, 'chat', assistant.selected, const []),
-        ),
-        child: const Text('Send'),
+      body: Column(
+        children: [
+          ?assistant.pendingNotice,
+          TextButton(
+            onPressed: () async => onSend(
+              await meRecipients(ref, 'chat', assistant.selected, const []),
+            ),
+            child: const Text('Send'),
+          ),
+        ],
       ),
     );
   }
 }
 
 void main() {
-  for (final action in ['Resume', 'Later', 'Discard choice']) {
-    testWidgets('header restores pending agent choice: $action', (
-      tester,
-    ) async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final sync = MeSync(
-        RelaySessionNotifier(),
-        RelayConfig(
-          baseUrl: 'https://relay.test',
-          nsec: nostr.Nip19.encode(
-            prefix: nostr.Nip19Prefix.nsec,
-            data: '0' * 63 + '1',
-          ),
-        ),
-        prefs: prefs,
-      );
-      await prefs.setString(MeAgentChange.selectionKey(sync, 'chat'), 'a');
-      await MeAgentChange.create(sync, 'chat', 'b').save(sync, 'chat');
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            meSyncProvider.overrideWithValue(sync),
-            meAssistantsProvider.overrideWith(
-              (ref) async => const [
-                AgentDirectoryEntry(pubkey: 'a', displayName: 'Alpha'),
-                AgentDirectoryEntry(pubkey: 'b', displayName: 'Beta'),
-              ],
+  for (final keyFallback in [false, true]) {
+    final target = keyFallback ? '0123456789abcdef' * 4 : 'b';
+    final targetName = keyFallback ? '01234567…cdef' : 'Beta';
+    for (final action in ['Resume', 'Later', 'Discard choice']) {
+      testWidgets(
+        'header restores pending agent choice: $action fallback=$keyFallback',
+        (tester) async {
+          final semantics = tester.ensureSemantics();
+          SharedPreferences.setMockInitialValues({});
+          final prefs = await SharedPreferences.getInstance();
+          final sync = MeSync(
+            RelaySessionNotifier(),
+            RelayConfig(
+              baseUrl: 'https://relay.test',
+              nsec: nostr.Nip19.encode(
+                prefix: nostr.Nip19Prefix.nsec,
+                data: '0' * 63 + '1',
+              ),
             ),
-            channelMembersProvider('chat').overrideWith(
-              (ref) async => [
-                for (final id in ['a', 'b'])
-                  ChannelMember(
-                    pubkey: id,
-                    role: 'bot',
-                    joinedAt: DateTime(2026),
+            prefs: prefs,
+          );
+          await prefs.setString(MeAgentChange.selectionKey(sync, 'chat'), 'a');
+          await MeAgentChange.create(sync, 'chat', target).save(sync, 'chat');
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                meSyncProvider.overrideWithValue(sync),
+                meAssistantsProvider.overrideWith(
+                  (ref) async => [
+                    AgentDirectoryEntry(pubkey: 'a', displayName: 'Alpha'),
+                    AgentDirectoryEntry(
+                      pubkey: target,
+                      displayName: keyFallback ? null : 'Beta',
+                    ),
+                  ],
+                ),
+                channelMembersProvider('chat').overrideWith(
+                  (ref) async => [
+                    for (final id in ['a', target])
+                      ChannelMember(
+                        pubkey: id,
+                        role: 'bot',
+                        joinedAt: DateTime(2026),
+                      ),
+                  ],
+                ),
+                userCacheProvider.overrideWith(_Profiles.new),
+              ],
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: _Harness((_) {}),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Finish choosing $targetName'), findsOneWidget);
+          expect(
+            tester
+                .getSemantics(
+                  find.widgetWithText(
+                    TextButton,
+                    'Finish choosing $targetName',
                   ),
-              ],
-            ),
-            userCacheProvider.overrideWith(_Profiles.new),
-          ],
-          child: MaterialApp(theme: AppTheme.light(), home: _Harness((_) {})),
-        ),
+                )
+                .getSemanticsData()
+                .hasAction(SemanticsAction.tap),
+            isTrue,
+          );
+          expect(
+            find.byTooltip('Pending agent change: $targetName'),
+            findsOneWidget,
+          );
+          await tester.tap(find.text('Finish choosing $targetName'));
+          await tester.pumpAndSettle();
+          expect(
+            find.textContaining('Your choice of $targetName'),
+            findsOneWidget,
+          );
+          expect(
+            find.textContaining('keeps any access already granted'),
+            findsOneWidget,
+          );
+          expect(find.text('Finish changing your agent?'), findsOneWidget);
+          await tester.tap(find.text(action));
+          await tester.pumpAndSettle();
+          expect(
+            prefs.getString(MeAgentChange.selectionKey(sync, 'chat')),
+            action == 'Resume' ? target : 'a',
+          );
+          expect(
+            MeAgentChange.pending(sync, 'chat') != null,
+            action == 'Later',
+          );
+          expect(
+            find.text('Finish choosing $targetName'),
+            action == 'Later' ? findsOneWidget : findsNothing,
+          );
+          semantics.dispose();
+        },
       );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Change agent: Alpha'));
-      await tester.pumpAndSettle();
-      expect(find.text('Finish changing your agent?'), findsOneWidget);
-      await tester.tap(find.text(action));
-      await tester.pumpAndSettle();
-      expect(
-        prefs.getString(MeAgentChange.selectionKey(sync, 'chat')),
-        action == 'Resume' ? 'b' : 'a',
-      );
-      expect(MeAgentChange.pending(sync, 'chat') != null, action == 'Later');
-      expect(
-        find.byTooltip(
-          'Change agent: ${action == 'Resume' ? 'Beta' : 'Alpha'}',
-        ),
-        findsOneWidget,
-      );
-    });
+    }
   }
   for (final scenario in ['valid', 'revoked', 'removed']) {
     testWidgets('parallel send checks handle $scenario recipients', (

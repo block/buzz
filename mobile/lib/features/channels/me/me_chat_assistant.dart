@@ -48,7 +48,12 @@ String? resolveMeAssistant({
 }
 
 /// Header avatar and persistent mobile selection for a personal chat.
-({String? selected, IosNavigationAction nativeAction, Widget action})
+({
+  String? selected,
+  IosNavigationAction nativeAction,
+  Widget action,
+  Widget? pendingNotice,
+})
 useMeChatAssistant(
   BuildContext context,
   WidgetRef ref, {
@@ -90,7 +95,32 @@ useMeChatAssistant(
           .where((agent) => agent.pubkey == selected)
           .firstOrNull
           ?.displayName;
-  final label = selected == null
+  String agentName(String pubkey) {
+    final names = [
+      ref.read(userCacheProvider)[pubkey]?.displayName,
+      agents.where((a) => a.pubkey == pubkey).firstOrNull?.displayName,
+    ];
+    return names
+            .whereType<String>()
+            .where((name) => name.trim().isNotEmpty)
+            .firstOrNull ??
+        (pubkey.length > 12
+            ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
+            : pubkey);
+  }
+
+  MeAgentChange? pending;
+  if (sync != null) {
+    try {
+      pending = MeAgentChange.pending(sync, channelId);
+    } catch (_) {
+      // The action surfaces an unreadable journal without crashing the chat.
+    }
+  }
+  final pendingName = pending == null ? null : agentName(pending.agent);
+  final label = pendingName != null
+      ? 'Pending agent change: $pendingName'
+      : selected == null
       ? 'Choose an agent'
       : 'Change agent: ${name ?? 'Agent'}';
   Future<void> choose() async {
@@ -99,12 +129,13 @@ useMeChatAssistant(
     try {
       var intent = MeAgentChange.pending(sync, channelId);
       if (intent != null) {
+        final intentName = agentName(intent.agent);
         final resume = await showDialog<String>(
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Finish changing your agent?'),
-            content: const Text(
-              'Your previous choice is saved. Resume to finish selecting that agent. Discarding the choice keeps any access already granted.',
+            content: Text(
+              'Your choice of $intentName is saved. Resume to finish selecting this agent. Discarding the choice keeps any access already granted.',
             ),
             actions: [
               TextButton(
@@ -179,6 +210,16 @@ useMeChatAssistant(
 
   return (
     selected: selected,
+    pendingNotice: pendingName == null
+        ? null
+        : Semantics(
+            liveRegion: true,
+            child: TextButton.icon(
+              onPressed: busy.value ? null : choose,
+              icon: const Icon(Icons.pending_outlined),
+              label: Text('Finish choosing $pendingName'),
+            ),
+          ),
     nativeAction: IosNavigationAction(
       label: label,
       symbol: 'person.crop.circle',
