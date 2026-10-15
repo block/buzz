@@ -20,16 +20,18 @@ void main() {
   final otherMsgKey = msgContextKey('msg-2');
 
   late ProviderContainer container;
+  late _FakeRelayConfig config;
 
   Future<ReadStateNotifier> pumpNotifier() async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final nsec = nostr.Keys.generate().nsec;
+    config = _FakeRelayConfig(nsec);
 
     container = ProviderContainer(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
-        relayConfigProvider.overrideWith(() => _FakeRelayConfig(nsec)),
+        relayConfigProvider.overrideWith(() => config),
         relaySessionProvider.overrideWith(_FakeRelaySession.new),
         activeCommunityProvider.overrideWith((ref) async => null),
         appLifecycleProvider.overrideWith(_FakeAppLifecycle.new),
@@ -49,6 +51,36 @@ void main() {
   }
 
   ReadStateState state() => container.read(readStateProvider);
+
+  Future<void> settle() async {
+    for (var i = 0; i < 10 && !state().isReady; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(state().isReady, isTrue);
+  }
+
+  test('read marks stay with the community they were made in', () async {
+    final notifier = await pumpNotifier();
+    // Recent, so the saved copy keeps it.
+    final readAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    notifier.markContextRead(msgKey, readAt);
+
+    // The same identity in a second community starts with none of them, so
+    // it has nothing of the first community's to publish to its relay.
+    config.switchTo('http://localhost:2');
+    container.read(readStateProvider);
+    await settle();
+    expect(state().effectiveTimestamp(msgKey), isNull);
+    container
+        .read(readStateProvider.notifier)
+        .markContextRead(channelId, readAt);
+
+    config.switchTo('http://localhost:1');
+    container.read(readStateProvider);
+    await settle();
+    expect(state().effectiveTimestamp(msgKey), readAt);
+    expect(state().effectiveTimestamp(channelId), isNull);
+  });
 
   test('message unread → read → unread round-trips through the real '
       'notifier', () async {
@@ -147,6 +179,9 @@ class _FakeRelayConfig extends RelayConfigNotifier {
 
   @override
   RelayConfig build() => RelayConfig(baseUrl: 'http://localhost:1', nsec: nsec);
+
+  void switchTo(String baseUrl) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
 }
 
 /// Relay session that never connects and returns no history, keeping the
