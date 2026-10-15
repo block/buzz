@@ -89,7 +89,9 @@ class SystemEvent {
     try {
       final content = jsonDecode(event.content);
       if (content is Map) {
-        ephemeralChannelId = _readString(content, 'ephemeral_channel_id');
+        ephemeralChannelId = _canonicalHuddleRoomId(
+          content['ephemeral_channel_id'],
+        );
       }
     } catch (_) {
       // The row still renders, but joining requires the validated room ID.
@@ -792,4 +794,25 @@ String? _lastETag(List<List<String>> tags) {
 String? _readString(Map<dynamic, dynamic> json, String key) {
   final value = json[key];
   return value is String ? value : null;
+}
+
+// Match Rust Uuid::parse_str: simple, hyphenated, URN and braced forms.
+String? _canonicalHuddleRoomId(Object? value) {
+  if (value is! String) return null;
+  var text = value;
+  if (text.length == 45 && text.startsWith('urn:uuid:')) {
+    text = text.substring(9);
+  } else if (text.length == 38 && text.startsWith('{') && text.endsWith('}')) {
+    text = text.substring(1, 37);
+  }
+  if (RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(text)) {
+    text =
+        '${text.substring(0, 8)}-${text.substring(8, 12)}-${text.substring(12, 16)}-${text.substring(16, 20)}-${text.substring(20)}';
+  }
+  if (!RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  ).hasMatch(text)) {
+    return null;
+  }
+  return text.toLowerCase();
 }

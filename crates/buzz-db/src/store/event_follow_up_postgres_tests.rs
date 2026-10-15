@@ -1,6 +1,6 @@
 //! PostgreSQL contract for the event follow-up producers (push match
 //! enqueue and channel TTL refresh), on the desired and migration schemas,
-//! with the follow-up triggers present (dual) and dropped (app-only).
+//! with historical overlap, push retired, and both follow-ups app-only.
 use crate::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
 use crate::{event, migration, push, AdmittedTx, Db, DbConfig, DbError};
 use buzz_core::CommunityId;
@@ -214,14 +214,13 @@ async fn activate_lease(
     );
 }
 
-/// Which producers are live. `Dual` is production during the migration
-/// window: the app follow-ups plus the 0023/0024 triggers. `AppOnly` drops
-/// both triggers in this disposable database, as the retirement migration
-/// will.
+/// Preserve the overlap and fully app-only compatibility contracts alongside
+/// the shipped push-only retirement (the TTL trigger remains installed).
 #[derive(Clone, Copy, Debug)]
 enum Arm {
     Dual,
     AppOnly,
+    PushRetired,
 }
 
 async fn apply_arm(pool: &PgPool, arm: Arm) {
@@ -233,32 +232,43 @@ async fn apply_arm(pool: &PgPool, arm: Arm) {
     .fetch_one(pool)
     .await
     .expect("count follow-up triggers");
-    assert_eq!(triggers, 2, "both follow-up triggers exist before the arm");
-    if let Arm::AppOnly = arm {
-        for statement in [
-            "DROP TRIGGER events_enqueue_push_match ON events",
-            "DROP TRIGGER events_refresh_channel_ttl ON events",
-        ] {
-            sqlx::query(statement)
-                .execute(pool)
-                .await
-                .expect("drop follow-up trigger in disposable database");
-        }
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_trigger \
-             WHERE tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("count remaining follow-up triggers, including partition clones");
-        assert_eq!(
-            remaining, 0,
-            "app-only arm must leave no trigger on any partition"
-        );
-        sqlx::query("DROP FUNCTION enqueue_push_match_job()")
+    assert_eq!(
+        triggers, 1,
+        "only the TTL trigger remains in the shipped schema"
+    );
+    let absent: bool =
+        sqlx::query_scalar("SELECT to_regprocedure('enqueue_push_match_job()') IS NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(absent);
+    match arm {
+        Arm::Dual => {
+            // Reconstruct the historical overlap explicitly in this test only.
+            sqlx::raw_sql(include_str!(
+                "../../../../migrations/0040_push_message_kinds.sql"
+            ))
             .execute(pool)
             .await
             .unwrap();
+            sqlx::raw_sql(include_str!(
+                "../../../../migrations/0059_push_rollback_gate.sql"
+            ))
+            .execute(pool)
+            .await
+            .unwrap();
+            sqlx::query("CREATE TRIGGER events_enqueue_push_match AFTER INSERT ON events FOR EACH ROW EXECUTE FUNCTION enqueue_push_match_job()")
+                .execute(pool).await.unwrap();
+        }
+        Arm::AppOnly => {
+            sqlx::query("DROP TRIGGER events_refresh_channel_ttl ON events")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Arm::PushRetired => {}
+    }
+    if !matches!(arm, Arm::Dual) {
         sqlx::raw_sql(include_str!(
             "../../../../migrations/0059_push_rollback_gate.sql"
         ))
@@ -272,7 +282,7 @@ async fn apply_arm(pool: &PgPool, arm: Arm) {
                 .unwrap();
         assert!(
             absent,
-            "rollback migration must not resurrect a retired function"
+            "rollback migration must not resurrect the retired function"
         );
     }
 }
@@ -812,6 +822,18 @@ async fn migration_schema_event_follow_up_contract_dual() {
 #[ignore = "requires Postgres"]
 async fn migration_schema_event_follow_up_contract_app_only() {
     assert_contract(true, Arm::AppOnly).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn desired_event_follow_up_contract_push_retired() {
+    assert_contract(false, Arm::PushRetired).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_event_follow_up_contract_push_retired() {
+    assert_contract(true, Arm::PushRetired).await;
 }
 
 // Runs with both schema sources and with/without the overlap trigger.

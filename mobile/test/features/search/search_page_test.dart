@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -17,7 +18,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -806,7 +806,7 @@ void main() {
     );
     expect(content.mentionNames, {agentPubkey: 'Helper Bot'});
     expect(content.agentMentionPubkeys, contains(agentPubkey));
-    expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
+    expect(find.byType(BuzzAgentIcon), findsOneWidget);
   });
 
   testWidgets('does not label an unjoined channel as having zero members', (

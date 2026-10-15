@@ -64,7 +64,7 @@ impl PushEnqueue {
                         record_drop("shutdown");
                         break;
                     },
-                    result = tokio::time::timeout(ENQUEUE_TIMEOUT, enqueue(&pool, &job)) => result,
+                    result = tokio::time::timeout(ENQUEUE_TIMEOUT, enqueue(&pool, &job, #[cfg(test)] None)) => result,
                 };
                 match result {
                     Ok(Ok(())) => {
@@ -145,7 +145,37 @@ pub(crate) fn record_drop(reason: &'static str) {
     metrics::counter!("buzz_push_enqueue_total", "result" => reason).increment(1);
 }
 
-async fn enqueue(pool: &PgPool, job: &Job) -> crate::Result<()> {
+#[cfg(test)]
+type GateBarrier = (
+    tokio::sync::oneshot::Sender<i32>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+/// Pause the real enqueue transaction after it acquires the production gate.
+#[cfg(test)]
+pub(crate) async fn enqueue_with_gate_barrier(
+    pool: &PgPool,
+    community: CommunityId,
+    event_id: Vec<u8>,
+    barrier: GateBarrier,
+) -> crate::Result<()> {
+    enqueue(
+        pool,
+        &Job {
+            community,
+            event_id,
+            barrier: None,
+        },
+        Some(barrier),
+    )
+    .await
+}
+
+async fn enqueue(
+    pool: &PgPool,
+    job: &Job,
+    #[cfg(test)] gate_barrier: Option<GateBarrier>,
+) -> crate::Result<()> {
     let mut tx = pool.begin().await?;
     // Server-side deadlines also bound work if the client disconnects or the
     // task is cancelled. These apply only to the dedicated push connection.
@@ -158,6 +188,17 @@ async fn enqueue(pool: &PgPool, job: &Job) -> crate::Result<()> {
         .bind(crate::push::push_gate_lock_key(job.community))
         .execute(&mut *tx)
         .await?;
+    #[cfg(test)]
+    if let Some((held, release)) = gate_barrier {
+        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await?;
+        held.send(pid)
+            .expect("race test observes enqueue transaction");
+        release
+            .await
+            .expect("race test releases enqueue transaction");
+    }
     // Compare recorded receipt/update times without imposing commit ordering.
     // Registration overlapping message arrival may send or suppress a wake.
     // This bounded job never scans historical messages on lease activation.

@@ -1277,6 +1277,86 @@ mod postgres_tests {
         drop_schema(&schema).await;
     }
 
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn app_attest_challenge_and_counter_fences_survive_races_and_exhaustion() {
+        let (pool, schema) = full_schema(4).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now().timestamp();
+        let challenge = Challenge {
+            id: Uuid::new_v4(),
+            value: [7; 32],
+            created_at: now,
+            expires_at: now + 300,
+        };
+        store.put_challenge(challenge.clone()).await.unwrap();
+        assert_eq!(
+            store.consume_challenge(challenge.id, [8; 32], now).await,
+            Err(AuthorityError::Rejected)
+        );
+        assert_eq!(
+            store
+                .consume_challenge(Uuid::new_v4(), challenge.value, now)
+                .await,
+            Err(AuthorityError::Rejected)
+        );
+        store
+            .consume_challenge(challenge.id, challenge.value, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .consume_challenge(challenge.id, challenge.value, now)
+                .await,
+            Err(AuthorityError::Rejected)
+        );
+        let expired = Challenge {
+            id: Uuid::new_v4(),
+            expires_at: now - 1,
+            ..challenge
+        };
+        store.put_challenge(expired.clone()).await.unwrap();
+        assert_eq!(
+            store
+                .consume_challenge(expired.id, expired.value, now)
+                .await,
+            Err(AuthorityError::Rejected)
+        );
+
+        install_authority(&pool).await;
+        let id = Uuid::from_u128(1);
+        let (a, b) = tokio::join!(
+            store.advance_assertion_counter(id, 0, 1),
+            store.advance_assertion_counter(id, 0, 2)
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let previous = store.installation(id, now).await.unwrap().assertion_counter;
+        assert!(previous == 1 || previous == 2);
+        store
+            .advance_assertion_counter(id, previous, u32::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.advance_assertion_counter(id, u32::MAX, 0).await,
+            Err(AuthorityError::Rejected)
+        );
+        assert_eq!(
+            store
+                .advance_assertion_counter(id, u32::MAX, u32::MAX)
+                .await,
+            Err(AuthorityError::Rejected)
+        );
+        assert_eq!(
+            store.installation(id, now).await.unwrap().assertion_counter,
+            u32::MAX
+        );
+        assert!(store.installation(id, now + 31 * 86400).await.is_err());
+        store.revoke_installation(id, 1, 2).await.unwrap();
+        assert!(store.installation(id, now).await.is_err());
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
     async fn drop_schema(schema: &str) {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))

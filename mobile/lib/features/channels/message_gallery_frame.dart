@@ -39,18 +39,20 @@ class MessageGalleryFrame extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (loading)
-            ExcludeSemantics(
-              child: Stack(
-                alignment: Alignment.centerLeft,
-                children: [
-                  Opacity(opacity: 0, child: label),
-                  const SkeletonBar(width: 48, height: 10),
-                ],
-              ),
-            )
-          else
-            label,
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: Grid.xs),
+            child: loading
+                ? ExcludeSemantics(
+                    child: Stack(
+                      alignment: Alignment.centerLeft,
+                      children: [
+                        Opacity(opacity: 0, child: label),
+                        const SkeletonBar(width: 48, height: 10),
+                      ],
+                    ),
+                  )
+                : label,
+          ),
           const SizedBox(height: Grid.half + Grid.quarter),
           child,
         ],

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
@@ -9,7 +10,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:buzz/shared/theme/buzz_icons.dart';
 
 class _Fixture {
   final revision = ValueNotifier(0);
@@ -197,7 +197,7 @@ void main() {
       fixture.agents.add('alice-key');
       await fixture.refresh(tester);
       expect(_components(tester), isNot(same(before)));
-      expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
+      expect(find.byType(BuzzAgentIcon), findsOneWidget);
       before = _components(tester);
       fixture.mentionHandler = false;
       fixture.tappedId = null;
@@ -210,7 +210,7 @@ void main() {
       await fixture.refresh(tester);
       await tester.tap(find.text('ALICE'));
       expect(fixture.tappedId, 'second-key');
-      expect(find.byIcon(BuzzIcons.bot), findsNothing);
+      expect(find.byType(BuzzAgentIcon), findsNothing);
     },
   );
 

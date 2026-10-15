@@ -1,4 +1,5 @@
 import 'agent_reply_handoff.dart';
+import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -74,6 +75,8 @@ import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
+import '../../shared/widgets/message_attachment_corners.dart';
+import 'message_media_avatar.dart';
 import 'message_skeleton_body.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
@@ -638,7 +641,12 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             currentPubkey: currentPubkey,
           );
     final timelineEntries = buildMainTimelineEntries(
-      timelineMessages,
+      // End events still update the original card through allMessages.
+      timelineMessages
+          .where(
+            (message) => !isCollapsedHuddleEnding(message, timelineMessages),
+          )
+          .toList(),
       flat: personalChat,
       relaySummaries: ref.read(messagesProvider.notifier).threadSummaries,
     );

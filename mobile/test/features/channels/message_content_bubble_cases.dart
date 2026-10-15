@@ -32,6 +32,38 @@ void bubbleContentTests() {
     }
   });
 
+  for (final brightness in Brightness.values) {
+    testWidgets('bubbles inherit every chat color in $brightness', (
+      tester,
+    ) async {
+      for (final choice in chatColorChoices) {
+        final theme = mobileAppearanceTheme(brightness, choice.wireValue);
+        for (final own in [false, true]) {
+          await tester.pumpWidget(
+            _testable(
+              MessageContent(
+                content: 'Themed message',
+                bubble: true,
+                ownMessage: own,
+              ),
+              theme: theme,
+            ),
+          );
+          await tester.pumpAndSettle();
+          final surface = tester.widget<LocalSendBubbleSurface>(
+            find.byType(LocalSendBubbleSurface),
+          );
+          expect(
+            surface.color,
+            own
+                ? theme.extension<ChatColors>()!.outgoing
+                : theme.colorScheme.secondaryContainer,
+          );
+        }
+      }
+    });
+  }
+
   for (final dark in [false, true]) {
     testWidgets('outgoing headings, mentions and links contrast in dark=$dark', (
       tester,
@@ -52,7 +84,9 @@ void bubbleContentTests() {
         ),
       );
       await tester.pumpAndSettle();
-      final foreground = dark ? Colors.black : Colors.white;
+      final foreground = ChatColors.of(
+        tester.element(find.byType(MessageContent)),
+      ).foreground;
       for (final heading in ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']) {
         final text = tester.widget<RichText>(_findRich(heading).last);
         final colors = <Color?>[];
@@ -71,16 +105,24 @@ void bubbleContentTests() {
         inspect(text.text, null);
         expect(colors, [foreground]);
       }
+      final linkColor = foreground == Colors.white
+          ? foreground
+          : dark
+          ? const Color(0xFF83C4FF)
+          : const Color(0xFF0B5FA8);
       for (final label in ['Alice', 'Helper']) {
-        expect(tester.widget<Text>(find.text(label)).style?.color, foreground);
+        expect(tester.widget<Text>(find.text(label)).style?.color, linkColor);
       }
-      expect(tester.widget<Icon>(find.byIcon(BuzzIcons.bot)).color, foreground);
+      expect(
+        tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon)).color,
+        linkColor,
+      );
       final link = tester.widget<Text>(
         find.byWidgetPredicate(
           (w) => w is Text && w.textSpan?.toPlainText() == 'Website',
         ),
       );
-      expect(link.textSpan?.style?.color, foreground);
+      expect(link.textSpan?.style?.color, linkColor);
       await tester.tap(find.text('Alice'));
       expect(tapped, 'person');
       await tester.tap(find.text('Helper'));
@@ -114,34 +156,37 @@ void bubbleContentTests() {
     });
   }
 
-  testWidgets('image corners follow the conversation group', (tester) async {
-    for (final grouped in [false, true]) {
-      await tester.pumpWidget(
-        _testable(
-          MessageContent(
-            content: '![photo](https://example.com/photo.png)',
-            bubble: true,
-            bubbleStart: !grouped,
-            bubbleEnd: !grouped,
+  testWidgets(
+    'image corners remain uniform throughout the conversation group',
+    (tester) async {
+      for (final grouped in [false, true]) {
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '![photo](https://example.com/photo.png)',
+              bubble: true,
+              bubbleStart: !grouped,
+              bubbleEnd: !grouped,
+            ),
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final frame = tester.widget<Container>(
-        find.byKey(
-          const ValueKey(
-            'message-media-image-preview:https://example.com/photo.png',
+        );
+        await tester.pumpAndSettle();
+        final frame = tester.widget<Container>(
+          find.byKey(
+            const ValueKey(
+              'message-media-image-preview:https://example.com/photo.png',
+            ),
           ),
-        ),
-      );
-      final corners =
-          (frame.decoration! as BoxDecoration).borderRadius! as BorderRadius;
-      expect(corners.topLeft.x, grouped ? Radii.sm : Radii.container);
-      expect(corners.bottomLeft.x, grouped ? Radii.sm : Radii.container);
-      expect(corners.topRight.x, Radii.container);
-      expect(corners.bottomRight.x, Radii.container);
-    }
-  });
+        );
+        final corners =
+            (frame.decoration! as BoxDecoration).borderRadius! as BorderRadius;
+        expect(corners.topLeft.x, Radii.container);
+        expect(corners.bottomLeft.x, Radii.container);
+        expect(corners.topRight.x, Radii.container);
+        expect(corners.bottomRight.x, Radii.container);
+      }
+    },
+  );
 
   testWidgets('photo gallery stays outside its caption bubble', (tester) async {
     await tester.pumpWidget(

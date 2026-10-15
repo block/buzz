@@ -38,6 +38,7 @@ import 'message_content/bubble_segments.dart';
 import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
+import 'message_media_avatar.dart';
 import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
@@ -194,6 +195,12 @@ class MessageContent extends HookConsumerWidget {
     final markdownTheme = GptMarkdownTheme.of(context);
     final chatColors = ChatColors.of(context);
     final ownTextColor = chatColors.foreground;
+    // Desktop uses blue links on neutral bubbles and the bubble ink on colors.
+    final linkColor = ownMessage && ownTextColor == Colors.white
+        ? ownTextColor
+        : context.colors.brightness == Brightness.dark
+        ? const Color(0xFF83C4FF)
+        : const Color(0xFF0B5FA8);
     final baseTextStyle =
         (baseStyle ??
                 context.textTheme.bodyMedium?.copyWith(
@@ -410,13 +417,7 @@ class MessageContent extends HookConsumerWidget {
                       color: ownMessage
                           ? chatColors.outgoing
                           : context.colors.secondaryContainer,
-                      shape: _MessageBubbleShape(
-                        start: bubbleStart && index == 0,
-                        end:
-                            bubbleEnd &&
-                            trailingGallery == null &&
-                            index == segments.length - 1,
-                      ),
+                      shape: const _MessageBubbleShape(),
                       child: Padding(
                         padding: EdgeInsets.fromLTRB(
                           Grid.xs,
@@ -426,38 +427,48 @@ class MessageContent extends HookConsumerWidget {
                               ? Grid.xs
                               : Grid.xxs,
                         ),
-                        child: ownMessage
-                            ? Theme(
-                                data: Theme.of(context).copyWith(
-                                  colorScheme: context.colors.copyWith(
-                                    primary: ownTextColor,
-                                  ),
-                                ),
-                                child: GptMarkdownTheme(
-                                  gptThemeData: markdownTheme.copyWith(
-                                    h1: markdownTheme.h1?.copyWith(
-                                      color: ownTextColor,
-                                    ),
-                                    h2: markdownTheme.h2?.copyWith(
-                                      color: ownTextColor,
-                                    ),
-                                    h3: markdownTheme.h3?.copyWith(
-                                      color: ownTextColor,
-                                    ),
-                                    h4: markdownTheme.h4?.copyWith(
-                                      color: ownTextColor,
-                                    ),
-                                    h5: markdownTheme.h5?.copyWith(
-                                      color: ownTextColor,
-                                    ),
-                                    h6: markdownTheme.h6?.copyWith(
-                                      color: ownTextColor,
-                                    ),
-                                  ),
-                                  child: renderMarkdown(segment.text),
-                                ),
-                              )
-                            : renderMarkdown(segment.text),
+                        child: Theme(
+                          data: Theme.of(context).copyWith(
+                            colorScheme: context.colors.copyWith(
+                              primary: linkColor,
+                            ),
+                          ),
+                          child: GptMarkdownTheme(
+                            gptThemeData: markdownTheme.copyWith(
+                              h1: markdownTheme.h1?.copyWith(
+                                color: ownMessage
+                                    ? ownTextColor
+                                    : context.colors.onSurface,
+                              ),
+                              h2: markdownTheme.h2?.copyWith(
+                                color: ownMessage
+                                    ? ownTextColor
+                                    : context.colors.onSurface,
+                              ),
+                              h3: markdownTheme.h3?.copyWith(
+                                color: ownMessage
+                                    ? ownTextColor
+                                    : context.colors.onSurface,
+                              ),
+                              h4: markdownTheme.h4?.copyWith(
+                                color: ownMessage
+                                    ? ownTextColor
+                                    : context.colors.onSurface,
+                              ),
+                              h5: markdownTheme.h5?.copyWith(
+                                color: ownMessage
+                                    ? ownTextColor
+                                    : context.colors.onSurface,
+                              ),
+                              h6: markdownTheme.h6?.copyWith(
+                                color: ownMessage
+                                    ? ownTextColor
+                                    : context.colors.onSurface,
+                              ),
+                            ),
+                            child: renderMarkdown(segment.text),
+                          ),
+                        ),
                       ),
                     ),
                   ),

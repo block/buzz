@@ -260,6 +260,10 @@ class _MessageCarouselViewport extends HookWidget {
       child: NotificationListener<ScrollUpdateNotification>(
         onNotification: (notification) {
           if (notification.depth == 0 && notification.metrics is PageMetrics) {
+            MessageGalleryScrollNotification(
+              notification.metrics.pixels -
+                  notification.metrics.minScrollExtent,
+            ).dispatch(context);
             final index = (notification.metrics as PageMetrics).page!.round();
             if (index != currentIndex) onPageChanged(index);
           }
@@ -268,7 +272,11 @@ class _MessageCarouselViewport extends HookWidget {
         child: CustomScrollView(
           controller: controller,
           scrollDirection: Axis.horizontal,
-          physics: const _CarouselPagePhysics(),
+          physics: _CarouselPagePhysics(
+            parent: Theme.of(context).platform == TargetPlatform.iOS
+                ? const BouncingScrollPhysics()
+                : const ClampingScrollPhysics(),
+          ),
           clipBehavior: Clip.none,
           slivers: [
             SliverPadding(
