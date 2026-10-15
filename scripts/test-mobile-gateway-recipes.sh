@@ -15,15 +15,21 @@ cat > "$fixture/bin/flutter" <<'STUB'
 set -eu
 printf '%s\n' "$@" > "$CALL_LOG"
 STUB
+# Only DeviceHub (Xcode 27) is running and no simulator app can be opened, so
+# mobile-dev reaches Flutter only if it recognizes DeviceHub.
 cat > "$fixture/bin/pgrep" <<'STUB'
 #!/bin/bash
-exit 0
+[[ "$*" == "-x DeviceHub" ]]
+STUB
+cat > "$fixture/bin/open" <<'STUB'
+#!/bin/bash
+exit 1
 STUB
 cat > "$fixture/scripts/mobile-worktree-overrides.sh" <<'STUB'
 #!/bin/bash
 exit 0
 STUB
-chmod +x "$fixture/bin/flutter" "$fixture/bin/pgrep" "$fixture/scripts/mobile-worktree-overrides.sh"
+chmod +x "$fixture/bin/flutter" "$fixture/bin/pgrep" "$fixture/bin/open" "$fixture/scripts/mobile-worktree-overrides.sh"
 export PATH="$fixture/bin:$PATH"
 export CALL_LOG="$fixture/arguments"
 unset BUZZ_PUSH_GATEWAY_URL

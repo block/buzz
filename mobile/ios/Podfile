@@ -1,4 +1,5 @@
-platform :ios, '16.0'
+ios_deployment_target = '16.0'
+platform :ios, ios_deployment_target
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -36,8 +37,17 @@ target 'Runner' do
 end
 
 post_install do |installer|
+  minimum_ios_version = Gem::Version.new(ios_deployment_target)
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    # Pods and their resource bundles can retain older podspec deployment
+    # targets that newer Xcode versions no longer support.
+    target.build_configurations.each do |config|
+      deployment_target = config.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
+      if deployment_target.nil? || Gem::Version.new(deployment_target) < minimum_ios_version
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = ios_deployment_target
+      end
+    end
   end
   # Flutter creates plugin symlinks during installation, so load the upstream
   # helper here rather than requiring an existing Pods install at parse time.
