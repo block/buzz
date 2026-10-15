@@ -805,7 +805,8 @@ String? _canonicalHuddleRoomId(Object? value) {
   }
   if (!RegExp(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
-  ).hasMatch(text))
+  ).hasMatch(text)) {
     return null;
+  }
   return text.toLowerCase();
 }
