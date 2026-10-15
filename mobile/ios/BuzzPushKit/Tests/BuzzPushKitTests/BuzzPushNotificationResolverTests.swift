@@ -809,8 +809,10 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
           now: { Date(timeIntervalSince1970: Double(profile.cachedAt)) }, isCurrent: { scopes.contains($0) })
         try writer.save(event: event, scope: scope)
         if let image = profile.avatarPNG {
+          let requestID = try XCTUnwrap(writer.beginAvatarRequest(
+            profileID: event.id, pubkey: event.pubkey, scope: scope))
           try writer.saveAvatar(image, source: "https://images.example/avatar.png",
-            profileID: event.id, pubkey: event.pubkey, scope: scope)
+            profileID: event.id, requestID: requestID, pubkey: event.pubkey, scope: scope)
         }
       }
       for channel in snapshot.channels {

@@ -33,20 +33,26 @@ struct BuzzNotificationCacheTests {
       privateKey: key, createdAt: 1, kind: 0,
       content: #"{"name":"A","picture":"https://image.example/a.png"}"#)
     try cache.save(event: first, scope: scope)
+    let firstRequest = try #require(
+      try cache.beginAvatarRequest(
+        profileID: first.id, pubkey: first.pubkey, scope: scope))
     let bytes = Data([1, 2, 3])
     try cache.saveAvatar(
       bytes, source: "https://image.example/a.png",
-      profileID: first.id, pubkey: first.pubkey, scope: scope)
+      profileID: first.id, requestID: firstRequest, pubkey: first.pubkey, scope: scope)
     let replacement = try signedEvent(
       privateKey: key, createdAt: 2, kind: 0,
       content: #"{"name":"A","picture":"https://image.example/b.png"}"#)
     try cache.save(event: replacement, scope: scope)
     #expect(try cache.avatar(scope: scope, pubkey: first.pubkey)?.data == bytes)
+    let replacementRequest = try #require(
+      try cache.beginAvatarRequest(
+        profileID: replacement.id, pubkey: first.pubkey, scope: scope))
     let removal = try signedEvent(privateKey: key, createdAt: 3, kind: 0, content: #"{"name":"A"}"#)
     try cache.save(event: removal, scope: scope)
     try cache.saveAvatar(
       bytes, source: "https://image.example/b.png",
-      profileID: replacement.id, pubkey: first.pubkey, scope: scope)
+      profileID: replacement.id, requestID: replacementRequest, pubkey: first.pubkey, scope: scope)
     #expect(try cache.avatar(scope: scope, pubkey: first.pubkey) == nil)
     try cache.save(event: first, scope: scope)
     #expect(try cache.metadata(scope: scope, kind: 0, author: first.pubkey)?.event.id == removal.id)

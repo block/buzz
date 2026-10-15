@@ -132,9 +132,12 @@ final class BuzzNotificationEnrichmentOperationTests: XCTestCase {
       directory: root,
       now: { Date(timeIntervalSince1970: 100) }, isCurrent: { $0 == scope })
     try oldCache.save(event: profile, scope: scope)
+    let oldRequest = try XCTUnwrap(
+      oldCache.beginAvatarRequest(
+        profileID: profile.id, pubkey: message.pubkey, scope: scope))
     let oldImage = Data([1, 2, 3])
     try oldCache.saveAvatar(
-      oldImage, source: source, profileID: profile.id,
+      oldImage, source: source, profileID: profile.id, requestID: oldRequest,
       pubkey: message.pubkey, scope: scope)
     let now = Date(timeIntervalSince1970: 3700)
     let cache = BuzzNotificationCache(directory: root, now: { now }, isCurrent: { $0 == scope })
@@ -161,6 +164,54 @@ final class BuzzNotificationEnrichmentOperationTests: XCTestCase {
     XCTAssertEqual(
       try cache.avatar(scope: scope, pubkey: message.pubkey)?.savedAt,
       Date(timeIntervalSince1970: 100))
+  }
+
+  func testOlderOverlappingDownloadCannotReplaceNewerImage() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let message = try signedEvent(kind: 9, content: "Hello")
+    let profile = try signedEvent(
+      kind: 0, content: #"{"name":"Alice","picture":"https://images.example/avatar.png"}"#)
+    let community = PushLeaseCommunity(
+      id: "community", name: "Test", relayUrl: "wss://relay.example",
+      pubkey: message.pubkey, policies: [], notificationSessionID: "session")
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community))
+    let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+    try cache.save(event: profile, scope: scope)
+    let olderStarted = expectation(description: "Older download started")
+    let newerStarted = expectation(description: "Newer download started")
+    let olderFinished = expectation(description: "Older completion processed")
+    let newerFinished = expectation(description: "Newer completion processed")
+    var olderCallback: ((Result<Data, Error>) -> Void)?
+    var newerCallback: ((Result<Data, Error>) -> Void)?
+    func operation(
+      started: XCTestExpectation, finished: XCTestExpectation,
+      capture: @escaping (@escaping (Result<Data, Error>) -> Void) -> Void
+    ) -> BuzzNotificationEnrichmentOperation {
+      BuzzNotificationEnrichmentOperation(
+        event: message, community: community, scope: scope,
+        cache: BuzzNotificationCache(directory: root, isCurrent: { $0 == scope }),
+        avatarLoader: nil, now: Date.init, isCurrent: { true },
+        loadAvatar: { _, _, callback in
+          capture(callback)
+          started.fulfill()
+        },
+        scheduleDeadline: { _, _ in },
+        refresh: { _, _, _ in XCTFail("Profile is fresh") },
+        completion: { _ in finished.fulfill() })
+    }
+    let older = operation(started: olderStarted, finished: olderFinished) { olderCallback = $0 }
+    older.start()
+    wait(for: [olderStarted], timeout: 2)
+    let newer = operation(started: newerStarted, finished: newerFinished) { newerCallback = $0 }
+    newer.start()
+    wait(for: [newerStarted], timeout: 2)
+    try XCTUnwrap(newerCallback)(.success(Data([2])))
+    wait(for: [newerFinished], timeout: 2)
+    let saved = try XCTUnwrap(cache.avatar(scope: scope, pubkey: message.pubkey))
+    try XCTUnwrap(olderCallback)(.success(Data([1])))
+    wait(for: [olderFinished], timeout: 2)
+    XCTAssertEqual(try cache.avatar(scope: scope, pubkey: message.pubkey), saved)
   }
 
   private func signedEvent(kind: Int, content: String) throws -> VerifiedNostrEvent {

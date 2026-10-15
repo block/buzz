@@ -72,6 +72,7 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     var version = 1
     var metadata: [BuzzNotificationMetadata] = []
     var avatars: [BuzzNotificationAvatar] = []
+    var avatarRequests: [String: String]?
   }
 
   public init(
@@ -171,9 +172,26 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     try access(scope) { state in state.avatars.first { $0.pubkey == pubkey } }
   }
 
-  /// Publishes an image only if the current profile still identifies this source.
+  /// Registers the newest image request under the same lock used by all cache writers.
+  public func beginAvatarRequest(
+    profileID: String, pubkey: String, scope: BuzzNotificationCacheScope
+  ) throws -> String? {
+    try access(scope, write: true) { state in
+      guard
+        state.metadata.contains(where: {
+          $0.event.kind == 0 && $0.event.pubkey == pubkey && $0.event.id == profileID
+        })
+      else { return nil }
+      let requestID = UUID().uuidString
+      if state.avatarRequests == nil { state.avatarRequests = [:] }
+      state.avatarRequests?[pubkey] = requestID
+      return requestID
+    }
+  }
+
+  /// Publishes only the latest request while the current profile still identifies its source.
   public func saveAvatar(
-    _ data: Data, source: String, profileID: String, pubkey: String,
+    _ data: Data, source: String, profileID: String, requestID: String, pubkey: String,
     scope: BuzzNotificationCacheScope
   ) throws {
     guard !data.isEmpty, data.count <= Self.maximumAvatarBytes else {
@@ -183,7 +201,8 @@ public final class BuzzNotificationCache: @unchecked Sendable {
       guard
         let profile = state.metadata.first(where: {
           $0.event.kind == 0 && $0.event.pubkey == pubkey
-        }), profile.event.id == profileID, Self.picture(profile.event) == source
+        }), profile.event.id == profileID, Self.picture(profile.event) == source,
+        state.avatarRequests?[pubkey] == requestID
       else { return }
       state.avatars.removeAll { $0.pubkey == pubkey }
       state.avatars.append(
@@ -257,6 +276,9 @@ public final class BuzzNotificationCache: @unchecked Sendable {
       if write {
         state.metadata = Array(state.metadata.sorted { $0.checkedAt > $1.checkedAt }.prefix(512))
         state.avatars = Array(state.avatars.sorted { $0.savedAt > $1.savedAt }.prefix(128))
+        let profileAuthors = Set(
+          state.metadata.filter { $0.event.kind == 0 }.map { $0.event.pubkey })
+        state.avatarRequests = state.avatarRequests?.filter { profileAuthors.contains($0.key) }
         let encoder = JSONEncoder()
         var data = try encoder.encode(state)
         while data.count > Self.maximumBytes {

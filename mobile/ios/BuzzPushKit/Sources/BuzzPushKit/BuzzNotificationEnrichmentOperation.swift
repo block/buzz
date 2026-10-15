@@ -120,13 +120,28 @@ final class BuzzNotificationEnrichmentOperation {
     }
     // Decoding and persistence cannot occupy the delivery deadline's queue.
     DispatchQueue.global(qos: .utility).async { [self] in
+      let requestID: String
+      do {
+        guard
+          let registered = try cache.beginAvatarRequest(
+            profileID: profile.event.id, pubkey: event.pubkey, scope: scope)
+        else {
+          readCache { [self] in deliver() }
+          return
+        }
+        requestID = registered
+      } catch {
+        report(error)
+        readCache { [self] in deliver() }
+        return
+      }
       loadAvatar(source, scope) { [self] result in
         DispatchQueue.global(qos: .utility).async { [self] in
           switch result {
           case .success(let data):
             do {
               try cache.saveAvatar(
-                data, source: source, profileID: profile.event.id,
+                data, source: source, profileID: profile.event.id, requestID: requestID,
                 pubkey: event.pubkey, scope: scope)
             } catch { report(error) }
           case .failure(let error): report(error)
