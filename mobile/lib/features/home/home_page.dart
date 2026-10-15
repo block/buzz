@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -108,9 +109,39 @@ class HomePage extends HookConsumerWidget {
         settingsPageBuilder: settingsPageBuilder,
         onSearch: () => Navigator.of(context).push(
           PageRouteBuilder<void>(
+            // Keep Android backdrop filters composited while search is open.
+            // UIKit controls must instead be hidden beneath the iOS route.
+            opaque: defaultTargetPlatform == TargetPlatform.iOS,
             allowSnapshotting: false,
-            transitionDuration: Duration.zero,
-            reverseTransitionDuration: Duration.zero,
+            transitionDuration: reducedMotion
+                ? Duration.zero
+                : defaultTargetPlatform == TargetPlatform.iOS
+                ? CupertinoRouteTransitionMixin.kTransitionDuration
+                : const Duration(milliseconds: 260),
+            reverseTransitionDuration: reducedMotion
+                ? Duration.zero
+                : defaultTargetPlatform == TargetPlatform.iOS
+                ? CupertinoRouteTransitionMixin.kTransitionDuration
+                : const Duration(milliseconds: 220),
+            transitionsBuilder: (_, animation, secondaryAnimation, child) =>
+                reducedMotion
+                ? child
+                : defaultTargetPlatform == TargetPlatform.iOS
+                ? CupertinoFullscreenDialogTransition(
+                    primaryRouteAnimation: animation,
+                    secondaryRouteAnimation: secondaryAnimation,
+                    linearTransition: false,
+                    child: child,
+                  )
+                : SlideTransition(
+                    position: animation.drive(
+                      Tween(
+                        begin: const Offset(0, 1),
+                        end: Offset.zero,
+                      ).chain(CurveTween(curve: Curves.easeOutCubic)),
+                    ),
+                    child: child,
+                  ),
             pageBuilder: (_, animation, secondaryAnimation) =>
                 const SearchPage(),
           ),

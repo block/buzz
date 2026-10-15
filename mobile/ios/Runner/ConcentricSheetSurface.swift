@@ -154,7 +154,7 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
         glassView.effect = effect
       }
       glassView.backgroundColor = .clear
-      glassView.contentView.backgroundColor = surfaceColor.withAlphaComponent(0.12)
+      glassView.contentView.backgroundColor = surfaceColor.withAlphaComponent(min(surfaceColor.cgColor.alpha, 0.12))
     } else {
       surfaceView.backgroundColor = surfaceColor
     }

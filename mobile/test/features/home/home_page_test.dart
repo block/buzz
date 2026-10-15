@@ -147,8 +147,12 @@ void main() {
     expect(find.byType(SearchPage), findsOneWidget);
     final searchRoute = ModalRoute.of(tester.element(find.byType(SearchPage)))!;
     expect(searchRoute.allowSnapshotting, isFalse);
-    expect(searchRoute.transitionDuration, Duration.zero);
-    expect(searchRoute.reverseTransitionDuration, Duration.zero);
+    expect(searchRoute.opaque, isTrue);
+    expect(searchRoute.transitionDuration, const Duration(milliseconds: 500));
+    expect(
+      searchRoute.reverseTransitionDuration,
+      const Duration(milliseconds: 500),
+    );
     Navigator.of(tester.element(find.byType(SearchPage))).pop();
     await tester.pumpAndSettle();
     expect(find.byType(SearchPage), findsNothing);
@@ -156,6 +160,37 @@ void main() {
     await tester.pump();
     debugDefaultTargetPlatformOverride = null;
   });
+
+  for (final reducedMotion in [false, true]) {
+    testWidgets('search slides vertically, reduced motion: $reducedMotion', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        await buildHome(disableAnimations: reducedMotion),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Search'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      final search = find.byType(SearchPage);
+      expect(search, findsOneWidget);
+      expect(tester.getTopLeft(search).dx, 0);
+      expect(tester.getTopLeft(search).dy, reducedMotion ? 0 : greaterThan(0));
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(search).dy, 0);
+      expect(ModalRoute.of(tester.element(search))!.opaque, isFalse);
+      Navigator.of(tester.element(search)).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      if (reducedMotion) {
+        expect(search, findsNothing);
+      } else {
+        expect(tester.getTopLeft(search).dy, greaterThan(0));
+      }
+      await tester.pumpAndSettle();
+      expect(search, findsNothing);
+    });
+  }
 
   testWidgets('keeps creation beside the tabs and search beside the avatar', (
     tester,
