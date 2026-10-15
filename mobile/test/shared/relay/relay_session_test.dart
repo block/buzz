@@ -234,6 +234,137 @@ void main() {
     );
   });
 
+  test('queryRelay accepts a valid signed event', () async {
+    final valid = _signedEvent();
+    final harness = _eventQueryHarness([valid.toJson()]);
+    addTearDown(harness.container.dispose);
+
+    final events = await harness.session.queryRelay(const []);
+
+    expect(events, [valid]);
+  });
+
+  test(
+    'queryRelay rejects a canonical id with a forged zero signature',
+    () async {
+      final forged = {
+        ..._signedEvent().toJson(),
+        'sig': _repeatedHex('00', 64),
+      };
+      final harness = _eventQueryHarness([forged]);
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(isA<FormatException>()),
+      );
+    },
+  );
+
+  final alteredSignedEvents = <String, Map<String, dynamic>>{
+    'altered content': {
+      ..._signedEvent().toJson(),
+      'content': 'attacker content',
+    },
+    'altered id': {..._signedEvent().toJson(), 'id': _repeatedHex('00', 32)},
+    'short id': {..._signedEvent().toJson(), 'id': '00'},
+    'overlong id': {..._signedEvent().toJson(), 'id': _repeatedHex('00', 33)},
+    'nonhex id': {..._signedEvent().toJson(), 'id': _repeatedHex('gg', 32)},
+    'short pubkey': {..._signedEvent().toJson(), 'pubkey': '00'},
+    'overlong pubkey': {
+      ..._signedEvent().toJson(),
+      'pubkey': _repeatedHex('00', 33),
+    },
+    'nonhex pubkey': {
+      ..._signedEvent().toJson(),
+      'pubkey': _repeatedHex('gg', 32),
+    },
+    'short signature': {..._signedEvent().toJson(), 'sig': '00'},
+    'overlong signature': {
+      ..._signedEvent().toJson(),
+      'sig': _repeatedHex('00', 65),
+    },
+    'nonhex signature': {
+      ..._signedEvent().toJson(),
+      'sig': _repeatedHex('gg', 64),
+    },
+  };
+  for (final entry in alteredSignedEvents.entries) {
+    test('queryRelay rejects ${entry.key}', () async {
+      final harness = _eventQueryHarness([entry.value]);
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(isA<FormatException>()),
+      );
+    });
+  }
+
+  test('queryRelay keeps valid events from a mixed invalid batch', () async {
+    final valid = _signedEvent(content: 'valid after forged');
+    final forged = {
+      ..._signedEvent(content: 'forged').toJson(),
+      'sig': _repeatedHex('00', 64),
+    };
+    final harness = _eventQueryHarness([forged, valid.toJson()]);
+    addTearDown(harness.container.dispose);
+
+    final events = await harness.session.queryRelay(const []);
+
+    expect(events, [valid]);
+  });
+
+  test('queryRelay rejects an oversized event before verification', () async {
+    final oversized = {
+      ..._signedEvent().toJson(),
+      'content': List.filled(700000, 'x').join(),
+    };
+    final harness = _eventQueryHarness([oversized]);
+    addTearDown(harness.container.dispose);
+
+    await expectLater(
+      harness.session.queryRelay(const []),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('queryRelay propagates verification queue exhaustion', () async {
+    final large = {
+      ..._signedEvent().toJson(),
+      'content': List.filled(600000, 'x').join(),
+    };
+    final harness = _eventQueryHarness(List.filled(10, large));
+    addTearDown(harness.container.dispose);
+
+    await expectLater(
+      harness.session.queryRelay(const []),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('queryRelay rejects a response above its byte limit', () async {
+    final harness = _queryHarness(
+      gate: RelayRateLimitGate(),
+      client: http_testing.MockClient(
+        (_) async =>
+            http.Response(List.filled(8 * 1024 * 1024 + 1, 'x').join(), 200),
+      ),
+    );
+    addTearDown(harness.container.dispose);
+
+    await expectLater(
+      harness.session.queryRelay(const []),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('size limit'),
+        ),
+      ),
+    );
+  });
+
   test('queryRelay rotates the client after a timeout', () async {
     final clients = <_ControlledHttpClient>[];
     final session = RelaySessionNotifier(
@@ -507,6 +638,33 @@ void main() {
       );
     },
   );
+
+  test('websocket history keeps valid events from a mixed batch', () async {
+    final session = RelaySessionNotifier();
+    final history = session.fetchHistory(_channelFilter);
+    final valid = _signedEvent(content: 'valid history');
+    final forged = {
+      ..._signedEvent(content: 'forged history').toJson(),
+      'sig': _repeatedHex('00', 64),
+    };
+
+    session.debugHandleMessage(['EVENT', 'h-1', forged]);
+    session.debugHandleMessage(['EVENT', 'h-1', valid.toJson()]);
+    session.debugHandleMessage(['EOSE', 'h-1']);
+
+    expect(await history, [valid]);
+  });
+
+  test('websocket history rejects an all-invalid response', () async {
+    final session = RelaySessionNotifier();
+    final history = session.fetchHistory(_channelFilter);
+    final forged = {..._signedEvent().toJson(), 'sig': _repeatedHex('00', 64)};
+
+    session.debugHandleMessage(['EVENT', 'h-1', forged]);
+    session.debugHandleMessage(['EOSE', 'h-1']);
+
+    await expectLater(history, throwsA(isA<FormatException>()));
+  });
 
   test('background disconnect rejects in-flight history', () async {
     final session = RelaySessionNotifier();
@@ -782,16 +940,16 @@ void main() {
     session.debugHandleMessage(['EOSE', 'l-2']);
     final unsubscribeSecond = await secondSubscribe;
 
-    final event = _event();
+    final event = _signedEvent();
     session.debugHandleMessage(['EVENT', 'l-1', event.toJson()]);
     session.debugHandleMessage(['EVENT', 'l-2', event.toJson()]);
-    session.debugFlushEventBuffer();
+    await _waitUntil(() => firstEvents.length == 1 && secondEvents.length == 1);
 
     expect(firstEvents.map((event) => event.id), [event.id]);
     expect(secondEvents.map((event) => event.id), [event.id]);
 
     session.debugHandleMessage(['EVENT', 'l-1', event.toJson()]);
-    session.debugFlushEventBuffer();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
 
     expect(firstEvents.map((event) => event.id), [event.id]);
     expect(secondEvents.map((event) => event.id), [event.id]);
@@ -816,7 +974,7 @@ void main() {
       filter,
       (_) => deliveryPhases.add(queryHasBegun),
     );
-    final replayEvent = _event();
+    final replayEvent = _signedEvent();
     session.debugHandleMessage(['EVENT', 'l-1', replayEvent.toJson()]);
     session.debugHandleMessage(['EOSE', 'l-1']);
 
@@ -830,8 +988,504 @@ void main() {
     unsubscribe();
   });
 
+  test(
+    'live delivery continues with a valid event after an invalid event',
+    () async {
+      final session = RelaySessionNotifier();
+      final delivered = <NostrEvent>[];
+      final subscribe = session.subscribe(_channelFilter, delivered.add);
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+      final valid = _signedEvent(content: 'valid live');
+      final forged = {
+        ..._signedEvent(content: 'forged live').toJson(),
+        'sig': _repeatedHex('00', 64),
+      };
+
+      session.debugHandleMessage(['EVENT', 'l-1', forged]);
+      session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+
+      await _waitUntil(() => delivered.isNotEmpty);
+      expect(delivered, [valid]);
+      unsubscribe();
+    },
+  );
+
+  test('EOSE waits for preceding event verification and delivery', () async {
+    final verification = Completer<List<Map<String, dynamic>?>>();
+    var verificationStarted = false;
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        verificationStarted = true;
+        return verification.future;
+      },
+    );
+    final delivered = <NostrEvent>[];
+    var ready = false;
+    final subscribe = session.subscribe(_channelFilter, delivered.add)
+      ..then((_) => ready = true);
+    final valid = _signedEvent();
+
+    session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await _waitUntil(() => verificationStarted);
+    expect(delivered, isEmpty);
+    expect(ready, isFalse);
+
+    verification.complete([valid.toJson()]);
+    final unsubscribe = await subscribe;
+    expect(delivered, [valid]);
+    expect(ready, isTrue);
+    unsubscribe();
+  });
+
+  test('EOSE does not wait for a later event verification', () async {
+    final verifications = <Completer<List<Map<String, dynamic>?>>>[];
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        final verification = Completer<List<Map<String, dynamic>?>>();
+        verifications.add(verification);
+        return verification.future;
+      },
+    );
+    final delivered = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, delivered.add);
+    final beforeEose = _signedEvent(content: 'before EOSE');
+    final afterEose = _signedEvent(content: 'after EOSE');
+
+    session.debugHandleMessage(['EVENT', 'l-1', beforeEose.toJson()]);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await _waitUntil(() => verifications.length == 1);
+    session.debugHandleMessage(['EVENT', 'l-1', afterEose.toJson()]);
+    verifications.first.complete([beforeEose.toJson()]);
+
+    final unsubscribe = await subscribe.timeout(
+      const Duration(milliseconds: 200),
+    );
+    expect(delivered, [beforeEose]);
+    await _waitUntil(() => verifications.length == 2);
+    unsubscribe();
+    verifications.last.complete([afterEose.toJson()]);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(delivered, [beforeEose]);
+  });
+
+  test(
+    'history overflow retires promptly while prior verification is held',
+    () async {
+      final firstVerification = Completer<List<Map<String, dynamic>?>>();
+      var verificationCalls = 0;
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier(
+        verifyEventBatch: (events) {
+          verificationCalls++;
+          if (verificationCalls == 1) return firstVerification.future;
+          return Future.value(List.filled(events.length, null));
+        },
+      );
+      session.debugAttachSocketForTest(socket);
+      final history = session.fetchHistory(_channelFilter);
+      final historyFailure = expectLater(history, throwsStateError);
+      final valid = _signedEvent();
+
+      session.debugHandleMessage(['EVENT', 'h-1', valid.toJson()]);
+      await _waitUntil(() => verificationCalls == 1);
+      final large = {
+        ...valid.toJson(),
+        'content': List.filled(600000, 'x').join(),
+      };
+      for (var i = 0; i < 12; i++) {
+        session.debugHandleMessage(['EVENT', 'h-1', large]);
+      }
+
+      await historyFailure.timeout(const Duration(milliseconds: 200));
+      expect(_closes(socket, 'h-1'), hasLength(1));
+      expect(session.debugPendingRelayAdmissions, lessThanOrEqualTo(10));
+
+      firstVerification.complete([valid.toJson()]);
+      await _waitUntil(() => session.debugPendingRelayAdmissions == 0);
+      expect(_closes(socket, 'h-1'), hasLength(1));
+    },
+  );
+
+  for (final initiallyReady in [false, true]) {
+    test('live overflow retires ${initiallyReady ? 'ready' : 'initial'} '
+        'subscription exactly once', () async {
+      final firstVerification = Completer<List<Map<String, dynamic>?>>();
+      var verificationCalls = 0;
+      final socket = _RecordingRelaySocket();
+      final delivered = <NostrEvent>[];
+      final closed = <String>[];
+      final session = RelaySessionNotifier(
+        verifyEventBatch: (events) {
+          verificationCalls++;
+          if (verificationCalls == 1) return firstVerification.future;
+          return Future.value(List.filled(events.length, null));
+        },
+      );
+      session.debugAttachSocketForTest(socket);
+      final subscribe = session.subscribe(
+        _channelFilter,
+        delivered.add,
+        onClosed: closed.add,
+      );
+      final Future<void>? subscribeFailure = initiallyReady
+          ? null
+          : expectLater(subscribe, throwsStateError);
+      void Function()? unsubscribe;
+      if (initiallyReady) {
+        session.debugHandleMessage(['EOSE', 'l-1']);
+        unsubscribe = await subscribe;
+      }
+      final valid = _signedEvent();
+      session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+      await _waitUntil(() => verificationCalls == 1);
+      final large = {
+        ...valid.toJson(),
+        'content': List.filled(600000, 'x').join(),
+      };
+      for (var i = 0; i < 12; i++) {
+        session.debugHandleMessage(['EVENT', 'l-1', large]);
+      }
+
+      await _waitUntil(() => _closes(socket, 'l-1').isNotEmpty);
+      if (initiallyReady) {
+        expect(closed, hasLength(1));
+      } else {
+        await subscribeFailure;
+        expect(closed, isEmpty);
+      }
+      expect(_closes(socket, 'l-1'), hasLength(1));
+      expect(session.debugPendingRelayAdmissions, lessThanOrEqualTo(10));
+
+      firstVerification.complete([valid.toJson()]);
+      await _waitUntil(() => session.debugPendingRelayAdmissions == 0);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      session.debugFlushEventBuffer();
+      expect(delivered, isEmpty);
+      unsubscribe?.call();
+      expect(_closes(socket, 'l-1'), hasLength(1));
+    });
+  }
+
+  test('disconnect immediately retires pending live verification', () async {
+    final verification = Completer<List<Map<String, dynamic>?>>();
+    var verificationStarted = false;
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        verificationStarted = true;
+        return verification.future;
+      },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        authProvider.overrideWith(() => _PendingAuthNotifier()),
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(
+            baseUrl: 'https://relay.example',
+            nsec: nostr.Keys.generate().nsec,
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+    final delivered = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, delivered.add);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+    final valid = _signedEvent();
+
+    session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+    await _waitUntil(() => verificationStarted);
+    session.debugHandleDisconnected();
+    verification.complete([valid.toJson()]);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    session.debugFlushEventBuffer();
+
+    expect(delivered, isEmpty);
+    unsubscribe();
+  });
+
+  test('unsubscribe immediately retires pending live verification', () async {
+    final verification = Completer<List<Map<String, dynamic>?>>();
+    var verificationStarted = false;
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        verificationStarted = true;
+        return verification.future;
+      },
+    );
+    final delivered = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, delivered.add);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+    final valid = _signedEvent();
+
+    session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+    await _waitUntil(() => verificationStarted);
+    unsubscribe();
+    verification.complete([valid.toJson()]);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    session.debugFlushEventBuffer();
+
+    expect(delivered, isEmpty);
+  });
+
+  test('terminal CLOSED immediately retires pending verification', () async {
+    final verification = Completer<List<Map<String, dynamic>?>>();
+    var verificationStarted = false;
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        verificationStarted = true;
+        return verification.future;
+      },
+    );
+    final delivered = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, delivered.add);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+    final valid = _signedEvent();
+
+    session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+    await _waitUntil(() => verificationStarted);
+    session.debugHandleMessage(['CLOSED', 'l-1', 'restricted: removed']);
+    verification.complete([valid.toJson()]);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    session.debugFlushEventBuffer();
+
+    expect(delivered, isEmpty);
+  });
+
+  for (final message in ['error: relay overloaded', 'error: query timed out']) {
+    test(
+      'pending EVENT and EOSE are fenced by retryable CLOSED: $message',
+      () async {
+        final verification = Completer<List<Map<String, dynamic>?>>();
+        var verificationCalls = 0;
+        final timers = <_ManualTimer>[];
+        final socket = _RecordingRelaySocket();
+        final delivered = <NostrEvent>[];
+        final statuses = <RelaySubscriptionStatus>[];
+        final session = RelaySessionNotifier(
+          verifyEventBatch: (events) {
+            verificationCalls++;
+            if (verificationCalls == 1) return verification.future;
+            return Future.value([
+              for (final event in events) event as Map<String, dynamic>,
+            ]);
+          },
+          retryTimerFactory: (duration, callback) {
+            final timer = _ManualTimer(duration, callback);
+            timers.add(timer);
+            return timer;
+          },
+        );
+        session.debugAttachSocketForTest(socket);
+        final subscribe = session.subscribeWithStatus(
+          _channelFilter,
+          delivered.add,
+          onStatusChanged: statuses.add,
+        );
+        session.debugHandleMessage(['EOSE', 'l-1']);
+        final unsubscribe = await subscribe;
+        final stale = _signedEvent(createdAt: 30, content: 'stale');
+
+        session.debugHandleMessage(['EVENT', 'l-1', stale.toJson()]);
+        session.debugHandleMessage(['EOSE', 'l-1']);
+        await _waitUntil(() => verificationCalls == 1);
+        session.debugHandleMessage(['CLOSED', 'l-1', message]);
+        expect(statuses, [
+          RelaySubscriptionStatus.ready,
+          RelaySubscriptionStatus.retrying,
+        ]);
+        session.debugHandleMessage(['EOSE', 'l-1']);
+        expect(statuses, hasLength(2));
+
+        verification.complete([stale.toJson()]);
+        await _waitUntil(() => session.debugPendingRelayAdmissions == 0);
+        await Future<void>.delayed(Duration.zero);
+        expect(delivered, isEmpty);
+        expect(statuses, hasLength(2));
+        expect(timers.single.isActive, isTrue);
+
+        timers.single.fire();
+        await Future<void>.delayed(Duration.zero);
+        final replayReq = _reqs(socket).where((req) => req[1] == 'l-1').last;
+        expect(replayReq[2], isNot(contains('since')));
+
+        final replay = _signedEvent(createdAt: 40, content: 'replay');
+        session.debugHandleMessage(['EVENT', 'l-1', replay.toJson()]);
+        session.debugHandleMessage(['EOSE', 'l-1']);
+        await _waitUntil(() => statuses.length == 3);
+        expect(delivered, [replay]);
+        expect(statuses.last, RelaySubscriptionStatus.ready);
+        unsubscribe();
+      },
+    );
+  }
+
+  test(
+    'retryable CLOSED replays all dropped verified buffered events',
+    () async {
+      final heldVerification = Completer<List<Map<String, dynamic>?>>();
+      var verificationCalls = 0;
+      final timers = <_ManualTimer>[];
+      final socket = _RecordingRelaySocket();
+      final delivered = <NostrEvent>[];
+      final session = RelaySessionNotifier(
+        verifyEventBatch: (events) {
+          verificationCalls++;
+          if (verificationCalls == 2) return heldVerification.future;
+          return Future.value([
+            for (final event in events) event as Map<String, dynamic>,
+          ]);
+        },
+        retryTimerFactory: (duration, callback) {
+          final timer = _ManualTimer(duration, callback);
+          timers.add(timer);
+          return timer;
+        },
+      );
+      session.debugAttachSocketForTest(socket);
+      final subscribe = session.subscribe(_channelFilter, delivered.add);
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+      final alreadyDelivered = _signedEvent(
+        createdAt: 10,
+        content: 'already delivered',
+      );
+      final droppedEarlier = _signedEvent(
+        createdAt: 20,
+        content: 'dropped earlier',
+      );
+      final droppedLater = _signedEvent(
+        createdAt: 100,
+        content: 'dropped later',
+      );
+
+      session.debugHandleMessage(['EVENT', 'l-1', alreadyDelivered.toJson()]);
+      await _waitUntil(() => delivered.length == 1);
+
+      session.debugHandleMessage(['EVENT', 'l-1', droppedEarlier.toJson()]);
+      session.debugHandleMessage(['EVENT', 'l-1', droppedLater.toJson()]);
+      await _waitUntil(() => verificationCalls == 2);
+      heldVerification.complete([
+        droppedEarlier.toJson(),
+        droppedLater.toJson(),
+      ]);
+      await _waitUntil(() => session.debugBufferedEventCount == 2);
+
+      session.debugHandleMessage(['CLOSED', 'l-1', 'error: transient']);
+      expect(delivered, [alreadyDelivered]);
+      expect(session.debugBufferedEventCount, 0);
+      expect(timers.single.isActive, isTrue);
+
+      timers.single.fire();
+      await Future<void>.delayed(Duration.zero);
+      final firstReplayReq = _reqs(socket).where((req) => req[1] == 'l-1').last;
+      expect(firstReplayReq[2]['since'], 5);
+
+      session.debugHandleMessage(['EVENT', 'l-1', droppedEarlier.toJson()]);
+      session.debugHandleMessage(['EVENT', 'l-1', droppedLater.toJson()]);
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      await _waitUntil(() => delivered.length == 3);
+      expect(delivered, [alreadyDelivered, droppedEarlier, droppedLater]);
+
+      session.debugHandleMessage(['CLOSED', 'l-1', 'error: transient']);
+      timers.last.fire();
+      await Future<void>.delayed(Duration.zero);
+      final secondReplayReq = _reqs(
+        socket,
+      ).where((req) => req[1] == 'l-1').last;
+      expect(secondReplayReq[2]['since'], 95);
+      unsubscribe();
+    },
+  );
+
+  test('local OK acknowledgment bypasses pending verification', () async {
+    final verification = Completer<List<Map<String, dynamic>?>>();
+    var verificationStarted = false;
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        verificationStarted = true;
+        return verification.future;
+      },
+    );
+    final subscribe = session.subscribe(_channelFilter, (_) {});
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+    session.debugHandleMessage(['EVENT', 'l-1', _signedEvent().toJson()]);
+    await _waitUntil(() => verificationStarted);
+    session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+    final publish = session.publish(_event(id: 'local-event'));
+    session.debugHandleMessage(['OK', 'local-event', true, 'accepted']);
+
+    expect(
+      (await publish.timeout(const Duration(milliseconds: 100))).id,
+      'local-event',
+    );
+    unsubscribe();
+    verification.complete([_signedEvent().toJson()]);
+  });
+
+  test('session teardown fences a pending verification result', () async {
+    final verification = Completer<List<Map<String, dynamic>?>>();
+    var verificationStarted = false;
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        verificationStarted = true;
+        return verification.future;
+      },
+    );
+    final delivered = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, delivered.add);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await subscribe;
+    final valid = _signedEvent();
+
+    session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+    await _waitUntil(() => verificationStarted);
+    session.debugDispose();
+    verification.complete([valid.toJson()]);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    session.debugFlushEventBuffer();
+
+    expect(delivered, isEmpty);
+  });
+
+  test('connection replacement fences a pending verification result', () async {
+    final verification = Completer<List<Map<String, dynamic>?>>();
+    var verificationStarted = false;
+    final session = RelaySessionNotifier(
+      verifyEventBatch: (events) {
+        verificationStarted = true;
+        return verification.future;
+      },
+    );
+    final delivered = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, delivered.add);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+    final valid = _signedEvent();
+
+    session.debugHandleMessage(['EVENT', 'l-1', valid.toJson()]);
+    await _waitUntil(() => verificationStarted);
+    session.debugSupersedeConnection();
+    verification.complete([valid.toJson()]);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    session.debugFlushEventBuffer();
+
+    expect(delivered, isEmpty);
+    unsubscribe();
+  });
+
   test('terminal CLOSED fails a live subscribe before ready', () async {
     final session = RelaySessionNotifier();
+    final socket = _RecordingRelaySocket();
+    session.debugAttachSocketForTest(socket);
     const filter = NostrFilter(kinds: [EventKind.agentObserverFrame], limit: 0);
 
     final subscribe = session.subscribe(filter, (_) {});
@@ -851,6 +1505,7 @@ void main() {
         ),
       ),
     );
+    expect(_closes(socket, 'l-1'), isEmpty);
   });
 
   test(
@@ -919,7 +1574,7 @@ void main() {
     session.debugHandleMessage([
       'EVENT',
       'l-1',
-      _event(createdAt: 30).toJson(),
+      _signedEvent(createdAt: 30).toJson(),
     ]);
     expect(statuses, [
       RelaySubscriptionStatus.ready,
@@ -927,6 +1582,7 @@ void main() {
     ]);
 
     session.debugHandleMessage(['EOSE', 'l-1']);
+    await _waitUntil(() => statuses.length == 3);
     expect(statuses, [
       RelaySubscriptionStatus.ready,
       RelaySubscriptionStatus.retrying,
@@ -957,6 +1613,8 @@ void main() {
     session.debugHandleMessage(['CLOSED', 'l-1', 'error: transient']);
     expect(timers.last.duration, const Duration(seconds: 2));
 
+    timers.last.fire();
+    await Future<void>.delayed(Duration.zero);
     session.debugHandleMessage(['EOSE', 'l-1']);
     session.debugHandleMessage(['CLOSED', 'l-1', 'error: transient']);
     expect(timers.last.duration, const Duration(seconds: 1));
@@ -1004,7 +1662,8 @@ void main() {
       },
     );
     session.debugAttachSocketForTest(socket);
-    final subscribe = session.subscribe(_channelFilter, (_) {});
+    final delivered = <NostrEvent>[];
+    final subscribe = session.subscribe(_channelFilter, delivered.add);
     session.debugHandleMessage(['EOSE', 'l-1']);
     final unsubscribe = await subscribe;
 
@@ -1014,11 +1673,14 @@ void main() {
     session.debugHandleMessage(['CLOSED', 'l-1', 'error: transient']);
     expect(timers.last.duration, const Duration(seconds: 2));
 
+    timers.last.fire();
+    await Future<void>.delayed(Duration.zero);
     session.debugHandleMessage([
       'EVENT',
       'l-1',
-      _event(createdAt: 30).toJson(),
+      _signedEvent(createdAt: 30).toJson(),
     ]);
+    await _waitUntil(() => delivered.isNotEmpty);
     session.debugHandleMessage(['CLOSED', 'l-1', 'error: transient']);
     expect(timers.last.duration, const Duration(seconds: 1));
     unsubscribe();
@@ -1048,6 +1710,7 @@ void main() {
     session.debugResetClosedRetriesForDisconnect();
     expect(timers.last.isActive, isFalse);
     session.debugSetSessionStatus(SessionStatus.connected);
+    await session.debugReplayLiveSubscriptions();
     session.debugHandleMessage(['CLOSED', 'l-1', 'error: transient']);
     expect(timers.last.duration, const Duration(seconds: 1));
     unsubscribe();
@@ -1519,7 +2182,16 @@ void main() {
   );
 
   test('live onClosed callback runs only for a terminal CLOSED', () async {
-    final session = RelaySessionNotifier();
+    final timers = <_ManualTimer>[];
+    final socket = _RecordingRelaySocket();
+    final session = RelaySessionNotifier(
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        timers.add(timer);
+        return timer;
+      },
+    );
+    session.debugAttachSocketForTest(socket);
     final closedMessages = <String>[];
     const filter = NostrFilter(kinds: [EventKind.agentObserverFrame], limit: 0);
 
@@ -1536,6 +2208,8 @@ void main() {
       'error: temporarily unavailable',
     ]);
     expect(closedMessages, isEmpty);
+    timers.single.fire();
+    await Future<void>.delayed(Duration.zero);
     session.debugHandleMessage([
       'CLOSED',
       'l-1',
@@ -1772,6 +2446,13 @@ _QueryHarness _queryHarness({
   return _QueryHarness(container: container, session: session);
 }
 
+_QueryHarness _eventQueryHarness(List<Object?> events) => _queryHarness(
+  gate: RelayRateLimitGate(),
+  client: http_testing.MockClient(
+    (_) async => http.Response(jsonEncode(events), 200),
+  ),
+);
+
 class _FakeAuthNotifier extends AuthNotifier {
   int signOutCount = 0;
 
@@ -1846,6 +2527,31 @@ NostrEvent _event({int createdAt = 20, String id = 'event-1'}) {
   );
 }
 
+NostrEvent _signedEvent({int createdAt = 20, String content = 'hello'}) {
+  final event = nostr.Event.from(
+    kind: EventKind.streamMessageV2,
+    content: content,
+    tags: const [
+      ['h', _channelId],
+    ],
+    createdAt: createdAt,
+    secretKey: '1'.padLeft(64, '0'),
+  );
+  return NostrEvent.fromJson(event.toMap());
+}
+
+String _repeatedHex(String pair, int bytes) => List.filled(bytes, pair).join();
+
+Future<void> _waitUntil(bool Function() predicate) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (!predicate()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out waiting for asynchronous relay work');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+  }
+}
+
 const _visibleChannelId = '99999999-9999-4999-8999-999999999999';
 const _channelFilter = NostrFilter(
   kinds: EventKind.channelEventKinds,
@@ -1872,6 +2578,16 @@ List<String> _replayedChannelIds(_RecordingRelaySocket socket) => _reqs(socket)
 
 List<List<dynamic>> _reqs(_RecordingRelaySocket socket) =>
     socket.messages.where((message) => message.first == 'REQ').toList();
+
+List<List<dynamic>> _closes(_RecordingRelaySocket socket, String subId) =>
+    socket.messages
+        .where(
+          (message) =>
+              message.length >= 2 &&
+              message.first == 'CLOSE' &&
+              message[1] == subId,
+        )
+        .toList();
 
 class _RecordingRelaySocket extends RelaySocket {
   _RecordingRelaySocket()

@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
+const deterministicFixtureEpoch = 4102444800;
+
 /// A scripted relay behind the real [RelaySessionNotifier], so REQ/EOSE,
 /// CLOSED classification, event batching and OK all run production code.
 /// Retains replaceable heads the way the relay does: `created_at DESC, id ASC`.
@@ -16,7 +18,7 @@ class SidebarRelay {
     session.debugAttachSocketForTest(_ScriptedSocket(_onSend));
   }
 
-  final keys = nostr.Keys.generate();
+  final keys = nostr.Keys('1'.padLeft(64, '0'));
   final session = ConnectedRelaySession();
   late final signer = SignedEventRelay(session: session, nsec: keys.nsec);
   final stored = <NostrEvent>[];
@@ -31,26 +33,70 @@ class SidebarRelay {
 
   String get pubkey => keys.public;
 
-  NostrEvent event(String dTag, Object payload, int createdAt, {String? id}) =>
-      NostrEvent(
-        id: id ?? 'e$createdAt'.padRight(64, 'f'),
-        pubkey: pubkey,
-        createdAt: createdAt,
-        kind: EventKind.readState,
-        tags: [
-          ['d', dTag],
-        ],
-        content: nip44Encrypt(_key, jsonEncode(payload)),
-        sig: 'sig',
-      );
+  NostrEvent event(String dTag, Object payload, int createdAt) {
+    final event = nostr.Event.from(
+      kind: EventKind.readState,
+      content: nip44Encrypt(_key, jsonEncode(payload)),
+      tags: [
+        ['d', dTag],
+      ],
+      createdAt: createdAt,
+      secretKey: _privateKey,
+    );
+    return NostrEvent.fromJson(event.toMap());
+  }
 
-  Object? decrypt(NostrEvent event) =>
-      jsonDecode(nip44Decrypt(_key, event.content));
+  NostrEvent deterministicEvent(
+    String dTag,
+    Object payload,
+    int createdAt, {
+    List<List<String>> extraTags = const [],
+  }) {
+    final event = nostr.Event.from(
+      kind: EventKind.readState,
+      content: jsonEncode(payload),
+      tags: [
+        ['d', dTag],
+        ...extraTags,
+      ],
+      createdAt: createdAt,
+      secretKey: _privateKey,
+    );
+    return NostrEvent.fromJson(event.toMap());
+  }
 
-  late final _key = getConversationKey(
-    nostr.Nip19.decode(payload: keys.nsec).data,
-    keys.public,
-  );
+  NostrEvent orderedEvent(
+    String dTag,
+    Object payload,
+    int createdAt, {
+    required String referenceId,
+    required bool sortsBefore,
+    required int nonce,
+  }) {
+    final candidate = deterministicEvent(
+      dTag,
+      payload,
+      createdAt,
+      extraTags: [
+        ['nonce', '$nonce'],
+      ],
+    );
+    if ((candidate.id.compareTo(referenceId) < 0) != sortsBefore) {
+      throw StateError('The fixed signed fixture has the wrong event ordering');
+    }
+    return candidate;
+  }
+
+  Object? decrypt(NostrEvent event) {
+    try {
+      return jsonDecode(event.content);
+    } on FormatException {
+      return jsonDecode(nip44Decrypt(_key, event.content));
+    }
+  }
+
+  late final String _privateKey = nostr.Nip19.decode(payload: keys.nsec).data;
+  late final _key = getConversationKey(_privateKey, keys.public);
 
   List<List<dynamic>> reqsFor(String dTag, String prefix) => [
     for (final req in reqs)
@@ -117,8 +163,24 @@ class SidebarRelay {
 }
 
 class ConnectedRelaySession extends RelaySessionNotifier {
+  ConnectedRelaySession() : super(verifyEventBatch: _verifySignedBatchInline);
+
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+}
+
+Future<List<Map<String, dynamic>?>> _verifySignedBatchInline(
+  List<Object?> eventJsons,
+) async => [
+  for (final eventJson in eventJsons) _verifySignedEventInline(eventJson),
+];
+
+Map<String, dynamic>? _verifySignedEventInline(Object? eventJson) {
+  try {
+    return nostr.Event.fromJson(jsonEncode(eventJson)).toMap();
+  } catch (_) {
+    return null;
+  }
 }
 
 class _ScriptedSocket extends RelaySocket {
