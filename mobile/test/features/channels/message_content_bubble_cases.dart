@@ -32,6 +32,38 @@ void bubbleContentTests() {
     }
   });
 
+  for (final brightness in Brightness.values) {
+    testWidgets('bubbles inherit every chat color in $brightness', (
+      tester,
+    ) async {
+      for (final choice in chatColorChoices) {
+        final theme = mobileAppearanceTheme(brightness, choice.wireValue);
+        for (final own in [false, true]) {
+          await tester.pumpWidget(
+            _testable(
+              MessageContent(
+                content: 'Themed message',
+                bubble: true,
+                ownMessage: own,
+              ),
+              theme: theme,
+            ),
+          );
+          await tester.pumpAndSettle();
+          final surface = tester.widget<LocalSendBubbleSurface>(
+            find.byType(LocalSendBubbleSurface),
+          );
+          expect(
+            surface.color,
+            own
+                ? theme.extension<ChatColors>()!.outgoing
+                : theme.colorScheme.secondaryContainer,
+          );
+        }
+      }
+    });
+  }
+
   for (final dark in [false, true]) {
     testWidgets('outgoing headings, mentions and links contrast in dark=$dark', (
       tester,

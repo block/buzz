@@ -1,4 +1,3 @@
-import 'package:buzz/shared/theme/mobile_appearance.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -43,6 +42,7 @@ Widget _testable(
   List<Override> overrides = const [],
   bool disableAnimations = false,
   bool dark = false,
+  ThemeData? theme,
   VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
@@ -53,7 +53,7 @@ Widget _testable(
       ...overrides,
     ],
     child: MaterialApp(
-      theme: dark ? AppTheme.dark() : AppTheme.light(),
+      theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
       // disableAnimations) applies to every pushed route, not just the
       // home scaffold.  Navigator-pushed routes (e.g. MediaVideoViewerPage)
