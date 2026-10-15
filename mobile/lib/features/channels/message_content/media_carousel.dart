@@ -272,7 +272,11 @@ class _MessageCarouselViewport extends HookWidget {
         child: CustomScrollView(
           controller: controller,
           scrollDirection: Axis.horizontal,
-          physics: const _CarouselPagePhysics(parent: ClampingScrollPhysics()),
+          physics: _CarouselPagePhysics(
+            parent: Theme.of(context).platform == TargetPlatform.iOS
+                ? const BouncingScrollPhysics()
+                : const ClampingScrollPhysics(),
+          ),
           clipBehavior: Clip.none,
           slivers: [
             SliverPadding(
