@@ -2807,18 +2807,31 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
 
-        // Hold the shared lock used by the post-commit enqueue transaction.
-        let mut enqueue_tx = pool.begin().await.expect("begin raced enqueue");
-        sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
-            .bind(push_gate_lock_key(community))
-            .execute(&mut *enqueue_tx)
+        let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced enqueue")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign raced event");
+        crate::event::insert_event(&pool, community, &raced, None)
             .await
-            .expect("take enqueue gate lock");
-
-        let enqueue_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *enqueue_tx)
+            .expect("store event before post-commit enqueue");
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let enqueue = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                crate::runtime::push_enqueue::enqueue_with_gate_barrier(
+                    &pool,
+                    community,
+                    raced.id.as_bytes().to_vec(),
+                    (held_tx, release_rx),
+                )
+                .await
+                .expect("real enqueue transaction succeeds");
+            })
+        };
+        let enqueue_pid = tokio::time::timeout(Duration::from_secs(5), held_rx)
             .await
-            .expect("read enqueue backend pid");
+            .expect("enqueue reaches its gate")
+            .expect("enqueue backend pid");
 
         // A concurrent activation must block on the exclusive gate lock until
         // the enqueue transaction resolves.
@@ -2865,7 +2878,13 @@ mod postgres_tests {
         assert!(!activation.is_finished());
 
         // Committing the enqueue releases the shared lock so activation can proceed.
-        enqueue_tx.commit().await.expect("commit raced enqueue");
+        release_tx
+            .send(())
+            .expect("release real enqueue transaction");
+        tokio::time::timeout(Duration::from_secs(5), enqueue)
+            .await
+            .expect("enqueue commits")
+            .expect("join enqueue");
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(10), activation)
                 .await
