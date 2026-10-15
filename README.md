@@ -129,6 +129,12 @@ On a Mac, check the Apple menu > About This Mac: "Chip: Apple …" means Apple S
 
 The Windows build is not code-signed, so SmartScreen may show "Windows protected your PC" on first launch. If available, click **More info**, then **Run anyway**.
 
+On Linux, choose the AppImage if you want Buzz to download and install updates
+from inside the app. A `.deb` installation is package-managed: Buzz can notify
+you that a release is available, but it opens GitHub Releases instead of trying
+to replace the installed package. Install the newer `.deb` with the same package
+manager you used originally. This distinction prevents the AppImage-only Tauri
+updater from attempting to modify a `.deb` installation ([#1535](https://github.com/block/buzz/pull/1535)).
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
 
