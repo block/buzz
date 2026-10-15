@@ -96,6 +96,10 @@ class ReadStateStorage {
   }
 
   StoredReadState read(String pubkey, String relayUrl) {
+    // The shared marks may be another community's, so each community starts
+    // from them only as local marks. None is publishable, so none reaches its
+    // relay; another community's IDs simply never match. They stay for the
+    // other communities to start from.
     for (final prefix in const [
       _publishableKeyPrefix,
       _sourceCreatedAtKeyPrefix,
@@ -104,32 +108,12 @@ class ReadStateStorage {
     }
     final key = localReadStateKey(pubkey, relayUrl);
     return StoredReadState(
-      contexts: _prefs.containsKey(key)
-          ? _readContexts(key)
-          : _claimLegacyContexts(pubkey),
+      contexts: _readContexts(
+        _prefs.containsKey(key) ? key : _legacyKey(_contextsKeyPrefix, pubkey),
+      ),
       publishableContextIds: _readPublishableContextIds(pubkey, relayUrl),
       sourceCreatedAt: _readSourceCreatedAt(pubkey, relayUrl),
     );
-  }
-
-  /// The shared marks come over as local marks only: none is publishable, so
-  /// none reaches a community's relay. Channel ids may repeat across
-  /// communities, so the first community to open claims the channel marks.
-  /// Marks keyed by event id only ever match their own community, so they
-  /// stay for the others to start from.
-  Map<String, int> _claimLegacyContexts(String pubkey) {
-    final legacyKey = _legacyKey(_contextsKeyPrefix, pubkey);
-    final contexts = _readContexts(legacyKey);
-    final shared = {
-      for (final entry in contexts.entries)
-        if (_isEventContext(entry.key)) entry.key: entry.value,
-    };
-    if (shared.isEmpty) {
-      _prefs.remove(legacyKey);
-    } else {
-      _prefs.setString(legacyKey, _encodeContexts(shared));
-    }
-    return contexts;
   }
 
   void write(
@@ -139,10 +123,12 @@ class ReadStateStorage {
     Set<String> publishableContextIds,
     Map<String, int> sourceCreatedAt,
   ) {
-    _prefs.setString(
-      localReadStateKey(pubkey, relayUrl),
-      _encodeContexts(contexts),
-    );
+    final state = <String, String>{};
+    for (final entry in contexts.entries) {
+      state[entry.key] = unixSecondsToDateTime(entry.value).toIso8601String();
+    }
+
+    _prefs.setString(localReadStateKey(pubkey, relayUrl), jsonEncode(state));
     _prefs.setString(
       localPublishableContextKey(pubkey, relayUrl),
       jsonEncode(publishableContextIds.toList()),
@@ -152,11 +138,6 @@ class ReadStateStorage {
       jsonEncode(sourceCreatedAt.map((k, v) => MapEntry(k, v.toString()))),
     );
   }
-
-  String _encodeContexts(Map<String, int> contexts) => jsonEncode({
-    for (final entry in contexts.entries)
-      entry.key: unixSecondsToDateTime(entry.value).toIso8601String(),
-  });
 
   Map<String, int> _readContexts(String key) {
     final raw = _prefs.getString(key);
@@ -246,12 +227,6 @@ class ReadStateStorage {
     return result;
   }
 }
-
-/// Message, thread and thread catch-up marks, keyed by event id.
-bool _isEventContext(String contextId) =>
-    contextId.startsWith(msgContextPrefix) ||
-    contextId.startsWith(threadContextPrefix) ||
-    contextId.startsWith('thread-activity:');
 
 String generateReadStateSlotId() {
   final random = Random.secure();
