@@ -7,11 +7,34 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/me_recovery.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+
+class _Config extends RelayConfigNotifier {
+  final RelayConfig config;
+  _Config(this.config);
+  @override
+  RelayConfig build() => config;
+  void switchTo(RelayConfig next) => state = next;
+}
 
 class FakeRelay extends RelaySessionNotifier {
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+  int directoryQueries = 0;
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    directoryQueries++;
+    return [];
+  }
+
   List<NostrEvent> events = [];
   Future<List<NostrEvent>>? pendingRead;
   void Function(String)? closeSubscription;
@@ -104,6 +127,108 @@ void main() {
       ],
       verify: false,
     ).toMap(),
+  );
+  for (final failure in ['false', 'throw']) {
+    test(
+      'pending-save discard retains recovery after $failure removal',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final store = _FailingCacheStore();
+        SharedPreferencesStorePlatform.instance = store;
+        final prefs = await SharedPreferences.getInstance();
+        final service = MeSync(
+          FakeRelay(),
+          RelayConfig(baseUrl: origin, nsec: nsec),
+          prefs: prefs,
+        );
+        await prefs.setString(service.pendingKey, 'reviewed');
+        store.removeFailure = failure;
+        await expectLater(service.discardPending('reviewed'), throwsStateError);
+        expect(prefs.getString(service.pendingKey), 'reviewed');
+        store.removeFailure = null;
+        await service.discardPending('reviewed');
+        expect(prefs.getString(service.pendingKey), isNull);
+      },
+    );
+  }
+  test(
+    'dirty newest snapshot survives transport reconnect and remains scoped',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = _FailingCacheStore();
+      SharedPreferencesStorePlatform.instance = store;
+      final prefs = await SharedPreferences.getInstance();
+      final relay = FakeRelay();
+      final config = _Config(RelayConfig(baseUrl: origin, nsec: nsec));
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(() => config),
+          relaySessionProvider.overrideWith(() => relay),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+      );
+      addTearDown(container.dispose);
+      final service = container.read(meSyncProvider);
+      container.listen(meAssistantsProvider, (_, _) {});
+      await container.read(meAssistantsProvider.future);
+      expect(relay.directoryQueries, 1);
+      final a = signed(timestamp: 1);
+      final b = signed(
+        timestamp: 2,
+        groups: const MeGroups(
+          groups: [
+            {'id': 'new', 'name': 'Newest', 'defaultTemplateId': ''},
+          ],
+        ),
+      );
+      await service.cache(a);
+      relay.events = [a];
+      container.listen(meGroupsProvider, (_, _) {});
+      container.listen(meOfflineSaveWarningProvider, (_, _) {});
+      await container.read(meGroupsProvider.future);
+      store.failure = 'false';
+      relay.emit!(b);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        container.read(meGroupsProvider).value!.groups.single['name'],
+        'Newest',
+      );
+      expect(service.cacheWriteFailed.value, isTrue);
+      relay.setStatus(SessionStatus.disconnected);
+      await container.pump();
+      expect(container.read(meSyncProvider), same(service));
+      expect(service.connected, isFalse);
+      expect(
+        container.read(meGroupsProvider).value!.groups.single['name'],
+        'Newest',
+      );
+      expect(container.read(meOfflineSaveWarningProvider).value, isTrue);
+      relay.setStatus(SessionStatus.connected);
+      await container.pump();
+      await container.read(meGroupsProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(container.read(meSyncProvider), same(service));
+      expect(service.connected, isTrue);
+      await container.read(meAssistantsProvider.future);
+      expect(relay.directoryQueries, 2);
+      expect(
+        container.read(meGroupsProvider).value!.groups.single['name'],
+        'Newest',
+      );
+      expect(service.cacheWriteFailed.value, isTrue);
+      store.failure = null;
+      container.invalidate(meGroupsProvider);
+      await container.read(meGroupsProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(service.cachedSnapshot()?.event?.id, b.id);
+      expect(service.cacheWriteFailed.value, isFalse);
+      config.switchTo(RelayConfig(baseUrl: 'https://other.test', nsec: nsec));
+      await container.pump();
+      final other = container.read(meSyncProvider);
+      expect(service.disposed, isTrue);
+      expect(other.latestCacheCandidate, isNull);
+      expect(other.cacheWriteFailed.value, isFalse);
+    },
   );
   test(
     'newer failed cache fences older arrivals and Retry retains newest',

@@ -6,6 +6,9 @@ import '../../helpers/thread_ids.dart';
 
 class _Relay extends RelaySessionNotifier {
   late void Function(NostrEvent) receive;
+  int active = 0;
+  int peak = 0;
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
   @override
@@ -16,11 +19,35 @@ class _Relay extends RelaySessionNotifier {
   }) async {
     expect(filter.kinds, containsAll([20002, 9, 40002, 40008]));
     receive = onEvent;
-    return () {};
+    active++;
+    if (active > peak) peak = active;
+    return () {
+      active--;
+    };
   }
 }
 
 void main() {
+  test('transport rebuilds release each typing subscription', () async {
+    final relay = _Relay();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relay)],
+    );
+    container.listen(channelTypingProvider('chat'), (_, _) {});
+    await container.pump();
+    for (var i = 0; i < 4; i++) {
+      relay.setStatus(SessionStatus.disconnected);
+      await container.pump();
+      expect(relay.active, 0);
+      relay.setStatus(SessionStatus.connected);
+      await container.pump();
+      expect(relay.active, 1);
+    }
+    expect(relay.peak, 1);
+    container.dispose();
+    await Future<void>.delayed(Duration.zero);
+    expect(relay.active, 0);
+  });
   test(
     'reply clears its scope immediately and suppresses late pulses',
     () async {

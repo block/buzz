@@ -15,6 +15,9 @@ final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref,
 ) async {
   final sync = ref.watch(meSyncProvider);
+  if (sync.connectionState != null) {
+    ref.watch(relaySessionProvider.select((state) => state.status));
+  }
   final session = ref.watch(relaySessionProvider.notifier);
   return _loadAssistants(sync, session);
 }, retry: (_, _) => null);
@@ -24,7 +27,11 @@ final meAssistantOwnershipProvider = FutureProvider.family<bool, String>((
   ref,
   pubkey,
 ) {
-  return isOwnedMeAssistant(ref.watch(meSyncProvider), pubkey);
+  final sync = ref.watch(meSyncProvider);
+  if (sync.connectionState != null) {
+    ref.watch(relaySessionProvider.select((state) => state.status));
+  }
+  return isOwnedMeAssistant(sync, pubkey);
 });
 
 /// Revalidates only the chosen assistant before creating a chat.

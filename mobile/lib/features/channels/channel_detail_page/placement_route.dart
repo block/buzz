@@ -1,12 +1,15 @@
 part of '../channel_detail_page.dart';
 
+/// Explicit destination identity; generic entries allow ordinary sending.
+enum ChannelRoutePlacement { ordinary, solo, unresolved }
+
 /// Resolves Solo placement at the destination, including Activity/deep links.
 class ChannelDetailPage extends ConsumerWidget {
   final Channel channel;
   final bool personalChat;
 
-  /// Affirmative ordinary-channel entry, independent of optional Solo sync.
-  final bool ordinaryChannelRoute;
+  /// Caller identity; known Solo organization always takes precedence.
+  final ChannelRoutePlacement placement;
   final String? initialAssistant;
   final String? initialMessageId;
   final String? initialThreadRootId;
@@ -16,7 +19,7 @@ class ChannelDetailPage extends ConsumerWidget {
     super.key,
     required this.channel,
     this.personalChat = false,
-    this.ordinaryChannelRoute = false,
+    this.placement = ChannelRoutePlacement.ordinary,
     this.initialAssistant,
     this.initialMessageId,
     this.initialThreadRootId,
@@ -26,20 +29,12 @@ class ChannelDetailPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final groups = ref.watch(meGroupsProvider).value;
-    final fallback = ref.watch(meSearchPlacementProvider(channel.id));
-    // Solo chats are private streams. Public channels, forums and DMs do not
-    // depend on the optional Solo record to use their ordinary send path.
-    final ordinary =
-        !personalChat &&
-        (ordinaryChannelRoute ||
-            channel.visibility == 'open' ||
-            channel.isDm ||
-            channel.isForum);
     final placed =
-        personalChat || (groups?.channels.contains(channel.id) ?? false);
-    // Bounded waiting keeps ordinary search results readable during an outage.
-    // Unknown placement may be read, but cannot send via an unverified path.
-    if (!ordinary && !placed && groups == null && fallback.isLoading) {
+        personalChat ||
+        placement == ChannelRoutePlacement.solo ||
+        (groups?.channels.contains(channel.id) ?? false);
+    final lookup = ref.watch(meSearchPlacementProvider(channel.id));
+    if (!placed && groups == null && lookup.isLoading) {
       return Scaffold(
         appBar: AppBar(title: Text(channel.name)),
         body: const Center(child: BuzzLoadingIndicator()),
@@ -49,7 +44,10 @@ class ChannelDetailPage extends ConsumerWidget {
       key: ValueKey((channel.id, placed)),
       channel: channel,
       personalChat: placed,
-      placementKnown: ordinary || groups != null || personalChat,
+      placementKnown:
+          placed ||
+          groups != null ||
+          placement != ChannelRoutePlacement.unresolved,
       initialAssistant: initialAssistant,
       initialMessageId: initialMessageId,
       initialThreadRootId: initialThreadRootId,

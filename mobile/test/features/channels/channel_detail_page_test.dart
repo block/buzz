@@ -286,6 +286,7 @@ Widget _buildTestable({
   Stream<MeGroups>? organization,
   SendMessage? sender,
   SendMessage? soloSender,
+  ChannelRoutePlacement placement = ChannelRoutePlacement.ordinary,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final navigatorKey = GlobalKey<NavigatorState>();
@@ -471,6 +472,7 @@ Widget _buildTestable({
           ChannelDetailPage(
             channel: resolvedChannel,
             personalChat: personalChat,
+            placement: placement,
             initialMessageId: initialMessageId,
             initialThreadRootId: initialThreadRootId,
             initialThreadRouteBehavior: initialThreadRouteBehavior,
@@ -10282,10 +10284,7 @@ void main() {
             disableRetries: true,
             sender: sender,
             organization: Stream.error(const MeCacheException()),
-            home: ChannelDetailPage(
-              channel: channel,
-              ordinaryChannelRoute: true,
-            ),
+            home: ChannelDetailPage(channel: channel),
           ),
         );
         await tester.pumpAndSettle();
@@ -10311,7 +10310,7 @@ void main() {
         home: ChannelDetailPage(
           channel: _testChannel,
           personalChat: true,
-          ordinaryChannelRoute: true,
+          placement: ChannelRoutePlacement.ordinary,
         ),
       ),
     );
@@ -10355,6 +10354,7 @@ void main() {
     await tester.pumpWidget(
       _buildTestable(
         disableRetries: true,
+        placement: ChannelRoutePlacement.unresolved,
         organization: Stream.error(StateError('offline')),
         channel: Channel(
           id: _channelId,

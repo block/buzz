@@ -11,10 +11,21 @@ import '../crypto/nip44.dart';
 import '../relay/relay.dart';
 import 'me_groups.dart';
 import 'me_recovery.dart';
+import 'me_journal.dart';
 
 /// A live, account/community-scoped reader for desktop's encrypted Solo record.
 final meGroupsProvider = StreamProvider<MeGroups>((ref) {
   final service = ref.watch(meSyncProvider);
+  if (service.connectionState != null) {
+    ref.listen(relaySessionProvider.select((state) => state.status), (
+      previous,
+      next,
+    ) {
+      if (previous != next && next == SessionStatus.connected) {
+        ref.invalidateSelf();
+      }
+    });
+  }
   final controller = StreamController<MeGroups>();
   var disposed = false;
   void Function()? unsubscribe;
@@ -130,13 +141,13 @@ bool meEventIsNewer(NostrEvent a, NostrEvent b) =>
     a.createdAt > b.createdAt ||
     (a.createdAt == b.createdAt && a.id.compareTo(b.id) < 0);
 
-final meSyncProvider = Provider<MeSync>((ref) {
+final Provider<MeSync> meSyncProvider = Provider<MeSync>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final status = ref.watch(relaySessionProvider).status;
   final service = MeSync(
     ref.read(relaySessionProvider.notifier),
     config,
-    connected: status == SessionStatus.connected,
+    connectionState: () =>
+        ref.read(relaySessionProvider).status == SessionStatus.connected,
     prefs: ref.read(savedPrefsProvider),
   );
   ref.onDispose(() => service.disposed = true);
@@ -151,13 +162,25 @@ class MeSync {
   late final String privateHex = nostr.Nip19.decode(payload: config.nsec!).data;
   late final String pubkey = nostr.Keys(privateHex).public;
   late final key = getConversationKey(privateHex, pubkey);
-  final bool connected;
+  final bool _connected;
+
+  /// Live transport status without replacing account/community-scoped state.
+  final bool Function()? connectionState;
+
+  /// Whether relay operations can currently be attempted.
+  bool get connected => connectionState?.call() ?? _connected;
   final SharedPreferences? prefs;
   String get pendingKey => 'me-pending:$community:$pubkey';
   bool disposed = false;
   bool _saving = false;
 
-  MeSync(this.session, this.config, {this.connected = true, this.prefs});
+  MeSync(
+    this.session,
+    this.config, {
+    bool connected = true,
+    this.connectionState,
+    this.prefs,
+  }) : _connected = connected;
 
   /// Encrypted last verified organization, isolated by account and community.
   String get cacheKey => 'me-cache:$community:$pubkey';
@@ -266,10 +289,10 @@ class MeSync {
   );
 
   void check() {
+    if (disposed) throw StateError('Your community changed. Open Solo again.');
     if (!connected || config.nsec == null) {
       throw StateError('Connect to your community to load Solo.');
     }
-    if (disposed) throw StateError('Your community changed. Open Solo again.');
   }
 
   MeGroups decode(NostrEvent event) {
@@ -307,9 +330,7 @@ class MeSync {
     if (_saving || prefs?.getString(pendingKey) != expected) {
       throw StateError('The pending save changed. Review it again.');
     }
-    if (!await prefs!.remove(pendingKey)) {
-      throw StateError('Couldn’t discard the pending save. Try again.');
-    }
+    await clearMeJournal(prefs!, pendingKey, expected, checkScope: check);
   }
 
   Future<void> _clearConfirmedPending(String expected) async {
