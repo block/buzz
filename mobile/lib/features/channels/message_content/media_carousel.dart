@@ -122,6 +122,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
                       width: carouselWidth,
                       gutter: nativeGutter,
                       gap: Grid.half,
+                      trailingPadding: Grid.gutter,
                       radius:
                           (MessageAttachmentCorners.of(context) ??
                                   BorderRadius.circular(Radii.md))

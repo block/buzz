@@ -17,6 +17,7 @@ class IosMediaCarousel extends HookWidget {
     required this.width,
     required this.gutter,
     required this.gap,
+    required this.trailingPadding,
     required this.radius,
     required this.onOpen,
     required this.onScroll,
@@ -29,6 +30,7 @@ class IosMediaCarousel extends HookWidget {
   final double width;
   final double gutter;
   final double gap;
+  final double trailingPadding;
   final double radius;
   final ValueChanged<int> onOpen;
   final ValueChanged<double> onScroll;
@@ -46,6 +48,7 @@ class IosMediaCarousel extends HookWidget {
       'width': width,
       'gutter': gutter,
       'gap': gap,
+      'trailingPadding': trailingPadding,
       'radius': radius,
       'brightness': brightness,
       'rtl': rtl,
@@ -120,13 +123,25 @@ class IosMediaCarousel extends HookWidget {
         bridge.setMethodCallHandler(null);
       };
     }, [channel.value]);
-    useEffect(() {
-      final bridge = channel.value;
-      if (bridge != null) {
-        unawaited(bridge.invokeMethod<void>('configure', configuration));
-      }
-      return null;
-    }, [width, gutter, gap, radius, brightness, rtl, labelSignature]);
+    useEffect(
+      () {
+        final bridge = channel.value;
+        if (bridge != null) {
+          unawaited(bridge.invokeMethod<void>('configure', configuration));
+        }
+        return null;
+      },
+      [
+        width,
+        gutter,
+        gap,
+        trailingPadding,
+        radius,
+        brightness,
+        rtl,
+        labelSignature,
+      ],
+    );
 
     return UiKitView(
       viewType: viewType,

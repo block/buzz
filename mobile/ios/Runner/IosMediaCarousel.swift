@@ -55,6 +55,7 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
   private var stride: CGFloat = 1
   private var gutter: CGFloat = 0
   private var gap: CGFloat = 8
+  private var trailingPadding: CGFloat = 16
   private var radius: CGFloat = 16
   private var rtl = false
   private var ready = false
@@ -92,6 +93,7 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
   private func apply(_ args: [String: Any]) {
     applying = true
     defer { applying = false }
+    let oldTrailingPadding = trailingPadding
     let oldStride = stride
     let oldGutter = gutter
     let oldRTL = rtl
@@ -100,6 +102,7 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     stride = max(1, (args["width"] as? Double ?? 1) * 0.9)
     gutter = args["gutter"] as? Double ?? 0
     gap = args["gap"] as? Double ?? 8
+    trailingPadding = args["trailingPadding"] as? Double ?? 16
     radius = args["radius"] as? Double ?? 16
     rtl = args["rtl"] as? Bool ?? false
     collection.overrideUserInterfaceStyle = args["brightness"] as? String == "dark" ? .dark : .light
@@ -107,12 +110,13 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     collection.transform = rtl ? CGAffineTransform(scaleX: -1, y: 1) : .identity
     collection.contentInset = UIEdgeInsets(top: 0, left: gutter, bottom: 0, right: gutter)
     layout.minimumLineSpacing = gap
-    layout.sectionInset = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: gap)
+    // The strip overflows the message gutter; restore that full inset at its end.
+    layout.sectionInset = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: trailingPadding)
     layout.invalidateLayout()
     for cell in collection.visibleCells {
       cell.contentView.layer.cornerRadius = radius
     }
-    if oldStride != stride || oldGutter != gutter || oldLabels != labels || oldRTL != rtl {
+    if oldTrailingPadding != trailingPadding || oldStride != stride || oldGutter != gutter || oldLabels != labels || oldRTL != rtl {
       selected = min(selected, max(0, labels.count - 1))
       collection.reloadData()
       collection.layoutIfNeeded()

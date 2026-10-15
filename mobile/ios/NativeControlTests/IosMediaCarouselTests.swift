@@ -7,7 +7,7 @@ struct IosMediaCarouselTests {
     let messenger = CarouselTestMessenger()
     var args: [String: Any] = [
       "labels": ["Photo A", "Photo B", "Photo C"],
-      "width": 300.0, "gutter": 20.0, "gap": 8.0, "radius": 16.0,
+      "width": 300.0, "gutter": 20.0, "gap": 4.0, "trailingPadding": 20.0, "radius": 16.0,
     ]
     let platform = IosMediaCarousel(
       frame: CGRect(x: 0, y: 0, width: 340, height: 240), id: 42,
@@ -37,6 +37,14 @@ struct IosMediaCarouselTests {
     target.x = 10000
     platform.scrollViewWillEndDragging(strip, withVelocity: .zero, targetContentOffset: &target)
     precondition(target.x <= strip.contentSize.width - strip.bounds.width + 20, "No trailing blank page")
+    let last = IndexPath(item: 2, section: 0)
+    guard let lastFrame = strip.layoutAttributesForItem(at: last)?.frame else {
+      preconditionFailure("Missing final photo layout")
+    }
+    let trailingEdge = lastFrame.maxX - target.x
+    precondition(abs((strip.bounds.width - 20) - trailingEdge - 20) < 0.01,
+      "Final photo must stop at the full 20pt message gutter, not the 4pt photo gap")
+    precondition(lastFrame.minX == 540, "Trailing padding must not change page stride")
     strip.contentOffset.x = 250
     platform.scrollViewDidScroll(strip)
     precondition(messenger.calls.contains { $0.method == "page" && $0.arguments as? Int == 1 })
@@ -46,6 +54,13 @@ struct IosMediaCarouselTests {
     strip.layoutIfNeeded()
     let rtlCell = strip.visibleCells.first
     precondition(rtlCell?.transform.a == -1, "Photo itself is not mirrored")
+    target.x = 10000
+    platform.scrollViewWillEndDragging(strip, withVelocity: .zero, targetContentOffset: &target)
+    guard let rtlLast = strip.layoutAttributesForItem(at: last)?.frame else {
+      preconditionFailure("Missing RTL final photo layout")
+    }
+    precondition(abs((strip.bounds.width - 20) - (rtlLast.maxX - target.x) - 20) < 0.01,
+      "RTL final photo must retain the same message gutter")
     args["width"] = 200.0
     messenger.configure(args)
     precondition(strip.contentOffset.x == 160, "Resize retains the selected logical photo")

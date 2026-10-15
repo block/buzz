@@ -45,6 +45,7 @@ void main() {
               width: 300,
               gutter: 20,
               gap: 8,
+              trailingPadding: 16,
               radius: 16,
               onOpen: opened.add,
               onScroll: offsets.add,
