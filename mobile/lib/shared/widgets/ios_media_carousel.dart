@@ -129,8 +129,9 @@ class IosMediaCarousel extends HookWidget {
 }
 
 // Keep native subscriptions and unresolved provider loads bounded together.
-// The shared image provider cannot abort its HTTP fetch. A cancelled load keeps
-// its slot until its first frame/error, so rapid reuse cannot start more fetches.
+// A cancelled load keeps its slot until its first frame/error. MediaImageProvider
+// aborts stalled HTTP requests at its deadline, allowing queued cells to progress
+// without releasing slots while their transports are still running.
 class _CarouselImages {
   _CarouselImages(this.channel);
   final MethodChannel channel;

@@ -45,12 +45,17 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
+  /// Deadline for the complete response, including a stalled response body.
+  /// Aborts the request without closing the shared client.
+  final Duration requestTimeout;
+
   const MediaImageProvider({
     required this.url,
     required this.auth,
     required this.client,
     this.onBytesLoaded,
     this.scale = 1.0,
+    this.requestTimeout = const Duration(seconds: 30),
   });
 
   static const _defaultCooldown = Duration(seconds: 30);
@@ -97,7 +102,18 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final uri = Uri.parse(url);
       final http.Response response;
       try {
-        response = await client.get(uri, headers: auth.headersFor(url));
+        final abort = Completer<void>();
+        final deadline = Timer(requestTimeout, abort.complete);
+        try {
+          final request = http.AbortableRequest(
+            'GET',
+            uri,
+            abortTrigger: abort.future,
+          )..headers.addAll(auth.headersFor(url));
+          response = await http.Response.fromStream(await client.send(request));
+        } finally {
+          deadline.cancel();
+        }
       } catch (_) {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
         rethrow;

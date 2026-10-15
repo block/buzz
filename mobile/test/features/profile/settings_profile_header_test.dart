@@ -241,6 +241,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(container.read(profileAvatarHandoffProvider), isNull);
+    // Finish the deliberately paused transport so its deadline is cancelled.
+    animationResponse.complete(http.Response.bytes(_transparentPng, 200));
+    await tester.pump();
   });
   testWidgets('keeps the avatar unbadged while showing the current status', (
     tester,

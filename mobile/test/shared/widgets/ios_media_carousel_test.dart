@@ -1,14 +1,85 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:buzz/shared/widgets/ios_media_carousel.dart';
+import 'package:buzz/shared/relay/media_auth.dart';
+import 'package:buzz/shared/relay/media_image.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final stallBody in [false, true]) {
+    testWidgets(
+      'stalled ${stallBody ? "bodies" : "headers"} abort before queued photo loads',
+      (tester) async {
+        final client = (await tester.runAsync(() async => _TrackingClient()))!;
+        final server = await tester.runAsync(
+          () => HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+        );
+        addTearDown(() async {
+          client.close();
+          await server!.close(force: true);
+          MediaImageProvider.debugResetCooldowns();
+        });
+        final base = 'http://127.0.0.1:${server!.port}';
+        final auth = MediaGetAuthService(baseUrl: base, nsec: null);
+        await tester.runAsync(() async {
+          server.listen((request) {
+            if (request.uri.path == '/4') {
+              request.response.statusCode = 404;
+              unawaited(request.response.close());
+            } else if (stallBody) {
+              request.response.contentLength = 100;
+              request.response.add([0]);
+              unawaited(request.response.flush());
+            }
+            // The first four never finish: only client-side abort can release them.
+          });
+        });
+        final harness = await _mount(
+          tester,
+          List.generate(
+            5,
+            (index) => MediaImageProvider(
+              url: '$base/$index',
+              auth: auth,
+              client: client,
+              requestTimeout: const Duration(seconds: 1),
+            ),
+          ),
+        );
+        await tester.runAsync(() async {
+          for (var index = 0; index < 4; index++) {
+            await harness.send('subscribeImage', {
+              'id': '$index',
+              'index': index,
+            });
+            await harness.send('cancelImage', '$index');
+          }
+          await harness.send('subscribeImage', {'id': 'latest', 'index': 4});
+          expect(client.started, 4);
+          await harness.waitForFrames(1);
+          await client.retired.future.timeout(const Duration(seconds: 5));
+        });
+        expect(client.started, 5);
+        expect(client.peak, 4);
+        expect(client.aborted, 4);
+        expect(client.active, 0);
+        expect(harness.frames, [
+          {'id': 'latest', 'bytes': null},
+        ]);
+        await tester.pumpWidget(const SizedBox());
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+  }
+
   testWidgets(
     'native callbacks and disposal release subscribed images',
     (tester) async {
@@ -93,7 +164,7 @@ void main() {
         isTrue,
       );
       // Retired pending providers retain a bounded completion observer because
-      // the shared HTTP provider cannot abort. Completion releases that slot.
+      // transport termination must precede releasing that slot.
       final image = await tester.runAsync(() => _frame(Colors.red));
       providers[0].completer.emit(image!);
       await tester.pump();
@@ -124,7 +195,10 @@ Future<ui.Image> _frame(Color color) async {
   }
 }
 
-Future<_Harness> _mount(WidgetTester tester, List<_TestImage> providers) async {
+Future<_Harness> _mount(
+  WidgetTester tester,
+  List<ImageProvider<Object>> providers,
+) async {
   final harness = _Harness(tester);
   final messenger = tester.binding.defaultBinaryMessenger;
   messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
@@ -235,3 +309,47 @@ class _TestCompleter extends ImageStreamCompleter {
 
   void emit(ui.Image image) => setImage(ImageInfo(image: image));
 }
+
+// Real IO transport: count through body completion, not just response headers.
+class _TrackingClient extends http.BaseClient {
+  final inner = IOClient(_RealHttpOverrides().createHttpClient(null));
+  int active = 0, peak = 0, started = 0, aborted = 0;
+  final retired = Completer<void>();
+  void recordAbort() {
+    aborted++;
+    if (aborted == 4) retired.complete();
+  }
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    started++;
+    active++;
+    if (active > peak) peak = active;
+    try {
+      final response = await inner.send(request);
+      return http.StreamedResponse(_body(response.stream), response.statusCode);
+    } catch (error) {
+      active--;
+      if (error is http.RequestAbortedException) recordAbort();
+      rethrow;
+    }
+  }
+
+  Stream<List<int>> _body(Stream<List<int>> stream) async* {
+    try {
+      await for (final chunk in stream) {
+        yield chunk;
+      }
+    } catch (error) {
+      if (error is http.RequestAbortedException) recordAbort();
+      rethrow;
+    } finally {
+      active--;
+    }
+  }
+
+  @override
+  void close() => inner.close();
+}
+
+class _RealHttpOverrides extends HttpOverrides {}
