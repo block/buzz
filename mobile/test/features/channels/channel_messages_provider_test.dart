@@ -45,6 +45,22 @@ void test(String description, Future<void> Function() body) {
 }
 
 void main() {
+  test('Solo paginates through more than 100 equal-second events', () async {
+    final relay = _CursorRelay();
+    final container = _buildContainer(relay);
+    addTearDown(container.dispose);
+    container.read(meMessagesProvider(_channelId));
+    await relay.subscribed;
+    await _pumpEventQueue();
+    final notifier = container.read(meMessagesProvider(_channelId).notifier);
+    expect(await notifier.fetchOlder(), isTrue);
+    expect(await notifier.fetchOlder(), isTrue);
+    expect(await notifier.fetchOlder(), isFalse);
+    final events = container.read(meMessagesProvider(_channelId)).value!;
+    expect(events.length, 351);
+    expect(events.first.id, 'older');
+    expect(events.map((e) => e.id).toSet().length, 351);
+  });
   test(
     'Me reads channel replies without the top-level window filter',
     () async {
@@ -5730,5 +5746,30 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     if (!_history.isCompleted) {
       _history.completeError(error);
     }
+  }
+}
+
+class _CursorRelay extends _RecordingRelaySessionNotifier {
+  final events = [
+    for (var i = 0; i < 350; i++)
+      _event(id: i.toString().padLeft(64, '0'), createdAt: 20),
+    _event(id: 'older', createdAt: 19),
+  ];
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final before = filter.extensions['before_id'] as String?;
+    return events
+        .where(
+          (e) =>
+              filter.until == null ||
+              e.createdAt < filter.until! ||
+              (e.createdAt == filter.until &&
+                  (before == null || e.id.compareTo(before) > 0)),
+        )
+        .take(filter.limit)
+        .toList();
   }
 }

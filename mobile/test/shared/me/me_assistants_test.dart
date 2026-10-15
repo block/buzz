@@ -39,6 +39,7 @@ void main() {
     nostr.Keys? ownedBy,
     int time = 1,
     String conditions = '',
+    Object? content,
   }) {
     final digest = SHA256Digest()
         .process(
@@ -51,7 +52,7 @@ void main() {
     return NostrEvent.fromJson(
       nostr.Event.from(
         kind: 0,
-        content: jsonEncode({'display_name': 'My assistant'}),
+        content: jsonEncode(content ?? {'display_name': 'My assistant'}),
         secretKey: signer.secret,
         createdAt: time,
         tags: [
@@ -105,6 +106,47 @@ void main() {
     expect(choices.map((a) => a.pubkey), [agent.public]);
     expect(choices.single.displayName, 'My assistant');
   });
+  for (final malformed in [7, true, 'wrong', <String, Object>{}, <Object>[]]) {
+    test(
+      'malformed optional profile fields do not poison directory: $malformed',
+      () async {
+        final broken = nostr.Keys.generate();
+        final container = setup(
+          _Relay([
+            [
+              profile(
+                broken,
+                ownedBy: owner,
+                content: {
+                  for (final field in [
+                    'display_name',
+                    'name',
+                    'respond_to',
+                    'respond_to_allowlist',
+                    'channel_ids',
+                  ])
+                    field: malformed,
+                },
+              ),
+              profile(agent, ownedBy: owner),
+            ],
+          ]),
+        );
+        final choices = await container.read(meAssistantsProvider.future);
+        expect(
+          choices.singleWhere((a) => a.pubkey == agent.public).displayName,
+          'My assistant',
+        );
+        expect(
+          await isOwnedMeAssistant(
+            container.read(meSyncProvider),
+            agent.public,
+          ),
+          isTrue,
+        );
+      },
+    );
+  }
   test('latest profile removes obsolete ownership', () async {
     final container = setup(
       _Relay([

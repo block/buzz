@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/me/me_assistants.dart';
+import '../../../shared/me/me_agent_change.dart';
 import '../../../shared/me/me_sync.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/relay/relay.dart';
@@ -95,34 +96,72 @@ useMeChatAssistant(
     if (busy.value || sync == null) return;
     busy.value = true;
     try {
-      sync.check();
-      final picked = await showBuzzModalBottomSheet<String>(
-        context: context,
-        title: 'Agent',
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (_) => MeAssistantPickerSheet(selected: selected),
+      var intent = MeAgentChange.pending(sync, channelId);
+      if (intent != null) {
+        final resume = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Finish changing your agent?'),
+            content: const Text(
+              'Your previous choice is saved. Resume to finish selecting that agent. Discarding the choice keeps any access already granted.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'later'),
+                child: const Text('Later'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'resume'),
+                child: const Text('Resume'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'discard'),
+                child: const Text('Discard choice'),
+              ),
+            ],
+          ),
+        );
+        if (!context.mounted) return;
+        if (resume == 'discard') {
+          await intent.discard(sync, channelId);
+          return;
+        }
+        if (resume != 'resume') return;
+      } else {
+        final picked = await showBuzzModalBottomSheet<String>(
+          context: context,
+          title: 'Agent',
+          isScrollControlled: true,
+          showDragHandle: true,
+          builder: (_) => MeAssistantPickerSheet(selected: selected),
+        );
+        if (picked == null || !context.mounted) return;
+        intent = MeAgentChange.create(sync, channelId, picked);
+      }
+      final picked = intent.agent;
+      await intent.complete(
+        sync,
+        channelId,
+        ensureMembership: () async {
+          ref.invalidate(meAssistantsProvider);
+          final current = await ref.read(meAssistantsProvider.future);
+          sync.check();
+          if (!current.any((agent) => agent.pubkey == picked)) {
+            throw StateError('This agent is no longer available.');
+          }
+          ref.invalidate(channelMembersProvider(channelId));
+          final members = await ref.read(
+            channelMembersProvider(channelId).future,
+          );
+          sync.check();
+          if (!members.any((member) => member.pubkey == picked)) {
+            await ref
+                .read(channelActionsProvider)
+                .addMembers(channelId: channelId, pubkeys: [picked]);
+            ref.invalidate(channelMembersProvider(channelId));
+          }
+        },
       );
-      if (picked == null || !context.mounted) return;
-      sync.check();
-      ref.invalidate(meAssistantsProvider);
-      final current = await ref.read(meAssistantsProvider.future);
-      sync.check();
-      if (!current.any((agent) => agent.pubkey == picked)) {
-        throw StateError('This agent is no longer available.');
-      }
-      final members = await ref.read(channelMembersProvider(channelId).future);
-      sync.check();
-      if (!members.any((member) => member.pubkey == picked)) {
-        await ref
-            .read(channelActionsProvider)
-            .addMembers(channelId: channelId, pubkeys: [picked]);
-        ref.invalidate(channelMembersProvider(channelId));
-      }
-      sync.check();
-      if (prefs != null && !await prefs.setString(key, picked)) {
-        throw StateError('Could not save your agent choice. Try again.');
-      }
       if (context.mounted) selection.value = (key, picked);
     } catch (error) {
       if (context.mounted) {

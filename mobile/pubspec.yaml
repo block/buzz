@@ -49,6 +49,7 @@ dependencies:
   local_auth: ^3.0.2
 
 dev_dependencies:
+  shared_preferences_platform_interface: ^2.4.2
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0

@@ -641,42 +641,60 @@ private final class MeAssistantListController: UITableViewController {
   private let onSelect: (String, UIImage) -> Void
   private let pageColor: UIColor
   private let rowColor: UIColor
-  private var photos: [String: UIImage] = [:]
-  private var tasks: [URLSessionDataTask] = []
+  private let avatars: MeAvatarLoader
+  private var requests: [IndexPath: UUID] = [:]
 
-  init(assistants: [[String: String]], selected: String?, pageColor: UIColor, rowColor: UIColor, onSelect: @escaping (String, UIImage) -> Void) {
+  init(assistants: [[String: String]], selected: String?, pageColor: UIColor, rowColor: UIColor, avatars: MeAvatarLoader = MeAvatarLoader(), onSelect: @escaping (String, UIImage) -> Void) {
     self.assistants = assistants
     self.selected = selected
     self.onSelect = onSelect
     self.pageColor = pageColor
     self.rowColor = rowColor
+    self.avatars = avatars
     super.init(style: .insetGrouped)
     title = "Agent"
   }
 
   required init?(coder: NSCoder) { nil }
 
-  deinit { tasks.forEach { $0.cancel() } }
+  deinit { avatars.cancelAll() }
 
   override func viewDidLoad() {
     super.viewDidLoad()
     tableView.backgroundColor = pageColor
     tableView.rowHeight = UITableView.automaticDimension
     tableView.estimatedRowHeight = 64
-    for (index, assistant) in assistants.enumerated() {
-      guard let raw = assistant["avatarUrl"], let url = URL(string: raw),
-            ["https", "http"].contains(url.scheme?.lowercased() ?? "") else { continue }
-      let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-        guard let data, let image = UIImage(data: data) else { return }
-        DispatchQueue.main.async { [weak self] in
-          guard let self else { return }
-          self.photos[assistant["id"] ?? ""] = image
-          self.tableView.reloadRows(at: [IndexPath(row: index, section: 0)], with: .none)
-        }
-      }
-      tasks.append(task)
-      task.resume()
+  }
+
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    tableView.reloadData()
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    avatars.cancelAll()
+    requests.removeAll()
+  }
+
+  private func avatarURL(_ assistant: [String: String]) -> URL? {
+    assistant["avatarUrl"].flatMap(URL.init(string:))
+  }
+
+  override func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+    let assistant = assistants[indexPath.row]
+    guard let url = avatarURL(assistant) else { return }
+    requests[indexPath] = avatars.load(url) { [weak self, weak cell] image in
+      guard self != nil, let cell, tableView.indexPath(for: cell) == indexPath else { return }
+      var content = cell.defaultContentConfiguration()
+      content.text = assistant["name"] ?? "Agent"
+      content.image = Self.avatarImage(assistant, photo: image)
+      cell.contentConfiguration = content
     }
+  }
+
+  override func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+    if let request = requests.removeValue(forKey: indexPath) { avatars.cancel(request) }
   }
 
   override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
@@ -689,7 +707,7 @@ private final class MeAssistantListController: UITableViewController {
     var content = cell.defaultContentConfiguration()
     let name = assistant["name"] ?? "Agent"
     content.text = name
-    content.image = Self.avatarImage(assistant, photo: photos[assistant["id"] ?? ""])
+    content.image = Self.avatarImage(assistant, photo: avatars.image(for: avatarURL(assistant)))
     cell.backgroundColor = rowColor
     cell.contentConfiguration = content
     cell.accessoryType = assistant["id"] == selected ? .checkmark : .none
@@ -720,7 +738,7 @@ private final class MeAssistantListController: UITableViewController {
 
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     guard let id = assistants[indexPath.row]["id"] else { return }
-    onSelect(id, Self.avatarImage(assistants[indexPath.row], photo: photos[id]))
+    onSelect(id, Self.avatarImage(assistants[indexPath.row], photo: avatars.image(for: avatarURL(assistants[indexPath.row]))))
     navigationController?.popViewController(animated: true)
   }
 }

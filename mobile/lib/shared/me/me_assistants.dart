@@ -87,9 +87,16 @@ Future<List<AgentDirectoryEntry>> _loadAssistants(
       throw StateError('Could not finish loading assistants. Try again.');
     }
   }
-  return [
-    for (final event in profiles.values)
-      if (verifiedProfileOaOwnerPubkey(event) == sync.pubkey)
-        AgentDirectoryEntry.fromEvent(event),
-  ];
+  final agents = <AgentDirectoryEntry>[];
+  for (final event in profiles.values) {
+    try {
+      if (verifiedProfileOaOwnerPubkey(event) == sync.pubkey) {
+        agents.add(AgentDirectoryEntry.fromEvent(event));
+      }
+    } catch (_) {
+      // A malformed profile must not hide unrelated verified agents.
+      continue;
+    }
+  }
+  return agents;
 }

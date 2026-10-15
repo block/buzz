@@ -4,6 +4,7 @@ import 'package:buzz/features/channels/me/me_chat_assistant.dart';
 import 'package:buzz/features/channels/me/me_assistant_picker.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/me/me_agent_change.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -51,6 +52,69 @@ class _Harness extends HookConsumerWidget {
 }
 
 void main() {
+  for (final action in ['Resume', 'Later', 'Discard choice']) {
+    testWidgets('header restores pending agent choice: $action', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final sync = MeSync(
+        RelaySessionNotifier(),
+        RelayConfig(
+          baseUrl: 'https://relay.test',
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data: '0' * 63 + '1',
+          ),
+        ),
+        prefs: prefs,
+      );
+      await prefs.setString(MeAgentChange.selectionKey(sync, 'chat'), 'a');
+      await MeAgentChange.create(sync, 'chat', 'b').save(sync, 'chat');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            meSyncProvider.overrideWithValue(sync),
+            meAssistantsProvider.overrideWith(
+              (ref) async => const [
+                AgentDirectoryEntry(pubkey: 'a', displayName: 'Alpha'),
+                AgentDirectoryEntry(pubkey: 'b', displayName: 'Beta'),
+              ],
+            ),
+            channelMembersProvider('chat').overrideWith(
+              (ref) async => [
+                for (final id in ['a', 'b'])
+                  ChannelMember(
+                    pubkey: id,
+                    role: 'bot',
+                    joinedAt: DateTime(2026),
+                  ),
+              ],
+            ),
+            userCacheProvider.overrideWith(_Profiles.new),
+          ],
+          child: MaterialApp(theme: AppTheme.light(), home: _Harness((_) {})),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Change agent: Alpha'));
+      await tester.pumpAndSettle();
+      expect(find.text('Finish changing your agent?'), findsOneWidget);
+      await tester.tap(find.text(action));
+      await tester.pumpAndSettle();
+      expect(
+        prefs.getString(MeAgentChange.selectionKey(sync, 'chat')),
+        action == 'Resume' ? 'b' : 'a',
+      );
+      expect(MeAgentChange.pending(sync, 'chat') != null, action == 'Later');
+      expect(
+        find.byTooltip(
+          'Change agent: ${action == 'Resume' ? 'Beta' : 'Alpha'}',
+        ),
+        findsOneWidget,
+      );
+    });
+  }
   for (final scenario in ['valid', 'revoked', 'removed']) {
     testWidgets('parallel send checks handle $scenario recipients', (
       tester,

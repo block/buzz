@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		4A71C0192F40D00100A17E02 /* MeAvatarLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */; };
 		C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000002 /* NativeConfirmationDialog.swift */; };
 		C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000022 /* NativePresenceMenu.swift */; };
 		C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000012 /* NativeAddMembersSheet.swift */; };
@@ -92,6 +93,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeAvatarLoader.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000002 /* NativeConfirmationDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeConfirmationDialog.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000022 /* NativePresenceMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePresenceMenu.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000012 /* NativeAddMembersSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAddMembersSheet.swift; sourceTree = "<group>"; };
@@ -289,6 +291,7 @@
 				C0AF00000000000000000022 /* NativePresenceMenu.swift */,
 				C0AF00000000000000000012 /* NativeAddMembersSheet.swift */,
 				4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */,
+				4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */,
 				4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */,
 				4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */,
 				AC7400022F50000100A17E01 /* ThemePaginationGeometry.swift */,
@@ -625,6 +628,7 @@
 				C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */,
 				C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */,
 				4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */,
+				4A71C0192F40D00100A17E02 /* MeAvatarLoader.swift in Sources */,
 				4A71C01B2F40E00100A17E01 /* NativeSkinToneControl.swift in Sources */,
 				4A71C01D2F40F00100A17E01 /* ThemePaginationGlassControl.swift in Sources */,
 				AC7400012F50000100A17E01 /* ThemePaginationGeometry.swift in Sources */,

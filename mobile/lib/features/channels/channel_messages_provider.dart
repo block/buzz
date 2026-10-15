@@ -11,6 +11,7 @@ import 'thread_reply_ownership.dart';
 import 'timeline_message.dart';
 
 part 'channel_messages_provider/thread_summaries.dart';
+part 'channel_messages_provider/pagination.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
@@ -929,61 +930,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ]..sort(compareChannelTimelineEventsChronologically);
   }
 
-  Future<bool> fetchOlder() async {
-    if (_reachedOldest || _initInFlight) return false;
+  AsyncValue<List<NostrEvent>> get _historyState => state;
+  set _historyState(AsyncValue<List<NostrEvent>> value) => state = value;
 
-    final session = ref.read(relaySessionProvider.notifier);
-    if (_usingChannelWindow) {
-      final cursor = channelWindowNextCursor(_windowStore);
-      if (cursor == null) {
-        _reachedOldest = true;
-        return false;
-      }
-      try {
-        final pageVersion = ++_threadQuerySerial;
-        final page = await _fetchWindowPage(session, cursor);
-        _windowStore = appendOlderChannelWindow(_windowStore, page);
-        _reconcilePageSummaries(page, pageVersion);
-        _reachedOldest = !channelWindowHasMore(_windowStore);
-        final flattened = _withDeepLinkEvents(
-          flattenChannelWindowEvents(_windowStore),
-        );
-        _lastKnownMessages = flattened;
-        _reconcileRetainedSummaryPayloads(page.rows.map((row) => row.event));
-        state = AsyncData(flattened);
-        return page.rows.isNotEmpty || page.aux.isNotEmpty;
-      } catch (error) {
-        debugPrint(
-          '[ChannelMessagesNotifier] failed to fetch older channel window page for $channelId: $error',
-        );
-        return false;
-      }
-    }
-
-    final currentEvents = state.value;
-    if (currentEvents == null || currentEvents.isEmpty) return false;
-    final oldest = currentEvents.first.createdAt;
-    final older = await session.fetchHistory(
-      NostrFilters.messages(channelId, limit: 100, until: oldest),
-    );
-    if (older.isEmpty) {
-      _reachedOldest = true;
-      return false;
-    }
-    final currentIds = state.value?.map((e) => e.id).toSet() ?? {};
-    final deduped = older.where((e) => !currentIds.contains(e.id)).toList();
-    if (deduped.isEmpty) {
-      _reachedOldest = true;
-      return false;
-    }
-    state = state.whenData((events) {
-      final merged = [...deduped, ...events];
-      merged.sort(compareChannelTimelineEventsChronologically);
-      _lastKnownMessages = merged;
-      return merged;
-    });
-    return true;
-  }
+  Future<bool> fetchOlder() => _fetchOlder();
 }
 
 int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;

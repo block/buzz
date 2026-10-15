@@ -8,7 +8,8 @@ frameworks="$flutter_root/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios
 fixture=$(mktemp -d)
 trap 'rm -r "$fixture"' EXIT
 # Compile in one file to exercise the private production controller directly.
-cat "$repo_root/mobile/ios/Runner/NativeProfileTextEditor.swift" \
+cat "$repo_root/mobile/ios/Runner/MeAvatarLoader.swift" \
+  "$repo_root/mobile/ios/Runner/NativeProfileTextEditor.swift" \
   "$repo_root/mobile/ios/NativeControlTests/MeAgentAccessibilityTests.swift" > "$fixture/test.swift"
 xcrun --sdk iphonesimulator swiftc -parse-as-library \
   -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
