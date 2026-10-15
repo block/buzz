@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -22,10 +25,13 @@ void main() {
   late ProviderContainer container;
   late _FakeRelayConfig config;
 
-  Future<ReadStateNotifier> pumpNotifier() async {
-    SharedPreferences.setMockInitialValues({});
+  Future<ReadStateNotifier> pumpNotifier({
+    Map<String, Object> Function(String pubkey)? stored,
+  }) async {
+    final keys = nostr.Keys.generate();
+    SharedPreferences.setMockInitialValues(stored?.call(keys.public) ?? {});
     final prefs = await SharedPreferences.getInstance();
-    final nsec = nostr.Keys.generate().nsec;
+    final nsec = keys.nsec;
     config = _FakeRelayConfig(nsec);
 
     container = ProviderContainer(
@@ -80,6 +86,34 @@ void main() {
     await settle();
     expect(state().effectiveTimestamp(msgKey), readAt);
     expect(state().effectiveTimestamp(channelId), isNull);
+  });
+
+  test('only the first community takes the shared channel marks', () async {
+    // Recent, so the saved copy keeps the message mark.
+    final readAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final at = unixSecondsToDateTime(readAt).toIso8601String();
+    final catchUp = activityContextKey(channelId);
+    await pumpNotifier(
+      stored: (pubkey) => {
+        'buzz.channel-read-state.v2:$pubkey': jsonEncode({
+          channelId: at,
+          catchUp: at,
+          msgKey: at,
+        }),
+      },
+    );
+    expect(state().effectiveTimestamp(channelId), readAt);
+    expect(state().effectiveTimestamp(catchUp), readAt);
+    expect(state().effectiveTimestamp(msgKey), readAt);
+
+    // A second community may have a channel with the same id, so it takes
+    // none of the first's channel marks, only those keyed by event id.
+    config.switchTo('http://localhost:2');
+    container.read(readStateProvider);
+    await settle();
+    expect(state().effectiveTimestamp(channelId), isNull);
+    expect(state().effectiveTimestamp(catchUp), isNull);
+    expect(state().effectiveTimestamp(msgKey), readAt);
   });
 
   test('message unread → read → unread round-trips through the real '
