@@ -6,6 +6,9 @@ import '../../helpers/thread_ids.dart';
 
 class _Relay extends RelaySessionNotifier {
   late void Function(NostrEvent) receive;
+  int calls = 0;
+  bool reject = false;
+  void Function(String)? close;
   int active = 0;
   int peak = 0;
   void setStatus(SessionStatus status) => state = SessionState(status: status);
@@ -18,6 +21,9 @@ class _Relay extends RelaySessionNotifier {
     void Function(String)? onClosed,
   }) async {
     expect(filter.kinds, containsAll([20002, 9, 40002, 40008]));
+    calls++;
+    close = onClosed;
+    if (reject) throw StateError('rejected');
     receive = onEvent;
     active++;
     if (active > peak) peak = active;
@@ -28,6 +34,62 @@ class _Relay extends RelaySessionNotifier {
 }
 
 void main() {
+  test(
+    'initial rejection retries with a bound and no uncaught error',
+    () async {
+      final relay = _Relay()..reject = true;
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => relay)],
+      );
+      container.listen(channelTypingProvider('chat'), (_, _) {});
+      await container.pump();
+      expect(relay.calls, 1);
+      for (final seconds in [1, 2, 4, 8]) {
+        await Future<void>.delayed(Duration(milliseconds: seconds * 1000 + 20));
+      }
+      expect(relay.calls, 4);
+      container.dispose();
+    },
+  );
+  test(
+    'terminal close clears typing and retries; disposal cancels recovery',
+    () async {
+      final relay = _Relay();
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => relay)],
+      );
+      final provider = channelTypingProvider('chat');
+      container.listen(provider, (_, _) {});
+      await container.pump();
+      relay.receive(
+        NostrEvent(
+          id: 'typing',
+          pubkey: 'agent',
+          kind: 20002,
+          createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          content: '',
+          sig: '',
+          tags: [
+            ['h', 'chat'],
+          ],
+        ),
+      );
+      expect(container.read(provider), hasLength(1));
+      relay.close!('terminal');
+      await container.pump();
+      expect(container.read(provider), isEmpty);
+      expect(relay.active, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      expect(relay.active, 1);
+      expect(relay.calls, 2);
+      relay.close!('terminal again');
+      await container.pump();
+      container.dispose();
+      await Future<void>.delayed(const Duration(milliseconds: 2100));
+      expect(relay.calls, 2);
+      expect(relay.active, 0);
+    },
+  );
   test('transport rebuilds release each typing subscription', () async {
     final relay = _Relay();
     final container = ProviderContainer(

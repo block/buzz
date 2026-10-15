@@ -30,6 +30,7 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
   final String channelId;
   void Function()? _unsubscribe;
   Timer? _pruneTimer;
+  Timer? _retryTimer;
   int _generation = 0;
   final _activity = <(String, String?), _TypingActivity>{};
 
@@ -48,37 +49,69 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
       _unsubscribe = null;
       _pruneTimer?.cancel();
       _pruneTimer = null;
+      _retryTimer?.cancel();
+      _retryTimer = null;
     });
 
     if (sessionState.status == SessionStatus.connected) {
-      _subscribeLive(generation);
+      unawaited(_subscribeLive(generation));
     }
 
     return [];
   }
 
-  void _subscribeLive(int generation) async {
+  Future<void> _subscribeLive(int generation, [int attempt = 0]) async {
     final session = ref.read(relaySessionProvider.notifier);
-    final unsubscribe = await session.subscribe(
-      NostrFilter(
-        kinds: [
-          EventKind.typingIndicator,
-          ...EventKind.channelMessageEventKinds,
-          EventKind.streamMessageDiff,
-        ],
-        tags: {
-          '#h': [channelId],
+    var closed = false;
+    void failed() {
+      if (closed) return;
+      closed = true;
+      // subscribe may invoke onClosed synchronously during provider build.
+      scheduleMicrotask(() {
+        if (generation != _generation) return;
+        _unsubscribe?.call();
+        _unsubscribe = null;
+        _activity.clear();
+        state = [];
+        _pruneTimer?.cancel();
+        _pruneTimer = null;
+        // Bound retries for policy rejections; a transport reconnect resets it.
+        if (attempt < 3) {
+          _retryTimer = Timer(Duration(seconds: 1 << attempt), () {
+            _retryTimer = null;
+            if (generation == _generation) {
+              unawaited(_subscribeLive(generation, attempt + 1));
+            }
+          });
+        }
+      });
+    }
+
+    try {
+      final unsubscribe = await session.subscribe(
+        NostrFilter(
+          kinds: [
+            EventKind.typingIndicator,
+            ...EventKind.channelMessageEventKinds,
+            EventKind.streamMessageDiff,
+          ],
+          tags: {
+            '#h': [channelId],
+          },
+          limit: 10,
+        ),
+        (event) {
+          if (!closed && generation == _generation) _handleTypingEvent(event);
         },
-        limit: 10,
-      ),
-      (event) {
-        if (generation == _generation) _handleTypingEvent(event);
-      },
-    );
-    if (generation != _generation) {
-      unsubscribe();
-    } else {
-      _unsubscribe = unsubscribe;
+        onClosed: (_) => failed(),
+      );
+      if (closed || generation != _generation) {
+        unsubscribe();
+      } else {
+        _unsubscribe = unsubscribe;
+      }
+    } catch (_) {
+      failed();
     }
   }
 

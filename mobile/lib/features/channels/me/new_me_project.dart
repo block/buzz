@@ -40,15 +40,54 @@ Future<void> _createMeProject(BuildContext context, WidgetRef ref) async {
     if (name == null) return;
     intent = MeProjectCreation(const Uuid().v4(), name);
   }
-  try {
-    await intent.complete(_currentMeSync(ref, sync));
-  } catch (error) {
-    if (error is MeRecoveryConflict) rethrow;
-    if (MeProjectCreation.pending(sync) != null) {
-      throw StateError(
-        'Project setup saved on this phone. Open New project to resume or discard it. ${error.toString().replaceFirst('Bad state: ', '')}',
+  while (context.mounted) {
+    try {
+      await intent!.complete(_currentMeSync(ref, sync));
+      return;
+    } catch (error) {
+      if (error is MeRecoveryConflict) rethrow;
+      // A failed preferences write can still update its optimistic cache.
+      // Only advertise recovery after rereading the durable journal.
+      var saved = false;
+      try {
+        await sync.prefs?.reload();
+        saved = MeProjectCreation.pending(sync) != null;
+      } catch (_) {
+        // Storage could not be verified. Retain the entered form below.
+      }
+      if (saved) {
+        throw StateError(
+          'Project setup saved on this phone. Open New project to resume or discard it. ${error.toString().replaceFirst('Bad state: ', '')}',
+        );
+      }
+      if (!context.mounted || sync.disposed) rethrow;
+      final retry = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Project was not saved'),
+          content: const Text(
+            'Couldn’t save your project on this phone. Try again to keep your entered name.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Try again'),
+            ),
+          ],
+        ),
       );
+      if (retry != true || !context.mounted) return;
+      final name = await _name(
+        context,
+        'New project',
+        initialValue: intent!.name,
+      );
+      if (name == null) return;
+      intent = MeProjectCreation(intent.id, name);
     }
-    rethrow;
   }
 }

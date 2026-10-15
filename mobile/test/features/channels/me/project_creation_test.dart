@@ -14,6 +14,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+
+class _FailingStore extends InMemorySharedPreferencesStore {
+  final bool throws;
+  _FailingStore(this.throws) : super.empty();
+  @override
+  Future<bool> setValue(String type, String key, Object value) async {
+    if (throws) throw StateError('disk failure');
+    return false;
+  }
+}
 
 class _Channels extends ChannelsNotifier {
   @override
@@ -56,6 +67,66 @@ void main() {
       data: '0' * 63 + '1',
     ),
   );
+  for (final throws in [false, true]) {
+    testWidgets(
+      'failed project write ($throws) reopens the entered name without claiming recovery',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        SharedPreferencesStorePlatform.instance = _FailingStore(throws);
+        final prefs = await SharedPreferences.getInstance();
+        final relay = _Relay();
+        final sync = MeSync(relay, config, prefs: prefs);
+        const channel = MethodChannel('buzz/profile_text_editor');
+        var forms = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          (call) async {
+            forms++;
+            if (forms == 1) return 'My entered name';
+            expectSync(
+              (call.arguments as Map)['initialValue'],
+              'My entered name',
+            );
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              meSyncProvider.overrideWithValue(sync),
+              meGroupsProvider.overrideWith(
+                (ref) => Stream.value(const MeGroups()),
+              ),
+              meAssistantsProvider.overrideWith((ref) async => []),
+              channelsProvider.overrideWith(_Channels.new),
+            ],
+            child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+          ),
+        );
+        await tester.pumpAndSettle();
+        tester
+            .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+            .nativeActions!
+            .firstWhere((a) => a.label == 'New project')
+            .onPressed!();
+        await tester.pumpAndSettle();
+        expect(find.text('Project was not saved'), findsOneWidget);
+        expect(find.textContaining('Project setup saved'), findsNothing);
+        expect(MeProjectCreation.pending(sync), isNull);
+        expect(relay.writes, 0);
+        await tester.tap(find.text('Try again'));
+        await tester.pumpAndSettle();
+        expect(forms, 2);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+  }
   for (final recovery in ['Resume', 'Discard setup']) {
     for (final offline in [true, false]) {
       testWidgets(

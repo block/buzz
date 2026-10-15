@@ -15,7 +15,11 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
-Future<String?> _name(BuildContext context, String title) async {
+Future<String?> _name(
+  BuildContext context,
+  String title, {
+  String initialValue = '',
+}) async {
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     final theme = utilitySurfaceThemeData(Theme.of(context));
     try {
@@ -23,7 +27,7 @@ Future<String?> _name(BuildContext context, String title) async {
         'buzz/profile_text_editor',
       ).invokeMethod<String>('presentProject', {
         'title': title,
-        'initialValue': '',
+        'initialValue': initialValue,
         'placeholder': 'Project name',
         'multiline': false,
         'brightness': theme.brightness.name,
@@ -42,16 +46,17 @@ Future<String?> _name(BuildContext context, String title) async {
     title: title,
     isScrollControlled: true,
     requestFocus: true,
-    builder: (_) => const _NewMeProject(),
+    builder: (_) => _NewMeProject(initialValue: initialValue),
   );
 }
 
 class _NewMeProject extends HookConsumerWidget {
-  const _NewMeProject();
+  final String initialValue;
+  const _NewMeProject({this.initialValue = ''});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final controller = useTextEditingController();
+    final controller = useTextEditingController(text: initialValue);
     useListenable(controller);
     final name = controller.text.trim();
     return Padding(
