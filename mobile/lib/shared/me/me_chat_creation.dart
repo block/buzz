@@ -1,6 +1,7 @@
 import 'dart:convert';
 import '../crypto/nip44.dart';
 import 'me_sync.dart';
+import 'me_journal.dart';
 
 /// Durable, encrypted intent reused after a failed or interrupted chat creation.
 class MeChatCreation {
@@ -64,9 +65,16 @@ class MeChatCreation {
     if (current?.id != id || current?.name != name || current?.agent != agent) {
       throw StateError('The unfinished chat changed. Review it again.');
     }
-    if (!await sync.prefs!.remove(storageKey(sync))) {
-      throw StateError('Couldn’t discard this setup. Try again.');
-    }
+    await clearMeJournal(
+      sync.prefs!,
+      storageKey(sync),
+      sync.prefs!.getString(storageKey(sync))!,
+      checkScope: () {
+        if (sync.disposed) {
+          throw StateError('Your community changed. Try again.');
+        }
+      },
+    );
   }
 
   /// Keep the journal through every relay step, including Me placement.
@@ -80,6 +88,7 @@ class MeChatCreation {
     required Future<void> Function() place,
   }) async {
     await save(sync);
+    final record = sync.prefs!.getString(storageKey(sync))!;
     sync.check();
     final existing = await findChannel();
     sync.check();
@@ -93,9 +102,12 @@ class MeChatCreation {
     sync.check();
     if (!placed) await place();
     sync.check();
-    if (!await sync.prefs!.remove(storageKey(sync))) {
-      throw StateError('Chat saved. Reopen New chat to finish recovery.');
-    }
+    await clearMeJournal(
+      sync.prefs!,
+      storageKey(sync),
+      record,
+      checkScope: sync.check,
+    );
     return result;
   }
 }

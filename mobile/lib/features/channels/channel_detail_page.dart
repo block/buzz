@@ -319,7 +319,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                     .observedUnreadEventsByChannel[channel.id]
                     ?.values ??
                 const <ObservedUnreadEvent>[])
-          if (event.rootId == null &&
+          if ((personalChat || event.rootId == null) &&
               event.createdAt >
                   (observedUnreadEventReadAt(
                         event,

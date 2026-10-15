@@ -71,7 +71,8 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
       if (!context.mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(channel: channel),
+          builder: (_) =>
+              ChannelDetailPage(channel: channel, ordinaryChannelRoute: true),
         ),
       );
     }

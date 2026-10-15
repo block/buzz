@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../crypto/nip44.dart';
 import 'me_groups.dart';
 import 'me_sync.dart';
+import 'me_journal.dart';
 
 /// An accepted project name and stable ID, retained until confirmed or discarded.
 class MeProjectCreation {
@@ -60,14 +61,18 @@ class MeProjectCreation {
     if (current?.id != id || current?.name != name) {
       throw StateError('The unfinished project changed. Review it again.');
     }
-    if (!await sync.prefs!.remove(storageKey(sync))) {
-      throw StateError('Couldn’t discard this setup. Try again.');
-    }
+    await clearMeJournal(
+      sync.prefs!,
+      storageKey(sync),
+      sync.prefs!.getString(storageKey(sync))!,
+      checkScope: () => _checkScope(sync),
+    );
   }
 
   /// Retry using the same ID, preserving projects already confirmed on desktop.
   Future<void> complete(MeSync sync) async {
     await save(sync);
+    final record = sync.prefs!.getString(storageKey(sync))!;
     final head = await sync.head();
     final exists =
         head != null && sync.decode(head).groups.any((g) => g['id'] == id);
@@ -85,6 +90,11 @@ class MeProjectCreation {
               ),
       );
     }
-    await discard(sync);
+    await clearMeJournal(
+      sync.prefs!,
+      storageKey(sync),
+      record,
+      checkScope: () => _checkScope(sync),
+    );
   }
 }

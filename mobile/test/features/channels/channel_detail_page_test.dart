@@ -285,6 +285,7 @@ Widget _buildTestable({
   Widget? home,
   Stream<MeGroups>? organization,
   SendMessage? sender,
+  SendMessage? soloSender,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final navigatorKey = GlobalKey<NavigatorState>();
@@ -296,6 +297,10 @@ Widget _buildTestable({
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
+      if (soloSender != null) ...[
+        meSendMessageProvider.overrideWithValue(soloSender),
+        meAssistantOwnershipProvider('agent').overrideWith((ref) async => true),
+      ],
       meGroupsProvider.overrideWith(
         (ref) =>
             organization ??
@@ -4521,6 +4526,11 @@ void main() {
                 pubkey: 'alice',
                 content: 'Message $i',
                 createdAt: 1000 + i,
+                extraTags: personal
+                    ? [
+                        ['e', threadIdThreadDashRoot, '', 'reply'],
+                      ]
+                    : const [],
               ),
           ];
           final olderPage = [
@@ -4530,6 +4540,11 @@ void main() {
                 pubkey: 'alice',
                 content: 'Message $i',
                 createdAt: 1000 + i,
+                extraTags: personal
+                    ? [
+                        ['e', threadIdThreadDashRoot, '', 'reply'],
+                      ]
+                    : const [],
               ),
           ];
           final messagesNotifier = _FakeMessagesNotifier(
@@ -4543,10 +4558,10 @@ void main() {
                 makeObservedUnreadEvent(
                   id: 'msg21',
                   createdAt: 1021,
-                  rootId: null,
+                  rootId: personal ? threadIdThreadDashRoot : null,
                   highPriority: false,
                   channelType: 'stream',
-                  isThreadedReply: false,
+                  isThreadedReply: personal,
                 ),
               ],
             },
@@ -10245,23 +10260,93 @@ void main() {
     });
   });
 
-  testWidgets('ordinary send survives a Solo offline-cache failure', (
+  for (final visibility in ['open', 'private']) {
+    testWidgets(
+      'ordinary $visibility send survives a Solo offline-cache failure',
+      (tester) async {
+        final sender = _RecordingOrdinarySender();
+        final channel = Channel(
+          id: _channelId,
+          name: 'Ordinary',
+          channelType: 'stream',
+          visibility: visibility,
+          description: '',
+          createdBy: 'self',
+          createdAt: DateTime(2026),
+          memberCount: 2,
+          isMember: true,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [],
+            disableRetries: true,
+            sender: sender,
+            organization: Stream.error(const MeCacheException()),
+            home: ChannelDetailPage(
+              channel: channel,
+              ordinaryChannelRoute: true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester
+            .widget<ComposeBar>(find.byType(ComposeBar))
+            .onSend('Still usable', []);
+        expect(sender.sent, ['Still usable']);
+      },
+    );
+  }
+
+  testWidgets('affirmative Solo route never falls back to ordinary sending', (
     tester,
   ) async {
     final sender = _RecordingOrdinarySender();
     await tester.pumpWidget(
       _buildTestable(
         messages: [],
+        personalChat: true,
         disableRetries: true,
         sender: sender,
         organization: Stream.error(const MeCacheException()),
+        home: ChannelDetailPage(
+          channel: _testChannel,
+          personalChat: true,
+          ordinaryChannelRoute: true,
+        ),
       ),
     );
     await tester.pumpAndSettle();
-    await tester
-        .widget<ComposeBar>(find.byType(ComposeBar))
-        .onSend('Still usable', []);
-    expect(sender.sent, ['Still usable']);
+    expect(find.byKey(const ValueKey('me-assistant-button')), findsOneWidget);
+    await expectLater(
+      tester
+          .widget<ComposeBar>(find.byType(ComposeBar))
+          .onSend('Must not leak', []),
+      throwsStateError,
+    );
+    expect(sender.sent, isEmpty);
+  });
+
+  testWidgets('identified Solo sends through the Solo sender', (tester) async {
+    final ordinary = _RecordingOrdinarySender(),
+        solo = _RecordingOrdinarySender();
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [],
+        personalChat: true,
+        sender: ordinary,
+        soloSender: solo,
+        members: [
+          ChannelMember(pubkey: 'agent', role: 'bot', joinedAt: DateTime(2026)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend(
+      'Solo message',
+      ['agent'],
+    );
+    expect(solo.sent, ['Solo message']);
+    expect(ordinary.sent, isEmpty);
   });
 
   testWidgets('unknown Solo placement remains readable but cannot send', (

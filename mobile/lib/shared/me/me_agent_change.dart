@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../crypto/nip44.dart';
 import 'me_sync.dart';
+import 'me_journal.dart';
 
 /// Durable intent written before granting a selected agent channel access.
 class MeAgentChange {
@@ -66,9 +67,12 @@ class MeAgentChange {
     if (sync.prefs?.getString('$_scope:pending') != _record) {
       throw StateError('The pending agent change changed. Review it again.');
     }
-    if (!await sync.prefs!.remove('$_scope:pending')) {
-      throw StateError('Could not clear the pending agent change.');
-    }
+    await clearMeJournal(
+      sync.prefs!,
+      '$_scope:pending',
+      _record,
+      checkScope: () => _check(sync, channel),
+    );
   }
 
   /// Reconcile membership before committing the preference. Ambiguous results

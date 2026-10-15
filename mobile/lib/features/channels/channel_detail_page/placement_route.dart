@@ -4,6 +4,9 @@ part of '../channel_detail_page.dart';
 class ChannelDetailPage extends ConsumerWidget {
   final Channel channel;
   final bool personalChat;
+
+  /// Affirmative ordinary-channel entry, independent of optional Solo sync.
+  final bool ordinaryChannelRoute;
   final String? initialAssistant;
   final String? initialMessageId;
   final String? initialThreadRootId;
@@ -13,6 +16,7 @@ class ChannelDetailPage extends ConsumerWidget {
     super.key,
     required this.channel,
     this.personalChat = false,
+    this.ordinaryChannelRoute = false,
     this.initialAssistant,
     this.initialMessageId,
     this.initialThreadRootId,
@@ -27,8 +31,12 @@ class ChannelDetailPage extends ConsumerWidget {
     // depend on the optional Solo record to use their ordinary send path.
     final ordinary =
         !personalChat &&
-        (channel.visibility == 'open' || channel.isDm || channel.isForum);
-    final placed = groups?.channels.contains(channel.id) ?? personalChat;
+        (ordinaryChannelRoute ||
+            channel.visibility == 'open' ||
+            channel.isDm ||
+            channel.isForum);
+    final placed =
+        personalChat || (groups?.channels.contains(channel.id) ?? false);
     // Bounded waiting keeps ordinary search results readable during an outage.
     // Unknown placement may be read, but cannot send via an unverified path.
     if (!ordinary && !placed && groups == null && fallback.isLoading) {
