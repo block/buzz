@@ -7,6 +7,7 @@ This guide covers the most common rendering failures on Linux and how to resolve
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | Blank or transparent window, then `SIGABRT` with `colrv1_configure_skpaint` in the output | COLRv1 color emoji font (AppImage only) | Upgrade to the latest AppImage (v0.5.2+) |
+| Blank window, then `GStreamer element autoaudiosink not found` and WebKitWebProcess `SIGABRT` | AppImage uses host GStreamer; WebKit RELEASE_ASSERTs on a missing audio sink (`autoaudiosink` lives in gst-plugins-good) | Install `gst-plugins-good` (Arch) / `gstreamer1.0-plugins-good` (Debian). AppImage shim should set host plugin dirs. |
 | Blank window on startup / SIGSEGV when switching workspaces | dmabuf renderer incompatibility (NVIDIA or AppImage) | Prefer `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` (shipped automatically) or `--safe-rendering`. Do **not** set `WEBKIT_DISABLE_DMABUF_RENDERER=1` on current WebKitGTK — see [#3654](https://github.com/block/buzz/issues/3654). On Debian/Ubuntu with the proprietary NVIDIA driver the crash can persist (distro WebKit patch) — [#3654](https://github.com/block/buzz/issues/3654) stays open for that path. |
 | Blank window on any hardware, no crash output | Unknown GPU/driver combination | `--safe-rendering` flag (see below) |
 
@@ -58,6 +59,29 @@ FONTCONFIG_FILE=~/.config/buzz-fontconfig/fonts.conf ./Buzz_*.AppImage
 ```
 
 **Native packages (`deb`/`rpm`):** The COLRv1 crash ([#2548](https://github.com/block/buzz/issues/2548), [#2982](https://github.com/block/buzz/issues/2982)) is AppImage-only — native packages use the system WebKit, which has a consistent FreeType ABI, and are not affected.
+
+---
+
+## Crash: `GStreamer element autoaudiosink not found` (AppImage)
+
+**Affected distributions:** Any distro missing GStreamer "good" plugins, and AppImage launches whose plugin search path does not include the host GStreamer dirs (Arch/Fedora under `/usr/lib/gstreamer-1.0`).
+
+**Symptom:** Buzz starts, the window stays blank, and the terminal shows `GStreamer element autoaudiosink not found` followed by WebKitWebProcess `SIGABRT`.
+
+**Root cause:** The AppImage strips bundled GStreamer and uses the host's. WebKitGTK RELEASE_ASSERTs when it cannot create an audio sink. `autoaudiosink` is provided by gst-plugins-good. linuxdeploy's AppRun also force-sets `GST_PLUGIN_SYSTEM_PATH_1_0` to an empty in-bundle directory, which *replaces* GStreamer's default search path — so even an installed host plugin set is invisible until the launcher shim points at host dirs.
+
+**Fix:** Install the GStreamer good plugins, then relaunch:
+
+```bash
+# Arch
+sudo pacman -S gst-plugins-good
+# Debian/Ubuntu
+sudo apt install gstreamer1.0-plugins-good
+```
+
+AppImage builds include a launcher shim (`desktop/scripts/fix-appimage.sh`) that unsets bundle-pointing `GST_PLUGIN_*` overrides and sets `GST_PLUGIN_SYSTEM_PATH_1_0` to existing host plugin directories (`/usr/lib/gstreamer-1.0`, `/usr/lib64/gstreamer-1.0`, `/usr/lib/x86_64-linux-gnu/gstreamer-1.0`). Upgrade to an AppImage that includes that shim if an older build still reports missing plugins after the packages are installed.
+
+This is not a GPU/compositor failure — `--safe-rendering` will not recover a missing `autoaudiosink`.
 
 ---
 
