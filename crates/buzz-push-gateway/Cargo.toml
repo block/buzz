@@ -22,6 +22,7 @@ personal-dev-app-attest = ["appattest/testing"]
 [dependencies]
 aes-gcm = "0.10"
 appattest = { version = "0.1.1", default-features = false }
+aws-lc-rs = { version = "1", default-features = false }
 axum = { workspace = true }
 async-trait = "0.1"
 base64 = "0.22"

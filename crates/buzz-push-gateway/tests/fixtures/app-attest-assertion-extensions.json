@@ -1,0 +1,10 @@
+{
+  "description": "Real iOS 27 App Attest delegation assertion whose authenticatorData carries Apple extension data (99 bytes, ED flag).",
+  "app_id": "6PU678XRWJ.com.monotelabs.buzz",
+  "public_key_hex": "041740cd1acf5c8bcf5a196bb26c231ed025efbede78275195779bb1a81fdf83bba02a934be3830c1fe91e59b6443b81c6f3af42f02fb4b42ed21596ab54b96c72",
+  "client_data": "buzz.push.delegate.v1\n{\"v\":1,\"audience\":\"https://push.buzz.xyz/v1/delegations\",\"challenge_id\":\"9e2dd642-6d35-4cf1-9b96-e5f2fd6a87be\",\"challenge\":\"z1vnVBypyq1bcc_lsE2TwSc4tWQpAwDp6JBN1_7BMx0\",\"installation_handle\":\"79ee98e7-96be-4c98-acff-5aacb7e72d11\",\"endpoint_epoch\":1,\"generation\":116,\"relay_pubkey\":\"324e339a09bcd6a72a560a81b99ed8790c76d8f2d4d065a313864331a0e737a0\",\"not_before\":1790846356,\"expires_at\":1793436900}",
+  "challenge": "z1vnVBypyq1bcc_lsE2TwSc4tWQpAwDp6JBN1_7BMx0",
+  "assertion_b64": "omlzaWduYXR1cmVYSDBGAiEAzceni1j9sWQukx84gRLz7586KWAQgsxQZvVrJwITkDUCIQD3xgDLFOEj3A5qEpjBhe4Hfqrf7TxS9HSouFcNRvW/23FhdXRoZW50aWNhdG9yRGF0YVhjrcEZ3QzlsQSzlnMT1WvkcRWBm9jenhcwHPkQV7/g9/bAAAAAdKJ3YXBwbGVfYnVuZGxlX3ZlcnNpb25fMDFhMngcYXBwbGVfdmFsaWRhdGlvbl9jYXRlZ29yeV8wMUQCAAAA",
+  "previous_counter": 0,
+  "expected_counter": 116
+}
