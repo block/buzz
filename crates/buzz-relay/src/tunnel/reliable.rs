@@ -270,6 +270,16 @@ impl ReliableMeshStream {
         self.fenced
     }
 
+    /// Receive the next raw wire frame without validation.
+    ///
+    /// Cancel-safe when the transport half is (the iroh half keeps
+    /// partial-read state across drops; in-memory halves are trivially
+    /// safe), so it may be raced in a `select!`. Pair with
+    /// [`Self::validate_received`] run outside the cancellable region.
+    pub async fn recv_frame(&mut self) -> Result<Option<MeshStreamFrame>, MeshError> {
+        self.stream.recv_frame().await
+    }
+
     /// Send bytes as one or more ordered mesh `Data` frames.
     pub async fn send_bytes(
         &mut self,
@@ -329,6 +339,13 @@ impl ReliableMeshStream {
     /// pinned fenced tuple and the Redis directory. This is the reliable-stream
     /// equivalent of Dawn's hot-path media floor, but authoritative: stale or
     /// mismatched frames fail the session rather than being dropped silently.
+    ///
+    /// NOT cancel-safe: a frame already read off the stream is lost if this
+    /// future is dropped during fence validation (the Redis await). Callers
+    /// that race receiving against another branch (drain ticks, shutdown)
+    /// must select over [`MeshStream::recv_frame`]-level extraction and run
+    /// [`Self::validate_received`] outside the cancellable region — see
+    /// `mesh_boot::run_demo_echo`.
     pub async fn recv_validated(
         &mut self,
         directory: &SessionDirectory,
@@ -336,7 +353,20 @@ impl ReliableMeshStream {
         let Some(frame) = self.stream.recv_frame().await? else {
             return Ok(None);
         };
+        self.validate_received(directory, frame).await
+    }
 
+    /// Validate an already-received wire frame against the stream's pinned
+    /// fenced tuple and the Redis directory.
+    ///
+    /// Split from [`Self::recv_validated`] so callers that must remain
+    /// cancel-safe can extract the frame first and validate it outside any
+    /// `select!`/`timeout` region.
+    pub async fn validate_received(
+        &mut self,
+        directory: &SessionDirectory,
+        frame: MeshStreamFrame,
+    ) -> Result<Option<ReliableFrame>, ReliableStreamError> {
         match frame {
             MeshStreamFrame::Data { fenced, payload } => {
                 let frame = ReliableWireFrame::decode(&payload)?;
