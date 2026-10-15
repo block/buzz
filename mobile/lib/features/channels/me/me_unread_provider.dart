@@ -22,7 +22,7 @@ class MeUnreadChannelIds extends Notifier<Set<String>> {
     final seeds = ref.watch(_initialSeedsProvider);
     final baselines = seeds.baselines;
     final seeded = seeds.completed;
-    if (!reads.isReady || organization == null) return const {};
+    if (reads.pubkey == null || organization == null) return const {};
     final active = channels
         .where(
           (c) =>
@@ -39,6 +39,7 @@ class MeUnreadChannelIds extends Notifier<Set<String>> {
         () => dateTimeToUnixSeconds(channel.lastMessageAt),
       );
     }
+    if (!reads.isReady) return const {};
     var disposed = false;
     ref.onDispose(() => disposed = true);
     if (pending.isNotEmpty) {
@@ -73,9 +74,9 @@ class MeUnreadChannelIds extends Notifier<Set<String>> {
 }
 
 // Retain the captured baseline across channel/read-marker rebuilds, but never
-// across an identity, community, or read-state initialization boundary.
+// across an identity or community boundary. Readiness must preserve history.
 final _initialSeedsProvider = Provider((ref) {
-  ref.watch(readStateProvider.select((s) => (s.pubkey, s.isReady)));
+  ref.watch(readStateProvider.select((s) => s.pubkey));
   ref.watch(relayConfigProvider.select((c) => c.baseUrl));
   return _InitialSeeds();
 });

@@ -71,15 +71,22 @@ class _Channels extends ChannelsNotifier {
 
 class _Reads extends ReadStateNotifier {
   final bool empty;
-  _Reads({this.empty = false});
+  final bool ready;
+  _Reads({this.empty = false, this.ready = true});
   @override
   void seedContextRead(String key, int timestamp) => read(key, timestamp);
   @override
   ReadStateState build() => ReadStateState(
-    isReady: true,
+    isReady: ready,
     pubkey: 'owner',
     contexts: empty ? {} : {'solo': 10},
     version: 0,
+  );
+  void finishLoading() => state = ReadStateState(
+    isReady: true,
+    pubkey: state.pubkey,
+    contexts: state.contexts,
+    version: state.version + 1,
   );
   void resetIdentity() => state = const ReadStateState(
     isReady: true,
@@ -177,74 +184,101 @@ void main() {
       },
     );
   }
-  testWidgets(
-    'Solo retains live unread row, collapsed section, and tab indication',
-    (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final channels = _Channels();
-      final reads = _Reads();
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            savedPrefsProvider.overrideWithValue(prefs),
-            channelsProvider.overrideWith(() => channels),
-            readStateProvider.overrideWith(() => reads),
-            meGroupsProvider.overrideWith((ref) => Stream.value(organization)),
-            meAssistantsProvider.overrideWith((ref) async => []),
-          ],
-          child: MaterialApp(
-            theme: AppTheme.light(),
-            home: Consumer(
-              builder: (context, ref, _) => HomePage(
-                settingsPageBuilder: (_) => const SizedBox(),
-                mePageBuilder: (_) => const MePage(),
-                hasUnreadInbox: false,
-                hasUnreadSolo: ref.watch(meUnreadChannelIdsProvider).isNotEmpty,
+  for (final loading in [false, true]) {
+    testWidgets(
+      'Solo retains row, section, and tab unread after loading=$loading',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final channels = _Channels();
+        final reads = _Reads(empty: loading, ready: !loading);
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              channelsProvider.overrideWith(() => channels),
+              readStateProvider.overrideWith(() => reads),
+              meGroupsProvider.overrideWith(
+                (ref) => Stream.value(organization),
+              ),
+              meAssistantsProvider.overrideWith((ref) async => []),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Consumer(
+                builder: (context, ref, _) => HomePage(
+                  settingsPageBuilder: (_) => const SizedBox(),
+                  mePageBuilder: (_) => const MePage(),
+                  hasUnreadInbox: false,
+                  hasUnreadSolo: ref
+                      .watch(meUnreadChannelIdsProvider)
+                      .isNotEmpty,
+                ),
               ),
             ),
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(HomePage)),
-      );
-      expect(container.read(meUnreadChannelIdsProvider), {'solo'});
-      expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
-      expect(find.text('solo'), findsNothing);
-      await tester.tap(find.byTooltip('Solo'));
-      await tester.pumpAndSettle();
-      expect(
-        tester.widget<Text>(find.text('solo')).style?.fontWeight,
-        FontWeight.w700,
-      );
-      expect(find.bySemanticsLabel('solo, unread'), findsOneWidget);
-      await tester.tap(find.text('Project'));
-      await tester.pumpAndSettle();
-      expect(find.text('solo'), findsNothing);
-      expect(
-        find.byKey(const ValueKey('solo-section-unread-Project')),
-        findsOneWidget,
-      );
-      reads.read('msg:reply', 20);
-      await tester.pumpAndSettle();
-      expect(
-        find.byKey(const ValueKey('solo-section-unread-Project')),
-        findsNothing,
-      );
-      await tester.tap(find.byTooltip('Home'));
-      await tester.pumpAndSettle();
-      expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
-      channels.reply();
-      await tester.pumpAndSettle();
-      expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
-      reads.read('thread:root', 21);
-      await tester.pumpAndSettle();
-      expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
-      reads.force();
-      await tester.pumpAndSettle();
-      expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
-    },
-  );
+        );
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(HomePage)),
+        );
+        if (loading) {
+          expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+          expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
+          expect(
+            container.read(readStateProvider).effectiveTimestamp('solo'),
+            isNull,
+          );
+          channels.reply();
+          await tester.pumpAndSettle();
+          expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+          expect(
+            container.read(readStateProvider).effectiveTimestamp('solo'),
+            isNull,
+          );
+          reads.finishLoading();
+          await tester.pumpAndSettle();
+          expect(
+            container.read(readStateProvider).effectiveTimestamp('solo'),
+            20,
+          );
+        }
+        expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+        expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
+        expect(find.text('solo'), findsNothing);
+        await tester.tap(find.byTooltip('Solo'));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<Text>(find.text('solo')).style?.fontWeight,
+          FontWeight.w700,
+        );
+        expect(find.bySemanticsLabel('solo, unread'), findsOneWidget);
+        await tester.tap(find.text('Project'));
+        await tester.pumpAndSettle();
+        expect(find.text('solo'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('solo-section-unread-Project')),
+          findsOneWidget,
+        );
+        reads.read('msg:reply', channels.timestamp);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('solo-section-unread-Project')),
+          findsNothing,
+        );
+        await tester.tap(find.byTooltip('Home'));
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
+        channels.reply();
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
+        reads.read('thread:root', channels.timestamp);
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
+        reads.force();
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
+      },
+    );
+  }
 }
