@@ -1,0 +1,108 @@
+# Builds the mdBook docs site from the Markdown in this repo and publishes it
+# to the existing `pages` branch under /book/.
+#
+# Publishing is safe to run unconditionally because mdBook emits relative asset
+# paths, so the book works from a subpath. It is written into a subdirectory of
+# the branch Pages already serves, which leaves index/privacy/support/terms
+# untouched at the root and needs no change to the Pages source or DNS.
+#
+#   https://block.github.io/buzz/        legal pages, unchanged
+#   https://block.github.io/buzz/book/   this book
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths: &docs_paths
+      - '**.md'
+      - 'docs/book/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths: *docs_paths
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  MDBOOK_VERSION: '0.5.4'
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: |
+          url="https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "$url" | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # --check fails the build if any document matches no SECTIONS rule, so a
+      # new doc has to be placed deliberately rather than landing in Unsorted
+      # unnoticed. Links already broken in the source are reported on stderr
+      # without failing — those are pre-existing and fixing them belongs in the
+      # document, not here.
+      - name: Assemble book
+        run: python3 docs/book/build.py --check
+
+      - name: Build
+        run: mdbook build docs/book
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: book
+          path: docs/book/dist
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install mdBook
+        run: |
+          url="https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "$url" | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          python3 docs/book/build.py --check
+          mdbook build docs/book
+
+      - name: Publish to pages branch
+        run: |
+          set -euo pipefail
+          git fetch origin pages
+          git worktree add /tmp/pages origin/pages
+          rm -rf /tmp/pages/book
+          cp -R docs/book/dist /tmp/pages/book
+          cd /tmp/pages
+          git add -A book
+          if git diff --cached --quiet; then
+            echo "book unchanged; nothing to publish"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "docs: publish book from ${GITHUB_SHA:0:8}"
+          git push origin HEAD:pages
