@@ -172,7 +172,7 @@ class _MessageTile extends ConsumerWidget {
         ),
       );
     } else {
-      _openSearchChannel(context, ref, channel);
+      _openSearchChannel(context, channel);
     }
   }
 }
