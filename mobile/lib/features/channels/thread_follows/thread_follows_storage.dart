@@ -2,15 +2,24 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../shared/theme/community_theme_preference.dart';
+
 /// Persistence for followed thread root IDs.
 ///
 /// Mirrors the desktop store (`useThreadFollows.ts`): per-pubkey entries of
 /// `{rootId, followedAt}`, capped at the oldest-out limit. Desktop keeps this
 /// client-local (localStorage), so mobile does the same with
 /// SharedPreferences — following on one device intentionally does not sync.
+/// Threads belong to one community, so entries and their cap are kept per
+/// relay as well as per identity.
 const threadFollowsMaxEntries = 500;
 
-String threadFollowsKey(String pubkey) => 'buzz-thread-follows.v1:$pubkey';
+String threadFollowsKey(String pubkey, String relayUrl) =>
+    'buzz-thread-follows.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyThreadFollowsKey(String pubkey) =>
+    'buzz-thread-follows.v1:$pubkey';
 
 class ThreadFollowEntry {
   final String rootId;
@@ -26,8 +35,18 @@ class ThreadFollowsStorage {
 
   ThreadFollowsStorage(this._prefs);
 
-  List<ThreadFollowEntry> read(String pubkey) {
-    final raw = _prefs.getString(threadFollowsKey(pubkey));
+  List<ThreadFollowEntry> read(String pubkey, String relayUrl) {
+    final key = threadFollowsKey(pubkey, relayUrl);
+    // The first community to open claims the shared entry. Its root ids are
+    // event ids, so they only ever match threads in their own community.
+    final legacyKey = legacyThreadFollowsKey(pubkey);
+    final legacy = _prefs.getString(legacyKey);
+    if (legacy != null) {
+      _prefs.remove(legacyKey);
+      if (!_prefs.containsKey(key)) _prefs.setString(key, legacy);
+    }
+
+    final raw = _prefs.getString(key);
     if (raw == null || raw.isEmpty) return const [];
 
     try {
@@ -48,9 +67,9 @@ class ThreadFollowsStorage {
     }
   }
 
-  void write(String pubkey, List<ThreadFollowEntry> entries) {
+  void write(String pubkey, String relayUrl, List<ThreadFollowEntry> entries) {
     _prefs.setString(
-      threadFollowsKey(pubkey),
+      threadFollowsKey(pubkey, relayUrl),
       jsonEncode([for (final entry in entries) entry.toJson()]),
     );
   }
