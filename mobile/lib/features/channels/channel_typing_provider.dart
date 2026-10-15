@@ -31,6 +31,7 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
   void Function()? _unsubscribe;
   Timer? _pruneTimer;
   Timer? _retryTimer;
+  Timer? _healthyTimer;
   int _generation = 0;
   final _activity = <(String, String?), _TypingActivity>{};
 
@@ -51,6 +52,8 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
       _pruneTimer = null;
       _retryTimer?.cancel();
       _retryTimer = null;
+      _healthyTimer?.cancel();
+      _healthyTimer = null;
     });
 
     if (sessionState.status == SessionStatus.connected) {
@@ -72,6 +75,8 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
         if (generation != _generation) return;
         _unsubscribe?.call();
         _unsubscribe = null;
+        _healthyTimer?.cancel();
+        _healthyTimer = null;
         _activity.clear();
         state = [];
         _pruneTimer?.cancel();
@@ -109,7 +114,12 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
       if (closed || generation != _generation) {
         unsubscribe();
       } else {
-        failures = 0;
+        // Admission alone is not health: repeated terminal rejections may
+        // arrive after subscribe's readiness timeout. Reset only after a full
+        // typing TTL of uninterrupted subscription health.
+        _healthyTimer = Timer(const Duration(milliseconds: _ttlMs), () {
+          if (!closed && generation == _generation) failures = 0;
+        });
         _unsubscribe = unsubscribe;
       }
     } catch (_) {

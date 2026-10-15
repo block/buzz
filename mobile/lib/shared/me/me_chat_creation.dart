@@ -100,7 +100,10 @@ class MeChatCreation {
     sync.check();
     final placed = await isPlaced();
     sync.check();
-    if (!placed) await place();
+    // Placement may be confirmed while its inner journal cleanup failed.
+    if (!placed || sync.prefs?.getString(sync.pendingKey) != null) {
+      await place();
+    }
     sync.check();
     await clearMeJournal(
       sync.prefs!,

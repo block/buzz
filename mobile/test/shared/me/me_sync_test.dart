@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/me_recovery.dart';
@@ -128,6 +129,46 @@ void main() {
       verify: false,
     ).toMap(),
   );
+  for (final failure in ['false', 'throw']) {
+    test(
+      'chat recovery reconciles its confirmed Solo journal after $failure cleanup',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final store = _FailingCacheStore()..removeFailure = failure;
+        SharedPreferencesStorePlatform.instance = store;
+        final prefs = await SharedPreferences.getInstance();
+        final relay = FakeRelay();
+        final sync = MeSync(
+          relay,
+          RelayConfig(baseUrl: origin, nsec: nsec),
+          prefs: prefs,
+        );
+        const id = '11111111-1111-4111-8111-111111111111';
+        const intent = MeChatCreation(id, 'Chat', 'agent');
+        Future<String> complete() => intent.complete(
+          sync,
+          findChannel: () async => id,
+          createChannel: () async => id,
+          hasAgent: () async => true,
+          addAgent: () async {},
+          isPlaced: () async =>
+              relay.events.isNotEmpty &&
+              sync.decode(relay.events.single).channels.contains(id),
+          place: () => sync.update((current) => current.place(id)),
+        );
+        await expectLater(complete(), throwsStateError);
+        expect(prefs.getString(sync.pendingKey), isNotNull);
+        expect(MeChatCreation.pending(sync), isNotNull);
+        store.removeFailure = null;
+        await expectLater(complete(), throwsStateError);
+        expect(prefs.getString(sync.pendingKey), isNull);
+        expect(MeChatCreation.pending(sync), isNotNull);
+        expect(await complete(), id);
+        expect(MeChatCreation.pending(sync), isNull);
+        expect(relay.writes, 1);
+      },
+    );
+  }
   for (final failure in ['false', 'throw']) {
     test(
       'pending-save discard retains recovery after $failure removal',

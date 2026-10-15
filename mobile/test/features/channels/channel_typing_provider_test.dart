@@ -91,7 +91,7 @@ void main() {
     },
   );
   test(
-    'healthy typing recovery resets the consecutive failure budget',
+    'terminal closure loops stay bounded until sustained recovery',
     () async {
       final relay = _Relay();
       final container = ProviderContainer(
@@ -100,13 +100,37 @@ void main() {
       addTearDown(container.dispose);
       container.listen(channelTypingProvider('chat'), (_, _) {});
       await container.pump();
-      for (var i = 0; i < 5; i++) {
-        relay.close!('closed after healthy subscription');
+      for (final delay in [1, 2, 4]) {
+        final calls = relay.calls;
+        relay.close!('rejected after admission');
         await container.pump();
-        await Future<void>.delayed(const Duration(milliseconds: 1100));
-        expect(relay.calls, i + 2);
-        expect(relay.active, 1);
+        if (delay > 1) {
+          await Future<void>.delayed(const Duration(milliseconds: 1100));
+          expect(relay.calls, calls);
+        }
+        await Future<void>.delayed(
+          Duration(milliseconds: delay * 1000 + 50 - (delay > 1 ? 1100 : 0)),
+        );
+        expect(relay.calls, calls + 1);
       }
+      relay.close!('fourth rejection');
+      await container.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      expect(relay.calls, 4);
+      relay.setStatus(SessionStatus.disconnected);
+      await container.pump();
+      relay.setStatus(SessionStatus.connected);
+      await container.pump();
+      relay.close!('first rejection after reconnect');
+      await container.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      final recoveredCalls = relay.calls;
+      await Future<void>.delayed(const Duration(milliseconds: 8100));
+      relay.close!('closure after sustained health');
+      await container.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      expect(relay.calls, recoveredCalls + 1);
+      expect(relay.active, 1);
     },
   );
   test('transport rebuilds release each typing subscription', () async {
