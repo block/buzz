@@ -112,8 +112,8 @@ Debian/Ubuntu:
 ```bash
 sudo apt-get install -y --no-install-recommends \
   build-essential curl file libasound2-dev libayatana-appindicator3-dev \
-  libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
-  patchelf wget
+  libgtk-3-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libssl-dev \
+  libsoup-3.0-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
 ```
 
 This is the same list CI installs (see `.github/workflows/ci.yml`), so matching
