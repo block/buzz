@@ -54,10 +54,10 @@ public protocol BuzzPushNotificationResolving {
 
 /// Reads configured Buzz communities and resolves their newest unread event.
 public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
-  // Verified profiles may carry bounded inline raster avatars. Keep the refresh
-  // response capped, but large enough to recover the sender name from those
-  // otherwise valid kind-0 events when the app cache has not been populated.
-  static let maximumPresentationResponseBytes = 256 * 1_024
+  // One refresh can contain a profile, channel metadata, and membership.
+  // Allow their bounded 256 KiB contents plus JSON escaping, tags, and envelopes.
+  // Each record still passes the cache's separate content and signature checks.
+  static let maximumPresentationResponseBytes = 2 * 1_024 * 1_024
 
   private let session: URLSession
   private let loadCommunitiesData: () -> Data?

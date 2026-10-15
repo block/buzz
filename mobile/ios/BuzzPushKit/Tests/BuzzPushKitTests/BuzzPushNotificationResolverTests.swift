@@ -693,7 +693,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       tags: [["h", Self.channelID]],
       content: "Inline avatar profile"
     )
-    let picture = "data:image/png;base64," + String(repeating: "A", count: 170_000)
+    let picture = "data:image/png;base64," + String(repeating: "A", count: 262_050)
     let profileContent = try XCTUnwrap(
       String(
         data: JSONSerialization.data(withJSONObject: [
@@ -709,7 +709,19 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       kind: 0,
       content: profileContent
     )
-    let presentationData = try JSONEncoder().encode([profile])
+    let channel = try Self.signedEvent(
+      privateKey: Self.relayPrivateKey, createdAt: Self.now, kind: 39000,
+      tags: [["d", Self.channelID], ["name", "Large Channel"], ["t", "stream"]],
+      content: String(repeating: "\"", count: 256 * 1024)
+    )
+    let membership = try Self.signedEvent(
+      privateKey: Self.relayPrivateKey, createdAt: Self.now, kind: 39002,
+      tags: [["d", Self.channelID], ["p", Self.ownPubkey]],
+      content: String(repeating: "\"", count: 256 * 1024)
+    )
+    let presentationData = try JSONEncoder().encode([profile, channel, membership])
+    XCTAssertLessThanOrEqual(profileContent.utf8.count, 256 * 1024)
+    XCTAssertGreaterThan(presentationData.count, 256 * 1024)
     XCTAssertLessThan(
       presentationData.count,
       BuzzPushNotificationResolver.maximumPresentationResponseBytes
@@ -726,13 +738,15 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let result = try XCTUnwrap(
       resolve(
         makeResolver(
-          communitiesData: try snapshotData([community()]),
+          communitiesData: try snapshotData([community(relayMetadataPubkey: channel.pubkey)]),
           now: Date(timeIntervalSince1970: TimeInterval(Self.now))
         )
       )
     )
 
     XCTAssertEqual(result.title, "Fizz")
+    XCTAssertEqual(result.conversationDisplayName, "#Large Channel")
+    XCTAssertEqual(result.conversationRecipientCount, 1)
     XCTAssertNil(result.senderAvatarPNG)
     XCTAssertEqual(result.body, "Inline avatar profile")
     XCTAssertEqual(URLProtocolStub.requests.count, 2)
