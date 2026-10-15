@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
 import 'dart:io';
 import 'dart:math' as math;

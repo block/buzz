@@ -103,98 +103,147 @@ class _MessageImageCarousel extends HookConsumerWidget {
                 preloadProvider: previewProviders[index],
               ),
           ];
+          final nativeGutter = math.max(
+            0.0,
+            MediaQuery.sizeOf(context).width - carouselWidth,
+          );
           final carousel = SizedBox(
             key: const ValueKey('message-media-carousel'),
             width: carouselWidth,
             height: messageMediaCarouselHeight,
-            child: _MessageCarouselViewport(
-              width: carouselWidth,
-              currentIndex: currentIndex.value,
-              itemCount: items.length,
-              onPageChanged: (index) {
-                if (index != currentIndex.value) {
-                  unawaited(HapticFeedback.selectionClick());
-                }
-                currentIndex.value = index;
-              },
-              itemBuilder: (context, index) {
-                final item = items[index];
-                return Padding(
-                  key: ValueKey('message-media-carousel-page:${item.url}'),
-                  padding: EdgeInsetsDirectional.only(
-                    end: itemTrailingPaddings[index],
-                  ),
-                  child: Semantics(
-                    button: true,
-                    excludeSemantics: true,
-                    label: 'Open ${item.semanticLabel}',
-                    child: GestureDetector(
-                      key: ValueKey('message-media-carousel-item:${item.url}'),
-                      onTap: () => openImageViewer(
+            child: !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS
+                ? OverflowBox(
+                    minWidth: carouselWidth + 2 * nativeGutter,
+                    maxWidth: carouselWidth + 2 * nativeGutter,
+                    child: IosMediaCarousel(
+                      key: ValueKey((itemSignature, mediaAuth)),
+                      providers: previewProviders,
+                      labels: [for (final item in items) item.semanticLabel],
+                      width: carouselWidth,
+                      gutter: nativeGutter,
+                      gap: Grid.half,
+                      trailingPadding: Grid.gutter,
+                      radius:
+                          (MessageAttachmentCorners.of(context) ??
+                                  BorderRadius.circular(Radii.md))
+                              .topLeft
+                              .x,
+                      onScroll: (offset) => MessageGalleryScrollNotification(
+                        offset,
+                      ).dispatch(context),
+                      onPageChanged: (index) {
+                        if (index != currentIndex.value) {
+                          unawaited(HapticFeedback.selectionClick());
+                        }
+                        currentIndex.value = index;
+                      },
+                      onOpen: (index) => openImageViewer(
                         context,
-                        imageUrl: item.url,
+                        imageUrl: items[index].url,
                         heroTag: heroTags[index],
-                        semanticLabel: item.semanticLabel,
+                        semanticLabel: items[index].semanticLabel,
                         previewDecodeWidth: previewDecodeWidths[index],
-                        aspectRatio: item.aspectRatio,
+                        aspectRatio: items[index].aspectRatio,
                         galleryItems: viewerItems,
                         initialIndex: index,
                         onReply: onReply,
                         onMore: onMore,
                       ),
-                      child: Container(
-                        clipBehavior: Clip.antiAlias,
-                        decoration: BoxDecoration(
-                          color: context.colors.surfaceContainerHighest,
-                          borderRadius:
-                              MessageAttachmentCorners.of(context) ??
-                              BorderRadius.circular(Radii.md),
-                          border: Border.all(
-                            color: context.colors.outlineVariant,
-                          ),
+                    ),
+                  )
+                : _MessageCarouselViewport(
+                    width: carouselWidth,
+                    currentIndex: currentIndex.value,
+                    itemCount: items.length,
+                    onPageChanged: (index) {
+                      if (index != currentIndex.value) {
+                        unawaited(HapticFeedback.selectionClick());
+                      }
+                      currentIndex.value = index;
+                    },
+                    itemBuilder: (context, index) {
+                      final item = items[index];
+                      return Padding(
+                        key: ValueKey(
+                          'message-media-carousel-page:${item.url}',
                         ),
-                        child: MediaViewerHero(
-                          tag: heroTags[index],
-                          child: ClipRRect(
-                            borderRadius:
-                                MessageAttachmentCorners.of(context) ??
-                                BorderRadius.circular(Radii.md),
-                            child: MediaImage(
-                              url: item.url,
-                              decodeWidth: previewDecodeWidths[index],
-                              fit: BoxFit.cover,
+                        padding: EdgeInsetsDirectional.only(
+                          end: itemTrailingPaddings[index],
+                        ),
+                        child: Semantics(
+                          button: true,
+                          excludeSemantics: true,
+                          label: 'Open ${item.semanticLabel}',
+                          child: GestureDetector(
+                            key: ValueKey(
+                              'message-media-carousel-item:${item.url}',
+                            ),
+                            onTap: () => openImageViewer(
+                              context,
+                              imageUrl: item.url,
+                              heroTag: heroTags[index],
                               semanticLabel: item.semanticLabel,
-                              frameBuilder:
-                                  (context, child, frame, synchronous) =>
-                                      frame != null || synchronous
-                                      ? child
-                                      : const MediaLoadingPlaceholder(
-                                          label: 'Loading image',
+                              previewDecodeWidth: previewDecodeWidths[index],
+                              aspectRatio: item.aspectRatio,
+                              galleryItems: viewerItems,
+                              initialIndex: index,
+                              onReply: onReply,
+                              onMore: onMore,
+                            ),
+                            child: Container(
+                              clipBehavior: Clip.antiAlias,
+                              decoration: BoxDecoration(
+                                color: context.colors.surfaceContainerHighest,
+                                borderRadius:
+                                    MessageAttachmentCorners.of(context) ??
+                                    BorderRadius.circular(Radii.md),
+                                border: Border.all(
+                                  color: context.colors.outlineVariant,
+                                ),
+                              ),
+                              child: MediaViewerHero(
+                                tag: heroTags[index],
+                                child: ClipRRect(
+                                  borderRadius:
+                                      MessageAttachmentCorners.of(context) ??
+                                      BorderRadius.circular(Radii.md),
+                                  child: MediaImage(
+                                    url: item.url,
+                                    decodeWidth: previewDecodeWidths[index],
+                                    fit: BoxFit.cover,
+                                    semanticLabel: item.semanticLabel,
+                                    frameBuilder:
+                                        (context, child, frame, synchronous) =>
+                                            frame != null || synchronous
+                                            ? child
+                                            : const MediaLoadingPlaceholder(
+                                                label: 'Loading image',
+                                              ),
+                                    errorBuilder: (_, _, _) =>
+                                        const _MediaPreviewFallback(
+                                          icon: BuzzIcons.imageOff,
+                                          label: 'Image unavailable',
                                         ),
-                              errorBuilder: (_, _, _) =>
-                                  const _MediaPreviewFallback(
-                                    icon: BuzzIcons.imageOff,
-                                    label: 'Image unavailable',
                                   ),
+                                ),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           );
 
           final carouselSurface = Stack(
             clipBehavior: Clip.none,
             children: [
               carousel,
-              _MessageGalleryPrecache(
-                providers: previewProviders,
-                focusedIndex: currentIndex.value,
-              ),
+              if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS)
+                _MessageGalleryPrecache(
+                  providers: previewProviders,
+                  focusedIndex: currentIndex.value,
+                ),
             ],
           );
 
