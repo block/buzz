@@ -1,5 +1,6 @@
 //! NIP-45 COUNT handler — aggregate queries with channel access enforcement.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use nostr::Filter;
@@ -95,7 +96,7 @@ pub async fn handle_count(
     // this, a scoped token would COUNT events in channels outside its scope via
     // the no-channel-filter SQL pushdown below (which counts every accessible
     // channel). The per-filter targeted-channel repair is bounded by the same
-    // scope through `resolve_request_local_access`'s `token_allows` argument.
+    // scope through `confirm_requested_channel_access`'s `token_channel_ids` argument.
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
@@ -164,35 +165,20 @@ pub async fn handle_count(
 
         if let Some(requested_channels) = requested_channels {
             let repaired_from = accessible_channels.len();
-            for &ch_id in &requested_channels {
-                if accessible_channels.contains(&ch_id) || readable_system.contains(&ch_id) {
-                    continue;
-                }
-                let token_allows = token_channel_ids
-                    .as_deref()
-                    .is_none_or(|allowed| allowed.contains(&ch_id));
-                let db_is_member = if token_allows {
-                    match state
-                        .db
-                        .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
-                        .await
-                    {
-                        Ok(member) => Some(member),
-                        Err(e) => {
-                            warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
-                            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
-                super::req::resolve_request_local_access(
-                    &mut accessible_channels,
-                    ch_id,
-                    token_allows,
-                    db_is_member,
-                );
+            if let Err(e) = super::req::confirm_requested_channel_access(
+                &state,
+                conn.tenant.community(),
+                &pubkey_bytes,
+                &requested_channels,
+                token_channel_ids.as_deref(),
+                &mut accessible_channels,
+                &readable_system,
+            )
+            .await
+            {
+                warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
             }
             if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
                 &state,
@@ -212,10 +198,11 @@ pub async fn handle_count(
                 &accessible_channels,
                 &readable_system,
             );
+            let scope: HashSet<_> = filter_scope.iter().collect();
             let authorized_requested: Vec<_> = requested_channels
                 .iter()
                 .copied()
-                .filter(|channel_id| filter_scope.contains(channel_id))
+                .filter(|channel_id| scope.contains(channel_id))
                 .collect();
             if authorized_requested.is_empty() {
                 continue;

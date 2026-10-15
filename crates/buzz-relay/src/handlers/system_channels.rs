@@ -19,6 +19,7 @@
 //! implicit set, so naming one system channel cannot widen a sibling filter.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use nostr::{Alphabet, Filter, SingleLetterTag};
 use uuid::Uuid;
@@ -81,7 +82,11 @@ fn filter_opts_in(filter: &Filter) -> bool {
 
 /// Whether `filter` could need a system channel added to its scope.
 fn filter_needs_system_channels(filter: &Filter, implicit: &[Uuid]) -> bool {
-    filter_opts_in(filter) || named_channels(filter).any(|id| !implicit.contains(&id))
+    if filter_opts_in(filter) {
+        return true;
+    }
+    let implicit: HashSet<Uuid> = implicit.iter().copied().collect();
+    named_channels(filter).any(|id| !implicit.contains(&id))
 }
 
 /// The channels `filter` may read: the implicit set, plus the readable
@@ -101,8 +106,10 @@ pub(crate) fn filter_channel_scope<'a>(
     } else {
         named_channels(filter).collect()
     };
+    let readable: HashSet<Uuid> = readable_system.iter().copied().collect();
+    let mut seen: HashSet<Uuid> = implicit.iter().copied().collect();
     for id in candidates {
-        if readable_system.contains(&id) && !implicit.contains(&id) && !extra.contains(&id) {
+        if readable.contains(&id) && seen.insert(id) {
             extra.push(id);
         }
     }
@@ -145,7 +152,7 @@ pub(crate) async fn readable_system_channels_for_filters(
 /// Move system channels out of the repaired tail of the implicit set.
 ///
 /// A request re-checks membership for named channels missing from its first
-/// lookups, and [`super::req::resolve_request_local_access`] appends each
+/// lookups, and [`super::req::confirm_requested_channel_access`] appends each
 /// confirmed one to the implicit set. A system channel lands there when the
 /// reader joins it between the lookups and the re-check. This moves it to
 /// `readable_system`, so only the filters that name it can read it.
