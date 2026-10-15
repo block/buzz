@@ -27,7 +27,35 @@ struct IosMediaCarouselTests {
     }
     precondition(cell.accessibilityLabel == "Open Photo A")
     precondition(cell.accessibilityTraits.contains(.button))
-    precondition(messenger.calls.contains { $0.method == "image" }, "Images requested after ready")
+    precondition(messenger.calls.contains { $0.method == "subscribeImage" }, "Images requested after ready")
+    guard let subscription = messenger.calls.first(where: {
+      $0.method == "subscribeImage" && ($0.arguments as? [String: Any])?["index"] as? Int == 0
+    }), let id = (subscription.arguments as? [String: Any])?["id"] as? String,
+      let photo = cell.contentView.subviews.compactMap({ $0 as? UIImageView }).first else {
+      preconditionFailure("Missing visible photo subscription")
+    }
+    func frame(_ color: UIColor) -> Data {
+      UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { context in
+        color.setFill()
+        context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+      }
+    }
+    messenger.frame(id, frame(.red))
+    let firstFrame = photo.image?.pngData()
+    messenger.frame(id, frame(.blue))
+    precondition(firstFrame != nil && photo.image?.pngData() != firstFrame,
+      "Native photo must display continuing animation frames")
+    precondition(subscription.arguments is [String: Any], "Subscriptions carry request IDs")
+    platform.collectionView(strip, didEndDisplaying: cell, forItemAt: first)
+    precondition(messenger.calls.last?.method == "cancelImage", "Disappearing cells cancel subscriptions")
+    let stoppedFrame = photo.image?.pngData()
+    messenger.frame(id, frame(.green))
+    precondition(photo.image?.pngData() == stoppedFrame, "Late cancelled frames must not paint")
+    platform.collectionView(strip, willDisplay: cell, forItemAt: first)
+    let resubscription = messenger.calls.last
+    cell.prepareForReuse()
+    precondition(messenger.calls.last?.method == "cancelImage", "Reuse cancels its previous subscription")
+    precondition((resubscription?.arguments as? [String: Any])?["id"] as? String == messenger.calls.last?.arguments as? String)
     platform.collectionView(strip, didSelectItemAt: IndexPath(item: 1, section: 0))
     precondition(messenger.calls.last?.method == "open")
     precondition(messenger.calls.last?.arguments as? Int == 1)
@@ -71,6 +99,12 @@ struct IosMediaCarouselTests {
 private final class CarouselTestMessenger: NSObject, FlutterBinaryMessenger {
   var calls: [FlutterMethodCall] = []
   var handler: FlutterBinaryMessageHandler?
+  func frame(_ id: String, _ data: Data) {
+    let codec = FlutterStandardMethodCodec.sharedInstance()
+    handler?(codec.encode(FlutterMethodCall(methodName: "imageFrame", arguments: [
+      "id": id, "bytes": FlutterStandardTypedData(bytes: data)
+    ])), { _ in })
+  }
   func configure(_ args: [String: Any]) {
     let codec = FlutterStandardMethodCodec.sharedInstance()
     handler?(codec.encode(FlutterMethodCall(methodName: "configure", arguments: args)), { _ in })

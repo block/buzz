@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:buzz/shared/widgets/ios_media_carousel.dart';
 import 'package:flutter/foundation.dart';
@@ -8,91 +10,228 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   testWidgets(
-    'native carousel routes callbacks and cancels image work on disposal',
+    'native callbacks and disposal release subscribed images',
     (tester) async {
-      final messenger = tester.binding.defaultBinaryMessenger;
-      final channels = <MethodChannel>[];
-      MethodChannel? native;
-      messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
-        call,
-      ) async {
-        if (call.method == 'create') {
-          final id = (call.arguments as Map)['id'];
-          native = MethodChannel('${IosMediaCarousel.viewType}/$id');
-          channels.add(native!);
-          messenger.setMockMethodCallHandler(native!, (_) async => null);
-        }
-        return null;
-      });
-      addTearDown(() {
-        messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
-        for (final channel in channels) {
-          messenger.setMockMethodCallHandler(channel, null);
-        }
-      });
-      final opened = <int>[];
-      final pages = <int>[];
-      final offsets = <double>[];
-      final provider = _PendingImage();
-      await tester.pumpWidget(
-        MaterialApp(
-          home: SizedBox(
-            width: 300,
-            height: 200,
-            child: IosMediaCarousel(
-              providers: [provider],
-              labels: const ['Photo 1'],
-              width: 300,
-              gutter: 20,
-              gap: 8,
-              trailingPadding: 16,
-              radius: 16,
-              onOpen: opened.add,
-              onScroll: offsets.add,
-              onPageChanged: pages.add,
-            ),
-          ),
-        ),
-      );
-      await tester.pump();
-      final channel = native!;
-      Future<Object?> send(String method, Object argument) async {
-        final response = Completer<ByteData?>();
-        await messenger.handlePlatformMessage(
-          channel.name,
-          channel.codec.encodeMethodCall(MethodCall(method, argument)),
-          response.complete,
-        );
-        final bytes = await response.future;
-        return bytes == null ? null : channel.codec.decodeEnvelope(bytes);
-      }
-
-      await send('open', 0);
-      await send('open', 2);
-      await send('page', 0);
-      await send('scroll', 21.5);
-      expect(opened, [0]);
-      expect(pages, [0]);
-      expect(offsets, [21.5]);
-      final pending = send('image', 0);
-      await tester.pump();
+      final provider = _TestImage();
+      final harness = await _mount(tester, [provider]);
+      await harness.send('open', 0);
+      await harness.send('open', 2);
+      await harness.send('page', 0);
+      await harness.send('scroll', 21.5);
+      expect(harness.opened, [0]);
+      expect(harness.pages, [0]);
+      expect(harness.offsets, [21.5]);
+      await harness.send('subscribeImage', {'id': 'a', 'index': 0});
+      expect(provider.completer.listeners, hasLength(1));
       await tester.pumpWidget(const SizedBox());
+      expect(provider.completer.listeners, isEmpty);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'multi-image native gallery forwards continuing animation frames',
+    (tester) async {
+      final animated = _TestImage();
+      final still = _TestImage();
+      final harness = await _mount(tester, [animated, still]);
+      await harness.send('subscribeImage', {'id': 'animated', 'index': 0});
+      await harness.send('subscribeImage', {'id': 'still', 'index': 1});
+      final decoded = await tester.runAsync(() async {
+        // Two 1x1 GIF frames with different palette indices: red, then blue.
+        final codec = await ui.instantiateImageCodec(
+          base64Decode(
+            'R0lGODlhAQABAIAAAP8AAAAA/yH5BAAKAAAALAAAAAABAAEAAAICRAEAIfkEAAoAAAAsAAAAAAEAAQAAAgJMAQA7',
+          ),
+        );
+        try {
+          expect(codec.frameCount, 2);
+          return [
+            (await codec.getNextFrame()).image,
+            (await codec.getNextFrame()).image,
+          ];
+        } finally {
+          codec.dispose();
+        }
+      });
+      await tester.runAsync(() async {
+        animated.completer.emit(decoded![0]);
+        await harness.waitForFrames(1);
+        animated.completer.emit(decoded[1]);
+        await harness.waitForFrames(2);
+      });
+      expect(harness.frames.map((f) => f['id']), ['animated', 'animated']);
+      expect(
+        harness.frames[0]['bytes'],
+        isNot(orderedEquals(harness.frames[1]['bytes'] as Uint8List)),
+      );
+      await harness.send('cancelImage', 'animated');
+      expect(animated.completer.listeners, isEmpty);
+      final count = harness.frames.length;
+      final green = await tester.runAsync(() => _frame(Colors.green));
+      animated.completer.emit(green!);
       await tester.pump();
-      expect(await pending, isNull);
-      expect(tester.takeException(), isNull);
+      expect(harness.frames, hasLength(count));
+      await tester.pumpWidget(const SizedBox());
+      expect(still.completer.listeners, isEmpty);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'rapid reuse bounds unresolved loads and drops cancelled queued requests',
+    (tester) async {
+      final providers = List.generate(20, (_) => _TestImage());
+      final harness = await _mount(tester, providers);
+      for (var index = 0; index < 20; index++) {
+        await harness.send('subscribeImage', {'id': '$index', 'index': index});
+        if (index < 19) await harness.send('cancelImage', '$index');
+      }
+      expect(providers.where((p) => p.resolutions > 0), hasLength(4));
+      expect(
+        providers.skip(4).take(15).every((p) => p.completer.listeners.isEmpty),
+        isTrue,
+      );
+      // Retired pending providers retain a bounded completion observer because
+      // the shared HTTP provider cannot abort. Completion releases that slot.
+      final image = await tester.runAsync(() => _frame(Colors.red));
+      providers[0].completer.emit(image!);
+      await tester.pump();
+      expect(providers[0].completer.listeners, isEmpty);
+      expect(providers[19].resolutions, 1);
+      expect(
+        harness.frames,
+        isEmpty,
+        reason: 'Cancelled loads must never reach UIKit',
+      );
+      await tester.pumpWidget(const SizedBox());
+      expect(providers.every((p) => p.completer.listeners.isEmpty), isTrue);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 }
 
-class _PendingImage extends ImageProvider<_PendingImage> {
-  final pending = Completer<ImageInfo>();
+Future<ui.Image> _frame(Color color) async {
+  final recorder = ui.PictureRecorder();
+  Canvas(
+    recorder,
+  ).drawRect(const Rect.fromLTWH(0, 0, 2, 2), Paint()..color = color);
+  final picture = recorder.endRecording();
+  try {
+    return await picture.toImage(2, 2);
+  } finally {
+    picture.dispose();
+  }
+}
+
+Future<_Harness> _mount(WidgetTester tester, List<_TestImage> providers) async {
+  final harness = _Harness(tester);
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+    call,
+  ) async {
+    if (call.method == 'create') {
+      final id = (call.arguments as Map)['id'];
+      harness.channel = MethodChannel('${IosMediaCarousel.viewType}/$id');
+      messenger.setMockMethodCallHandler(harness.channel, (call) async {
+        if (call.method == 'imageFrame') {
+          harness.frames.add(Map<String, Object?>.from(call.arguments as Map));
+          harness.changed?.complete();
+          harness.changed = null;
+        }
+        return null;
+      });
+    }
+    return null;
+  });
+  addTearDown(() {
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+    messenger.setMockMethodCallHandler(harness.channel, null);
+  });
+  await tester.pumpWidget(
+    MaterialApp(
+      home: SizedBox(
+        width: 300,
+        height: 200,
+        child: IosMediaCarousel(
+          providers: providers,
+          labels: List.generate(providers.length, (i) => 'Photo $i'),
+          width: 300,
+          gutter: 20,
+          gap: 4,
+          trailingPadding: 20,
+          radius: 16,
+          onOpen: harness.opened.add,
+          onScroll: harness.offsets.add,
+          onPageChanged: harness.pages.add,
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+  return harness;
+}
+
+class _Harness {
+  _Harness(this.tester);
+  final WidgetTester tester;
+  late MethodChannel channel;
+  final opened = <int>[];
+  final pages = <int>[];
+  final offsets = <double>[];
+  final frames = <Map<String, Object?>>[];
+  Completer<void>? changed;
+  Future<void> waitForFrames(int count) async {
+    while (frames.length < count) {
+      changed = Completer<void>();
+      await changed!.future.timeout(const Duration(seconds: 5));
+    }
+  }
+
+  Future<void> send(String method, Object argument) async {
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      channel.name,
+      channel.codec.encodeMethodCall(MethodCall(method, argument)),
+      (_) {},
+    );
+  }
+}
+
+class _TestImage extends ImageProvider<_TestImage> {
+  _TestImage() {
+    final handle = completer.keepAlive();
+    addTearDown(handle.dispose);
+  }
+  final completer = _TestCompleter();
+  int resolutions = 0;
   @override
-  Future<_PendingImage> obtainKey(ImageConfiguration configuration) =>
+  Future<_TestImage> obtainKey(ImageConfiguration configuration) =>
       SynchronousFuture(this);
   @override
-  ImageStreamCompleter loadImage(
-    _PendingImage key,
-    ImageDecoderCallback decode,
-  ) => OneFrameImageStreamCompleter(pending.future);
+  void resolveStreamForKey(
+    ImageConfiguration configuration,
+    ImageStream stream,
+    _TestImage key,
+    ImageErrorListener handleError,
+  ) {
+    resolutions++;
+    stream.setCompleter(completer);
+  }
+}
+
+class _TestCompleter extends ImageStreamCompleter {
+  final listeners = <ImageStreamListener>{};
+  @override
+  void addListener(ImageStreamListener listener) {
+    listeners.add(listener);
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(ImageStreamListener listener) {
+    listeners.remove(listener);
+    super.removeListener(listener);
+  }
+
+  void emit(ui.Image image) => setImage(ImageInfo(image: image));
 }

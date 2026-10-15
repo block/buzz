@@ -56,70 +56,39 @@ class IosMediaCarousel extends HookWidget {
     useEffect(() {
       final bridge = channel.value;
       if (bridge == null) return null;
-      var active = true;
-      final pending = <VoidCallback>{};
-      bridge.setMethodCallHandler((call) async {
+      final images = _CarouselImages(bridge);
+      channel.value!.setMethodCallHandler((call) async {
         final widget = latest.value;
-        final index = call.arguments;
-        if (call.method == 'scroll' && index is num) {
-          widget.onScroll(index.toDouble());
-        } else if (index is int &&
-            index >= 0 &&
-            index < widget.providers.length) {
-          switch (call.method) {
-            case 'open':
-              widget.onOpen(index);
-            case 'page':
-              widget.onPageChanged(index);
-            case 'image':
-              final result = Completer<ImageInfo?>();
-              final stream = widget.providers[index].resolve(
-                createLocalImageConfiguration(context),
-              );
-              final listener = ImageStreamListener(
-                (image, _) {
-                  if (!result.isCompleted) {
-                    result.complete(image.clone());
-                  }
-                  image.dispose();
-                },
-                onError: (Object _, StackTrace? _) {
-                  if (!result.isCompleted) result.complete(null);
-                },
-              );
-              void cancel() {
-                stream.removeListener(listener);
-                if (!result.isCompleted) result.complete(null);
-              }
-              pending.add(cancel);
-              stream.addListener(listener);
-              final image = await result.future.timeout(
-                const Duration(seconds: 30),
-                onTimeout: () => null,
-              );
-              cancel();
-              pending.remove(cancel);
-              if (image == null) return null;
-              try {
-                if (!active) return null;
-                final bytes = await image.image.toByteData(
-                  format: ui.ImageByteFormat.png,
-                );
-                return active ? bytes?.buffer.asUint8List() : null;
-              } finally {
-                image.dispose();
-              }
+        final argument = call.arguments;
+        if (call.method == 'cancelImage' && argument is String) {
+          images.cancel(argument);
+        } else if (call.method == 'subscribeImage' && argument is Map) {
+          final id = argument['id'];
+          final index = argument['index'];
+          if (id is String &&
+              index is int &&
+              index >= 0 &&
+              index < widget.providers.length) {
+            images.subscribe(
+              id,
+              widget.providers[index],
+              createLocalImageConfiguration(context),
+            );
           }
+        } else if (call.method == 'scroll' && argument is num) {
+          widget.onScroll(argument.toDouble());
+        } else if (argument is int &&
+            argument >= 0 &&
+            argument < widget.providers.length) {
+          if (call.method == 'open') widget.onOpen(argument);
+          if (call.method == 'page') widget.onPageChanged(argument);
         }
         return null;
       });
       // UIKit requests visible thumbnails only after the Dart handler exists.
       unawaited(bridge.invokeMethod<void>('configure', configuration));
       return () {
-        active = false;
-        for (final cancel in pending) {
-          cancel();
-        }
+        images.dispose();
         bridge.setMethodCallHandler(null);
       };
     }, [channel.value]);
@@ -156,5 +125,154 @@ class IosMediaCarousel extends HookWidget {
         channel.value = MethodChannel('$viewType/$id');
       },
     );
+  }
+}
+
+// Keep native subscriptions and unresolved provider loads bounded together.
+// The shared image provider cannot abort its HTTP fetch. A cancelled load keeps
+// its slot until its first frame/error, so rapid reuse cannot start more fetches.
+class _CarouselImages {
+  _CarouselImages(this.channel);
+  final MethodChannel channel;
+  final _queued = <String, _CarouselImage>{};
+  final _running = <String, _CarouselImage>{};
+  bool _disposed = false;
+  bool _draining = false;
+
+  void subscribe(
+    String id,
+    ImageProvider<Object> provider,
+    ImageConfiguration config,
+  ) {
+    if (_disposed || _running.containsKey(id) || _queued.containsKey(id)) {
+      return;
+    }
+    _queued[id] = _CarouselImage(id, provider, config);
+    _drain();
+  }
+
+  void cancel(String id) {
+    _queued.remove(id);
+    final image = _running[id];
+    if (image == null) return;
+    image.cancelled = true;
+    image.nextFrame?.dispose();
+    image.nextFrame = null;
+    if (image.receivedFrame) {
+      image.detach();
+      if (!image.encoding) _finish(image);
+    }
+  }
+
+  void _drain() {
+    if (_draining || _disposed) return;
+    _draining = true;
+    try {
+      while (_running.length < 4 && _queued.isNotEmpty) {
+        final image = _queued.remove(_queued.keys.first)!;
+        _running[image.id] = image;
+        image.stream = image.provider.resolve(image.config);
+        image.listener = ImageStreamListener(
+          (frame, _) {
+            image.receivedFrame = true;
+            if (image.cancelled || _disposed) {
+              frame.dispose();
+              _finish(image);
+              return;
+            }
+            image.nextFrame?.dispose();
+            image.nextFrame = frame;
+            if (!image.encoding) unawaited(_sendFrames(image));
+          },
+          onError: (Object _, StackTrace? _) {
+            image.receivedFrame = true;
+            if (!image.cancelled && !_disposed) {
+              unawaited(_send(image.id, null));
+            }
+            image.cancelled = true;
+            image.detach();
+            if (!image.encoding) _finish(image);
+          },
+        );
+        image.stream!.addListener(image.listener!);
+      }
+    } finally {
+      _draining = false;
+    }
+  }
+
+  Future<void> _sendFrames(_CarouselImage image) async {
+    image.encoding = true;
+    try {
+      while (!_disposed && !image.cancelled && image.nextFrame != null) {
+        final frame = image.nextFrame!;
+        image.nextFrame = null;
+        try {
+          final bytes = await frame.image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
+          if (!_disposed && !image.cancelled) {
+            await _send(image.id, bytes?.buffer.asUint8List());
+          }
+        } finally {
+          frame.dispose();
+        }
+      }
+    } catch (_) {
+      if (!_disposed && !image.cancelled) await _send(image.id, null);
+      image.cancelled = true;
+    } finally {
+      image.encoding = false;
+      if (_disposed || image.cancelled) _finish(image);
+    }
+  }
+
+  Future<void> _send(String id, Uint8List? bytes) async {
+    try {
+      await channel.invokeMethod<void>('imageFrame', {
+        'id': id,
+        'bytes': bytes,
+      });
+    } on PlatformException {
+      // The native view may disappear while a frame crosses the bridge.
+    } on MissingPluginException {
+      // Disposal can remove the channel before an in-flight frame arrives.
+    }
+  }
+
+  void _finish(_CarouselImage image) {
+    image.detach();
+    image.nextFrame?.dispose();
+    image.nextFrame = null;
+    _running.remove(image.id);
+    _drain();
+  }
+
+  void dispose() {
+    _disposed = true;
+    _queued.clear();
+    for (final image in _running.values.toList()) {
+      image.cancelled = true;
+      _finish(image);
+    }
+  }
+}
+
+class _CarouselImage {
+  _CarouselImage(this.id, this.provider, this.config);
+  final String id;
+  final ImageProvider<Object> provider;
+  final ImageConfiguration config;
+  ImageStream? stream;
+  ImageStreamListener? listener;
+  ImageInfo? nextFrame;
+  bool cancelled = false;
+  bool receivedFrame = false;
+  bool encoding = false;
+
+  void detach() {
+    final listener = this.listener;
+    if (listener != null) stream?.removeListener(listener);
+    this.listener = null;
   }
 }

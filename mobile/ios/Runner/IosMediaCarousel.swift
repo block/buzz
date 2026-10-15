@@ -15,7 +15,13 @@ final class IosMediaCarouselFactory: NSObject, FlutterPlatformViewFactory {
 private final class CarouselPhotoCell: UICollectionViewCell {
   let image = UIImageView()
   let status = UILabel()
-  var request = UUID()
+  var request: String?
+  var cancelRequest: (() -> Void)?
+  func cancelImage() {
+    cancelRequest?()
+    cancelRequest = nil
+    request = nil
+  }
   override init(frame: CGRect) {
     super.init(frame: frame)
     image.contentMode = .scaleAspectFill
@@ -39,7 +45,7 @@ private final class CarouselPhotoCell: UICollectionViewCell {
   }
   override func prepareForReuse() {
     super.prepareForReuse()
-    request = UUID()
+    cancelImage()
     image.image = nil
     status.text = nil
   }
@@ -77,7 +83,18 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     collection.register(CarouselPhotoCell.self, forCellWithReuseIdentifier: "photo")
     apply(arguments as? [String: Any] ?? [:])
     channel.setMethodCallHandler { [weak self] call, result in
-      guard let self, call.method == "configure", let args = call.arguments as? [String: Any] else {
+      guard let self else { result(nil); return }
+      if call.method == "imageFrame", let args = call.arguments as? [String: Any],
+         let id = args["id"] as? String {
+        for case let cell as CarouselPhotoCell in self.collection.visibleCells where cell.request == id {
+          let image = (args["bytes"] as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
+          cell.image.image = image
+          cell.status.text = image == nil ? "Image unavailable\nTap to open" : nil
+        }
+        result(nil)
+        return
+      }
+      guard call.method == "configure", let args = call.arguments as? [String: Any] else {
         result(FlutterMethodNotImplemented)
         return
       }
@@ -118,6 +135,7 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     }
     if oldTrailingPadding != trailingPadding || oldStride != stride || oldGutter != gutter || oldLabels != labels || oldRTL != rtl {
       selected = min(selected, max(0, labels.count - 1))
+      for case let cell as CarouselPhotoCell in collection.visibleCells { cell.cancelImage() }
       collection.reloadData()
       collection.layoutIfNeeded()
       collection.contentOffset.x = clampedOffset(CGFloat(selected) * stride - gutter)
@@ -139,16 +157,20 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     cell.accessibilityLabel = "Open \(labels[indexPath.item])"
     cell.accessibilityValue = "\(indexPath.item + 1) of \(labels.count)"
     cell.status.text = "Loading image"
-    guard ready else { return cell }
-    let request = UUID()
-    cell.request = request
-    channel.invokeMethod("image", arguments: indexPath.item) { [weak cell] response in
-      guard let cell, cell.request == request else { return }
-      let image = (response as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
-      cell.image.image = image
-      cell.status.text = image == nil ? "Image unavailable\nTap to open" : nil
-    }
     return cell
+  }
+  func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+    guard ready, let cell = cell as? CarouselPhotoCell else { return }
+    cell.cancelImage()
+    let id = UUID().uuidString
+    cell.request = id
+    cell.cancelRequest = { [weak self] in
+      self?.channel.invokeMethod("cancelImage", arguments: id)
+    }
+    channel.invokeMethod("subscribeImage", arguments: ["id": id, "index": indexPath.item])
+  }
+  func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+    (cell as? CarouselPhotoCell)?.cancelImage()
   }
   func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
     channel.invokeMethod("open", arguments: indexPath.item)
@@ -171,5 +193,10 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     let maximum = max(-gutter, collection.contentSize.width - collection.bounds.width + gutter)
     return min(maximum, max(-gutter, offset))
   }
-  deinit { channel.setMethodCallHandler(nil) }
+  deinit {
+    for case let cell as CarouselPhotoCell in collection.visibleCells {
+      if let id = cell.request { channel.invokeMethod("cancelImage", arguments: id) }
+    }
+    channel.setMethodCallHandler(nil)
+  }
 }

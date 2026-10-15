@@ -206,6 +206,7 @@ jobs:
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
           /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
+          /bin/bash scripts/test-mobile-carousel.sh "$device"
           /bin/bash scripts/test-mobile-member-picker.sh "$device"
           xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner \
             -configuration Debug -destination "platform=iOS Simulator,id=$device" \

@@ -239,10 +239,11 @@ class _MessageImageCarousel extends HookConsumerWidget {
             clipBehavior: Clip.none,
             children: [
               carousel,
-              _MessageGalleryPrecache(
-                providers: previewProviders,
-                focusedIndex: currentIndex.value,
-              ),
+              if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS)
+                _MessageGalleryPrecache(
+                  providers: previewProviders,
+                  focusedIndex: currentIndex.value,
+                ),
             ],
           );
 
