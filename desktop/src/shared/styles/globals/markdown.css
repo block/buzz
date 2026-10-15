@@ -16,6 +16,26 @@
   display: none;
 }
 
+/* Bidi — resolve direction per block from its first strong character, so RTL
+   scripts (Hebrew, Arabic) keep trailing punctuation, brackets and numbers on
+   the correct edge. The document is LTR, so without this every block resolves
+   at paragraph level 0 and neutrals at a run boundary take the wrong side.
+   LTR-only content is unaffected. Applies to reading and typing alike —
+   MESSAGE_MARKDOWN_CLASS is on both the rendered message and the editor root. */
+.message-markdown p,
+.message-markdown li,
+.message-markdown blockquote,
+.message-markdown h1,
+.message-markdown h2,
+.message-markdown h3,
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6,
+.message-markdown td,
+.message-markdown th {
+  unicode-bidi: plaintext;
+}
+
 .message-markdown [data-link-preview] {
   --buzz-link-preview-icon-bg: hsl(var(--muted));
   --buzz-link-preview-icon-color: hsl(var(--foreground));
