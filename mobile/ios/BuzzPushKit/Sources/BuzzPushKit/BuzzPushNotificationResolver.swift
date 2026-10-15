@@ -261,14 +261,11 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       return
     }
     request.setValue(auth, forHTTPHeaderField: "Authorization")
-    session.downloadTask(with: request) { fileURL, response, _ in
-      guard let response = response as? HTTPURLResponse,
-        (200..<300).contains(response.statusCode),
-        let fileURL,
-        let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
-        let fileSize = values.fileSize,
-        fileSize <= Self.maximumPresentationResponseBytes,
-        let data = try? Data(contentsOf: fileURL),
+    BuzzNotificationDownload.start(
+      request: request, configuration: session.configuration,
+      maximumBytes: Self.maximumPresentationResponseBytes
+    ) { result in
+      guard case .success(let data) = result,
         let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
       else {
         completion(nil, nil, nil)
@@ -302,7 +299,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
             })
         } : nil
       completion(profile, channel, membership)
-    }.resume()
+    }
   }
 
   static func decodeResolution(

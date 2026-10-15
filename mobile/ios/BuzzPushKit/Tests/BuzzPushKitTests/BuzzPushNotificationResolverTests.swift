@@ -643,6 +643,11 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
   }
 
   func testOversizedPresentationRefreshFallsBackWithoutBlockingMessage() throws {
+    let cancelled = expectation(description: "Oversized streaming response is cancelled")
+    URLProtocolStub.finishLoading = { _ in URLProtocolStub.requests.count == 1 }
+    URLProtocolStub.onStopLoading = { _ in
+      if URLProtocolStub.requests.count > 1 { cancelled.fulfill() }
+    }
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,
       createdAt: Self.now,
@@ -683,6 +688,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.body, "Bounded fallback")
     XCTAssertEqual(URLProtocolStub.requests.count, 2)
+    wait(for: [cancelled], timeout: 1)
   }
 
   func testBoundedInlineAvatarProfileRefreshStillResolvesDisplayName() throws {
@@ -959,6 +965,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
   final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     static let lock = NSLock()
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var finishLoading: ((URLRequest) -> Bool)?
+    static var onStopLoading: ((URLRequest) -> Void)?
     static var requests: [URLRequest] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -973,17 +981,21 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
         let (response, data) = try handler?(request) ?? { throw URLError(.unsupportedURL) }()
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
-        client?.urlProtocolDidFinishLoading(self)
+        if Self.finishLoading?(request) ?? true {
+          client?.urlProtocolDidFinishLoading(self)
+        }
       } catch {
         client?.urlProtocol(self, didFailWithError: error)
       }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() { Self.onStopLoading?(request) }
 
     static func reset() {
       lock.lock()
       handler = nil
+      finishLoading = nil
+      onStopLoading = nil
       requests = []
       lock.unlock()
     }
