@@ -139,7 +139,12 @@ public final class BuzzNotificationAvatarLoader {
 
   private static func isRelayMedia(_ url: URL, scope: BuzzNotificationCacheScope) -> Bool {
     guard let origin = URL(string: scope.relayOrigin) else { return false }
-    return url.scheme == origin.scheme && url.host == origin.host && url.port == origin.port
+    func effectivePort(_ value: URL) -> Int? {
+      value.port ?? (value.scheme?.lowercased() == "https" ? 443 : 80)
+    }
+    return url.scheme?.lowercased() == origin.scheme?.lowercased()
+      && url.host?.lowercased() == origin.host?.lowercased()
+      && effectivePort(url) == effectivePort(origin)
       && url.path.hasPrefix("/media/")
   }
 
