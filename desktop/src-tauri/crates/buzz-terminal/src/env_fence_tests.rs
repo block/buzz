@@ -4,9 +4,11 @@
 //! assertion against the `CommandBuilder` alone would be weaker: it would not
 //! prove that what the builder holds is what the kernel hands the child.
 
-use crate::env_fence::fence_env;
-use crate::path::user_shell_path;
-use crate::shell::{is_executable_file, login_argv0, resolve_shell, FALLBACK_SHELL};
+use crate::env_fence::{fence_env, WINDOWS_INHERIT_ALLOWLIST};
+use crate::path::{user_shell_path, windows_shell_path};
+use crate::shell::{
+    is_executable_file, login_argv0, pick_windows_shell, resolve_shell, FALLBACK_SHELL,
+};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::Read;
 
@@ -324,6 +326,208 @@ fn child_shell_is_the_resolved_shell_not_the_inherited_one() {
         !out.contains("/definitely/not/a/real/shell"),
         "the inherited SHELL reached the child:\n{out}"
     );
+}
+
+/// The Windows allowlist obeys the same law as the Unix one: no secrets, ever.
+/// Windows environment names are case-insensitive, so the comparison here is
+/// too — an allowlist entry of `comspec` and one of `BUZZ_PRIVATE_KEY` differ
+/// only in how obviously wrong they are.
+#[test]
+fn windows_allowlist_admits_no_secrets() {
+    for entry in WINDOWS_INHERIT_ALLOWLIST {
+        let upper = entry.to_ascii_uppercase();
+        assert!(
+            !SECRET_KEYS
+                .iter()
+                .any(|secret| secret.eq_ignore_ascii_case(entry)),
+            "{entry} is a reserved secret and must not be allowlisted"
+        );
+        assert!(
+            !upper.starts_with("BUZZ") && !upper.starts_with("NOSTR"),
+            "{entry}: Buzz/Nostr-namespaced keys are exactly what the fence \
+             exists to withhold"
+        );
+    }
+}
+
+/// The keys the spawn itself depends on must be present: `ComSpec` and
+/// `USERPROFILE` feed `portable-pty`'s default-program and cwd resolution
+/// (`cmdbuilder.rs:671-675`, `:609-611`), and their absence is the confirmed
+/// `CreateProcessW "cmd.exe" in cwd None ... (os error 2)` failure. This
+/// pins them so a future trim of the list cannot silently reintroduce it.
+#[test]
+fn windows_allowlist_covers_the_spawn_contract() {
+    for key in ["ComSpec", "SystemRoot", "PATHEXT", "USERPROFILE"] {
+        assert!(
+            WINDOWS_INHERIT_ALLOWLIST.contains(&key),
+            "{key} is load-bearing for the Windows spawn and must stay \
+             allowlisted"
+        );
+    }
+}
+
+/// A rooted `ComSpec` naming a real file is the user's choice; honour it
+/// verbatim, including the `C:/` forward-slash and `\\server` UNC spellings
+/// Windows itself accepts.
+#[test]
+fn windows_shell_honours_a_valid_comspec() {
+    for candidate in [
+        r"C:\Windows\System32\cmd.exe",
+        r"D:\shells\nu.exe",
+        "C:/Windows/System32/cmd.exe",
+        r"\\server\share\cmd.exe",
+    ] {
+        assert_eq!(
+            pick_windows_shell(Some(candidate), Some(r"C:\Windows"), |path| path
+                == candidate),
+            candidate,
+            "a rooted, existing ComSpec must be used verbatim"
+        );
+    }
+}
+
+/// A `ComSpec` naming a file that does not exist falls through to the
+/// `SystemRoot`-derived absolute fallback — the case that used to become
+/// `CreateProcessW`'s os error 2, because `lpApplicationName` is never
+/// path-searched.
+#[test]
+fn windows_shell_falls_back_when_comspec_is_missing() {
+    let picked = pick_windows_shell(
+        Some(r"C:\definitely\not\real\cmd.exe"),
+        Some(r"D:\CustomRoot"),
+        |_| false,
+    );
+    assert_eq!(picked, r"D:\CustomRoot\System32\cmd.exe");
+}
+
+/// The hijack guard: a relative `ComSpec=cmd.exe` is rejected even when a file
+/// by that name exists, because `lpApplicationName` would execute whatever
+/// `cmd.exe` sits in Buzz's current directory. `is_file` answering `true` is
+/// exactly the attack scenario, so this arm discriminates the rootedness
+/// check from the existence check.
+#[test]
+fn windows_shell_rejects_a_relative_comspec_even_if_the_file_exists() {
+    for candidate in ["cmd.exe", r"tools\cmd.exe", r"\cmd.exe", "C:cmd.exe"] {
+        assert_eq!(
+            pick_windows_shell(Some(candidate), Some(r"C:\Windows"), |_| true),
+            r"C:\Windows\System32\cmd.exe",
+            "{candidate}: a ComSpec not anchored to a drive or UNC share must \
+             not be spawned"
+        );
+    }
+}
+
+/// With no `ComSpec` and no `SystemRoot` at all — a hand-stripped environment
+/// — the resolver still produces an absolute path rather than a bare name.
+#[test]
+fn windows_shell_survives_an_empty_environment() {
+    assert_eq!(
+        pick_windows_shell(None, None, |_| false),
+        r"C:\Windows\System32\cmd.exe"
+    );
+}
+
+/// `SystemRoot` comes from the mutable process environment, so presence alone
+/// does not make the fallback absolute. A relative or empty value must not
+/// recreate the same current-directory hijack rejected for `ComSpec`.
+#[test]
+fn windows_shell_rejects_an_unrooted_system_root() {
+    for system_root in ["", "Windows", r"\Windows", "C:Windows"] {
+        assert_eq!(
+            pick_windows_shell(None, Some(system_root), |_| false),
+            r"C:\Windows\System32\cmd.exe",
+            "{system_root:?}: an unrooted SystemRoot must use the absolute fallback"
+        );
+    }
+}
+
+/// The user's own entries survive, in their own order, ahead of the system
+/// directories we guarantee. This is the regression that stripped `ssh`,
+/// `git`, and every other installed tool from the Windows terminal.
+#[test]
+fn windows_path_keeps_what_the_user_installed() {
+    let inherited = r"C:\Users\dev\.cargo\bin;C:\Program Files\Git\cmd;C:\Windows\System32\OpenSSH";
+    let path = windows_shell_path(Some(inherited), Some(r"C:\Windows"));
+    let entries: Vec<&str> = path.split(';').collect();
+
+    assert_eq!(
+        &entries[..3],
+        &[
+            r"C:\Users\dev\.cargo\bin",
+            r"C:\Program Files\Git\cmd",
+            r"C:\Windows\System32\OpenSSH",
+        ],
+        "inherited entries must keep their order and their precedence"
+    );
+    for required in [
+        r"C:\Windows\System32",
+        r"C:\Windows",
+        r"C:\Windows\System32\Wbem",
+        r"C:\Windows\System32\WindowsPowerShell\v1.0",
+    ] {
+        assert!(
+            entries.contains(&required),
+            "{required} must be reachable however sparse the inherited PATH"
+        );
+    }
+}
+
+/// A `PATH` that already names a system directory must not gain a second copy
+/// of it, whatever case or trailing separator it was written with.
+#[test]
+fn windows_path_does_not_duplicate_system_directories() {
+    let path = windows_shell_path(
+        Some(r"c:\windows\system32\;C:\tools;C:\WINDOWS\System32\Wbem"),
+        Some(r"C:\Windows"),
+    );
+    let entries: Vec<&str> = path.split(';').collect();
+
+    let system32 = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .trim_end_matches('\\')
+                .eq_ignore_ascii_case(r"C:\Windows\System32")
+        })
+        .count();
+    assert_eq!(
+        system32, 1,
+        "System32 appears once, in the form the user wrote: {path}"
+    );
+    assert!(
+        entries.contains(&r"C:\tools"),
+        "de-duplication must not drop unrelated entries: {path}"
+    );
+}
+
+/// An absent or empty inherited `PATH` still yields a usable shell rather than
+/// an empty string.
+#[test]
+fn windows_path_survives_an_empty_environment() {
+    for inherited in [None, Some(""), Some(";;")] {
+        let path = windows_shell_path(inherited, None);
+        assert_eq!(
+            path,
+            r"C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0",
+            "an empty inherited PATH falls back to the system directories alone"
+        );
+    }
+}
+
+/// The system directories appended to PATH obey the same rootedness rule as
+/// the shell fallback; otherwise an invalid `SystemRoot` would still add
+/// current-directory-relative command lookup locations.
+#[test]
+fn windows_path_rejects_an_unrooted_system_root() {
+    let expected = r"C:\tools;C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0";
+
+    for system_root in ["", "Windows", r"\Windows", "C:Windows"] {
+        assert_eq!(
+            windows_shell_path(Some(r"C:\tools"), Some(system_root)),
+            expected,
+            "{system_root:?}: PATH must append only rooted system directories"
+        );
+    }
 }
 
 /// Guards the duplication of `RESERVED_ENV_KEYS` above. If the desktop crate
