@@ -34,8 +34,8 @@ import { installMockBridge } from "../helpers/bridge";
  * does NOT measure the WKWebView compositor feel on the shipped Tauri shell —
  * that is a separate real-wheel pass.
  *
- * Run it:
- *   pnpm build && npx playwright test --config=playwright.perf.config.ts \
+ * Run it (build:e2e, not build — a plain build strips the mock bridge):
+ *   pnpm build:e2e && npx playwright test --config=playwright.perf.config.ts \
  *     cold-switch-longtask.perf.ts
  */
 
