@@ -99,11 +99,7 @@ pub async fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolRe
 
     // Apply the size cap to the full output (body + Supporting Files section)
     // so the total tool result stays within MAX_SKILL_BODY_BYTES.
-    let output = if output.len() > MAX_SKILL_BODY_BYTES {
-        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
-    } else {
-        output
-    };
+    let output = truncate_with_marker(output, MAX_SKILL_BODY_BYTES, name);
 
     ToolResult {
         provider_id: String::new(),
@@ -203,11 +199,11 @@ async fn load_supporting_file(
                         "# Loaded: {}/{}\n\n{}\n\n---\nFile loaded into context.",
                         skill_name, rel_path_owned, content
                     );
-                    let output = if output.len() > MAX_SKILL_BODY_BYTES {
-                        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
-                    } else {
-                        output
-                    };
+                    let output = truncate_with_marker(
+                        output,
+                        MAX_SKILL_BODY_BYTES,
+                        &format!("{skill_name}/{rel_path_owned}"),
+                    );
                     ToolResult {
                         provider_id: String::new(),
                         content: vec![ToolResultContent::Text(output)],
@@ -227,6 +223,43 @@ async fn load_supporting_file(
             "load_skill: could not resolve {skill_name:?}/{rel_path_owned}: {e}"
         )),
     }
+}
+
+/// Byte allowance reserved for the truncation marker inside
+/// [`truncate_with_marker`]. The marker is fixed text plus two decimal byte
+/// counts — under 100 bytes for any `usize` — so the slack keeps the
+/// arithmetic safely one-sided, as `truncate_middle` does for its own marker.
+const TRUNCATION_MARKER_ALLOWANCE: usize = 128;
+
+/// Cap `output` at `limit` bytes, appending an in-band marker and logging once
+/// when content is dropped.
+///
+/// `load_skill` returns authored instructions, not tool output. A skill that
+/// loses its tail still loads with `is_error: false`, so without a marker the
+/// model follows instructions it cannot tell are incomplete — the rules,
+/// output formats, and checklists that live at the end of a SKILL.md are
+/// simply absent. The marker is charged against `limit` rather than appended
+/// past it, so the cap stays a budget the caller can rely on.
+///
+/// If `limit` is smaller than the marker itself the marker still wins: a
+/// pathologically small budget is worth overrunning to keep the loss visible.
+/// `MAX_SKILL_BODY_BYTES` is 32 KiB, so this cannot happen on the live path.
+fn truncate_with_marker(output: String, limit: usize, requested: &str) -> String {
+    if output.len() <= limit {
+        return output;
+    }
+    tracing::warn!(
+        skill = %requested,
+        bytes = output.len(),
+        limit,
+        "load_skill content truncated"
+    );
+    let kept = truncate_at_boundary(&output, limit.saturating_sub(TRUNCATION_MARKER_ALLOWANCE));
+    format!(
+        "{kept}\n\n[truncated: {} of {} bytes shown; the remainder was dropped by load_skill]",
+        kept.len(),
+        output.len()
+    )
 }
 
 fn error_result(msg: &str) -> ToolResult {
@@ -571,5 +604,152 @@ mod tests {
             text.starts_with("# Loaded: big/references/huge.md"),
             "missing supporting-file header: {text}"
         );
+    }
+
+    const MARKER_PREFIX: &str = "\n\n[truncated: ";
+
+    /// Split a truncated result into the content that survived and the two byte
+    /// counts the marker reports. Panics if the marker is absent.
+    fn split_marker(text: &str) -> (&str, usize, usize) {
+        let at = text
+            .find(MARKER_PREFIX)
+            .unwrap_or_else(|| panic!("missing truncation marker in: {text:?}"));
+        let (kept, marker) = text.split_at(at);
+        let rest = marker.strip_prefix(MARKER_PREFIX).unwrap();
+        let (shown, rest) = rest.split_once(" of ").unwrap();
+        let (total, _) = rest.split_once(" bytes shown").unwrap();
+        (kept, shown.parse().unwrap(), total.parse().unwrap())
+    }
+
+    #[test]
+    fn truncate_with_marker_leaves_content_under_the_limit_byte_identical() {
+        let content = "Skill body.\n\n## Rules\n\nAlways answer in JSON.\n".to_owned();
+        let out = truncate_with_marker(content.clone(), MAX_SKILL_BODY_BYTES, "small");
+        assert_eq!(out, content, "content under the limit must pass through");
+        assert!(!out.contains("[truncated:"), "unexpected marker: {out}");
+    }
+
+    #[test]
+    fn truncate_with_marker_reports_accurate_byte_counts() {
+        let content = "x".repeat(40 * 1024);
+        let out = truncate_with_marker(content.clone(), MAX_SKILL_BODY_BYTES, "big");
+        assert!(
+            out.len() <= MAX_SKILL_BODY_BYTES,
+            "marker must fit inside the cap, got {}",
+            out.len()
+        );
+        let (kept, shown, total) = split_marker(&out);
+        assert_eq!(shown, kept.len(), "shown count must match the kept content");
+        assert_eq!(total, content.len(), "total must be the pre-cut length");
+        assert!(shown < total, "shown {shown} should be below total {total}");
+        assert!(content.starts_with(kept), "kept content must be a prefix");
+    }
+
+    #[test]
+    fn truncate_with_marker_keeps_valid_utf8_on_a_multibyte_cut() {
+        // 2-byte chars plus odd limits push the cut into the middle of a char.
+        let content = "é".repeat(60_000);
+        for limit in [1025usize, 4097, MAX_SKILL_BODY_BYTES - 1] {
+            let out = truncate_with_marker(content.clone(), limit, "accented");
+            assert!(out.len() <= limit, "limit={limit} got {}", out.len());
+            assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+            let (kept, shown, total) = split_marker(&out);
+            assert_eq!(shown, kept.len(), "limit={limit}");
+            assert_eq!(total, content.len(), "limit={limit}");
+            assert!(content.starts_with(kept), "limit={limit}");
+        }
+    }
+
+    #[test]
+    fn truncate_with_marker_keeps_the_marker_when_the_limit_cannot_hold_it() {
+        // Unreachable at MAX_SKILL_BODY_BYTES, but the helper is total: a budget
+        // too small to report the loss is worth overrunning to report it anyway.
+        let out = truncate_with_marker("x".repeat(1024), 16, "tiny");
+        let (kept, shown, total) = split_marker(&out);
+        assert!(kept.is_empty(), "no content fits, got: {kept:?}");
+        assert_eq!(shown, 0);
+        assert_eq!(total, 1024);
+    }
+
+    #[tokio::test]
+    async fn call_load_skill_marks_truncated_body() {
+        let tmp = TempDir::new().unwrap();
+        let skill_md = tmp.path().join("SKILL.md");
+        // The tail of a SKILL.md is where output rules tend to live — drop it
+        // and the skill still "loads", which is the bug the marker reports.
+        let body = format!(
+            "{}\n## SENTINEL\n\nAlways refuse X.\n",
+            "filler\n".repeat(6 * 1024)
+        );
+        std::fs::write(
+            &skill_md,
+            format!("---\nname: big\ndescription: desc\n---\n{body}"),
+        )
+        .unwrap();
+
+        let skills = vec![make_skill("big", "desc", skill_md)];
+        let result = call_load_skill(&serde_json::json!({"name": "big"}), &skills).await;
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(
+            !text.contains("SENTINEL"),
+            "test setup: the tail should have been cut"
+        );
+        let (kept, shown, total) = split_marker(&text);
+        assert_eq!(shown, kept.len());
+        assert!(
+            total > MAX_SKILL_BODY_BYTES,
+            "total {total} should be the untruncated length"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_load_skill_marks_truncated_supporting_file() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        let skill_md = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_md, "---\nname: big\ndescription: desc\n---\nBody.\n").unwrap();
+
+        let refs_dir = skill_dir.join("references");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        let ref_file = refs_dir.join("huge.md");
+        std::fs::write(&ref_file, "x".repeat(MAX_SKILL_BODY_BYTES * 2)).unwrap();
+
+        let skills = vec![make_skill_with_files(
+            "big",
+            "desc",
+            skill_md,
+            vec![ref_file],
+        )];
+        let result = call_load_skill(
+            &serde_json::json!({"name": "big/references/huge.md"}),
+            &skills,
+        )
+        .await;
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        let (kept, shown, total) = split_marker(&text);
+        assert_eq!(shown, kept.len());
+        assert!(
+            total > MAX_SKILL_BODY_BYTES * 2,
+            "total {total} should cover the wrapped file content"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_load_skill_does_not_mark_body_under_the_limit() {
+        let tmp = TempDir::new().unwrap();
+        let skill_md = tmp.path().join("SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: small\ndescription: desc\n---\nBody.\n\n## Rules\n\nRefuse X.\n",
+        )
+        .unwrap();
+        let skills = vec![make_skill("small", "desc", skill_md)];
+        let result = call_load_skill(&serde_json::json!({"name": "small"}), &skills).await;
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(!text.contains("[truncated:"), "unexpected marker: {text}");
+        assert!(text.contains("Refuse X."), "tail must survive: {text}");
     }
 }
