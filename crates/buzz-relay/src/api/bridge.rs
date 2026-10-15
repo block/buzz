@@ -547,6 +547,15 @@ fn extract_search_mode(raw: &Value) -> buzz_search::SearchMode {
     }
 }
 
+/// Bridge-only `search_sort` extension, advertised as `buzz-search-sort`.
+/// Absent or unrecognized values keep relevance order.
+fn extract_search_sort(raw: &Value) -> buzz_search::SearchSort {
+    match raw.get("search_sort").and_then(Value::as_str) {
+        Some("newest") => buzz_search::SearchSort::Newest,
+        _ => buzz_search::SearchSort::Relevance,
+    }
+}
+
 fn extract_search_page(raw: &Value) -> u32 {
     raw.get("page")
         .or_else(|| raw.get("search_page"))
@@ -2427,6 +2436,7 @@ async fn handle_bridge_search(
             page: search_page,
             per_page: limit,
             mode: search_mode,
+            sort: extract_search_sort(raw),
         };
 
         let search_result = state
@@ -2450,7 +2460,7 @@ async fn handle_bridge_search(
             .await
             .map_err(|e| db_read_error("search fetch error", &e))?;
 
-        // Build lookup map to preserve FTS relevance ordering.
+        // Build lookup map to preserve FTS ordering.
         let event_map: std::collections::HashMap<[u8; 32], &buzz_core::StoredEvent> = stored_events
             .iter()
             .map(|ev| (ev.event.id.to_bytes(), ev))
@@ -3249,6 +3259,26 @@ pub(crate) mod postgres_tests {
             extract_search_mode(&serde_json::json!({ "search": "pro", "search_mode": "word" })),
             buzz_search::SearchMode::FullText
         );
+    }
+
+    #[test]
+    fn bridge_search_sort_extension_selects_newest_only_when_named() {
+        for (raw, expected) in [
+            (
+                serde_json::json!({ "search": "pro" }),
+                buzz_search::SearchSort::Relevance,
+            ),
+            (
+                serde_json::json!({ "search": "pro", "search_sort": "oldest" }),
+                buzz_search::SearchSort::Relevance,
+            ),
+            (
+                serde_json::json!({ "search": "pro", "search_sort": "newest" }),
+                buzz_search::SearchSort::Newest,
+            ),
+        ] {
+            assert_eq!(extract_search_sort(&raw), expected);
+        }
     }
 
     #[test]

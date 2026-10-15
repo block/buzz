@@ -123,6 +123,7 @@ async fn search_finds_event_in_same_community() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -171,6 +172,7 @@ async fn search_does_not_return_other_community_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -188,6 +190,7 @@ async fn search_does_not_return_other_community_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -232,6 +235,7 @@ async fn kind0_search_by_display_name_works_without_flattening() {
                 page: 1,
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
+                sort: buzz_search::SearchSort::Relevance,
             })
             .await
             .unwrap();
@@ -292,6 +296,7 @@ async fn short_kind0_prefix_prioritizes_exact_lexeme_on_a_noisy_page() {
             page: 1,
             per_page: 3,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("short profile prefix search ok");
@@ -358,6 +363,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("full text search ok");
@@ -383,6 +389,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("prefix search ok");
@@ -402,6 +409,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("multi-token prefix search ok");
@@ -420,6 +428,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("completed-token exact + trailing-prefix search ok");
@@ -469,6 +478,7 @@ async fn prefix_mode_handles_tsquery_boundary_punctuation() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("prefix punctuation search ok");
@@ -527,6 +537,7 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("prefix privacy search ok");
@@ -607,6 +618,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -626,6 +638,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -644,6 +657,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -662,6 +676,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -701,6 +716,7 @@ async fn deleted_events_are_excluded() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -732,6 +748,7 @@ async fn empty_query_returns_empty_result_no_roundtrip() {
                 page: 1,
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
+                sort: buzz_search::SearchSort::Relevance,
             })
             .await
             .unwrap();
@@ -799,6 +816,7 @@ async fn since_until_filters() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -843,6 +861,7 @@ async fn pagination_works() {
             page: 1,
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -860,6 +879,7 @@ async fn pagination_works() {
             page: 3,
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -867,6 +887,85 @@ async fn pagination_works() {
         r2.hits.len(),
         1,
         "page 3 of 7 with per_page=3 should have 1 hit"
+    );
+
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn newest_sort_pages_by_time_then_id_within_scope() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "a.example").await;
+    let channel = Uuid::new_v4();
+    let pk = rand_bytes32();
+    let most_relevant = [9u8; 32];
+    let tie_low = [1u8; 32];
+    let tie_high = [2u8; 32];
+    let newest = [3u8; 32];
+    let rows = [
+        (
+            most_relevant,
+            "sortword sortword sortword sortword",
+            1_700_000_000,
+        ),
+        (tie_high, "sortword once", 1_700_000_100),
+        (tie_low, "sortword once", 1_700_000_100),
+        (newest, "sortword once", 1_700_000_200),
+    ];
+    for (id, content, created_at) in rows {
+        insert_event(&pool, c, id, pk, 9, content, Some(channel), created_at).await;
+    }
+    // Newer than every scoped row, but outside the requested channel scope.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        pk,
+        9,
+        "sortword once",
+        Some(Uuid::new_v4()),
+        1_700_000_300,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let page = |page, sort| {
+        let svc = svc.clone();
+        async move {
+            svc.search(&SearchQuery {
+                community: c,
+                q: "sortword".into(),
+                channel_scope: ChannelScope::Channels(vec![channel]),
+                kinds: None,
+                authors: None,
+                since: None,
+                until: None,
+                page,
+                per_page: 2,
+                mode: buzz_search::SearchMode::FullText,
+                sort,
+            })
+            .await
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|hit| hit.event_id)
+            .collect::<Vec<_>>()
+        }
+    };
+
+    let newest_order = [
+        page(1, buzz_search::SearchSort::Newest).await,
+        page(2, buzz_search::SearchSort::Newest).await,
+        page(3, buzz_search::SearchSort::Newest).await,
+    ]
+    .concat();
+    assert_eq!(newest_order, vec![newest, tie_low, tie_high, most_relevant]);
+    assert_eq!(
+        page(1, buzz_search::SearchSort::Relevance).await[0],
+        most_relevant
     );
 
     teardown(pool, &schema).await;
@@ -952,6 +1051,7 @@ async fn channel_less_only_excludes_per_channel_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -1000,6 +1100,7 @@ async fn nul_bytes_in_query_are_sanitized() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("NUL-containing search query should not bubble a Postgres error");
@@ -1043,6 +1144,7 @@ async fn enormous_page_number_is_clamped() {
             page: u32::MAX,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("huge page number should be bounded, not error");
@@ -1072,6 +1174,7 @@ async fn very_long_query_is_bounded_before_pg_parse() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("long search query should be capped before Postgres parses it");
@@ -1213,6 +1316,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -1309,6 +1413,7 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
             page: 1,
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -1416,6 +1521,7 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
             page: 1,
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -1491,6 +1597,7 @@ async fn artifact_search_uses_only_live_current_head() {
         page: 1,
         per_page: 10,
         mode: buzz_search::SearchMode::FullText,
+        sort: buzz_search::SearchSort::Relevance,
     };
     let result = svc.search(&query).await.unwrap();
     assert_eq!(result.hits.len(), 1);

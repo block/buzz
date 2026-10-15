@@ -67,6 +67,15 @@ pub enum SearchMode {
     Prefix,
 }
 
+/// Result ordering for a search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchSort {
+    /// `ts_rank_cd` relevance, newest first among equal ranks.
+    Relevance,
+    /// Newest first, ignoring relevance; ties ordered by event id.
+    Newest,
+}
+
 /// A community-scoped FTS query.
 ///
 /// The community is REQUIRED at the type level — there is no construction path
@@ -98,6 +107,8 @@ pub struct SearchQuery {
     pub per_page: u32,
     /// Matching semantics for the search text.
     pub mode: SearchMode,
+    /// Result ordering. Paging is over this order.
+    pub sort: SearchSort,
 }
 
 /// A single FTS hit. The relay refetches the canonical `StoredEvent` and
@@ -122,7 +133,7 @@ pub struct SearchHit {
 /// Result of a search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// Hits on this page, ordered by relevance then created_at desc.
+    /// Hits on this page, in the query's `sort` order.
     pub hits: Vec<SearchHit>,
     /// 1-indexed page returned.
     pub page: u32,
@@ -209,7 +220,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 ///   AND deleted_at IS NULL
 ///   AND search_tsv @@ query
 ///   [+ channel scope, kinds, authors, since, until]
-/// ORDER BY rank DESC, created_at DESC, id
+/// ORDER BY rank DESC, created_at DESC, id   -- SearchSort::Newest: created_at DESC, id
 /// LIMIT $per_page OFFSET (($page - 1) * $per_page)
 /// ```
 ///
@@ -237,7 +248,8 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     // short exact display name off the bounded first page. Keep the same result
     // set and pagination contract, but put rows containing the whole lexeme
     // first for this one narrow caller shape.
-    let prioritize_exact_profile_lexeme = query.mode == SearchMode::Prefix
+    let prioritize_exact_profile_lexeme = query.sort == SearchSort::Relevance
+        && query.mode == SearchMode::Prefix
         && query.kinds.as_deref() == Some(&[0][..])
         && search_text.chars().count() <= 2;
 
@@ -306,7 +318,9 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         qb.push(")");
     }
 
-    if prioritize_exact_profile_lexeme {
+    if query.sort == SearchSort::Newest {
+        qb.push(" ORDER BY created_at DESC, id LIMIT ");
+    } else if prioritize_exact_profile_lexeme {
         qb.push(" ORDER BY search_tsv @@ websearch_to_tsquery('simple', ");
         qb.push_bind(&search_text);
         qb.push(") DESC, rank DESC, created_at DESC, id LIMIT ");

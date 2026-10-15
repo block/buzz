@@ -247,6 +247,8 @@ impl RelayInfo {
             "nip-ar".to_string(),
             // NIP-CL: identity tags, labels and system channels.
             "nip-cl".to_string(),
+            // Bridge `/query` search accepts `search_sort: "newest"`.
+            "buzz-search-sort".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -666,10 +668,11 @@ mod tests {
             .contains(&"buzz-gif".to_string()));
     }
 
-    /// NIP-CL: clients refuse labels and system channels unless the relay
-    /// says it supports them, so every document must advertise it.
+    /// Clients refuse NIP-CL labels and system channels, and newest-first
+    /// search, unless the relay says it supports them, so every document must
+    /// advertise both.
     #[test]
-    fn advertises_nip_cl_extension() {
+    fn advertises_nip_cl_and_search_sort_extensions() {
         let info = RelayInfo::build(
             None,
             None,
@@ -679,10 +682,9 @@ mod tests {
             None,
             None,
         );
-        assert!(info
-            .supported_extensions
-            .expect("extensions")
-            .contains(&"nip-cl".to_string()));
+        let extensions = info.supported_extensions.expect("extensions");
+        assert!(extensions.contains(&"nip-cl".to_string()));
+        assert!(extensions.contains(&"buzz-search-sort".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

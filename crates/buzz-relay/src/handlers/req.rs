@@ -844,6 +844,7 @@ async fn handle_search_req(
                 page,
                 per_page: SEARCH_PAGE_SIZE,
                 mode: buzz_search::SearchMode::FullText,
+                sort: buzz_search::SearchSort::Relevance,
             };
 
             let search_result = match state.search.search(&search_query).await {

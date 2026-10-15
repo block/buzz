@@ -67,7 +67,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
 | **Blossom media** | ✅ | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |
-| **NIP-50 search** | ✅ | One-shot search REQs: `{"search":"query","kinds":[9],"#h":["<uuid>"]}` → relevance-sorted results → EOSE. Not registered as persistent subscriptions. |
+| **NIP-50 search** | ✅ | One-shot search REQs: `{"search":"query","kinds":[9],"#h":["<uuid>"]}` → relevance-sorted results → EOSE. Not registered as persistent subscriptions. HTTP `POST /query` also accepts `search_sort: "newest"` (advertised as `buzz-search-sort` in NIP-11 `supported_extensions`) for newest-first results, paged with `page`. |
 | **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. |
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
