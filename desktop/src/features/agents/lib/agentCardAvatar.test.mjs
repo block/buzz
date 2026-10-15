@@ -23,6 +23,17 @@ test("running agent card falls back to the definition avatar", () => {
   );
 });
 
+test("running agent card falls back to the managed agent avatar", () => {
+  assert.equal(
+    resolveAgentCardAvatarUrl(
+      null,
+      null,
+      " https://relay.example/managed.png ",
+    ),
+    "https://relay.example/managed.png",
+  );
+});
+
 test("running agent card ignores blank avatar values", () => {
   assert.equal(resolveAgentCardAvatarUrl("  ", ""), null);
 });
