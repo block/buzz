@@ -33,8 +33,8 @@ class AppTheme {
   }) {
     final scheme = colorScheme ?? lightColorScheme;
     final appColors = AppColors(
-      success: const Color(0xFF40A02B), // Catppuccin Latte Green — universal
-      warning: const Color(0xFFDF8E1D), // Latte Yellow
+      success: const Color(0xFF218358), // Desktop green-11
+      warning: const Color(0xFFAB6400), // Desktop amber-11
       accent: scheme.tertiary,
       huddleDrawerSurface: const Color(0xFF000000),
       huddleControlSurface: const Color(0xFF333333),
@@ -57,10 +57,8 @@ class AppTheme {
   }) {
     final scheme = colorScheme ?? darkColorScheme;
     final appColors = AppColors(
-      success: const Color(
-        0xFFA6DA95,
-      ), // Catppuccin Macchiato Green — universal
-      warning: const Color(0xFFEED49F), // Macchiato Yellow
+      success: const Color(0xFF3DD68C), // Desktop green-11
+      warning: const Color(0xFFFFCA16), // Desktop amber-11
       accent: scheme.tertiary,
       huddleDrawerSurface: scheme.primaryContainer,
       huddleControlSurface: Color.alphaBlend(

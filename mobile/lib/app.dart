@@ -311,11 +311,6 @@ class App extends HookConsumerWidget {
         ? ref.watch(communityThemeProvider)
         : defaultCommunityTheme;
     final themeMode = communityTheme.mode;
-    final accentIndex = effectiveAccentIndex(
-      communityTheme.theme,
-      communityTheme.accent,
-    );
-    final schemeName = communityTheme.theme;
     final authState = ref.watch(authProvider);
     final pairedCommunity = ref.watch(pairedCommunityLandingProvider);
 
@@ -325,25 +320,6 @@ class App extends HookConsumerWidget {
       });
       return null;
     }, const []);
-
-    final resolved = resolveSchemes(schemeName, themeMode);
-    final lightScheme = applyAccent(resolved.light, accentIndex);
-    final darkScheme = applyAccent(resolved.dark, accentIndex);
-    // Light/Dark modes pin the brightness; System leaves it null so Flutter
-    // follows the OS across the selected theme and its pair.
-    final effectiveMode = resolved.forcedMode ?? themeMode;
-
-    // Derive the gradient from the themes that produced each color scheme.
-    // This keeps fallbacks and pinned brightness changes aligned with the
-    // rendered palette rather than the raw persisted selection.
-    final buzzLightGradient = buzzTopSectionGradient(
-      resolved.lightTheme?.name ?? '',
-      lightScheme.brightness,
-    );
-    final buzzDarkGradient = buzzTopSectionGradient(
-      resolved.darkTheme?.name ?? '',
-      darkScheme.brightness,
-    );
 
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
@@ -394,15 +370,9 @@ class App extends HookConsumerWidget {
       navigatorKey: _mobileRootNavigatorKey,
       navigatorObservers: [appRouteObserver],
       title: 'Buzz',
-      theme: AppTheme.light(
-        colorScheme: lightScheme,
-        topSectionGradient: buzzLightGradient,
-      ),
-      darkTheme: AppTheme.dark(
-        colorScheme: darkScheme,
-        topSectionGradient: buzzDarkGradient,
-      ),
-      themeMode: effectiveMode,
+      theme: mobileAppearanceTheme(Brightness.light, communityTheme.accent),
+      darkTheme: mobileAppearanceTheme(Brightness.dark, communityTheme.accent),
+      themeMode: themeMode,
       // Above the navigator, so an age restriction cannot be bypassed by a
       // route that was pushed while the store signal request was in flight.
       builder: (context, child) => switch (ageSignalState) {

@@ -32,9 +32,6 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/skeleton.dart';
-import '../../shared/custom_emoji/custom_emoji.dart';
-import '../../shared/custom_emoji/custom_emoji_provider.dart';
-import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
@@ -87,24 +84,16 @@ const double _kSectionHeaderVerticalPadding =
 // centre sits lower than a channel row's. This keeps an expanded section's
 // final row equally spaced from the following divider.
 const double _kExpandedSectionTrailingPadding =
-    11.0 - _kSectionSpacingTightening;
-const double _kChannelLabelInset =
-    _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
+    11.5 - _kSectionSpacingTightening;
+const double _kChannelLabelInset = _kChannelSectionInset;
 
-/// DM avatars are circles, so they fill their box edge to edge where a channel
-/// glyph leaves 4dp of slack inside the same 22dp leading column. Sizing them to
-/// the glyph's ink width keeps the icon-to-label distance identical across both
-/// sections while the labels stay on [_kChannelLabelInset].
+/// Compact avatars remain on direct-message rows.
 const double _kDmAvatarSize = _kChannelIconSize;
 
 const double _kTopSectionProfileAvatarSize = 36.0;
 const double _kTopSectionBottomPadding = Grid.xxs;
 
-/// The top section's avatars are 40dp circles, which fill their box edge to
-/// edge; the channel rows below lead with an 18dp glyph left-aligned in a 22dp
-/// box at [_kChannelSectionInset]. Edge-aligning the two leaves the circles
-/// looking pushed outward, so the bar is pulled in to sit the avatar's centre
-/// near the channel-icon column.
+/// Inset for the community and profile avatar row.
 const double _kTopSectionInset = Grid.twelve;
 const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
 const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);

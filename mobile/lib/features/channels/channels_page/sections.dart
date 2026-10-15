@@ -86,7 +86,7 @@ class _CustomChannelSection extends StatelessWidget {
   }
 }
 
-class _CustomSectionHeader extends ConsumerWidget {
+class _CustomSectionHeader extends StatelessWidget {
   final ChannelSection section;
   final bool expanded;
   final bool isFirst;
@@ -114,13 +114,10 @@ class _CustomSectionHeader extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final sectionColor = navigationSectionForeground(context);
-    final icon = section.icon;
-    final customEmoji = icon == null
-        ? null
-        : _resolveCustomEmoji(icon, ref.watch(customEmojiListProvider));
-
+  Widget build(BuildContext context) {
+    final sectionColor = context.colors.brightness == Brightness.dark
+        ? const Color(0xFF595959)
+        : const Color(0xFF959595);
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
@@ -133,44 +130,11 @@ class _CustomSectionHeader extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: icon == null || icon.isEmpty
-                    ? Icon(
-                        BuzzIcons.folder,
-                        size: _kChannelIconSize,
-                        color: sectionColor,
-                      )
-                    : customEmoji != null
-                    ? CustomEmojiImage(
-                        shortcode: customEmoji.shortcode,
-                        url: customEmoji.url,
-                        size: _kChannelIconSize,
-                      )
-                    : Text(
-                        icon,
-                        maxLines: 1,
-                        overflow: TextOverflow.visible,
-                        style: TextStyle(
-                          fontSize: _kChannelIconSize,
-                          height: 1,
-                          color: sectionColor,
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
             Expanded(
-              child: Text(
-                section.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: contentListTitleTextStyle.copyWith(
-                  color: sectionColor,
-                  fontWeight: FontWeight.w600,
-                ),
+              child: _SectionLabel(
+                label: section.name,
+                expanded: expanded,
+                color: sectionColor,
               ),
             ),
             Builder(
@@ -246,7 +210,6 @@ class _CustomSectionHeader extends ConsumerWidget {
               ),
             ),
             const SizedBox(width: Grid.quarter),
-            _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
       ),
@@ -282,16 +245,6 @@ class _SectionMenuItemContent extends StatelessWidget {
       ],
     );
   }
-}
-
-CustomEmoji? _resolveCustomEmoji(String icon, List<CustomEmoji> palette) {
-  if (!icon.startsWith(':') || !icon.endsWith(':')) return null;
-  final shortcode = normalizeShortcode(icon);
-  if (shortcode == null) return null;
-  for (final emoji in palette) {
-    if (emoji.shortcode == shortcode) return emoji;
-  }
-  return null;
 }
 
 class _SectionNameDialog extends HookWidget {
@@ -372,7 +325,6 @@ List<PopupMenuEntry<String>> _sortMenuItems(
 
 class _ChannelSection extends StatelessWidget {
   final String title;
-  final IconData icon;
   final bool expanded;
   final VoidCallback onToggle;
   final List<Channel> channels;
@@ -387,7 +339,6 @@ class _ChannelSection extends StatelessWidget {
 
   const _ChannelSection({
     required this.title,
-    required this.icon,
     required this.expanded,
     required this.onToggle,
     required this.channels,
@@ -409,7 +360,6 @@ class _ChannelSection extends StatelessWidget {
         if (showTopDivider) const _SectionDivider(),
         _SectionHeader(
           label: title,
-          icon: icon,
           expanded: expanded,
           onToggle: onToggle,
           sortMode: sortMode,
@@ -497,7 +447,7 @@ class _SectionDivider extends StatelessWidget {
         thickness: 1,
         indent: _kChannelSectionInset,
         endIndent: _kChannelSectionInset,
-        color: context.colors.primary.withValues(alpha: 0.15),
+        color: context.colors.onSurface.withValues(alpha: 0.07),
       ),
     );
   }
@@ -505,7 +455,6 @@ class _SectionDivider extends StatelessWidget {
 
 class _SectionHeader extends StatelessWidget {
   final String label;
-  final IconData icon;
   final bool expanded;
   final VoidCallback onToggle;
   final ChannelSortMode? sortMode;
@@ -513,7 +462,6 @@ class _SectionHeader extends StatelessWidget {
 
   const _SectionHeader({
     required this.label,
-    required this.icon,
     required this.expanded,
     required this.onToggle,
     this.sortMode,
@@ -522,7 +470,9 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final sectionColor = navigationSectionForeground(context);
+    final sectionColor = context.colors.brightness == Brightness.dark
+        ? const Color(0xFF595959)
+        : const Color(0xFF959595);
 
     return GestureDetector(
       onTap: onToggle,
@@ -536,22 +486,13 @@ class _SectionHeader extends StatelessWidget {
         ),
         child: Row(
           children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Icon(icon, size: _kChannelIconSize, color: sectionColor),
-              ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
-            Text(
-              label,
-              style: contentListTitleTextStyle.copyWith(
+            Expanded(
+              child: _SectionLabel(
+                label: label,
+                expanded: expanded,
                 color: sectionColor,
-                fontWeight: FontWeight.w600,
               ),
             ),
-            const Spacer(),
             if (sortMode case final mode?) ...[
               Builder(
                 builder: (buttonContext) => IconButton(
@@ -590,12 +531,42 @@ class _SectionHeader extends StatelessWidget {
               ),
               const SizedBox(width: Grid.quarter),
             ],
-            _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
       ),
     );
   }
+}
+
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel({
+    required this.label,
+    required this.expanded,
+    required this.color,
+  });
+
+  final String label;
+  final bool expanded;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Flexible(
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: contentListTitleTextStyle.copyWith(
+            color: color,
+            fontWeight: FontWeight.w400,
+          ),
+        ),
+      ),
+      const SizedBox(width: Grid.quarter),
+      _SectionChevron(expanded: expanded, color: color),
+    ],
+  );
 }
 
 class _SectionChevron extends StatelessWidget {

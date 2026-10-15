@@ -10,89 +10,41 @@ class _ThemePreviewExperience extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final stored = ref.read(communityThemeProvider);
-    final initialEntries = _themeEntriesForMode(stored.mode);
-    var initialIndex = initialEntries.indexWhere(
-      (entry) => _themeEntryIsSelected(entry, stored.mode, stored.theme),
-    );
-    if (initialIndex < 0) initialIndex = 0;
-
     final draftMode = useState(stored.mode);
-    final draftThemeName = useState(initialEntries[initialIndex].name);
-    final draftAccent = useState(
-      accentIndexForWireValue(stored.accent) ?? defaultAccentIndex,
-    );
-    final currentPage = useState(initialIndex);
-    final suppressNextPageHaptic = useRef(false);
-    final controller = usePageController(initialPage: initialIndex);
-    final entries = _themeEntriesForMode(draftMode.value);
+    final draftAccent = useState(chatColorIndex(stored.accent));
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final previousDraftMode = usePrevious(draftMode.value);
-    final animatePaginationChanges =
-        previousDraftMode == null || previousDraftMode == draftMode.value;
-
-    var selectedIndex = entries.indexWhere(
-      (entry) =>
-          _themeEntryIsSelected(entry, draftMode.value, draftThemeName.value),
-    );
-    if (selectedIndex < 0) selectedIndex = 0;
-    final selectedEntry = entries[selectedIndex];
-    final selectedDisplayed = _displayedThemeFor(
-      selectedEntry,
-      draftMode.value,
-      platformBrightness,
-    );
-    final selectedResolved = resolveSchemes(
-      selectedEntry.name,
-      draftMode.value,
-    );
-    final selectedBaseScheme = platformBrightness == Brightness.dark
-        ? selectedResolved.dark
-        : selectedResolved.light;
-    final supportsAccent = !isBuzzTheme(selectedDisplayed.name);
-
-    void updateMode(ThemeMode mode) {
-      final normalized = mode == ThemeMode.system
-          ? schemeForAppearanceMode(draftThemeName.value, mode)
-          : effectiveTheme(draftThemeName.value, mode)?.name;
-      final nextEntries = _themeEntriesForMode(mode);
-      final nextTheme = normalized ?? nextEntries.first.name;
-      var nextIndex = nextEntries.indexWhere(
-        (entry) => _themeEntryIsSelected(entry, mode, nextTheme),
-      );
-      if (nextIndex < 0) nextIndex = 0;
-
-      draftMode.value = mode;
-      draftThemeName.value = nextEntries[nextIndex].name;
-      if (nextIndex != currentPage.value) {
-        suppressNextPageHaptic.value = true;
-      }
-      currentPage.value = nextIndex;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (controller.hasClients) controller.jumpToPage(nextIndex);
-      });
-    }
+    final brightness = switch (draftMode.value) {
+      ThemeMode.light => Brightness.light,
+      ThemeMode.dark => Brightness.dark,
+      ThemeMode.system => platformBrightness,
+    };
+    final selectedEntry = findTheme(
+      brightness == Brightness.dark ? buzzDarkThemeName : buzzThemeName,
+    )!;
+    final selectedBaseScheme = brightness == Brightness.dark
+        ? darkColorScheme
+        : lightColorScheme;
 
     void cycleAppearance() {
       final index = _appearanceOrder.indexOf(draftMode.value);
-      final next = _appearanceOrder[(index + 1) % _appearanceOrder.length];
       unawaited(HapticFeedback.selectionClick());
-      updateMode(next);
+      draftMode.value = _appearanceOrder[(index + 1) % _appearanceOrder.length];
     }
 
     void applySelection() {
       unawaited(HapticFeedback.mediumImpact());
-      final notifier = ref.read(communityThemeProvider.notifier);
-      final currentAccent = ref.read(communityThemeProvider).accent;
-      notifier.setPreference(
-        CommunityThemePreference(
-          theme: selectedEntry.name,
-          accent: supportsAccent
-              ? accentColors[draftAccent.value].wireValue
-              : currentAccent,
-          followSystem: draftMode.value == ThemeMode.system,
-        ),
-      );
+      ref
+          .read(communityThemeProvider.notifier)
+          .setPreference(
+            CommunityThemePreference(
+              theme: draftMode.value == ThemeMode.dark
+                  ? buzzDarkThemeName
+                  : buzzThemeName,
+              accent: chatColorChoices[draftAccent.value].wireValue,
+              followSystem: draftMode.value == ThemeMode.system,
+            ),
+          );
       Navigator.of(context).pop();
     }
 
@@ -123,38 +75,12 @@ class _ThemePreviewExperience extends HookConsumerWidget {
         children: [
           SizedBox(height: frostedAppBarHeight(context)),
           Expanded(
-            child: PageView.builder(
-              key: const ValueKey('theme-preview-pages'),
-              controller: controller,
-              itemCount: entries.length,
-              onPageChanged: (index) {
-                if (suppressNextPageHaptic.value) {
-                  suppressNextPageHaptic.value = false;
-                } else if (index != currentPage.value) {
-                  unawaited(HapticFeedback.selectionClick());
-                }
-                currentPage.value = index;
-                draftThemeName.value = entries[index].name;
-              },
-              itemBuilder: (context, index) => AnimatedBuilder(
-                animation: controller,
-                builder: (context, _) {
-                  var titleOffset = 0.0;
-                  if (!reduceMotion && controller.hasClients) {
-                    final page = controller.page;
-                    if (page != null) {
-                      titleOffset = (index - page).clamp(-1.0, 1.0) * Grid.md;
-                    }
-                  }
-                  return _ThemePreviewPage(
-                    theme: entries[index],
-                    mode: draftMode.value,
-                    accentIndex: draftAccent.value,
-                    platformBrightness: platformBrightness,
-                    titleHorizontalOffset: titleOffset,
-                  );
-                },
-              ),
+            child: _ThemePreviewPage(
+              theme: selectedEntry,
+              mode: draftMode.value,
+              accentIndex: draftAccent.value,
+              platformBrightness: platformBrightness,
+              titleHorizontalOffset: 0,
             ),
           ),
           SafeArea(
@@ -171,79 +97,25 @@ class _ThemePreviewExperience extends HookConsumerWidget {
                 children: [
                   SizedBox(
                     width: 64,
-                    child: IgnorePointer(
-                      ignoring: !supportsAccent,
-                      child: AnimatedSwitcher(
-                        key: const ValueKey(
-                          'theme-preview-accent-availability',
-                        ),
-                        duration: reduceMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 180),
-                        reverseDuration: reduceMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 140),
-                        switchInCurve: _appearanceMotionCurve,
-                        switchOutCurve: Curves.easeInOutCubic,
-                        layoutBuilder: (currentChild, previousChildren) =>
-                            Stack(
-                              alignment: Alignment.center,
-                              children: [...previousChildren, ?currentChild],
-                            ),
-                        transitionBuilder: (child, animation) => FadeTransition(
-                          opacity: animation,
-                          child: ScaleTransition(
-                            scale: Tween(
-                              begin: 0.78,
-                              end: 1.0,
-                            ).animate(animation),
-                            child: child,
-                          ),
-                        ),
-                        child: supportsAccent
-                            ? _PreviewSheetCircleAction(
-                                key: const ValueKey(
-                                  'theme-preview-accent-action-button',
-                                ),
-                                semanticLabel: 'Accent color',
-                                color: accentColorForScheme(
-                                  selectedBaseScheme,
-                                  draftAccent.value,
-                                ),
-                                onTap: () {
-                                  unawaited(HapticFeedback.lightImpact());
-                                  showAccentColorPickerSheet(
-                                    context: context,
-                                    colorScheme: selectedBaseScheme,
-                                    selectedIndex: draftAccent.value,
-                                    onSelected: (index) =>
-                                        draftAccent.value = index,
-                                  );
-                                },
-                              )
-                            : const SizedBox(
-                                key: ValueKey(
-                                  'theme-preview-accent-unavailable',
-                                ),
-                              ),
+                    child: _PreviewSheetCircleAction(
+                      key: const ValueKey('theme-preview-accent-action-button'),
+                      semanticLabel: 'Chat color',
+                      color: chatColorForScheme(
+                        selectedBaseScheme,
+                        draftAccent.value,
+                      ),
+                      onTap: () => showAccentColorPickerSheet(
+                        context: context,
+                        colorScheme: selectedBaseScheme,
+                        selectedIndex: draftAccent.value,
+                        onSelected: (index) => draftAccent.value = index,
                       ),
                     ),
                   ),
                   Expanded(
-                    child: PageIndicator(
-                      semanticLabel: 'Theme',
-                      controlKey: const ValueKey('theme-preview-scrubber'),
-                      dotKeyPrefix: 'theme-pagination-dot-',
-                      count: entries.length,
-                      selected: currentPage.value.clamp(0, entries.length - 1),
-                      animateChanges: animatePaginationChanges,
-                      onSelected: (index) {
-                        if (index == currentPage.value ||
-                            !controller.hasClients) {
-                          return;
-                        }
-                        controller.jumpToPage(index);
-                      },
+                    child: Text(
+                      appearanceModeLabel(draftMode.value),
+                      textAlign: TextAlign.center,
                     ),
                   ),
                   SizedBox(
@@ -369,19 +241,15 @@ class _ThemeDevicePairPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displayed = _displayedThemeFor(theme, mode, platformBrightness);
-    final resolved = resolveSchemes(theme.name, mode);
-    final base = platformBrightness == Brightness.dark
-        ? resolved.dark
-        : resolved.light;
-    final effectiveAccent = isBuzzTheme(displayed.name)
-        ? defaultAccentIndex
-        : accentIndex;
-    final scheme = applyAccent(base, effectiveAccent);
-    final gradient = buzzTopSectionGradient(displayed.name, scheme.brightness);
-    final previewTheme = scheme.brightness == Brightness.dark
-        ? AppTheme.dark(colorScheme: scheme, topSectionGradient: gradient)
-        : AppTheme.light(colorScheme: scheme, topSectionGradient: gradient);
+    final brightness = switch (mode) {
+      ThemeMode.light => Brightness.light,
+      ThemeMode.dark => Brightness.dark,
+      ThemeMode.system => platformBrightness,
+    };
+    final previewTheme = mobileAppearanceTheme(
+      brightness,
+      chatColorChoices[accentIndex].wireValue,
+    );
 
     return Row(
       key: ValueKey('theme-device-pair-preview-${theme.name}'),

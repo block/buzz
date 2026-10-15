@@ -347,23 +347,13 @@ void main() {
       expect(text.style?.height, contentListTitleTextStyle.height);
       expect(
         text.style?.color,
-        Theme.of(
-          tester.element(find.text(label)),
-        ).colorScheme.onSurface.withValues(alpha: 0.8),
+        Theme.of(tester.element(find.text(label))).colorScheme.onSurface,
       );
     }
-    final channelIcon = tester.widget<Icon>(
-      find.byKey(const ValueKey('channel-icon-1')),
-    );
-    expect(
-      channelIcon.color,
-      Theme.of(
-        tester.element(find.byKey(const ValueKey('channel-icon-1'))),
-      ).colorScheme.onSurface.withValues(alpha: 0.8),
-    );
+    expect(find.byKey(const ValueKey('channel-icon-1')), findsNothing);
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
-    expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+    expect(sectionTitle.style?.fontWeight, FontWeight.w400);
   });
 
   testWidgets('keys DM tile fallback avatars to the non-self counterpart', (
@@ -903,7 +893,12 @@ void main() {
             () => _FakeChannelSectionsNotifier(
               const ChannelSectionStore(
                 sections: [
-                  ChannelSection(id: 'section-1', name: 'Design', order: 0),
+                  ChannelSection(
+                    id: 'section-1',
+                    name: 'Design',
+                    icon: '🎨',
+                    order: 0,
+                  ),
                 ],
               ),
             ),
@@ -913,6 +908,25 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.text('🎨'), findsNothing);
+    final sectionRow = find
+        .ancestor(of: find.text('Design'), matching: find.byType(Row))
+        .first;
+    final chevron = find.descendant(
+      of: sectionRow,
+      matching: find.byIcon(BuzzIcons.chevronDown),
+    );
+    expect(
+      tester.getTopLeft(chevron).dx -
+          tester.getTopRight(find.text('Design')).dx,
+      closeTo(Grid.quarter, 0.01),
+    );
+    for (final divider in tester.widgetList<Divider>(find.byType(Divider))) {
+      expect(
+        divider.color,
+        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.07),
+      );
+    }
     await tester.tap(find.byKey(const Key('section-menu-section-1')));
     await tester.pumpAndSettle();
 

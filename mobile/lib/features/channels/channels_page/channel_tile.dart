@@ -28,9 +28,7 @@ class _ChannelTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final contentColor = isMuted
         ? navigationSecondaryForeground(context)
-        : navigationPrimaryForeground(
-            context,
-          ).withValues(alpha: isUnread ? 1 : 0.8);
+        : navigationPrimaryForeground(context);
 
     return InkWell(
       borderRadius: BorderRadius.circular(Radii.md),
@@ -45,21 +43,19 @@ class _ChannelTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: channel.isDm
-                    ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-                    : Icon(
-                        channelIcon(channel),
-                        key: ValueKey('channel-icon-${channel.id}'),
-                        size: _kChannelIconSize,
-                        color: contentColor,
-                      ),
+            if (channel.isDm) ...[
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _DmAvatar(
+                    channel: channel,
+                    currentPubkey: currentPubkey,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
+              const SizedBox(width: _kChannelLabelGap),
+            ],
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
