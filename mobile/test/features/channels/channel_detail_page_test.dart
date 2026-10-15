@@ -6344,6 +6344,16 @@ void main() {
         final tray = find.byKey(const ValueKey('combined-reaction-tray'));
         final card = find.byKey(const ValueKey('huddle-card-huddle-tray'));
         expect(tray, findsOneWidget);
+        final avatar = find.descendant(
+          of: find.byKey(const ValueKey('huddle-activity-huddle-tray')),
+          matching: find.byType(AvatarImage),
+        );
+        expect(avatar, findsOneWidget);
+        expect(
+          tester.getRect(avatar).bottom,
+          closeTo(tester.getRect(card).bottom, 0.01),
+        );
+
         expect(tester.getRect(tray).top, lessThan(tester.getRect(card).bottom));
         expect(
           tester.getRect(tray).left,
