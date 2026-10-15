@@ -146,8 +146,6 @@ fn echo_error(status: StatusCode, what: &str, e: &ReliableStreamError) -> Respon
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use axum::body::to_bytes;
     use buzz_relay_mesh::endpoint::MeshEndpoint;
     use buzz_relay_mesh::{
@@ -173,10 +171,9 @@ mod tests {
             .query_async::<String>(&mut *conn)
             .await
             .ok()?;
-        Some(SessionDirectory::with_lease_ttl(
-            pool,
-            Duration::from_secs(5),
-        ))
+        // Match the production mesh handle's 30-second directory lease. The
+        // demo join intentionally does not renew, and its echo timeout is 10s.
+        Some(SessionDirectory::new(pool))
     }
 
     struct NoopTransport;
