@@ -70,6 +70,46 @@ struct BuzzNotificationCacheTests {
     #expect(try second.metadata(scope: scope, kind: 0, author: profile.pubkey)?.event == profile)
   }
 
+  @Test("Concurrent notification writers preserve every independent record")
+  func concurrentWriters() throws {
+    let root = try directory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let scope = try scope()
+    let events = try (0..<24).map { index in
+      try signedEvent(
+        privateKey: key, kind: 39000,
+        tags: [["d", "room-\(index)"], ["name", "Room \(index)"]])
+    }
+    let errorLock = NSLock()
+    var failures: [String] = []
+    DispatchQueue.concurrentPerform(iterations: events.count) { index in
+      let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+      do {
+        try cache.save(event: events[index], scope: scope)
+        let record = try cache.metadata(
+          scope: scope, kind: 39000,
+          author: events[index].pubkey, identifier: "room-\(index)")
+        if record?.event != events[index] {
+          errorLock.lock()
+          failures.append("Missing record \(index)")
+          errorLock.unlock()
+        }
+      } catch {
+        errorLock.lock()
+        failures.append(String(describing: error))
+        errorLock.unlock()
+      }
+    }
+    #expect(failures.isEmpty)
+    let reopened = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+    for (index, event) in events.enumerated() {
+      #expect(
+        try reopened.metadata(
+          scope: scope, kind: 39000,
+          author: event.pubkey, identifier: "room-\(index)")?.event == event)
+    }
+  }
+
   @Test("Reads do not extend freshness; a successful recheck does")
   func freshness() throws {
     let root = try directory()
