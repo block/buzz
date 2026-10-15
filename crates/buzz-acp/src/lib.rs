@@ -23,6 +23,7 @@ mod runtime;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
 mod scope;
 mod setup_mode;
+mod team_loop;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -559,6 +560,10 @@ mod inbound_author_gate {
     impl AuthorizedListenerEvent {
         pub(crate) fn into_parts(self) -> (relay::BuzzEvent, String) {
             (self.buzz_event, self.effective_author)
+        }
+
+        pub(crate) fn event(&self) -> &relay::BuzzEvent {
+            &self.buzz_event
         }
     }
 
@@ -3037,6 +3042,11 @@ async fn run_harness(
     let dedup_mode = config.dedup_mode;
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let mut team_loop = team_loop::TeamLoop::new(
+        config.team_pubkeys.clone(),
+        pubkey_hex.clone(),
+        config.team_loop_limit,
+    );
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -3561,6 +3571,21 @@ async fn run_harness(
                             }
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
+                                if !config.team_pubkeys.is_empty()
+                                    && team_loop.targets_team(&buzz_event.event)
+                                {
+                                    let scope = scope::SessionScope::derive(
+                                        config.session_policy,
+                                        buzz_event.channel_id,
+                                        is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
+                                        &buzz_event.event,
+                                    );
+                                    team_loop.observe_teammate(
+                                        &scope,
+                                        buzz_event.event.id.to_hex(),
+                                        true,
+                                    );
+                                }
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -3723,6 +3748,31 @@ async fn run_harness(
                             else {
                                 continue;
                             };
+                            if !config.team_pubkeys.is_empty() {
+                                let event = authorized_event.event();
+                                let scope = scope::SessionScope::derive(
+                                    config.session_policy,
+                                    event.channel_id,
+                                    is_dm_channel(event.channel_id, &ctx.channel_info).await,
+                                    &event.event,
+                                );
+                                if team_loop.is_teammate(&event.event.pubkey.to_hex()) {
+                                    if matches!(event.event.kind.as_u16(), 9 | 45001 | 45003) {
+                                        let targets_team = team_loop.targets_team(&event.event);
+                                        team_loop.observe_teammate(
+                                            &scope,
+                                            event.event.id.to_hex(),
+                                            targets_team,
+                                        );
+                                    }
+                                } else {
+                                    team_loop.observe_human(
+                                        &scope,
+                                        event.event.id.to_hex(),
+                                        event.event.kind.as_u16(),
+                                    );
+                                }
+                            }
                             let Some(ingress) =
                                 AuthorizedNormalListenerEvent(authorized_event)
                                     .match_subscription(&rules, &pubkey_hex)
@@ -3732,6 +3782,27 @@ async fn run_harness(
                                 continue;
                             };
                             let ingress = ingress.resolve_edit_routing(&ctx.rest_client).await;
+                            if team_loop.is_teammate(&ingress.buzz_event.event.pubkey.to_hex())
+                                && matches!(ingress.buzz_event.event.kind.as_u16(), 9 | 45001 | 45003)
+                            {
+                                let scope = ingress.session_scope(
+                                    config.session_policy,
+                                    is_dm_channel(ingress.buzz_event.channel_id, &ctx.channel_info)
+                                        .await,
+                                );
+                                if !team_loop.observe_teammate(
+                                    &scope,
+                                    ingress.buzz_event.event.id.to_hex(),
+                                    true,
+                                ) {
+                                    tracing::info!(
+                                        channel_id = %ingress.buzz_event.channel_id,
+                                        scope = %scope.telemetry_label(),
+                                        "team loop limit reached — dropping teammate trigger"
+                                    );
+                                    continue;
+                                }
+                            }
                             // Derive the session scope once, at admission, from
                             // the operator policy, DM status, and NIP-10 thread
                             // tags. Under the default `channel` policy this is
@@ -10132,8 +10203,11 @@ mod build_mcp_servers_tests {
             effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
+            permission_mode_timeout_secs: 5,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
+            team_pubkeys: HashSet::new(),
+            team_loop_limit: 6,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -11229,8 +11303,11 @@ mod error_outcome_emission_tests {
             effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
+            permission_mode_timeout_secs: 5,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            team_pubkeys: HashSet::new(),
+            team_loop_limit: 6,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
