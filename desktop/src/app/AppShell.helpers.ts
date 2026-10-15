@@ -13,6 +13,7 @@ export type AppView =
 
 const WINDOW_DRAG_HANDLE_HEIGHT = 44;
 const TAURI_DRAG_REGION_ATTR = "data-tauri-drag-region";
+const WINDOW_DRAG_REGION_SELECTOR = `[${TAURI_DRAG_REGION_ATTR}]:not([${TAURI_DRAG_REGION_ATTR}="false"])`;
 const WINDOW_DRAG_INTERACTIVE_SELECTOR =
   'button, a, input, textarea, select, label, summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"], [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
 
@@ -76,10 +77,20 @@ export function isWindowDragHandleEvent(event: MouseEvent | PointerEvent) {
   }
 
   const target = event.target;
-  return !(
-    target instanceof Element &&
-    target.closest(WINDOW_DRAG_INTERACTIVE_SELECTOR)
-  );
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  // The fallback exists so plain descendants of a drag region still drag —
+  // `isTauriDragRegionEvent` only matches when the marked element is itself the
+  // click target. Height alone also caught ordinary content that happened to be
+  // scrolled under the top strip and cancelled its text selection (#6827), so
+  // require the point to actually be inside a drag region.
+  if (!target.closest(WINDOW_DRAG_REGION_SELECTOR)) {
+    return false;
+  }
+
+  return !target.closest(WINDOW_DRAG_INTERACTIVE_SELECTOR);
 }
 
 export function shouldBounceForChannelNotification(tags: string[][]): boolean {
