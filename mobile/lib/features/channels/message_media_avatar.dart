@@ -1,7 +1,30 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+
+import 'message_gallery.dart';
+import 'message_media.dart';
+import 'message_content/link_normalizer.dart';
 
 import '../../shared/theme/message_typography.dart';
+
+/// Retains gallery displacement across caption edits, resetting for new images.
+ValueNotifier<double> useMessageMediaOffset(
+  String content,
+  List<List<String>> tags,
+) {
+  final gallery = extractTrailingImageGallery(normalizeBareLinks(content), {
+    for (final entry in parseImetaTags(tags).entries)
+      normalizeMarkdownDestination(entry.key): entry.value,
+  });
+  final signature = gallery?.items.map((item) => item.url).join('\u0000');
+  final offset = useValueNotifier(0.0);
+  useEffect(() {
+    offset.value = 0;
+    return null;
+  }, [signature]);
+  return offset;
+}
 
 /// Reports gallery displacement so the author clears the overflowing images.
 class MessageGalleryScrollNotification extends Notification {

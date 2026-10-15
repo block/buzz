@@ -99,6 +99,8 @@ MapEntry<String, int>? _catchUpMark({
   // the live bottom, for example after a jump into history.
   final showsNewest = !loaded.any(
     (message) =>
+        (threadRootId != null ||
+            message.systemEvent?.type != SystemEventType.huddleEnded) &&
         message.createdAt > bottom.createdAt &&
         (threadRootId != null
             ? _threadRootOf(message) == threadRootId
@@ -106,10 +108,19 @@ MapEntry<String, int>? _catchUpMark({
   );
   if (!showsNewest) return null;
 
-  // Cut at the bottom row. A newer reply's time would also read a top-level
-  // message that arrives late with an earlier time. A clock ahead of now, on
-  // this device or the sender's, must not read messages before they arrive.
-  final cut = bottom.createdAt < now ? bottom.createdAt : now;
+  // At the live boundary, include hidden huddle endings so their observed
+  // unread dots clear too. Never advance through replies or past the clock.
+  var latest = bottom.createdAt;
+  if (threadRootId == null) {
+    for (final message in loaded) {
+      if (message.systemEvent?.type == SystemEventType.huddleEnded &&
+          message.parentId == null &&
+          message.createdAt > latest) {
+        latest = message.createdAt;
+      }
+    }
+  }
+  final cut = latest < now ? latest : now;
   final key = threadRootId != null
       ? threadActivityContextKey(threadRootId)
       : activityContextKey(channelId);

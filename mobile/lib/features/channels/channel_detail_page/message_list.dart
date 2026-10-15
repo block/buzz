@@ -609,10 +609,7 @@ class _MessageList extends HookConsumerWidget {
         channelId: channelId,
         isDm: isDm,
         currentPubkey: currentPubkey,
-        // Hidden lifecycle events update cards but are not timeline rows.
-        loaded: allMessages.where(
-          (message) => message.systemEvent?.type != SystemEventType.huddleEnded,
-        ),
+        loaded: allMessages,
         visible: visible,
         bottom: atBottom ? latest : null,
       );

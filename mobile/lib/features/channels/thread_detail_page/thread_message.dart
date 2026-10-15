@@ -37,11 +37,7 @@ class _ThreadMessage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
-    final mediaOffset = useValueNotifier(0.0);
-    useEffect(() {
-      mediaOffset.value = 0;
-      return null;
-    }, [message.content]);
+    final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final pk = message.pubkey.toLowerCase();
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??

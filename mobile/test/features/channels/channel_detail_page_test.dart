@@ -2208,7 +2208,7 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.markedContexts, {'activity:$_channelId': 1300});
       expect(tester.takeException(), isNull);
     });
 

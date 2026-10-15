@@ -1,9 +1,37 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
 
 void main() {
+  testWidgets('caption edits retain offset but replacing images resets it', (
+    tester,
+  ) async {
+    late ValueNotifier<double> offset;
+    Widget build(String caption, String second) => MaterialApp(
+      home: HookBuilder(
+        builder: (context) {
+          offset = useMessageMediaOffset(
+            '$caption\n![one](https://example.com/one.png)\n![two](https://example.com/$second.png)',
+            const [],
+          );
+          return MessageMediaAvatar(
+            offset: offset,
+            child: const SizedBox(width: 42, height: 42),
+          );
+        },
+      ),
+    );
+    await tester.pumpWidget(build('Original', 'two'));
+    offset.value = 200;
+    await tester.pump();
+    await tester.pumpWidget(build('Edited caption', 'two'));
+    expect(offset.value, 200);
+    await tester.pumpWidget(build('Edited caption', 'three'));
+    expect(offset.value, 0);
+  });
+
   testWidgets('gallery displacement hides the complete profile action', (
     tester,
   ) async {
