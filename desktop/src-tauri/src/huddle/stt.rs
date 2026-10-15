@@ -802,10 +802,15 @@ fn decode_speech(recognizer: &sherpa_onnx::OfflineRecognizer, speech_buf: &[f32]
 }
 
 fn send_transcript(text: String, text_tx: &tokio_mpsc::Sender<String>) {
-    if !text.is_empty() {
-        if let Err(e) = text_tx.blocking_send(text) {
-            eprintln!("buzz-desktop: STT text channel closed: {e}");
-        }
+    // Parakeet hallucinates bare punctuation (".", "?") on non-speech audio
+    // that clears the VAD's minimum-voiced-frames gate. A transcript with no
+    // alphanumeric characters carries no speech content — drop it here so it
+    // never reaches the posting task and becomes a channel message.
+    if !text.chars().any(char::is_alphanumeric) {
+        return;
+    }
+    if let Err(e) = text_tx.blocking_send(text) {
+        eprintln!("buzz-desktop: STT text channel closed: {e}");
     }
 }
 
