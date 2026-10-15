@@ -51,15 +51,18 @@ void main() {
     expect(state().doneIds, {'approval-a'});
   });
 
-  test('the first community to open claims the device-wide rows', () async {
+  test('every community starts from the device-wide rows', () async {
     final (container, config) = await start({
-      'activity_inbox_local_state_v1': '{"done":["approval-a"],"unread":[]}',
+      'activity_inbox_local_state_v1':
+          '{"done":["approval-a","approval-b"],"unread":[]}',
     });
+    InboxLocalState state() => container.read(inboxLocalStateProvider);
 
-    expect(container.read(inboxLocalStateProvider).doneIds, {'approval-a'});
+    expect(state().doneIds, {'approval-a', 'approval-b'});
+    container.read(inboxLocalStateProvider.notifier).markUnread(['approval-a']);
     config.switchTo('https://relay-b.example');
-    expect(container.read(inboxLocalStateProvider).doneIds, isEmpty);
+    expect(state().doneIds, {'approval-a', 'approval-b'});
     config.switchTo('https://relay-a.example');
-    expect(container.read(inboxLocalStateProvider).doneIds, {'approval-a'});
+    expect(state().doneIds, {'approval-b'});
   });
 }

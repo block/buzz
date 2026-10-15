@@ -306,12 +306,13 @@ void main() {
   });
 
   test(
-    'each community keeps its own slot, seeded from the shared one',
+    'each community keeps its own slot and marks, seeded from the shared ones',
     () async {
       SharedPreferences.setMockInitialValues({
         'buzz.nip-rs.slot-id:pk': 'a' * 32,
         'buzz.channel-read-state.v2:pk':
             '{"channel-1":"2026-01-01T00:00:00.000"}',
+        'buzz.channel-read-state.publishable.v1:pk': '["channel-1"]',
       });
       final prefs = await SharedPreferences.getInstance();
       final storage = ReadStateStorage(prefs);
@@ -325,9 +326,16 @@ void main() {
       storage.writeSlotId('pk', 'https://other.example', 'b' * 32);
       expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
 
-      // The shared marks may be another community's, so none are taken.
+      // Every community keeps the shared marks, but only locally: they may be
+      // another community's, so none is published to its relay.
+      final mine = storage.read('pk', _relayUrl);
+      expect(mine.contexts.keys, ['channel-1']);
+      expect(mine.publishableContextIds, isEmpty);
+      storage.write('pk', _relayUrl, {}, {}, {});
+      final other = storage.read('pk', 'https://other.example');
+      expect(other.contexts.keys, ['channel-1']);
+      expect(other.publishableContextIds, isEmpty);
       expect(storage.read('pk', _relayUrl).contexts, isEmpty);
-      expect(prefs.getString('buzz.channel-read-state.v2:pk'), isNull);
     },
   );
 

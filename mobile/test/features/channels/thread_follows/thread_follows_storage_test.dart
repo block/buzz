@@ -29,14 +29,19 @@ void main() {
     expect(storage.read('other-pubkey', relayUrl), isEmpty);
   });
 
-  test('the first community to open claims the shared entry', () async {
+  test('every community starts from the shared entry', () async {
     SharedPreferences.setMockInitialValues({
-      legacyThreadFollowsKey(pubkey): '[{"rootId":"root-a","followedAt":5}]',
+      legacyThreadFollowsKey(pubkey):
+          '[{"rootId":"root-a","followedAt":5},'
+          '{"rootId":"root-b","followedAt":6}]',
     });
     final storage = ThreadFollowsStorage(await SharedPreferences.getInstance());
-    expect(storage.read(pubkey, relayUrl).map((e) => e.rootId), ['root-a']);
-    expect(storage.read(pubkey, 'https://relay-b.example'), isEmpty);
-    expect(storage.read(pubkey, relayUrl).map((e) => e.rootId), ['root-a']);
+    storage.write(pubkey, relayUrl, const []);
+    expect(storage.read(pubkey, relayUrl), isEmpty);
+    expect(
+      storage.read(pubkey, 'https://relay-b.example').map((e) => e.rootId),
+      ['root-a', 'root-b'],
+    );
   });
 
   test('ignores malformed stored payloads', () async {
