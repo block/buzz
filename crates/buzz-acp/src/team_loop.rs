@@ -1,11 +1,15 @@
 //! Opt-in limit on consecutive teammate-authored triggers in a conversation.
-//! The relay subscription is widened when enabled so human messages that do
-//! not mention this agent still release the cap. Ordinary subscription rules
-//! continue to decide which admitted events can start a turn.
+//! The relay subscription is widened when enabled so admitted human messages
+//! that do not mention this agent can release the cap. Ordinary subscription
+//! rules continue to decide which admitted events can start a turn.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::queue::ResolvedEdit;
+use crate::scope::SessionPolicy;
 use crate::scope::SessionScope;
+use nostr::Event;
+use uuid::Uuid;
 
 const SEEN_CAPACITY: usize = 4096;
 
@@ -18,6 +22,16 @@ pub(crate) struct TeamLoop {
 }
 
 impl TeamLoop {
+    /// Guard scope is always thread-rooted in channels, independently of the
+    /// provider session policy. DMs have no thread boundary.
+    pub(crate) fn scope(
+        channel_id: Uuid,
+        is_dm: bool,
+        event: &Event,
+        edit: Option<&ResolvedEdit>,
+    ) -> SessionScope {
+        SessionScope::derive_routed(SessionPolicy::Thread, channel_id, is_dm, event, edit)
+    }
     pub(crate) fn new(mut teammates: HashSet<String>, self_pubkey: String, limit: usize) -> Self {
         teammates.insert(self_pubkey);
         Self {
@@ -43,8 +57,8 @@ impl TeamLoop {
         })
     }
 
-    /// Human messages reset the count even when they do not match this agent's
-    /// subscription rule. An auxiliary event cannot reset a blocked thread.
+    /// Admitted human messages reset the count even when they do not match this
+    /// agent's subscription rule. An auxiliary event cannot reset a thread.
     pub(crate) fn observe_human(&mut self, scope: &SessionScope, id: String, kind: u16) {
         if matches!(kind, 9 | 45001 | 45003) && self.remember(id, true).is_none() {
             self.counts.remove(scope);
@@ -91,7 +105,29 @@ impl TeamLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
     use uuid::Uuid;
+
+    #[test]
+    fn guard_keys_channel_events_by_thread_even_when_session_policy_is_channel() {
+        let channel_id = Uuid::new_v4();
+        let make_reply = |root: &str| {
+            EventBuilder::new(Kind::Custom(9), "ping")
+                .tags(vec![Tag::parse(vec!["e", root, "", "root"]).unwrap()])
+                .sign_with_keys(&Keys::generate())
+                .unwrap()
+        };
+        let left = make_reply(&"a".repeat(64));
+        let right = make_reply(&"b".repeat(64));
+        assert_ne!(
+            TeamLoop::scope(channel_id, false, &left, None),
+            TeamLoop::scope(channel_id, false, &right, None)
+        );
+        assert_eq!(
+            TeamLoop::scope(channel_id, true, &left, None),
+            TeamLoop::scope(channel_id, true, &right, None)
+        );
+    }
 
     #[test]
     fn stops_teammates_until_human_posts_in_same_scope() {

@@ -565,6 +565,10 @@ mod inbound_author_gate {
         pub(crate) fn event(&self) -> &relay::BuzzEvent {
             &self.buzz_event
         }
+
+        pub(crate) fn effective_author(&self) -> &str {
+            &self.effective_author
+        }
     }
 
     /// Apply the configured raw-author policy after trusted workflow attribution.
@@ -954,6 +958,32 @@ impl NormalListenerIngress {
     }
 }
 
+/// This consumes the admitted ingress so a capped event cannot accidentally
+/// be queued after the check. Callers must handle `None` with `continue`.
+fn gate_team_ingress(
+    team_loop: &mut team_loop::TeamLoop,
+    scope: &scope::SessionScope,
+    ingress: NormalListenerIngress,
+    enabled: bool,
+) -> Option<NormalListenerIngress> {
+    if enabled
+        && team_loop.is_teammate(&ingress.effective_author)
+        && matches!(
+            ingress.buzz_event.event.kind.as_u16(),
+            9 | 40003 | 45001 | 45003
+        )
+        && !team_loop.observe_teammate(scope, ingress.buzz_event.event.id.to_hex(), true)
+    {
+        tracing::info!(
+            channel_id = %ingress.buzz_event.channel_id,
+            scope = %scope.telemetry_label(),
+            "team loop limit reached — dropping teammate trigger"
+        );
+        return None;
+    }
+    Some(ingress)
+}
+
 /// Apply the complete normal-listener author boundary for one relay event.
 ///
 /// The event is consumed here, so the production loop cannot recover it except
@@ -977,6 +1007,251 @@ async fn authorize_normal_listener_event(
             rest_client,
         )
         .await
+}
+
+/// Only a verified, admitted human can release a teammate streak. The
+/// membership role is relay-owned; the profile's NIP-OA tag is a conservative
+/// agent signal even when the attestation belongs to another customer.
+async fn admitted_human_can_reset(
+    admitted: &AuthorizedListenerEvent,
+    team_loop: &team_loop::TeamLoop,
+    owner: Option<&str>,
+    allowlist: &HashSet<String>,
+    rest_client: &relay::RestClient,
+) -> bool {
+    let author = admitted.effective_author();
+    if !eligible_reset_principal(
+        author,
+        &admitted.event().event.pubkey.to_hex(),
+        team_loop,
+        owner,
+        allowlist,
+    ) {
+        return false;
+    }
+    let channel_id = admitted.event().channel_id;
+    let member_filter = serde_json::json!({
+        "kinds": [39002], "#d": [channel_id.to_string()], "limit": 1,
+        "consistency": "strong"
+    });
+    let profile_filter = serde_json::json!({
+        "kinds": [0], "authors": [author], "limit": 1
+    });
+    let member_filters = [member_filter];
+    let profile_filters = [profile_filter];
+    let (members, profile) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            rest_client.query_raw(&member_filters)
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            rest_client.query_raw(&profile_filters)
+        ),
+    );
+    let (Ok(Ok(members)), Ok(Ok(profile))) = (members, profile) else {
+        return false;
+    };
+    human_member_and_profile(author, owner, &members, &profile)
+}
+
+fn eligible_reset_principal(
+    effective_author: &str,
+    raw_author: &str,
+    team_loop: &team_loop::TeamLoop,
+    owner: Option<&str>,
+    allowlist: &HashSet<String>,
+) -> bool {
+    !team_loop.is_teammate(effective_author)
+        && (Some(effective_author) == owner || allowlist.contains(effective_author))
+        // A relay-signed workflow post is never a human reset, even when it
+        // carries a verified effective owner.
+        && raw_author == effective_author
+}
+
+fn human_member_and_profile(
+    author: &str,
+    owner: Option<&str>,
+    members: &serde_json::Value,
+    profile: &serde_json::Value,
+) -> bool {
+    let role = members
+        .as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| event.get("tags"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let fields = tag.as_array()?;
+                (fields.first()?.as_str() == Some("p") && fields.get(1)?.as_str() == Some(author))
+                    .then(|| {
+                        fields
+                            .get(3)
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|role| !role.is_empty())
+                            .unwrap_or("member")
+                    })
+            })
+        });
+    if !matches!(role, Some("owner" | "admin" | "member" | "guest")) {
+        return false;
+    }
+    // A missing profile cannot prove an allowlisted identity is human. The
+    // bound owner remains an explicit human authority without one.
+    let profile_tags = profile
+        .as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| event.get("tags"))
+        .and_then(serde_json::Value::as_array);
+    if profile_tags.is_none() && Some(author) != owner {
+        return false;
+    }
+    !profile_tags.is_some_and(|tags| {
+        tags.iter().any(|tag| {
+            tag.as_array()
+                .and_then(|fields| fields.first())
+                .and_then(serde_json::Value::as_str)
+                == Some("auth")
+        })
+    })
+}
+
+#[cfg(test)]
+mod team_loop_listener_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    #[test]
+    fn admitted_teammate_edits_and_messages_drop_after_self_spends_budget() {
+        let teammate = Keys::generate();
+        let agent = Keys::generate();
+        let teammate_hex = teammate.public_key().to_hex();
+        let mut guard = team_loop::TeamLoop::new(
+            HashSet::from([teammate_hex.clone()]),
+            agent.public_key().to_hex(),
+            2,
+        );
+        let channel_id = Uuid::new_v4();
+        let scope = scope::SessionScope::Thread {
+            channel_id,
+            root_event_id: "a".repeat(64),
+        };
+        // The listener observes its own team-addressed post before ignoring
+        // that self-authored event; it still spends one of the two slots.
+        assert!(guard.observe_teammate(&scope, "self-post".into(), true));
+        let ingress = |kind, text: &str| NormalListenerIngress {
+            buzz_event: relay::BuzzEvent {
+                connection_generation: 0,
+                channel_id,
+                event: EventBuilder::new(Kind::Custom(kind), text)
+                    .sign_with_keys(&teammate)
+                    .unwrap(),
+            },
+            effective_author: teammate_hex.clone(),
+            prompt_tag: "test".into(),
+            edit: None,
+        };
+        assert!(gate_team_ingress(&mut guard, &scope, ingress(9, "first"), true).is_some());
+        assert!(gate_team_ingress(&mut guard, &scope, ingress(40003, "edit"), true).is_none());
+        assert!(gate_team_ingress(&mut guard, &scope, ingress(9, "uncapped"), false).is_some());
+    }
+
+    #[test]
+    fn only_admitted_direct_humans_can_reset_and_bot_roles_never_can() {
+        let owner = "a".repeat(64);
+        let human = "b".repeat(64);
+        let relay = "c".repeat(64);
+        let bot = "d".repeat(64);
+        let guard = team_loop::TeamLoop::new(HashSet::from([bot.clone()]), "self".into(), 6);
+        let allowlist = HashSet::from([human.clone(), bot.clone()]);
+        assert!(eligible_reset_principal(
+            &owner,
+            &owner,
+            &guard,
+            Some(&owner),
+            &allowlist
+        ));
+        assert!(eligible_reset_principal(
+            &human,
+            &human,
+            &guard,
+            Some(&owner),
+            &allowlist
+        ));
+        assert!(!eligible_reset_principal(
+            &human,
+            &relay,
+            &guard,
+            Some(&owner),
+            &allowlist
+        ));
+        assert!(!eligible_reset_principal(
+            &bot,
+            &bot,
+            &guard,
+            Some(&owner),
+            &allowlist
+        ));
+        assert!(!eligible_reset_principal(
+            &relay,
+            &relay,
+            &guard,
+            Some(&owner),
+            &allowlist
+        ));
+
+        let members = |role| serde_json::json!([{"tags": [["p", human, "", role]]}]);
+        let plain = serde_json::json!([{"tags": []}]);
+        let nip_oa = serde_json::json!([{"tags": [["auth", owner, "", "signature"]]}]);
+        assert!(human_member_and_profile(
+            &human,
+            Some(&owner),
+            &members("member"),
+            &plain
+        ));
+        assert!(human_member_and_profile(
+            &human,
+            Some(&owner),
+            &serde_json::json!([{"tags": [["p", human]]}]),
+            &plain
+        ));
+        assert!(!human_member_and_profile(
+            &human,
+            Some(&owner),
+            &members("bot"),
+            &plain
+        ));
+        assert!(!human_member_and_profile(
+            &human,
+            Some(&owner),
+            &members("member"),
+            &nip_oa
+        ));
+        assert!(!human_member_and_profile(
+            &human,
+            Some(&owner),
+            &members("member"),
+            &serde_json::json!([])
+        ));
+    }
+
+    #[test]
+    fn production_listener_keeps_reset_after_author_gate_and_drop_before_queue() {
+        let source = include_str!("lib.rs");
+        let listener = source
+            .rsplit("// Coarse security policy: drop events")
+            .next()
+            .unwrap();
+        let authorize = listener.find("authorize_normal_listener_event(").unwrap();
+        let reset = listener.find("admitted_human_can_reset(").unwrap();
+        let route = listener.find("gate_team_ingress(").unwrap();
+        let queued = listener.find("ingress.push(&mut queue").unwrap();
+        assert!(authorize < reset && reset < route && route < queued);
+        assert!(listener[route..queued].contains("continue;"));
+        assert!(source.contains(
+            "buzz_event.event.id.to_hex(),\n                                        true,"
+        ));
+    }
 }
 
 /// Refresh the relay signing identity, logging why delegated workflow
@@ -3572,13 +3847,14 @@ async fn run_harness(
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 if !config.team_pubkeys.is_empty()
+                                    && matches!(kind_u32, 9 | 45001 | 45003)
                                     && team_loop.targets_team(&buzz_event.event)
                                 {
-                                    let scope = scope::SessionScope::derive(
-                                        config.session_policy,
+                                    let scope = team_loop::TeamLoop::scope(
                                         buzz_event.channel_id,
                                         is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
                                         &buzz_event.event,
+                                        None,
                                     );
                                     team_loop.observe_teammate(
                                         &scope,
@@ -3729,30 +4005,10 @@ async fn run_harness(
                             // agent. Must be AFTER !shutdown (owner can always
                             // shut down regardless of gate mode).
                             //
-                            // Both OwnerOnly and Allowlist accept events from
-                            // "siblings" — pubkeys whose agent_owner_pubkey
-                            // matches this agent's owner (e.g. other bots
-                            // launched by the same human). Allowlist adds the
-                            // explicit pubkey list on top, for external people;
-                            // it never revokes same-owner team bots.
-                            // A human channel post ends a teammate streak even if this
-                            // agent's response policy does not admit its author. The
-                            // subscription can see those posts solely for this reset.
-                            if !config.team_pubkeys.is_empty()
-                                && !team_loop.is_teammate(&buzz_event.event.pubkey.to_hex())
-                            {
-                                let scope = scope::SessionScope::derive(
-                                    config.session_policy,
-                                    buzz_event.channel_id,
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
-                                    &buzz_event.event,
-                                );
-                                team_loop.observe_human(
-                                    &scope,
-                                    buzz_event.event.id.to_hex(),
-                                    buzz_event.event.kind.as_u16(),
-                                );
-                            }
+                            // OwnerOnly and default Allowlist accept same-owner
+                            // sibling agents. Strict Allowlist admits only explicit
+                            // pubkeys, so a managed agent can ignore its siblings.
+
                             let Some(authorized_event) = authorize_normal_listener_event(
                                 &mut author_gate_ctx,
                                 buzz_event,
@@ -3767,22 +4023,42 @@ async fn run_harness(
                                 continue;
                             };
                             if !config.team_pubkeys.is_empty() {
+                                if admitted_human_can_reset(
+                                    &authorized_event,
+                                    &team_loop,
+                                    owner_cache.get(),
+                                    &config.respond_to_allowlist,
+                                    &ctx.rest_client,
+                                ).await {
+                                    let event = authorized_event.event();
+                                    let scope = team_loop::TeamLoop::scope(
+                                        event.channel_id,
+                                        is_dm_channel(event.channel_id, &ctx.channel_info).await,
+                                        &event.event,
+                                        None,
+                                    );
+                                    team_loop.observe_human(
+                                        &scope,
+                                        event.event.id.to_hex(),
+                                        event.event.kind.as_u16(),
+                                    );
+                                }
                                 let event = authorized_event.event();
-                                let scope = scope::SessionScope::derive(
-                                    config.session_policy,
-                                    event.channel_id,
-                                    is_dm_channel(event.channel_id, &ctx.channel_info).await,
-                                    &event.event,
-                                );
-                                if team_loop.is_teammate(&event.event.pubkey.to_hex()) {
-                                    if matches!(event.event.kind.as_u16(), 9 | 45001 | 45003) {
-                                        let targets_team = team_loop.targets_team(&event.event);
-                                        team_loop.observe_teammate(
-                                            &scope,
-                                            event.event.id.to_hex(),
-                                            targets_team,
-                                        );
-                                    }
+                                if team_loop.is_teammate(authorized_event.effective_author())
+                                    && matches!(event.event.kind.as_u16(), 9 | 45001 | 45003)
+                                {
+                                    let scope = team_loop::TeamLoop::scope(
+                                        event.channel_id,
+                                        is_dm_channel(event.channel_id, &ctx.channel_info).await,
+                                        &event.event,
+                                        None,
+                                    );
+                                    let targets_team = team_loop.targets_team(&event.event);
+                                    team_loop.observe_teammate(
+                                        &scope,
+                                        event.event.id.to_hex(),
+                                        targets_team,
+                                    );
                                 }
                             }
                             let Some(ingress) =
@@ -3794,27 +4070,18 @@ async fn run_harness(
                                 continue;
                             };
                             let ingress = ingress.resolve_edit_routing(&ctx.rest_client).await;
-                            if team_loop.is_teammate(&ingress.buzz_event.event.pubkey.to_hex())
-                                && matches!(ingress.buzz_event.event.kind.as_u16(), 9 | 45001 | 45003)
-                            {
-                                let scope = ingress.session_scope(
-                                    config.session_policy,
-                                    is_dm_channel(ingress.buzz_event.channel_id, &ctx.channel_info)
-                                        .await,
-                                );
-                                if !team_loop.observe_teammate(
-                                    &scope,
-                                    ingress.buzz_event.event.id.to_hex(),
-                                    true,
-                                ) {
-                                    tracing::info!(
-                                        channel_id = %ingress.buzz_event.channel_id,
-                                        scope = %scope.telemetry_label(),
-                                        "team loop limit reached — dropping teammate trigger"
-                                    );
-                                    continue;
-                                }
-                            }
+                            let team_scope = team_loop::TeamLoop::scope(
+                                ingress.buzz_event.channel_id,
+                                is_dm_channel(ingress.buzz_event.channel_id, &ctx.channel_info).await,
+                                &ingress.buzz_event.event,
+                                ingress.edit.as_ref(),
+                            );
+                            let Some(ingress) = gate_team_ingress(
+                                &mut team_loop, &team_scope, ingress, !config.team_pubkeys.is_empty(),
+                            )
+                            else {
+                                continue;
+                            };
                             // Derive the session scope once, at admission, from
                             // the operator policy, DM status, and NIP-10 thread
                             // tags. Under the default `channel` policy this is

@@ -1515,8 +1515,6 @@ const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`classify_control_cancel_failure`].
 const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
-/// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
-
 /// Bounded window a `Thread` batch waits for its busy session-owner before we
 /// stop holding and fork a fresh session on an idle worker. Kept below the 30s
 /// maintenance tick so even a silent system re-evaluates a held batch shortly
@@ -2227,6 +2225,29 @@ async fn apply_permission_mode(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod permission_mode_timeout_wiring_tests {
+    #[test]
+    fn session_setup_passes_configured_timeout_to_the_actual_acp_call() {
+        let source = include_str!("pool.rs");
+        let setup = source
+            .split("// Apply permission mode if not the agent's built-in default")
+            .nth(1)
+            .unwrap();
+        let apply = source
+            .split("async fn apply_permission_mode(")
+            .nth(1)
+            .unwrap();
+        assert!(setup.contains("ctx.permission_mode_timeout,"));
+        assert!(apply.contains("tokio::time::timeout(timeout, async"));
+        assert!(!apply
+            .split("match result")
+            .next()
+            .unwrap()
+            .contains("Duration::from_secs(5)"));
+    }
 }
 
 /// Prepend a legacy agent's standing context to a user-message body.
