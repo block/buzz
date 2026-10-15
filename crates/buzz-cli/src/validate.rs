@@ -72,6 +72,41 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Refuse to publish a message with no text.
+///
+/// `--content -` reads stdin verbatim, so a command whose pipeline produced
+/// nothing (a `printf` that rendered empty, a heredoc that collapsed, a failed
+/// substitution) sends an empty message rather than failing. On 2026-08-17 an
+/// agent did exactly that five times over ten hours while trying to report that
+/// it was unauthorized for a repo. Every attempt published successfully and
+/// carried nothing.
+///
+/// An empty message is worse than no message. It resolves the mention, lands in
+/// the thread at the expected moment, and says nothing — so it reads as an
+/// acknowledgement from an agent that has stopped working. The blocker stayed
+/// invisible, and the remedy that behaviour invited was restarting a healthy
+/// agent, which would have destroyed its in-flight work.
+///
+/// Failing loudly here gives the caller something it can act on: an agent sees
+/// a non-zero exit and can retry, and a human sees an error instead of a
+/// message that appears to have been delivered.
+///
+/// Callers that legitimately publish without text — an image-only message —
+/// must pass `allow_empty` once they have confirmed other content exists.
+pub fn validate_content_present(content: &str, allow_empty: bool) -> Result<(), CliError> {
+    if !allow_empty && content.trim().is_empty() {
+        return Err(CliError::Usage(
+            "refusing to send an empty message: content is blank after reading \
+             stdin. An empty message is indistinguishable from an acknowledgement \
+             and hides whatever you meant to say. If you piped `--content -`, the \
+             producing command wrote nothing — check it succeeded. To publish \
+             media with no text, pass --files."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Percent-encode for URL path segments and query parameter values.
 /// Encodes all bytes except RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
 #[cfg(test)]
@@ -502,5 +537,54 @@ mod tests {
         // verbatim as if it were the patch content.
         let err = super::read_file_or_stdin("0001-does-not-exist.patch").unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+}
+
+#[cfg(test)]
+mod empty_content_tests {
+    use super::*;
+
+    // ENG-4064. An agent spent ten hours trying to report that it was
+    // unauthorized for a repo. Every attempt published successfully and carried
+    // nothing, so the blocker was invisible and the agent looked wedged.
+
+    #[test]
+    fn an_empty_message_is_refused() {
+        assert!(validate_content_present("", false).is_err());
+    }
+
+    #[test]
+    fn whitespace_only_is_refused_too() {
+        // `printf '\n' | buzz messages send --content -` is the same failure
+        // wearing a different hat: a producing command that emitted only a
+        // newline still says nothing.
+        for blank in ["\n", "  ", "\t\n  \n"] {
+            assert!(
+                validate_content_present(blank, false).is_err(),
+                "blank content {blank:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn real_content_passes() {
+        assert!(validate_content_present("autopilot-brain is unauthorized", false).is_ok());
+    }
+
+    #[test]
+    fn an_image_only_message_is_still_allowed() {
+        // Media with no caption is legitimate. The guard must not block it, or
+        // it will be removed rather than fixed.
+        assert!(validate_content_present("", true).is_ok());
+    }
+
+    #[test]
+    fn the_error_says_what_to_check() {
+        // A refusal that does not name the likely cause sends the caller
+        // hunting the relay instead of their own pipeline.
+        let err = validate_content_present("", false).unwrap_err().to_string();
+        assert!(err.contains("empty message"), "{err}");
+        assert!(err.contains("--content -"), "{err}");
+        assert!(err.contains("--files"), "{err}");
     }
 }
