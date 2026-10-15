@@ -54,6 +54,10 @@ const PRUNE_INTERVAL_MS = 5_000;
 type ActiveTurn = {
   turnId: string;
   channelId: string;
+  /** Thread-root prefix the emitting harness scopes this turn to (NIP-AO
+   *  envelope `sessionId`, the root event id shortened). Null when the frame
+   *  carried none — such turns are channel-scoped only. */
+  sessionId: string | null;
   startedAt: number;
   lastActivityAt: number;
 };
@@ -98,6 +102,9 @@ const clockOffsetByAgent = new Map<string, number>();
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
 let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
+// `${channelId}|${threadRootId}` → working pubkeys, reference-stable per notify.
+const cachedThreadWorkingPubkeys = new Map<string, string[]>();
+const EMPTY_THREAD_PUBKEYS: readonly string[] = Object.freeze([]);
 
 // Composite watermark per (agent, channel): the newest observer event
 // processed for that channel, by (timestamp, seq) ordering. An event is
@@ -144,6 +151,8 @@ let unsubscribePruneVisibility: (() => void) | null = null;
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
   cachedChannelTurnSummaries = null;
+  // Thread-scoped snapshots span agents, so any agent change clears them all.
+  cachedThreadWorkingPubkeys.clear();
 }
 
 function notifyListeners() {
@@ -179,6 +188,7 @@ function startTurn(
   channelId: string,
   turnId: string,
   timestamp: string,
+  sessionId: string | null = null,
 ) {
   const key = normalizePubkey(agentPubkey);
   let agentTurns = activeTurnsByAgent.get(key);
@@ -206,6 +216,7 @@ function startTurn(
   agentTurns.set(turnId, {
     turnId,
     channelId,
+    sessionId,
     startedAt,
     lastActivityAt: Date.now(),
   });
@@ -254,7 +265,13 @@ function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
     frameAt !== null && startedAtMs !== null && startedAtMs <= frameAt
       ? startedAt
       : event.timestamp;
-  startTurn(agentPubkey, event.channelId, event.turnId, safeStartedAt);
+  startTurn(
+    agentPubkey,
+    event.channelId,
+    event.turnId,
+    safeStartedAt,
+    event.sessionId ?? null,
+  );
   return true;
 }
 
@@ -408,6 +425,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
           event.channelId,
           event.turnId ?? `seq-${event.seq}`,
           event.timestamp,
+          event.sessionId ?? null,
         );
         notifyListeners();
         return;
@@ -614,6 +632,72 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
     subscribeActiveAgentTurns,
     getActiveTurnsByChannel,
   );
+}
+
+/**
+ * Live observer turns one agent is running in one channel. The channel
+ * composer bar uses this to switch from a detailed single-turn status line to
+ * an aggregate ("2 threads") when parallel conversations would otherwise
+ * interleave in one line. Returns a primitive, so useSyncExternalStore
+ * reference stability is free.
+ */
+export function getActiveTurnCountForChannel(
+  agentPubkey: string | null | undefined,
+  channelId: string | null,
+): number {
+  if (!agentPubkey || !channelId) return 0;
+  const turns = activeTurnsByAgent.get(normalizePubkey(agentPubkey));
+  if (!turns) return 0;
+  let count = 0;
+  for (const turn of turns.values()) {
+    if (turn.channelId === channelId) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Agents with a live observer turn scoped to one thread. A turn qualifies
+ * when its channel matches AND the thread root id begins with the turn's
+ * `sessionId` (harnesses emit the root event id shortened, so prefix match is
+ * the identity test). Turns without a sessionId never qualify — the channel
+ * bar covers those.
+ */
+export function getWorkingAgentPubkeysForThread(
+  channelId: string | null,
+  threadRootId: string | null,
+): readonly string[] {
+  if (!channelId || !threadRootId) return EMPTY_THREAD_PUBKEYS;
+  const cacheKey = `${channelId}|${threadRootId}`;
+  const cached = cachedThreadWorkingPubkeys.get(cacheKey);
+  if (cached) return cached;
+
+  const pubkeys: string[] = [];
+  for (const [agentKey, turns] of activeTurnsByAgent) {
+    for (const turn of turns.values()) {
+      if (turn.channelId !== channelId) continue;
+      if (!turn.sessionId || !threadRootId.startsWith(turn.sessionId)) continue;
+      pubkeys.push(agentKey);
+      break;
+    }
+  }
+  cachedThreadWorkingPubkeys.set(cacheKey, pubkeys);
+  return pubkeys;
+}
+
+/**
+ * Hook: agents working in one specific thread, observer-derived.
+ * Reference-stable between store notifications.
+ */
+export function useThreadWorkingAgentPubkeys(
+  channelId: string | null,
+  threadRootId: string | null,
+): readonly string[] {
+  const getSnapshot = React.useCallback(
+    () => getWorkingAgentPubkeysForThread(channelId, threadRootId),
+    [channelId, threadRootId],
+  );
+
+  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
 }
 
 /**
