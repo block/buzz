@@ -1649,6 +1649,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn permission_timeout_reaches_prompt_context() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.permission_mode_timeout_secs = 30;
+        let rest = crate::relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".into(),
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        let context = crate::runtime::make_prompt_context(
+            &config,
+            rest,
+            std::collections::HashMap::new(),
+            crate::runtime::SessionMode::Conversation,
+        )
+        .unwrap();
+        assert_eq!(
+            context.permission_mode_timeout,
+            std::time::Duration::from_secs(30)
+        );
+    }
+
     fn make_rule(
         name: &str,
         channels: ChannelScope,

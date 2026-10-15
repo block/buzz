@@ -558,6 +558,14 @@ mod inbound_author_gate {
     }
 
     impl AuthorizedListenerEvent {
+        #[cfg(test)]
+        pub(crate) fn for_test(buzz_event: relay::BuzzEvent, effective_author: String) -> Self {
+            Self {
+                buzz_event,
+                effective_author,
+            }
+        }
+
         pub(crate) fn into_parts(self) -> (relay::BuzzEvent, String) {
             (self.buzz_event, self.effective_author)
         }
@@ -964,9 +972,8 @@ fn gate_team_ingress(
     team_loop: &mut team_loop::TeamLoop,
     scope: &scope::SessionScope,
     ingress: NormalListenerIngress,
-    enabled: bool,
 ) -> Option<NormalListenerIngress> {
-    if enabled
+    if team_loop.enabled()
         && team_loop.is_teammate(&ingress.effective_author)
         && matches!(
             ingress.buzz_event.event.kind.as_u16(),
@@ -982,6 +989,63 @@ fn gate_team_ingress(
         return None;
     }
     Some(ingress)
+}
+
+/// One authorized event's complete team and subscription path. An author-gate
+/// rejection is represented by `None` and cannot touch the reset counter.
+struct TeamListenerContext<'a> {
+    owner: Option<&'a str>,
+    allowlist: &'a HashSet<String>,
+    rules: &'a [SubscriptionRule],
+    agent_pubkey: &'a str,
+    is_dm: bool,
+    rest_client: &'a relay::RestClient,
+}
+
+async fn process_team_listener_event(
+    authorized: Option<AuthorizedListenerEvent>,
+    team_loop: &mut team_loop::TeamLoop,
+    human_reset_cache: &mut HumanResetCache,
+    context: TeamListenerContext<'_>,
+) -> Option<NormalListenerIngress> {
+    let authorized = authorized?;
+    if team_loop.enabled() {
+        if admitted_human_can_reset(
+            &authorized,
+            team_loop,
+            context.owner,
+            context.allowlist,
+            context.rest_client,
+            human_reset_cache,
+        )
+        .await
+        {
+            let event = authorized.event();
+            let scope =
+                team_loop::TeamLoop::scope(event.channel_id, context.is_dm, &event.event, None);
+            team_loop.observe_human(&scope, event.event.id.to_hex(), event.event.kind.as_u16());
+        }
+        let event = authorized.event();
+        if team_loop.is_teammate(authorized.effective_author())
+            && matches!(event.event.kind.as_u16(), 9 | 45001 | 45003)
+        {
+            let scope =
+                team_loop::TeamLoop::scope(event.channel_id, context.is_dm, &event.event, None);
+            let targets_team = team_loop.targets_team(&event.event);
+            team_loop.observe_teammate(&scope, event.event.id.to_hex(), targets_team);
+        }
+    }
+    let ingress = AuthorizedNormalListenerEvent(authorized)
+        .match_subscription(context.rules, context.agent_pubkey)
+        .await?;
+    let ingress = ingress.resolve_edit_routing(context.rest_client).await;
+    let team_scope = team_loop::TeamLoop::scope(
+        ingress.buzz_event.channel_id,
+        context.is_dm,
+        &ingress.buzz_event.event,
+        ingress.edit.as_ref(),
+    );
+    gate_team_ingress(team_loop, &team_scope, ingress)
 }
 
 /// Apply the complete normal-listener author boundary for one relay event.
@@ -1012,13 +1076,45 @@ async fn authorize_normal_listener_event(
 /// Only a verified, admitted human can release a teammate streak. The
 /// membership role is relay-owned; the profile's NIP-OA tag is a conservative
 /// agent signal even when the attestation belongs to another customer.
+#[derive(Default)]
+struct HumanResetCache {
+    entries: HashMap<(Uuid, String), (std::time::Instant, bool)>,
+}
+
+impl HumanResetCache {
+    fn get(&self, channel_id: Uuid, author: &str) -> Option<bool> {
+        self.entries
+            .get(&(channel_id, author.to_owned()))
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
+            .map(|(_, human)| *human)
+    }
+
+    fn insert(&mut self, channel_id: Uuid, author: &str, human: bool) {
+        if self.entries.len() >= 4096 {
+            self.entries
+                .retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+            if self.entries.len() >= 4096 {
+                self.entries.clear();
+            }
+        }
+        self.entries.insert(
+            (channel_id, author.to_owned()),
+            (std::time::Instant::now(), human),
+        );
+    }
+}
+
 async fn admitted_human_can_reset(
     admitted: &AuthorizedListenerEvent,
     team_loop: &team_loop::TeamLoop,
     owner: Option<&str>,
     allowlist: &HashSet<String>,
     rest_client: &relay::RestClient,
+    cache: &mut HumanResetCache,
 ) -> bool {
+    if !matches!(admitted.event().event.kind.as_u16(), 9 | 45001 | 45003) {
+        return false;
+    }
     let author = admitted.effective_author();
     if !eligible_reset_principal(
         author,
@@ -1030,6 +1126,9 @@ async fn admitted_human_can_reset(
         return false;
     }
     let channel_id = admitted.event().channel_id;
+    if let Some(human) = cache.get(channel_id, author) {
+        return human;
+    }
     let member_filter = serde_json::json!({
         "kinds": [39002], "#d": [channel_id.to_string()], "limit": 1,
         "consistency": "strong"
@@ -1052,7 +1151,9 @@ async fn admitted_human_can_reset(
     let (Ok(Ok(members)), Ok(Ok(profile))) = (members, profile) else {
         return false;
     };
-    human_member_and_profile(author, owner, &members, &profile)
+    let human = human_member_and_profile(author, owner, &members, &profile);
+    cache.insert(channel_id, author, human);
+    human
 }
 
 fn eligible_reset_principal(
@@ -1151,9 +1252,8 @@ mod team_loop_listener_tests {
             prompt_tag: "test".into(),
             edit: None,
         };
-        assert!(gate_team_ingress(&mut guard, &scope, ingress(9, "first"), true).is_some());
-        assert!(gate_team_ingress(&mut guard, &scope, ingress(40003, "edit"), true).is_none());
-        assert!(gate_team_ingress(&mut guard, &scope, ingress(9, "uncapped"), false).is_some());
+        assert!(gate_team_ingress(&mut guard, &scope, ingress(9, "first")).is_some());
+        assert!(gate_team_ingress(&mut guard, &scope, ingress(40003, "edit")).is_none());
     }
 
     #[test]
@@ -1235,22 +1335,146 @@ mod team_loop_listener_tests {
         ));
     }
 
-    #[test]
-    fn production_listener_keeps_reset_after_author_gate_and_drop_before_queue() {
-        let source = include_str!("lib.rs");
-        let listener = source
-            .rsplit("// Coarse security policy: drop events")
-            .next()
+    #[tokio::test]
+    async fn production_pipeline_caps_top_level_posts_and_resets_only_after_human_admission() {
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let human = Keys::generate();
+        let outsider = Keys::generate();
+        let alice_hex = alice.public_key().to_hex();
+        let bob_hex = bob.public_key().to_hex();
+        let human_hex = human.public_key().to_hex();
+        let channel_id = Uuid::new_v4();
+        let mut guard = team_loop::TeamLoop::new(
+            HashSet::from([alice_hex.clone(), bob_hex.clone()]),
+            "self".into(),
+            6,
+        );
+        let mut cache = HumanResetCache::default();
+        cache.insert(channel_id, &human_hex, true);
+        let allowlist = HashSet::from([human_hex.clone()]);
+        let rules = [SubscriptionRule::default()];
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".into(),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let context = || TeamListenerContext {
+            owner: None,
+            allowlist: &allowlist,
+            rules: &rules,
+            agent_pubkey: "self",
+            is_dm: false,
+            rest_client: &rest,
+        };
+        let admitted = |keys: &Keys, target: &str, text: &str| {
+            let event = EventBuilder::new(Kind::Custom(9), text)
+                .tags(vec![nostr::Tag::parse(vec!["p", target]).unwrap()])
+                .sign_with_keys(keys)
+                .unwrap();
+            AuthorizedListenerEvent::for_test(
+                relay::BuzzEvent {
+                    connection_generation: 0,
+                    channel_id,
+                    event,
+                },
+                keys.public_key().to_hex(),
+            )
+        };
+        for i in 0..6 {
+            let (keys, target) = if i % 2 == 0 {
+                (&alice, bob_hex.as_str())
+            } else {
+                (&bob, alice_hex.as_str())
+            };
+            assert!(process_team_listener_event(
+                Some(admitted(keys, target, &format!("ping {i}"))),
+                &mut guard,
+                &mut cache,
+                context()
+            )
+            .await
+            .is_some());
+        }
+        // An author-gate rejection or unrelated admitted bot must not reset.
+        assert!(
+            process_team_listener_event(None, &mut guard, &mut cache, context())
+                .await
+                .is_none()
+        );
+        assert!(process_team_listener_event(
+            Some(admitted(&outsider, &alice_hex, "outsider")),
+            &mut guard,
+            &mut cache,
+            context()
+        )
+        .await
+        .is_some());
+        assert!(process_team_listener_event(
+            Some(admitted(&alice, &bob_hex, "seventh")),
+            &mut guard,
+            &mut cache,
+            context()
+        )
+        .await
+        .is_none());
+        assert!(process_team_listener_event(
+            Some(admitted(&human, &alice_hex, "human reset")),
+            &mut guard,
+            &mut cache,
+            context()
+        )
+        .await
+        .is_some());
+        assert!(process_team_listener_event(
+            Some(admitted(&bob, &alice_hex, "after reset")),
+            &mut guard,
+            &mut cache,
+            context()
+        )
+        .await
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn self_post_spends_pipeline_budget() {
+        let agent = Keys::generate();
+        let peer = Keys::generate();
+        let peer_hex = peer.public_key().to_hex();
+        let channel_id = Uuid::new_v4();
+        let mut guard = team_loop::TeamLoop::new(
+            HashSet::from([peer_hex.clone()]),
+            agent.public_key().to_hex(),
+            1,
+        );
+        let self_event = EventBuilder::new(Kind::Custom(9), "delegate")
+            .tags(vec![
+                nostr::Tag::parse(vec!["p", peer_hex.as_str()]).unwrap()
+            ])
+            .sign_with_keys(&agent)
             .unwrap();
-        let authorize = listener.find("authorize_normal_listener_event(").unwrap();
-        let reset = listener.find("admitted_human_can_reset(").unwrap();
-        let route = listener.find("gate_team_ingress(").unwrap();
-        let queued = listener.find("ingress.push(&mut queue").unwrap();
-        assert!(authorize < reset && reset < route && route < queued);
-        assert!(listener[route..queued].contains("continue;"));
-        assert!(source.contains(
-            "buzz_event.event.id.to_hex(),\n                                        true,"
-        ));
+        guard.observe_self_event(channel_id, false, &self_event);
+        let peer_event = EventBuilder::new(Kind::Custom(9), "reply")
+            .tags(vec![nostr::Tag::parse(vec![
+                "p",
+                agent.public_key().to_hex().as_str(),
+            ])
+            .unwrap()])
+            .sign_with_keys(&peer)
+            .unwrap();
+        let ingress = NormalListenerIngress {
+            buzz_event: relay::BuzzEvent {
+                connection_generation: 0,
+                channel_id,
+                event: peer_event,
+            },
+            effective_author: peer_hex,
+            prompt_tag: "test".into(),
+            edit: None,
+        };
+        let scope = team_loop::TeamLoop::scope(channel_id, false, &ingress.buzz_event.event, None);
+        assert!(gate_team_ingress(&mut guard, &scope, ingress).is_none());
     }
 }
 
@@ -3322,6 +3546,7 @@ async fn run_harness(
         pubkey_hex.clone(),
         config.team_loop_limit,
     );
+    let mut human_reset_cache = HumanResetCache::default();
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -3846,22 +4071,11 @@ async fn run_harness(
                             }
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
-                                if !config.team_pubkeys.is_empty()
-                                    && matches!(kind_u32, 9 | 45001 | 45003)
-                                    && team_loop.targets_team(&buzz_event.event)
-                                {
-                                    let scope = team_loop::TeamLoop::scope(
-                                        buzz_event.channel_id,
-                                        is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
-                                        &buzz_event.event,
-                                        None,
-                                    );
-                                    team_loop.observe_teammate(
-                                        &scope,
-                                        buzz_event.event.id.to_hex(),
-                                        true,
-                                    );
-                                }
+                                team_loop.observe_self_event(
+                                    buzz_event.channel_id,
+                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await,
+                                    &buzz_event.event,
+                                );
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -4008,8 +4222,7 @@ async fn run_harness(
                             // OwnerOnly and default Allowlist accept same-owner
                             // sibling agents. Strict Allowlist admits only explicit
                             // pubkeys, so a managed agent can ignore its siblings.
-
-                            let Some(authorized_event) = authorize_normal_listener_event(
+                            let authorized_event = authorize_normal_listener_event(
                                 &mut author_gate_ctx,
                                 buzz_event,
                                 &config.respond_to,
@@ -4018,67 +4231,25 @@ async fn run_harness(
                                 &ctx.channel_info,
                                 &ctx.rest_client,
                             )
-                            .await
-                            else {
-                                continue;
+                            .await;
+                            let is_dm = if let Some(event) = authorized_event.as_ref() {
+                                is_dm_channel(event.event().channel_id, &ctx.channel_info).await
+                            } else {
+                                false
                             };
-                            if !config.team_pubkeys.is_empty() {
-                                if admitted_human_can_reset(
-                                    &authorized_event,
-                                    &team_loop,
-                                    owner_cache.get(),
-                                    &config.respond_to_allowlist,
-                                    &ctx.rest_client,
-                                ).await {
-                                    let event = authorized_event.event();
-                                    let scope = team_loop::TeamLoop::scope(
-                                        event.channel_id,
-                                        is_dm_channel(event.channel_id, &ctx.channel_info).await,
-                                        &event.event,
-                                        None,
-                                    );
-                                    team_loop.observe_human(
-                                        &scope,
-                                        event.event.id.to_hex(),
-                                        event.event.kind.as_u16(),
-                                    );
-                                }
-                                let event = authorized_event.event();
-                                if team_loop.is_teammate(authorized_event.effective_author())
-                                    && matches!(event.event.kind.as_u16(), 9 | 45001 | 45003)
-                                {
-                                    let scope = team_loop::TeamLoop::scope(
-                                        event.channel_id,
-                                        is_dm_channel(event.channel_id, &ctx.channel_info).await,
-                                        &event.event,
-                                        None,
-                                    );
-                                    let targets_team = team_loop.targets_team(&event.event);
-                                    team_loop.observe_teammate(
-                                        &scope,
-                                        event.event.id.to_hex(),
-                                        targets_team,
-                                    );
-                                }
-                            }
-                            let Some(ingress) =
-                                AuthorizedNormalListenerEvent(authorized_event)
-                                    .match_subscription(&rules, &pubkey_hex)
-                                    .await
-                            else {
-                                tracing::debug!("authorized event matched no rule — dropping");
-                                continue;
-                            };
-                            let ingress = ingress.resolve_edit_routing(&ctx.rest_client).await;
-                            let team_scope = team_loop::TeamLoop::scope(
-                                ingress.buzz_event.channel_id,
-                                is_dm_channel(ingress.buzz_event.channel_id, &ctx.channel_info).await,
-                                &ingress.buzz_event.event,
-                                ingress.edit.as_ref(),
-                            );
-                            let Some(ingress) = gate_team_ingress(
-                                &mut team_loop, &team_scope, ingress, !config.team_pubkeys.is_empty(),
-                            )
+                            let Some(ingress) = process_team_listener_event(
+                                authorized_event,
+                                &mut team_loop,
+                                &mut human_reset_cache,
+                                TeamListenerContext {
+                                    owner: owner_cache.get(),
+                                    allowlist: &config.respond_to_allowlist,
+                                    rules: &rules,
+                                    agent_pubkey: &pubkey_hex,
+                                    is_dm,
+                                    rest_client: &ctx.rest_client,
+                                },
+                            ).await
                             else {
                                 continue;
                             };

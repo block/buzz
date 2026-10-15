@@ -74,7 +74,7 @@ impl PoolStartup {
     }
 }
 
-fn make_prompt_context(
+pub(crate) fn make_prompt_context(
     config: &Config,
     rest_client: relay::RestClient,
     channels: HashMap<Uuid, relay::ChannelInfo>,

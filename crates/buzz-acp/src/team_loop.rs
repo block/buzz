@@ -6,7 +6,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::queue::ResolvedEdit;
-use crate::scope::SessionPolicy;
 use crate::scope::SessionScope;
 use nostr::Event;
 use uuid::Uuid;
@@ -15,6 +14,7 @@ const SEEN_CAPACITY: usize = 4096;
 
 pub(crate) struct TeamLoop {
     teammates: HashSet<String>,
+    enabled: bool,
     limit: usize,
     counts: HashMap<SessionScope, usize>,
     seen: HashMap<String, bool>,
@@ -22,20 +22,33 @@ pub(crate) struct TeamLoop {
 }
 
 impl TeamLoop {
-    /// Guard scope is always thread-rooted in channels, independently of the
-    /// provider session policy. DMs have no thread boundary.
+    /// Top-level posts share a channel budget; replies have a budget per
+    /// canonical thread root, independently of the provider session policy.
     pub(crate) fn scope(
         channel_id: Uuid,
         is_dm: bool,
         event: &Event,
         edit: Option<&ResolvedEdit>,
     ) -> SessionScope {
-        SessionScope::derive_routed(SessionPolicy::Thread, channel_id, is_dm, event, edit)
+        if is_dm
+            || crate::queue::routing_thread_tags(event, edit)
+                .root_event_id
+                .is_none()
+        {
+            SessionScope::Conversation { channel_id }
+        } else {
+            SessionScope::Thread {
+                channel_id,
+                root_event_id: crate::queue::reply_thread(event, edit),
+            }
+        }
     }
     pub(crate) fn new(mut teammates: HashSet<String>, self_pubkey: String, limit: usize) -> Self {
+        let enabled = !teammates.is_empty();
         teammates.insert(self_pubkey);
         Self {
             teammates,
+            enabled,
             limit,
             counts: HashMap::new(),
             seen: HashMap::new(),
@@ -45,6 +58,20 @@ impl TeamLoop {
 
     pub(crate) fn is_teammate(&self, author: &str) -> bool {
         self.teammates.contains(author)
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn observe_self_event(&mut self, channel_id: Uuid, is_dm: bool, event: &Event) {
+        if self.enabled
+            && matches!(event.kind.as_u16(), 9 | 45001 | 45003)
+            && self.targets_team(event)
+        {
+            let scope = Self::scope(channel_id, is_dm, event, None);
+            self.observe_teammate(&scope, event.id.to_hex(), true);
+        }
     }
 
     pub(crate) fn targets_team(&self, event: &nostr::Event) -> bool {
@@ -109,16 +136,31 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn guard_keys_channel_events_by_thread_even_when_session_policy_is_channel() {
+    fn guard_keys_top_level_posts_by_channel_and_replies_by_thread() {
         let channel_id = Uuid::new_v4();
         let make_reply = |root: &str| {
             EventBuilder::new(Kind::Custom(9), "ping")
-                .tags(vec![Tag::parse(vec!["e", root, "", "root"]).unwrap()])
+                .tags(vec![
+                    Tag::parse(vec!["e", root, "", "root"]).unwrap(),
+                    Tag::parse(vec!["e", &"c".repeat(64), "", "reply"]).unwrap(),
+                ])
                 .sign_with_keys(&Keys::generate())
                 .unwrap()
         };
         let left = make_reply(&"a".repeat(64));
         let right = make_reply(&"b".repeat(64));
+        let top_left = EventBuilder::new(Kind::Custom(9), "Alice mentions Bob")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let top_right = EventBuilder::new(Kind::Custom(9), "Bob mentions Alice")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let top_scope = TeamLoop::scope(channel_id, false, &top_left, None);
+        assert_eq!(
+            top_scope,
+            TeamLoop::scope(channel_id, false, &top_right, None)
+        );
+        assert_eq!(top_scope, SessionScope::Conversation { channel_id });
         assert_ne!(
             TeamLoop::scope(channel_id, false, &left, None),
             TeamLoop::scope(channel_id, false, &right, None)
@@ -127,6 +169,15 @@ mod tests {
             TeamLoop::scope(channel_id, true, &left, None),
             TeamLoop::scope(channel_id, true, &right, None)
         );
+        let mut guard = TeamLoop::new(
+            HashSet::from(["a".repeat(64), "b".repeat(64)]),
+            "self".into(),
+            6,
+        );
+        for i in 0..6 {
+            assert!(guard.observe_teammate(&top_scope, format!("top-{i}"), true));
+        }
+        assert!(!guard.observe_teammate(&top_scope, "seventh-top".into(), true));
     }
 
     #[test]

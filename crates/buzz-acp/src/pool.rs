@@ -2229,24 +2229,34 @@ async fn apply_permission_mode(
 
 #[cfg(test)]
 mod permission_mode_timeout_wiring_tests {
-    #[test]
-    fn session_setup_passes_configured_timeout_to_the_actual_acp_call() {
-        let source = include_str!("pool.rs");
-        let setup = source
-            .split("// Apply permission mode if not the agent's built-in default")
-            .nth(1)
-            .unwrap();
-        let apply = source
-            .split("async fn apply_permission_mode(")
-            .nth(1)
-            .unwrap();
-        assert!(setup.contains("ctx.permission_mode_timeout,"));
-        assert!(apply.contains("tokio::time::timeout(timeout, async"));
-        assert!(!apply
-            .split("match result")
-            .next()
-            .unwrap()
-            .contains("Duration::from_secs(5)"));
+    use super::*;
+
+    #[tokio::test]
+    async fn permission_mode_call_obeys_configured_short_deadline() {
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".into(),
+                "while IFS= read -r line; do sleep 1; done".into(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+        let configured = Duration::from_millis(25);
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            apply_permission_mode(
+                &mut acp,
+                "test-session",
+                &PermissionMode::BypassPermissions,
+                configured,
+            ),
+        )
+        .await
+        .expect("configured deadline must finish before the outer guard");
+        assert!(matches!(result, Err(AcpError::Timeout(value)) if value == configured));
     }
 }
 
