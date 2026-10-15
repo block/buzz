@@ -33,6 +33,7 @@
 		4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */; };
 		4A71C01B2F40E00100A17E01 /* NativeSkinToneControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */; };
 		4A71C01D2F40F00100A17E01 /* ThemePaginationGlassControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */; };
+		CA8300012F50000100A17E01 /* IosMediaCarousel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8300022F50000100A17E01 /* IosMediaCarousel.swift */; };
 		AC7400012F50000100A17E01 /* ThemePaginationGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC7400022F50000100A17E01 /* ThemePaginationGeometry.swift */; };
 		4A71C01F2F4100100A17E01 /* VoiceNotePackager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */; };
 		4A71C0212F4110100A17E01 /* MP4Canonicalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */; };
@@ -121,6 +122,7 @@
 		4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeProfileTextEditor.swift; sourceTree = "<group>"; };
 		4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSkinToneControl.swift; sourceTree = "<group>"; };
 		4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemePaginationGlassControl.swift; sourceTree = "<group>"; };
+		CA8300022F50000100A17E01 /* IosMediaCarousel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IosMediaCarousel.swift; sourceTree = "<group>"; };
 		AC7400022F50000100A17E01 /* ThemePaginationGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemePaginationGeometry.swift; sourceTree = "<group>"; };
 		4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceNotePackager.swift; sourceTree = "<group>"; };
 		4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP4Canonicalizer.swift; sourceTree = "<group>"; };
@@ -291,6 +293,7 @@
 				4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */,
 				4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */,
 				4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */,
+				CA8300022F50000100A17E01 /* IosMediaCarousel.swift */,
 				AC7400022F50000100A17E01 /* ThemePaginationGeometry.swift */,
 				4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */,
 				4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */,
@@ -627,6 +630,7 @@
 				4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */,
 				4A71C01B2F40E00100A17E01 /* NativeSkinToneControl.swift in Sources */,
 				4A71C01D2F40F00100A17E01 /* ThemePaginationGlassControl.swift in Sources */,
+				CA8300012F50000100A17E01 /* IosMediaCarousel.swift in Sources */,
 				AC7400012F50000100A17E01 /* ThemePaginationGeometry.swift in Sources */,
 				4A71C01F2F4100100A17E01 /* VoiceNotePackager.swift in Sources */,
 				4A71C0212F4110100A17E01 /* MP4Canonicalizer.swift in Sources */,
