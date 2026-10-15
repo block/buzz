@@ -25,7 +25,11 @@ pub fn validate_uuid(s: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Validate 64-character lowercase hex string (event_id, pubkey).
+/// Validate a 64-character hex string (event_id, pubkey).
+///
+/// Accepts either case — `is_ascii_hexdigit` does. Use [`parse_hex64`] when
+/// the value goes into a NIP-01 *tag* filter (`#e`, `#p`, `#a`): tag values
+/// are compared as strings, so `ABC…` does not match a stored `abc…`.
 pub fn validate_hex64(s: &str) -> Result<(), CliError> {
     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(CliError::Usage(format!(
@@ -33,6 +37,18 @@ pub fn validate_hex64(s: &str) -> Result<(), CliError> {
         )));
     }
     Ok(())
+}
+
+/// Validate a 64-character hex string and return it lowercased.
+///
+/// `ids` and `authors` are parsed into typed values on the relay, so case
+/// there is harmless. Generic tag filters are not: `filter_match_one`
+/// compares `#e`/`#p` values with `==` against the raw tag string, and every
+/// event in the tree carries lowercase hex. A query built from an uppercase
+/// id therefore matches nothing, silently.
+pub fn parse_hex64(s: &str) -> Result<String, CliError> {
+    validate_hex64(s)?;
+    Ok(s.to_ascii_lowercase())
 }
 
 /// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
@@ -254,6 +270,28 @@ mod tests {
         hex.push('z'); // 'z' is not a hex digit
         let err = validate_hex64(&hex).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    // --- parse_hex64 ---
+
+    #[test]
+    fn parse_hex64_lowercases_an_uppercase_id() {
+        let upper = "ABCDEF0123456789".repeat(4);
+        assert_eq!(super::parse_hex64(&upper).unwrap(), upper.to_lowercase());
+    }
+
+    #[test]
+    fn parse_hex64_leaves_a_lowercase_id_alone() {
+        let lower = "abcdef0123456789".repeat(4);
+        assert_eq!(super::parse_hex64(&lower).unwrap(), lower);
+    }
+
+    #[test]
+    fn parse_hex64_rejects_what_validate_hex64_rejects() {
+        assert!(super::parse_hex64("").is_err());
+        assert!(super::parse_hex64(&"a".repeat(63)).is_err());
+        assert!(super::parse_hex64(&"a".repeat(65)).is_err());
+        assert!(super::parse_hex64(&format!("{}z", "a".repeat(63))).is_err());
     }
 
     // --- validate_content_size ---

@@ -4,7 +4,7 @@ use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::commands::GIT_ORIGIN_CHANNEL_ENV;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
+use crate::validate::{parse_hex64, read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 use nostr::Timestamp;
 use serde::Deserialize;
@@ -353,7 +353,9 @@ async fn publish_issue_assignment_operation(
     label: Option<&str>,
     operation: IssueAssignmentOperation,
 ) -> Result<(), CliError> {
-    validate_hex64(issue)?;
+    // `issue` reaches a `#e` generic tag filter in `issue_assignment_context`,
+    // which is matched as a raw string against a lowercase tag.
+    let issue = &parse_hex64(issue)?;
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     for assignee in assignees {
