@@ -2599,6 +2599,10 @@ void main() {
         await tester.pump(androidImeMetricsSettleDelay);
         await tester.pumpAndSettle();
 
+        // Clear before moving: settling can outlast the reading dwell, so
+        // clearing after it would also drop the marks under test.
+        readState.markedContexts.clear();
+
         // Leave the latest message, then stop with history rows under the
         // keyboard.
         final messageList = find.byKey(const ValueKey('channel-message-list'));
@@ -2620,7 +2624,6 @@ void main() {
             .itemScrollController!
             .jumpTo(index: 20);
         await tester.pumpAndSettle();
-        readState.markedContexts.clear();
         await tester.pump(const Duration(milliseconds: 300));
 
         final textField = tester.widget<TextField>(find.byType(TextField));
