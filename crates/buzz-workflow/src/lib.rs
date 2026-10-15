@@ -44,6 +44,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+/// Bounded late tolerance for minute-granularity cron schedules.
+///
+/// The scheduler's normal cadence is one minute. Keeping a second minute of
+/// overlap means a slightly late tick still claims the cron's deterministic
+/// scheduled instant; the durable claim remains the at-most-once boundary.
+const CRON_LOOKBACK_SECS: i64 = 120;
+
 use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunStatus;
@@ -472,12 +479,12 @@ impl WorkflowEngine {
 
     /// Background loop for scheduled (cron/interval) triggers.
     ///
-    /// Ticks every 60 seconds. For each active workflow with a `Schedule`
+    /// Ticks every 60 seconds on a fixed cadence. For each active workflow with a `Schedule`
     /// trigger, checks whether the cron expression or interval has elapsed
     /// and spawns execution if so.
     ///
-    /// Uses window-based matching for cron expressions to handle tick drift:
-    /// `schedule.after(&(now - 60s)).next() <= now` instead of `includes(now)`.
+    /// Uses a bounded overlap window for cron expressions to handle tick drift:
+    /// `schedule.after(&(now - 120s)).next() <= now` instead of `includes(now)`.
     ///
     /// Interval tracking is anchored on the durable scheduled-fire claim:
     /// `last_fired` is an in-memory pre-filter, but the
@@ -487,10 +494,18 @@ impl WorkflowEngine {
     /// `latest_scheduled_workflow_fire` so a process bounce cannot double-fire
     /// within an interval.
     pub async fn run(self: &Arc<Self>) {
-        tracing::info!("WorkflowEngine cron loop started (60s tick)");
+        tracing::info!("WorkflowEngine cron loop started (60s fixed tick)");
+
+        // Unlike `sleep(60s)` at the end of each iteration, an interval keeps
+        // the target cadence independent of database and workflow-scan time.
+        // Burst is intentional: after a slow scan, run the missed scheduler
+        // tick immediately so the overlap window can claim its scheduled
+        // instant. Durable claims prevent duplicate execution across ticks/pods.
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tick.tick().await;
 
             let now = Utc::now();
 
@@ -542,7 +557,7 @@ impl WorkflowEngine {
                     schema::TriggerDef::Schedule {
                         cron: Some(expr),
                         interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
+                    } => match cron_fire_instant(expr, now, CRON_LOOKBACK_SECS, workflow.id) {
                         Some(instant) => (instant, "cron"),
                         None => continue,
                     },
@@ -752,8 +767,8 @@ impl WorkflowEngine {
 /// Find the cron schedule instant that fired within the `window_secs`-wide
 /// window ending at `now`, if any.
 ///
-/// Uses window-based matching: finds the next scheduled time after
-/// `(now - window_secs)` and returns it when it falls at or before `now`.
+/// Uses window-based matching: finds the latest scheduled time after
+/// `(now - window_secs)` that falls at or before `now`.
 /// This tolerates tick drift gracefully — a 61s tick won't miss a
 /// minute-granularity cron expression. The returned instant is the cron's own
 /// scheduled time (not `now`), so every pod evaluating the same expression in
@@ -772,7 +787,7 @@ fn cron_fire_instant(
     match normalized.parse::<cron::Schedule>() {
         Ok(sched) => {
             let window_start = now - chrono::Duration::seconds(window_secs);
-            sched.after(&window_start).next().filter(|t| *t <= now)
+            sched.after(&window_start).take_while(|t| *t <= now).last()
         }
         Err(e) => {
             tracing::warn!(
@@ -1130,16 +1145,50 @@ mod postgres_tests {
     }
 
     #[test]
-    fn cron_fire_instant_returns_none_just_outside_window() {
+    fn cron_fire_instant_tolerates_a_tick_just_over_one_minute_late() {
         // Fixed time: 09:01:01 UTC. Cron "0 9 * * *" fires at 09:00:00.
-        // Window [09:00:01, 09:01:01] does NOT contain 09:00:00.
+        // A 120-second overlap must still claim the 09:00:00 scheduled instant.
         let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:01:01Z")
             .unwrap()
             .with_timezone(&Utc);
         let wf_id = Uuid::new_v4();
+        assert_eq!(
+            cron_fire_instant("0 9 * * *", now, CRON_LOOKBACK_SECS, wf_id),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            ),
+            "cron should claim the scheduled instant after modest tick drift"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_uses_the_latest_due_minute() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:01:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
+        assert_eq!(
+            cron_fire_instant("* * * * *", now, CRON_LOOKBACK_SECS, wf_id),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-06-15T09:01:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            ),
+            "an overlap must not repeatedly select an already-claimed prior minute"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_does_not_replay_an_old_schedule() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:02:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
         assert!(
-            cron_fire_instant("0 9 * * *", now, 60, wf_id).is_none(),
-            "cron should not fire 61s after the scheduled time"
+            cron_fire_instant("0 9 * * *", now, CRON_LOOKBACK_SECS, wf_id).is_none(),
+            "a schedule older than the bounded overlap must not be replayed"
         );
     }
 
