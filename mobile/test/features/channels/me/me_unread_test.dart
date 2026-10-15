@@ -22,13 +22,14 @@ Channel chat(String id, {bool member = true, bool archived = false}) => Channel(
   description: '',
   createdBy: 'owner',
   createdAt: DateTime(2026),
+  lastMessageAt: DateTime.fromMillisecondsSinceEpoch(20000),
   memberCount: 2,
   isMember: member,
   archivedAt: archived ? DateTime(2026) : null,
 );
 
 class _Channels extends ChannelsNotifier {
-  final all = [
+  var all = [
     chat('solo'),
     chat('ordinary'),
     chat('archived', archived: true),
@@ -58,16 +59,32 @@ class _Channels extends ChannelsNotifier {
   };
   void reply() {
     timestamp++;
+    all = [
+      for (final c in all)
+        c.copyWith(
+          lastMessageAt: DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
+        ),
+    ];
     state = AsyncData([...all]);
   }
 }
 
 class _Reads extends ReadStateNotifier {
+  final bool empty;
+  _Reads({this.empty = false});
   @override
-  ReadStateState build() => const ReadStateState(
+  void seedContextRead(String key, int timestamp) => read(key, timestamp);
+  @override
+  ReadStateState build() => ReadStateState(
     isReady: true,
     pubkey: 'owner',
-    contexts: {'solo': 10},
+    contexts: empty ? {} : {'solo': 10},
+    version: 0,
+  );
+  void resetIdentity() => state = const ReadStateState(
+    isReady: true,
+    pubkey: 'other-owner',
+    contexts: {},
     version: 0,
   );
   void read(String key, int timestamp) =>
@@ -90,6 +107,76 @@ const organization = MeGroups(
 );
 
 void main() {
+  for (final duringSeed in [false, true]) {
+    test(
+      'fresh Solo history is gated; new reply during seeding=$duringSeed badges',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final channels = _Channels();
+        final reads = _Reads(empty: true);
+        final container = ProviderContainer(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            channelsProvider.overrideWith(() => channels),
+            readStateProvider.overrideWith(() => reads),
+            meGroupsProvider.overrideWith(
+              (ref) =>
+                  Stream.value(const MeGroups(channels: ['solo', 'ordinary'])),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        container.listen(channelsProvider, (_, _) {});
+        container.listen(meGroupsProvider, (_, _) {});
+        await container.read(channelsProvider.future);
+        await container.read(meGroupsProvider.future);
+        final observed = <Set<String>>[];
+        container.listen(
+          meUnreadChannelIdsProvider,
+          (_, next) => observed.add(next),
+          fireImmediately: true,
+        );
+        expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+        if (duringSeed) {
+          channels.reply();
+          expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+        }
+        await container.pump();
+        expect(
+          container.read(readStateProvider).effectiveTimestamp('solo'),
+          20,
+        );
+        if (!duringSeed) {
+          expect(observed.every((ids) => ids.isEmpty), isTrue);
+          channels.reply();
+        }
+        await container.pump();
+        expect(container.read(meUnreadChannelIdsProvider), {
+          'solo',
+          'ordinary',
+        });
+        expect(
+          container.read(readStateProvider).effectiveTimestamp('solo'),
+          20,
+        );
+        reads.resetIdentity();
+        expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+        await container.pump();
+        expect(
+          container.read(readStateProvider).effectiveTimestamp('solo'),
+          21,
+        );
+        expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+        channels.reply();
+        await container.pump();
+        expect(container.read(meUnreadChannelIdsProvider), {
+          'solo',
+          'ordinary',
+        });
+      },
+    );
+  }
   testWidgets(
     'Solo retains live unread row, collapsed section, and tab indication',
     (tester) async {
