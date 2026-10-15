@@ -1226,6 +1226,82 @@ test("project home task sheet expands into the repository Tasks view", async ({
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 });
 
+test("project navigation survives history traversal and reload", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+  await page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first()
+    .click();
+
+  await page.getByTestId("project-home-context-tasks").click();
+  await expect(page).toHaveURL(/homeTab=issues/);
+  const sheet = page.getByTestId("project-home-workspace-sheet");
+  const taskRow = sheet.getByTestId("project-issue-row").first();
+  await taskRow.locator('[data-projects-text-priority="primary"]').click();
+  await expect(sheet.getByTestId("project-issue-detail")).toBeVisible();
+  await expect(page).toHaveURL(/issueId=/);
+
+  await page.goBack();
+  await expect(sheet.getByTestId("project-issue-detail")).toHaveCount(0);
+  await expect(taskRow).toBeVisible();
+  await page.goForward();
+  await expect(sheet.getByTestId("project-issue-detail")).toBeVisible();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(
+    page
+      .getByTestId("project-home-workspace-sheet")
+      .getByTestId("project-issue-detail"),
+  ).toBeVisible();
+
+  await page
+    .getByTestId("focus-thread-drawer")
+    .getByTestId("auxiliary-panel-close")
+    .click();
+  await expect(page.getByTestId("project-channel-home")).toBeVisible();
+  await expect(page).not.toHaveURL(/homeTab=|repositoryId=|issueId=/);
+
+  await page.getByTestId("project-home-context-repo-buzz").click();
+  await page.getByRole("tab", { name: "Commits" }).click();
+  await expect(page).toHaveURL(/tab=commits/);
+  await page.getByTestId("project-activity-feed-item").first().click();
+  await expect(page.getByTestId("project-commit-detail")).toBeVisible();
+  await expect(page).toHaveURL(/commitHash=/);
+
+  await page.goBack();
+  await expect(
+    page.getByTestId("project-activity-feed-item").first(),
+  ).toBeVisible();
+  await page.goForward();
+  await expect(page.getByTestId("project-commit-detail")).toBeVisible();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("project-commit-detail")).toBeVisible();
+
+  await page.getByTestId("project-detail-chrome").getByText("Commits").click();
+  await page.getByRole("tab", { name: "Files" }).click();
+  const entry = page.getByTestId("project-repository-entry-row").first();
+  await entry.click();
+  await expect(page).toHaveURL(/filePath=/);
+  const hashSearch = new URL(page.url()).hash.split("?")[1] ?? "";
+  const selectedFilePath = new URLSearchParams(hashSearch).get("filePath");
+  expect(selectedFilePath).toBeTruthy();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page).toHaveURL(/filePath=/);
+  await expect(
+    page
+      .locator("[data-project-detail-panel]")
+      .getByText(selectedFilePath?.split("/").at(-1) ?? "", { exact: true })
+      .first(),
+  ).toBeVisible();
+});
+
 test("project discussion row opens its channel thread in context", async ({
   page,
 }) => {
