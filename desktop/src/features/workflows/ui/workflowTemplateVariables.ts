@@ -64,6 +64,20 @@ function triggerVariables(
         },
         ...COMMON_EVENT_VARIABLES,
       ];
+    case "slash_command":
+      return [
+        {
+          value: "trigger.args",
+          description: "Text after the command",
+          group: "Trigger",
+        },
+        {
+          value: "trigger.command",
+          description: "Command name",
+          group: "Trigger",
+        },
+        ...COMMON_EVENT_VARIABLES,
+      ];
     case "diff_posted":
       return [
         { value: "trigger.text", description: "Diff text", group: "Trigger" },

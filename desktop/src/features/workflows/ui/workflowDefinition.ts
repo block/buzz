@@ -108,6 +108,7 @@ export function getWorkflowTriggerConfig(
     emoji: nonEmptyString(trigger.emoji) ?? undefined,
     cron: nonEmptyString(trigger.cron) ?? undefined,
     interval: nonEmptyString(trigger.interval) ?? undefined,
+    command: nonEmptyString(trigger.command) ?? undefined,
   };
 }
 
@@ -149,6 +150,12 @@ function getTriggerCardClause(
       return nonEmptyString(trigger.filter)
         ? "When a matching message is posted"
         : "When a message is posted";
+    case "slash_command": {
+      const command = nonEmptyString(trigger.command);
+      return command
+        ? `When /${command} is entered`
+        : "When a slash command is entered";
+    }
     case "reaction_added": {
       const emoji = nonEmptyString(presentedReaction ?? trigger.emoji);
       return emoji
