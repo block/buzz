@@ -606,7 +606,14 @@ async fn run_dependency_sampler_for_diagnostics(
             biased;
             _ = cancel.cancelled() => break,
             _ = interval.tick() => {
-                diagnostics.sample(&db, &redis_pool).await;
+                let deadline = Instant::now() + DEPENDENCY_TIMEOUT;
+                let (_, reader_checkout) = tokio::join!(
+                    diagnostics.sample(&db, &redis_pool),
+                    db.sample_read_pool_checkout(deadline),
+                );
+                if let Err(error) = reader_checkout {
+                    tracing::debug!(error = %error, "Reader diagnostic pool checkout failed");
+                }
             }
         }
     }
@@ -994,6 +1001,59 @@ mod tests {
             panic!("a completed sample must be reported as sampled");
         };
         (age, stale)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sampler_emits_reader_checkout_samples_without_requests_or_writer_fallback() {
+        let (writer_only, redis_pool) = unreachable_dependencies();
+        let reader =
+            sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/reader").expect("lazy reader pool");
+        reader.close().await;
+        let db = Db::from_pools(writer_only.pool().clone(), reader);
+        let diagnostics = Arc::new(ready_diagnostics());
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let cancel = CancellationToken::new();
+        let sampler = run_dependency_sampler_for_diagnostics(
+            Arc::clone(&diagnostics),
+            db,
+            redis_pool,
+            DEPENDENCY_SAMPLE_INTERVAL,
+            cancel.clone(),
+        );
+        tokio::pin!(sampler);
+        tokio::select! {
+            _ = &mut sampler => panic!("sampler stopped before cancellation"),
+            _ = tokio::time::sleep(Duration::from_secs(61)) => {}
+        }
+        cancel.cancel();
+        sampler.await;
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let mut samples = 0;
+        for (key, _, _, value) in snapshot {
+            if key.key().name() != "buzz_db_pool_acquire_attempts_total" {
+                continue;
+            }
+            let labels: std::collections::BTreeMap<_, _> = key
+                .key()
+                .labels()
+                .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                .collect();
+            assert_eq!(labels["pool_role"], "reader", "no writer fallback");
+            assert_eq!(labels["operation"], "maintenance");
+            assert_eq!(labels["outcome"], "error", "closed reader is not success");
+            let DebugValue::Counter(count) = value else {
+                panic!("terminal attempts must be a counter");
+            };
+            samples += count;
+        }
+        assert_eq!(samples, 3, "sample at startup and each 30-second tick");
+        let DependencySnapshot::Sampled { report, .. } = diagnostics.snapshot() else {
+            panic!("writer dependencies must still be sampled");
+        };
+        assert_eq!(report.reason, DependencyReason::Ready);
     }
 
     /// An operator reading `/_status` must be able to tell "nothing has been

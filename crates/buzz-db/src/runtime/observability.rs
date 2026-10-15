@@ -77,7 +77,7 @@ pub(crate) enum ReaderOperation {
     Bootstrap,
     Authorization,
     SubscriptionHistory,
-    /// Leader-only background reads such as fleet usage telemetry.
+    /// Background reads and diagnostic checkouts such as fleet usage telemetry.
     Maintenance,
 }
 
@@ -529,8 +529,25 @@ pub(crate) async fn acquire_writer_until(
     operation: WriterOperation,
     deadline: tokio::time::Instant,
 ) -> sqlx::Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-    let pair = operation.pair();
-    let attempt = PoolAcquireAttempt::start(pair, false);
+    acquire_until(pool, operation.pair(), false, deadline).await
+}
+
+/// Sample a reader checkout within the diagnostic sampler's deadline.
+pub(super) async fn acquire_reader_until(
+    pool: &sqlx::PgPool,
+    operation: ReaderOperation,
+    deadline: tokio::time::Instant,
+) -> sqlx::Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+    acquire_until(pool, operation.pair(), true, deadline).await
+}
+
+async fn acquire_until(
+    pool: &sqlx::PgPool,
+    pair: PoolOperation,
+    emit_legacy: bool,
+    deadline: tokio::time::Instant,
+) -> sqlx::Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+    let attempt = PoolAcquireAttempt::start(pair, emit_legacy);
     match tokio::time::timeout_at(deadline, pool.acquire()).await {
         Err(_) => {
             attempt.finish(Outcome::Timeout);
@@ -1388,6 +1405,101 @@ mod tests {
         );
     }
 
+    async fn reader_diagnostic_checkout_records_real_outcomes_without_writer_fallback() {
+        let _test_guard = super::POOL_METRICS_TEST_LOCK.lock().await;
+        let reader = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("connect size-one reader diagnostic pool");
+        let writer = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/writer")
+            .expect("lazy unreachable writer");
+        let db = crate::Db::from_pools(writer.clone(), reader.clone());
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        for _ in 0..2 {
+            db.sample_read_pool_checkout(tokio::time::Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("idle reader checkout succeeds without application traffic");
+        }
+        let held = reader.acquire().await.expect("hold reader connection");
+        let error = db
+            .sample_read_pool_checkout(tokio::time::Instant::now() + Duration::from_millis(40))
+            .await
+            .expect_err("saturated reader cannot fall back to writer");
+        assert!(matches!(
+            error,
+            crate::DbError::Sqlx(sqlx::Error::PoolTimedOut)
+        ));
+        {
+            let cancelled =
+                db.sample_read_pool_checkout(tokio::time::Instant::now() + Duration::from_secs(5));
+            tokio::pin!(cancelled);
+            tokio::select! {
+                _ = &mut cancelled => panic!("held reader cannot complete a checkout"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+        drop(held);
+        reader.close().await;
+        let error = db
+            .sample_read_pool_checkout(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect_err("closed reader cannot become a success sample");
+        assert!(matches!(
+            error,
+            crate::DbError::Sqlx(sqlx::Error::PoolClosed)
+        ));
+        crate::Db::from_pool(writer)
+            .sample_read_pool_checkout(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("disabled reader emits nothing and does not touch writer");
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(waiter_value(&snapshot, "reader", "maintenance"), Some(0.0));
+        let mut outcomes = BTreeMap::new();
+        let mut histogram_samples = 0;
+        for (key, _, _, value) in snapshot {
+            let labels: BTreeMap<_, _> = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect();
+            match key.key().name() {
+                "buzz_db_pool_acquire_attempts_total" => {
+                    assert_eq!(labels["pool_role"], "reader", "never check out writer");
+                    assert_eq!(labels["operation"], "maintenance");
+                    let DebugValue::Counter(count) = value else {
+                        panic!("terminal counter");
+                    };
+                    outcomes.insert(labels["outcome"].to_owned(), count);
+                }
+                "buzz_db_pool_acquire_duration_seconds" => {
+                    let DebugValue::Histogram(samples) = value else {
+                        panic!("checkout histogram");
+                    };
+                    histogram_samples += samples.len();
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            outcomes,
+            BTreeMap::from([
+                ("success".to_owned(), 2),
+                ("timeout".to_owned(), 1),
+                ("error".to_owned(), 1),
+                ("cancelled".to_owned(), 1),
+            ])
+        );
+        assert_eq!(
+            histogram_samples, 5,
+            "one histogram sample per real attempt"
+        );
+    }
+
     async fn deletion_catalog_readiness_records_timeout_and_recovers() {
         let _test_guard = super::POOL_METRICS_TEST_LOCK.lock().await;
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -1923,6 +2035,12 @@ mod tests {
         #[ignore = "requires Postgres"]
         async fn production_db_methods_emit_exact_pool_operation_labels() {
             super::production_db_methods_emit_exact_pool_operation_labels().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn reader_diagnostic_checkout_records_real_outcomes_without_writer_fallback() {
+            super::reader_diagnostic_checkout_records_real_outcomes_without_writer_fallback().await;
         }
 
         #[tokio::test(flavor = "current_thread")]

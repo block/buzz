@@ -1290,6 +1290,25 @@ impl Db {
         }
     }
 
+    /// Measure a real reader-pool checkout for periodic diagnostics.
+    ///
+    /// A quiet replica otherwise emits no fresh checkout samples after startup.
+    /// This uses the configured reader pool without writer fallback, records the
+    /// existing reader/maintenance metrics, and bounds the wait by `deadline`.
+    /// No replica means no checkout and no reader sample. The borrowed connection
+    /// is returned without executing application SQL or changing routing state.
+    pub async fn sample_read_pool_checkout(&self, deadline: tokio::time::Instant) -> Result<()> {
+        if let Some(pool) = &self.read_pool {
+            let _connection = observability::acquire_reader_until(
+                pool,
+                observability::ReaderOperation::Maintenance,
+                deadline,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Returns pool utilisation stats for metrics emission.
     ///
     /// `size`  — total connections (idle + active)

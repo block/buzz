@@ -219,6 +219,14 @@ Every `dependencies` object therefore states how old its report is:
 | `sample_age_seconds` | age of the report at request time (absent when `not_yet_sampled`) |
 | `sample_interval_seconds` | the sampling cadence, `30` |
 
+The same loop independently samples a real reader-pool checkout every 30 seconds,
+under the same two-second deadline. This keeps
+`buzz_db_pool_acquire_duration_seconds{pool_role="reader",operation="maintenance"}`
+fresh when application traffic is quiet, so recovery analysis can measure reader
+checkout latency. Timeout/error/cancellation attempts retain their actual outcomes;
+no configured reader means no reader sample. The sample executes no application
+SQL and does not change the cached dependency verdict or lifecycle readiness.
+
 Polling `/_status` more often than the cadence returns the same cached report;
 it does not make the data fresher and adds no dependency load.
 
