@@ -27,7 +27,9 @@ class PushPresentationExportRecovery {
     }
 
     for (final milliseconds in [250, 500, 1000, 2000, 4000]) {
-      await Future<void>.delayed(Duration(milliseconds: milliseconds));
+      await debugPushPresentationRetryWait(
+        Duration(milliseconds: milliseconds),
+      );
       try {
         await operation();
         return true;

@@ -420,6 +420,11 @@ void main() {
     test(
       'pending channel input drains after exhausted $failedOperation',
       () async {
+        final retryWaits = <Duration>[];
+        debugPushPresentationRetryWait = (delay) async => retryWaits.add(delay);
+        addTearDown(
+          () => debugPushPresentationRetryWait = Future<void>.delayed,
+        );
         final blockerEntered = Completer<void>();
         final releaseBlocker = Completer<void>();
         final initialEntered = Completer<void>();
@@ -497,8 +502,12 @@ void main() {
           await container.read(channelsProvider.notifier).refresh();
           readsBeforeAdmissionRetries = session.snapshotReadCounts;
           if (!releaseRefetch.isCompleted) releaseRefetch.complete();
-          await terminal.future.timeout(const Duration(seconds: 12));
+          await terminal.future.timeout(const Duration(seconds: 5));
           expect(pushPresentationExportError.value, contains('queue is full'));
+          expect(retryWaits, [
+            for (final milliseconds in [250, 500, 1000, 2000, 4000])
+              Duration(milliseconds: milliseconds),
+          ]);
           if (failedOperation == 'dirty refetch') {
             // Membership pages and metadata were fetched before the paused
             // metadata response. Only the remaining member snapshot is read;

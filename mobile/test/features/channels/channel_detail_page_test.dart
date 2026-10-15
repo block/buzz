@@ -613,6 +613,8 @@ void main() {
                   },
                   threadReplies: const {'qualified': []},
                   initialThreadRootId: thread ? 'qualified' : null,
+                  // 48 mounts each open the sheet twice; skip its motion.
+                  disableAnimations: true,
                 ),
               );
               await tester.pumpAndSettle();

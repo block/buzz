@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 
-import 'package:flutter_test/flutter_test.dart';
+import 'package:fake_async/fake_async.dart';
+import 'package:flutter_test/flutter_test.dart' hide test;
+import 'package:flutter_test/flutter_test.dart' as flutter_test show test;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
@@ -11,6 +13,35 @@ import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 import '../../helpers/thread_ids.dart';
+
+/// Every test in this file runs on virtual time, so retry backoff and refresh
+/// timers fire in their real order without waiting on the wall clock. Work
+/// outside the fake zone, such as an isolate, fails the test instead of hanging.
+void test(String description, Future<void> Function() body) {
+  flutter_test.test(description, () {
+    fakeAsync((clock) {
+      var done = false;
+      Object? error;
+      StackTrace? stack;
+      body().then(
+        (_) => done = true,
+        onError: (Object e, StackTrace s) {
+          error = e;
+          stack = s;
+          done = true;
+        },
+      );
+      clock.flushMicrotasks();
+      while (!done) {
+        if (clock.pendingTimers.isEmpty) {
+          throw StateError('Test is waiting on work outside fake time');
+        }
+        clock.elapse(const Duration(milliseconds: 1));
+      }
+      if (error != null) Error.throwWithStackTrace(error!, stack!);
+    });
+  });
+}
 
 void main() {
   test('live window without deep links does not rescan flattened ids', () async {

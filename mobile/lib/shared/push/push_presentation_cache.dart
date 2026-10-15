@@ -28,6 +28,11 @@ class PushPresentationExportQueueFull extends StateError {
 /// The latest best-effort App Group presentation-cache failure.
 final pushPresentationCacheError = ValueNotifier<String?>(null);
 
+/// Waits out one export retry delay for the native writer and
+/// [PushPresentationExportRecovery]. Tests replace it to skip real time.
+Future<void> Function(Duration delay) debugPushPresentationRetryWait =
+    Future<void>.delayed;
+
 /// Revalidates a relay event before it crosses into the native cache writer.
 bool isVerifiedPushPresentationEvent(NostrEvent event) {
   try {
@@ -294,7 +299,7 @@ Future<void> _invokeVerifiedChunk(
       if (error.code != retryableCode) rethrow;
       final delay = budget.takeDelay();
       if (delay == null) rethrow;
-      await Future<void>.delayed(delay);
+      await debugPushPresentationRetryWait(delay);
     }
   }
 }

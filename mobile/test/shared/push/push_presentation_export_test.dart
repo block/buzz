@@ -16,11 +16,14 @@ const _secret =
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final calls = <MethodCall>[];
+  final retryWaits = <Duration>[];
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
   setUp(() {
     calls.clear();
+    retryWaits.clear();
+    debugPushPresentationRetryWait = (delay) async => retryWaits.add(delay);
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     pushPresentationCacheError.value = null;
     pushPresentationExportError.value = null;
@@ -30,6 +33,7 @@ void main() {
     });
   });
   tearDown(() {
+    debugPushPresentationRetryWait = Future<void>.delayed;
     messenger.setMockMethodCallHandler(_channel, null);
     debugDefaultTargetPlatformOverride = null;
     pushPresentationCacheError.value = null;
@@ -187,6 +191,7 @@ void main() {
           hasLength(6),
           reason: 'initial attempt plus five retries, with no later chunk',
         );
+        expect(retryWaits, _retryBackoff);
         expect(
           pushPresentationCacheError.value,
           contains(profiles ? 'profile_cache_failed' : 'channel_cache_failed'),
@@ -229,6 +234,7 @@ void main() {
       isFalse,
     );
     expect(calls, hasLength(7));
+    expect(retryWaits, _retryBackoff);
     expect(calls.map((call) => (call.arguments['events'] as List).length), [
       256,
       256,
@@ -542,23 +548,37 @@ void main() {
   );
 }
 
+const _retryBackoff = [
+  Duration(milliseconds: 250),
+  Duration(milliseconds: 500),
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+  Duration(seconds: 4),
+];
+
+// Signing dominates fixture cost, and tests reuse the same events.
+final _signedEvents = <(int, int, String, String), NostrEvent>{};
+
 NostrEvent _signed(
   int kind,
   int createdAt, {
   String channelID = 'channel',
   String secretKey = _secret,
-}) => NostrEvent.fromJson(
-  nostr.Event.from(
-    kind: kind,
-    createdAt: createdAt,
-    content: kind == 0 ? '{"name":"Synthetic profile"}' : '',
-    tags: kind == 0
-        ? []
-        : [
-            ['d', channelID],
-          ],
-    secretKey: secretKey,
-  ).toMap(),
+}) => _signedEvents.putIfAbsent(
+  (kind, createdAt, channelID, secretKey),
+  () => NostrEvent.fromJson(
+    nostr.Event.from(
+      kind: kind,
+      createdAt: createdAt,
+      content: kind == 0 ? '{"name":"Synthetic profile"}' : '',
+      tags: kind == 0
+          ? []
+          : [
+              ['d', channelID],
+            ],
+      secretKey: secretKey,
+    ).toMap(),
+  ),
 );
 
 NostrEvent _tampered(NostrEvent event) => NostrEvent(
