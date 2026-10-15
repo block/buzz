@@ -50,6 +50,7 @@ void main() {
   }) {
     return ChannelSectionsManager(
       pubkey: keychain.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: crypto,
       relaySession: relaySession,

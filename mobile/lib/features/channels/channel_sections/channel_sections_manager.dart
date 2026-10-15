@@ -33,6 +33,7 @@ class ChannelSectionsCrypto {
 
 class ChannelSectionsManager {
   final String pubkey;
+  final String relayUrl;
   final ChannelSectionsStorage _storage;
   final ChannelSectionsCrypto _crypto;
   final RelaySessionNotifier? _relaySession;
@@ -61,6 +62,7 @@ class ChannelSectionsManager {
 
   ChannelSectionsManager({
     required this.pubkey,
+    required this.relayUrl,
     required SharedPreferences prefs,
     required ChannelSectionsCrypto crypto,
     required RelaySessionNotifier? relaySession,
@@ -76,7 +78,7 @@ class ChannelSectionsManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelSectionsStorage(prefs).read(pubkey);
+       _store = ChannelSectionsStorage(prefs).read(pubkey, relayUrl);
 
   ChannelSectionStore get store => _store;
 
@@ -516,7 +518,7 @@ class ChannelSectionsManager {
   /// A retired manager never writes the prefs key its successor now owns.
   void _persist() {
     if (_disposed) return;
-    _storage.write(pubkey, _store);
+    _storage.write(pubkey, relayUrl, _store);
   }
 
   List<ChannelSection> _sortedSections() {

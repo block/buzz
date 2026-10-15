@@ -104,6 +104,16 @@ class _Config extends RelayConfigNotifier {
       RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
 }
 
+class _SwitchableConfig extends RelayConfigNotifier {
+  _SwitchableConfig(this.nsec);
+  final String nsec;
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
+  void switchTo(String baseUrl) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
+}
+
 class _InitializingSortSession extends ConnectedRelaySession {
   _InitializingSortSession(this.firstSnapshot);
   final NostrEvent firstSnapshot;
@@ -233,6 +243,57 @@ void main() {
     session.secondSnapshot.complete([latest]);
     clock.flushMicrotasks();
     expect(c.read(channelSortProvider).isReady, isTrue);
+    c.dispose();
+  });
+
+  fakeAsyncTest('groups stay with the community that owns them', (clock) {
+    final relay = SidebarRelay();
+    final config = _SwitchableConfig(relay.keys.nsec);
+    final c = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        relayConfigProvider.overrideWith(() => config),
+        relaySessionProvider.overrideWith(() => relay.session),
+        activeCommunityProvider.overrideWith(
+          (ref) async => Community(
+            id: 'c',
+            name: 'c',
+            relayUrl: 'wss://relay.example',
+            addedAt: DateTime(2026),
+          ),
+        ),
+        appLifecycleProvider.overrideWith(_Lifecycle.new),
+      ],
+    );
+    List<String> names() => [
+      for (final s in c.read(channelSectionsProvider).store.sections) s.name,
+    ];
+    relay.stored.add(
+      relay.event('channel-sections', {
+        'version': 1,
+        'sections': [
+          {'id': 'studio', 'name': 'Studio', 'order': 0},
+        ],
+        'assignments': <String, String>{},
+      }, nowSeconds()),
+    );
+    c.listen(channelSectionsProvider, (_, _) {});
+    clock.elapse(const Duration(seconds: 1));
+    expect(names(), ['Studio']);
+
+    // The same identity in a second community that has no groups.
+    relay.stored.clear();
+    config.switchTo('https://second.example');
+    clock.elapse(const Duration(seconds: 1));
+    expect(names(), isEmpty);
+
+    // Returning shows the first community's cached groups before its relay
+    // answers.
+    final held = relay.holdHistory = Completer<void>();
+    config.switchTo('https://relay.example');
+    clock.flushMicrotasks();
+    expect(names(), ['Studio']);
+    held.complete();
     c.dispose();
   });
 
@@ -425,6 +486,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
     ChannelSectionsManager start(FakeAsync clock) {
       m = ChannelSectionsManager(
         pubkey: relay.pubkey,
+        relayUrl: 'https://relay.example',
         prefs: prefs(),
         crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
         relaySession: relay.session,
@@ -554,6 +616,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
         clock.flushMicrotasks();
         m = ChannelSectionsManager(
           pubkey: relay.pubkey,
+          relayUrl: 'https://relay.example',
           prefs: prefs(),
           crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
           relaySession: relay.session,
@@ -611,6 +674,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       m.dispose(flushPending: false);
       m = ChannelSectionsManager(
         pubkey: relay.pubkey,
+        relayUrl: 'https://relay.example',
         prefs: prefs(),
         crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
         relaySession: relay.session,
