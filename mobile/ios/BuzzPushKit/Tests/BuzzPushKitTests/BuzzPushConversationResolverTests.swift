@@ -162,7 +162,7 @@ extension BuzzPushNotificationResolverTests {
 
     XCTAssertEqual(result.conversationDisplayName, "#General")
     XCTAssertEqual(result.conversationRecipientCount, 1)
-    XCTAssertEqual(URLProtocolStub.requests.count, 3)
+    XCTAssertEqual(URLProtocolStub.requests.count, 4)
   }
 
   func testTwoPersonDMUsesDirectCommunicationPresentation() throws {

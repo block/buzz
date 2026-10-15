@@ -225,15 +225,26 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         completion(.channel(nil, nil))
         return
       }
-      queryPresentation(filters: [39000, 39002].map { kind in
-        ["kinds": [kind], "authors": [authority], "#d": [channelID], "limit": 1]
-      }, community: community) { events in
-        let matching = events.filter {
-          $0.pubkey.lowercased() == authority && Self.tagValue("d", in: $0) == channelID
+      let group = DispatchGroup()
+      let lock = NSLock()
+      var records: [Int: VerifiedNostrEvent] = [:]
+      for kind in [39000, 39002] {
+        group.enter()
+        queryPresentation(filters: [[
+          "kinds": [kind], "authors": [authority], "#d": [channelID], "limit": 1,
+        ]], community: community) { events in
+          let record = Self.newest(events.filter {
+            $0.kind == kind && $0.pubkey.lowercased() == authority
+              && Self.tagValue("d", in: $0) == channelID
+          })
+          lock.lock()
+          records[kind] = record
+          lock.unlock()
+          group.leave()
         }
-        completion(.channel(
-          Self.newest(matching.filter { $0.kind == 39000 }),
-          Self.newest(matching.filter { $0.kind == 39002 })))
+      }
+      group.notify(queue: .global(qos: .utility)) {
+        completion(.channel(records[39000], records[39002]))
       }
     }
   }
