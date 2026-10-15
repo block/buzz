@@ -1,4 +1,5 @@
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { DeviceNameSettingsCard } from "./DeviceNameSettingsCard";
 import {
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
@@ -48,6 +49,7 @@ export function AgentsSettingsPanel() {
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>
+        <DeviceNameSettingsCard />
         <PreventSleepSettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />

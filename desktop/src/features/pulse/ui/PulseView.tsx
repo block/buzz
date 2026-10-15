@@ -114,6 +114,10 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
               : "offline",
           respondTo: agent.respondTo,
           respondToAllowlist: agent.respondToAllowlist,
+          // Local managed agents are always on this device, so there is no
+          // sibling device to disambiguate against here.
+          deviceId: null,
+          deviceLabel: null,
         });
       }
     }
