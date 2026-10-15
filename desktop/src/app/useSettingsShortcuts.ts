@@ -3,13 +3,11 @@ import * as React from "react";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
 type UseSettingsShortcutsOptions = {
-  onClose: () => void;
   onOpenSettings: () => void;
   open?: boolean;
 };
 
 export function useSettingsShortcuts({
-  onClose,
   onOpenSettings,
   open,
 }: UseSettingsShortcutsOptions) {
@@ -29,11 +27,6 @@ export function useSettingsShortcuts({
 
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (open) {
-        onClose();
-        return;
-      }
-
       onOpenSettings();
     }
 
@@ -41,5 +34,5 @@ export function useSettingsShortcuts({
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
     };
-  }, [onClose, onOpenSettings, open]);
+  }, [onOpenSettings, open]);
 }
