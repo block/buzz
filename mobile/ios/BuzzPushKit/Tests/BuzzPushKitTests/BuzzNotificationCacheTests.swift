@@ -110,6 +110,62 @@ struct BuzzNotificationCacheTests {
     }
   }
 
+  @Test("A failed batch cannot publish only its channel metadata")
+  func atomicBatchFailure() throws {
+    let root = try directory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let scope = try scope()
+    let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+    let channel = try signedEvent(
+      privateKey: key, createdAt: 1, kind: 39000, tags: [["d", "room"]])
+    let members = try signedEvent(
+      privateKey: key, createdAt: 1, kind: 39002, tags: [["d", "room"]])
+    try cache.save(events: [channel, members], scope: scope)
+    let newer = try signedEvent(privateKey: key, createdAt: 2, kind: 39000, tags: [["d", "room"]])
+    let invalid = try signedEvent(privateKey: key, createdAt: 2, kind: 9)
+    #expect(throws: BuzzNotificationCacheError.self) {
+      try cache.save(events: [newer, invalid], scope: scope)
+    }
+    let snapshot = try cache.presentation(
+      scope: scope, sender: channel.pubkey,
+      channelID: "room", authority: channel.pubkey)
+    #expect(snapshot.channel?.event == channel)
+    #expect(snapshot.membership?.event == members)
+  }
+
+  @Test("Concurrent channel readers see one complete refresh")
+  func atomicBatchReaders() throws {
+    let root = try directory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let scope = try scope()
+    let pairs = try (1...20).map { version in
+      try [39000, 39002].map { kind in
+        try signedEvent(privateKey: key, createdAt: version, kind: kind, tags: [["d", "room"]])
+      }
+    }
+    let errorsLock = NSLock()
+    var errors: [String] = []
+    DispatchQueue.concurrentPerform(iterations: pairs.count) { index in
+      let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+      do {
+        try cache.save(events: pairs[index], scope: scope)
+        let snapshot = try cache.presentation(
+          scope: scope, sender: pairs[index][0].pubkey,
+          channelID: "room", authority: pairs[index][0].pubkey)
+        if snapshot.channel?.event.createdAt != snapshot.membership?.event.createdAt {
+          errorsLock.lock()
+          errors.append("Mixed channel refresh")
+          errorsLock.unlock()
+        }
+      } catch {
+        errorsLock.lock()
+        errors.append(String(describing: error))
+        errorsLock.unlock()
+      }
+    }
+    #expect(errors.isEmpty)
+  }
+
   @Test("Reads do not extend freshness; a successful recheck does")
   func freshness() throws {
     let root = try directory()

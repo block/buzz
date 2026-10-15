@@ -65,9 +65,12 @@ final class BuzzNotificationEnrichmentOperation {
           refresh(refreshProfile, refreshChannel) { [self] profile, channel, membership in
             DispatchQueue.global(qos: .utility).async { [self] in
               if isCurrent() {
-                for record in [profile, channel, membership].compactMap({ $0 }) {
-                  do { try cache.save(event: record, scope: scope) } catch { report(error) }
+                if let profile {
+                  do { try cache.save(event: profile, scope: scope) } catch { report(error) }
                 }
+                do {
+                  try cache.save(events: [channel, membership].compactMap { $0 }, scope: scope)
+                } catch { report(error) }
               }
               readCache { [self] in fetchAvatar() }
             }
@@ -85,23 +88,18 @@ final class BuzzNotificationEnrichmentOperation {
 
   private func readCache(completion: @escaping () -> Void) {
     DispatchQueue.global(qos: .utility).async { [self] in
-      var loadedProfile: BuzzNotificationMetadata?
-      var loadedAvatar: BuzzNotificationAvatar?
-      var loadedChannel: BuzzNotificationMetadata?
-      var loadedMembership: BuzzNotificationMetadata?
+      var loaded = BuzzNotificationCache.Presentation()
       do {
-        loadedProfile = try cache.metadata(scope: scope, kind: 0, author: event.pubkey)
-        loadedAvatar = try cache.avatar(scope: scope, pubkey: event.pubkey)
-        if let channelID, let authority = community.relayMetadataPubkey {
-          loadedChannel = try cache.metadata(
-            scope: scope, kind: 39_000, author: authority, identifier: channelID)
-          loadedMembership = try cache.metadata(
-            scope: scope, kind: 39_002, author: authority, identifier: channelID)
-        }
+        loaded = try cache.presentation(
+          scope: scope, sender: event.pubkey,
+          channelID: channelID, authority: community.relayMetadataPubkey?.lowercased())
       } catch { report(error) }
-      let snapshot = (loadedProfile, loadedAvatar, loadedChannel, loadedMembership)
+      let snapshot = loaded
       queue.async { [self] in
-        (profile, avatar, channel, membership) = snapshot
+        profile = snapshot.profile
+        avatar = snapshot.avatar
+        channel = snapshot.channel
+        membership = snapshot.membership
         completion()
       }
     }

@@ -98,31 +98,69 @@ public final class BuzzNotificationCache: @unchecked Sendable {
 
   /// Saves verified replaceable metadata without allowing an older response to win.
   public func save(event: VerifiedNostrEvent, scope: BuzzNotificationCacheScope) throws {
-    guard [0, 39_000, 39_002].contains(event.kind), event.hasValidIDAndSignature(),
-      event.content.utf8.count <= 256 * 1024
-    else { throw BuzzNotificationCacheError.invalidRecord }
-    if event.kind == 0 {
-      guard let data = event.content.data(using: .utf8),
-        (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
+    try save(events: [event], scope: scope)
+  }
+
+  /// Commits records returned together in a single atomic snapshot.
+  func save(events: [VerifiedNostrEvent], scope: BuzzNotificationCacheScope) throws {
+    guard !events.isEmpty else { return }
+    for event in events {
+      guard [0, 39_000, 39_002].contains(event.kind), event.hasValidIDAndSignature(),
+        event.content.utf8.count <= 256 * 1024
       else { throw BuzzNotificationCacheError.invalidRecord }
+      if event.kind == 0 {
+        guard let data = event.content.data(using: .utf8),
+          (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
+        else { throw BuzzNotificationCacheError.invalidRecord }
+      }
     }
     try access(scope, write: true) { state in
-      let index = state.metadata.firstIndex {
-        $0.event.kind == event.kind && $0.event.pubkey == event.pubkey
-          && Self.identifier($0.event) == Self.identifier(event)
+      for event in events {
+        let index = state.metadata.firstIndex {
+          $0.event.kind == event.kind && $0.event.pubkey == event.pubkey
+            && Self.identifier($0.event) == Self.identifier(event)
+        }
+        let existing = index.map { state.metadata[$0].event }
+        guard
+          BuzzPushPresentationCacheStore.shouldReplace(
+            existingCreatedAt: existing?.createdAt, existingID: existing?.id,
+            candidateCreatedAt: event.createdAt, candidateID: event.id
+          )
+        else { continue }
+        let record = BuzzNotificationMetadata(event: event, checkedAt: now())
+        if let index { state.metadata[index] = record } else { state.metadata.append(record) }
+        if event.kind == 0, Self.removesPicture(event) {
+          state.avatars.removeAll { $0.pubkey == event.pubkey }
+        }
       }
-      let existing = index.map { state.metadata[$0].event }
-      guard
-        BuzzPushPresentationCacheStore.shouldReplace(
-          existingCreatedAt: existing?.createdAt, existingID: existing?.id,
-          candidateCreatedAt: event.createdAt, candidateID: event.id
-        )
-      else { return }
-      let record = BuzzNotificationMetadata(event: event, checkedAt: now())
-      if let index { state.metadata[index] = record } else { state.metadata.append(record) }
-      if event.kind == 0, Self.removesPicture(event) {
-        state.avatars.removeAll { $0.pubkey == event.pubkey }
-      }
+    }
+  }
+
+  struct Presentation {
+    var profile: BuzzNotificationMetadata?
+    var avatar: BuzzNotificationAvatar?
+    var channel: BuzzNotificationMetadata?
+    var membership: BuzzNotificationMetadata?
+  }
+
+  /// Reads related fields from one snapshot, so a concurrent update cannot mix generations.
+  func presentation(
+    scope: BuzzNotificationCacheScope, sender: String,
+    channelID: String?, authority: String?
+  ) throws -> Presentation {
+    try access(scope) { state in
+      let records = state.metadata
+      return Presentation(
+        profile: records.first { $0.event.kind == 0 && $0.event.pubkey == sender },
+        avatar: state.avatars.first { $0.pubkey == sender },
+        channel: records.first {
+          channelID != nil && authority != nil && $0.event.kind == 39000
+            && $0.event.pubkey == authority && Self.identifier($0.event) == channelID
+        },
+        membership: records.first {
+          channelID != nil && authority != nil && $0.event.kind == 39002
+            && $0.event.pubkey == authority && Self.identifier($0.event) == channelID
+        })
     }
   }
 
