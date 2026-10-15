@@ -271,12 +271,15 @@ try {
     await page.waitForTimeout(500);
   }
 
-  // Wait for all CSS/Web animations to finish before capturing.
-  // Radix components animate in via CSS — without this, screenshots
-  // are taken mid-transition and appear greyed-out or partially rendered.
-  await page.evaluate(() =>
-    Promise.all(document.getAnimations().map((a) => a.finished)),
-  );
+  // Wait for finishing CSS/Web animations, but do not hang on looping
+  // ones (spinners, presence pulses). Same ceiling as waitForAnimations.
+  await page.evaluate((ceiling) => {
+    const settled = Promise.all(
+      document.getAnimations().map((a) => a.finished.catch(() => undefined)),
+    );
+    const ceilingHit = new Promise((resolve) => setTimeout(resolve, ceiling));
+    return Promise.race([settled.then(() => undefined), ceilingHit]);
+  }, 1000);
 
   const filepath = join(outdir, `${args.name}.png`);
   const clipOpts = args.clip
