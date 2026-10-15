@@ -308,6 +308,29 @@ pub(crate) fn lookup_loaded_harness_by_id(id: &str) -> Option<Arc<HarnessDefinit
     guard.iter().find(|d| d.id == id).cloned()
 }
 
+/// Look up a loaded (non-builtin) harness by **command**. Returns `None` when
+/// no loaded definition's `command` matches exactly.
+///
+/// Used as a fallback when a record has no explicit `runtime` id — e.g. an
+/// agent whose `agent_command_override` was set directly to a preset's
+/// command (such as `"opencode"`) without also recording the matching
+/// `runtime` id. Without this fallback such agents silently lose the
+/// preset's default `args` (e.g. OpenCode's required `acp` subcommand),
+/// because `lookup_loaded_harness_by_id` only ever sees an empty id and the
+/// spawn falls back to the record's own (empty) `agent_args`.
+pub(crate) fn lookup_loaded_harness_by_command(command: &str) -> Option<Arc<HarnessDefinition>> {
+    let guard = match loaded_harness_registry().read() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!(
+                "custom_harnesses: loaded-harness registry read lock was poisoned; recovering"
+            );
+            poisoned.into_inner()
+        }
+    };
+    guard.iter().find(|d| d.command == command).cloned()
+}
+
 /// Warm the loaded-harness registry synchronously from `custom_dir`.
 ///
 /// Must be called **before** `restore_managed_agents_on_launch` so that cold
