@@ -50,11 +50,14 @@ just setup                       # start Docker services, run migrations
 
 > **Already running Buzz Desktop?** Desktop uses the same Docker container
 > names (`buzz-postgres`, `buzz-redis`) and the same
-> default ports (`:5432`, `:6379`). `just setup` will reuse those
-> services, so **your test relay writes into Desktop's database**. That's
-> fine for read/write smoke tests, but: `just reset` wipes Desktop's data
-> along with yours. If you need isolation, stop Desktop first or run the
-> dev stack on a different Compose project
+> default ports (`:5432`, `:6379`). Host ports can be overridden in `.env`;
+> keep `DATABASE_URL`/`PGPORT` and `REDIS_URL`/`REDIS_PORT` aligned. Changing
+> an override reconciles the shared Compose stack, so a running Desktop or
+> relay using the old ports will lose its service connections. `just setup`
+> will reuse those services, so **your test relay writes into Desktop's
+> database**. That's fine for read/write smoke tests, but: `just reset` wipes
+> Desktop's data along with yours. If you need isolation, stop Desktop first
+> or run the dev stack on a different Compose project
 > (`COMPOSE_PROJECT_NAME=buzz-dev docker compose …`).
 
 `just reset` wipes all local data and starts over — **including Buzz
@@ -332,7 +335,10 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
 | `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
 | `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |
+| `PGPORT`                          | `5432`                       | Postgres host port published by the root dev Compose stack; keep aligned with `DATABASE_URL` |
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
+| `REDIS_PORT`                      | `6379`                       | Redis host port published by the root dev Compose stack; keep aligned with `REDIS_URL` |
+| `MINIO_API_PORT`                  | `9000`                       | MinIO API host port; keep aligned with `BUZZ_S3_ENDPOINT` |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
 | `BUZZ_DRAIN_JITTER_MS`          | `0` (off)                   | Per-connection upper bound, in ms, for the random delay before each live WebSocket gets its `1012 Service Restart` close on graceful shutdown. `0` closes every socket at once (the previous behavior). A positive value spreads closes uniformly over `[1, value]` ms to avoid a reconnect thundering herd on rolling deploys. Values above `20000` are capped to `20000` (`MAX_DRAIN_JITTER_MS`) to leave close-frame delivery headroom under the relay's 30s hard-drain timeout. Empty or whitespace-only is treated as unset (off); a non-integer fails startup loudly. |
