@@ -1,3 +1,5 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+
 /**
  * Escape special regex characters in a string.
  */
@@ -17,6 +19,15 @@ export function mentionLabelPattern(label: string): string {
   return `${escapeRegExp(label)}${qualification}${suffix}`;
 }
 
+type MarkdownNode = {
+  type: string;
+  position?: {
+    start: { offset?: number };
+    end: { offset?: number };
+  };
+  children?: MarkdownNode[];
+};
+
 function maskRange(
   chars: string[],
   text: string,
@@ -30,114 +41,48 @@ function maskRange(
 
 /**
  * Replace Markdown code with spaces while retaining offsets and line endings.
- * Handles fenced blocks, four-space/tab-indented lines, and backtick code spans.
+ *
+ * A four-space line is not always code: nested list items and a list item's
+ * second paragraph indent the same way, and indented code can open with no
+ * blank line after a heading, fence, or thematic break. The micromark parse
+ * `react-markdown` uses is already a Desktop dependency, so we mask the source
+ * ranges of its `code` and `inlineCode` nodes instead of classifying lines.
  */
-function maskMarkdownCode(text: string): string {
+function computeMaskedMarkdownCode(text: string): string {
+  let tree: MarkdownNode;
+  try {
+    tree = fromMarkdown(text) as MarkdownNode;
+  } catch {
+    return text;
+  }
+
   const chars = text.split("");
-  const lines: Array<{ start: number; end: number; content: string }> = [];
-
-  let lineStart = 0;
-  while (lineStart < text.length) {
-    let lineEnd = lineStart;
-    while (
-      lineEnd < text.length &&
-      text[lineEnd] !== "\n" &&
-      text[lineEnd] !== "\r"
+  const visit = (node: MarkdownNode): void => {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (
+      (node.type === "code" || node.type === "inlineCode") &&
+      start !== undefined &&
+      end !== undefined
     ) {
-      lineEnd += 1;
+      maskRange(chars, text, start, end);
+      return;
     }
-    lines.push({
-      start: lineStart,
-      end: lineEnd,
-      content: text.slice(lineStart, lineEnd),
-    });
-    if (text[lineEnd] === "\r" && text[lineEnd + 1] === "\n") lineEnd += 1;
-    lineStart = lineEnd + 1;
-  }
-
-  let fence: { marker: string; length: number } | null = null;
-  for (const line of lines) {
-    if (fence) {
-      maskRange(chars, text, line.start, line.end);
-      const closing = line.content.match(/^ {0,3}(`+|~+)[ \t]*$/);
-      if (
-        closing &&
-        closing[1][0] === fence.marker &&
-        closing[1].length >= fence.length
-      ) {
-        fence = null;
-      }
-      continue;
+    for (const child of node.children ?? []) {
+      visit(child);
     }
-
-    const opening = line.content.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (opening && !(opening[1][0] === "`" && opening[2].includes("`"))) {
-      fence = { marker: opening[1][0], length: opening[1].length };
-      maskRange(chars, text, line.start, line.end);
-      continue;
-    }
-
-    if (/^(?: {4}|\t)/.test(line.content)) {
-      maskRange(chars, text, line.start, line.end);
-    }
-  }
-
-  const isMasked = (index: number) =>
-    chars[index] === " " && text[index] !== " ";
-  const isEscaped = (index: number) => {
-    let slashCount = 0;
-    for (
-      let cursor = index - 1;
-      cursor >= 0 && text[cursor] === "\\";
-      cursor -= 1
-    ) {
-      slashCount += 1;
-    }
-    return slashCount % 2 === 1;
   };
-
-  for (let index = 0; index < text.length; ) {
-    if (text[index] !== "`" || isMasked(index) || isEscaped(index)) {
-      index += 1;
-      continue;
-    }
-
-    let openerEnd = index + 1;
-    while (
-      openerEnd < text.length &&
-      text[openerEnd] === "`" &&
-      !isMasked(openerEnd)
-    ) {
-      openerEnd += 1;
-    }
-    const delimiterLength = openerEnd - index;
-    let closer = openerEnd;
-
-    while (closer < text.length) {
-      if (text[closer] !== "`" || isMasked(closer)) {
-        closer += 1;
-        continue;
-      }
-      let closerEnd = closer + 1;
-      while (
-        closerEnd < text.length &&
-        text[closerEnd] === "`" &&
-        !isMasked(closerEnd)
-      ) {
-        closerEnd += 1;
-      }
-      if (closerEnd - closer === delimiterLength) {
-        maskRange(chars, text, index, closerEnd);
-        index = closerEnd;
-        break;
-      }
-      closer = closerEnd;
-    }
-
-    if (closer >= text.length) index = openerEnd;
-  }
-
+  visit(tree);
   return chars.join("");
+}
+
+let maskedCache: { text: string; masked: string } | null = null;
+
+function maskMarkdownCode(text: string): string {
+  if (maskedCache?.text === text) return maskedCache.masked;
+  const masked = computeMaskedMarkdownCode(text);
+  maskedCache = { text, masked };
+  return masked;
 }
 
 /**
