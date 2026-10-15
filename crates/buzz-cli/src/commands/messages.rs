@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
-    infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
+    fold_name, infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
@@ -216,7 +216,9 @@ async fn resolve_content_mentions(
             continue;
         };
         name_to_pubkeys
-            .entry(name.to_ascii_lowercase())
+            // Folded exactly as `extract_at_mentions_with_known` folds the
+            // names it returns — these keys are looked up with those.
+            .entry(fold_name(name))
             .or_default()
             .push(pubkey.to_string());
         display_names.push(name.to_string());
@@ -566,7 +568,7 @@ async fn resolve_author(client: &BuzzClient, author: &str) -> Result<String, Cli
 /// kind:0 events. Returns deduped `(pubkey, shown name)` pairs. Pure so the
 /// name-resolution semantics are unit-testable without a relay.
 fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(String, String)> {
-    let lower = name.to_ascii_lowercase();
+    let lower = fold_name(name);
     let mut matches: Vec<(String, String)> = Vec::new();
     for e in events {
         let Some(pubkey) = e.get("pubkey").and_then(|v| v.as_str()) else {
@@ -584,7 +586,7 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let plain_name = content.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if display_name.to_ascii_lowercase() == lower || plain_name.to_ascii_lowercase() == lower {
+        if fold_name(display_name) == lower || fold_name(plain_name) == lower {
             let shown = if display_name.is_empty() {
                 plain_name
             } else {
@@ -1566,6 +1568,24 @@ mod tests {
         ];
         let matches = match_profiles_by_name(&events, "aArOn");
         assert_eq!(matches, vec![(PK_VALID_A.to_string(), "Aaron".to_string())]);
+    }
+
+    /// `messages search --author` folded with `to_ascii_lowercase`, so a
+    /// non-ASCII display name was only reachable by typing its exact case.
+    #[test]
+    fn author_name_match_folds_non_ascii_case() {
+        let events = vec![
+            profile_event(PK_VALID_A, Some("ÉQUIPE"), None),
+            profile_event(PK_VALID_B, None, Some("Общий")),
+        ];
+        assert_eq!(
+            match_profiles_by_name(&events, "équipe"),
+            vec![(PK_VALID_A.to_string(), "ÉQUIPE".to_string())]
+        );
+        assert_eq!(
+            match_profiles_by_name(&events, "ОБЩИЙ"),
+            vec![(PK_VALID_B.to_string(), "Общий".to_string())]
+        );
     }
 
     #[test]
