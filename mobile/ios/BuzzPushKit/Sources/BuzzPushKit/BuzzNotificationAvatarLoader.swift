@@ -201,7 +201,7 @@ public final class BuzzNotificationAvatarLoader {
     return output as Data
   }
 
-  private static func authorization(url: URL, key: String, account: String) throws -> String {
+  static func authorization(url: URL, key: String, account: String) throws -> String {
     guard let bytes = VerifiedNostrEvent.hexBytes(key), bytes.count == 32 else {
       throw NostrHTTPAuthError.invalidHex
     }
@@ -209,7 +209,9 @@ public final class BuzzNotificationAvatarLoader {
     let pubkey = VerifiedNostrEvent.hex(signingKey.xonly.bytes)
     guard pubkey == account else { throw BuzzNotificationCacheError.revoked }
     let timestamp = Int(Date().timeIntervalSince1970)
-    let authority = (url.host ?? "") + (url.port.map { ":\($0)" } ?? "")
+    // URLComponents preserves the brackets required around IPv6 authorities.
+    let host = URLComponents(url: url, resolvingAgainstBaseURL: false)?.host ?? ""
+    let authority = host + (url.port.map { ":\($0)" } ?? "")
     let tags = [["t", "get"], ["expiration", String(timestamp + 60)], ["server", authority]]
     let content = "Get buzz-media"
     let serialization = try VerifiedNostrEvent.canonicalSerialization(

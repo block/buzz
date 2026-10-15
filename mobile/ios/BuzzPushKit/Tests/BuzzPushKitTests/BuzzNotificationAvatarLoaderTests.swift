@@ -6,6 +6,21 @@ import Testing
 
 @Suite("Native notification avatar decoding")
 struct BuzzNotificationAvatarLoaderTests {
+  @Test("Avatar proofs preserve IPv6 brackets and explicit ports")
+  func signedServerAuthority() throws {
+    let key = String(repeating: "0", count: 63) + "1"
+    let account = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    for authority in ["[::1]:3000", "[2001:db8::1]", "relay.example:443", "relay.example"] {
+      let url = try #require(URL(string: "https://\(authority)/media/avatar.png"))
+      let header = try BuzzNotificationAvatarLoader.authorization(url: url, key: key, account: account)
+      let data = try #require(Data(base64Encoded: String(header.dropFirst(6))))
+      let event = try JSONDecoder().decode(VerifiedNostrEvent.self, from: data)
+      #expect(event.tags.contains(["server", authority]))
+      #expect(event.kind == 24242)
+      #expect(event.hasValidIDAndSignature())
+    }
+  }
+
   @Test("Relay media uses canonical hosts and default ports without trusting other origins")
   func mediaOrigins() throws {
     let hash = String(repeating: "a", count: 64)
