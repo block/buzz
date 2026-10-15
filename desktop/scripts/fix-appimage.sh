@@ -12,7 +12,7 @@
 # avoid appimagetool fetching one from its mutable `continuous` tag (CI pins
 # this; unset is fine for local testing).
 #
-# Root cause — three interlocking failures (upstream: https://github.com/tauri-apps/tauri/issues/15665):
+# Root cause - four interlocking failures (upstream: https://github.com/tauri-apps/tauri/issues/15665):
 #
 #  1. EGL crash: linuxdeploy bundles libwayland-client.so.0 (1.22) alongside
 #     the app. Mesa 25's libEGL calls the bundled version at runtime; the version
@@ -42,6 +42,11 @@
 #     wrong -- spawning nothing, dying on unresolved bundled libs, or spawning
 #     the system helpers -- and the window never appears.
 #
+#  4. External opener mismatch: AppRun puts the bundled xdg-open first on PATH,
+#     and opener children inherit AppImage GLib/GIO paths. On newer GNOME hosts,
+#     that mixed environment can hand the desktop a fully percent-encoded HTTPS
+#     URI instead of the original URL, so GNOME reports "No Apps Available".
+#
 # Fix: (a) remove the offending libs so the app uses the system copies (newer and
 # ABI-compatible on any distro shipping glib >= 2.72 / Ubuntu 22.04+), and
 # (b) install a launcher shim in front of the app binary that strips the
@@ -51,8 +56,9 @@
 # the variable last -- after every apprun-hook -- so any value set before it is
 # discarded (verified empirically; a runtime GST_PLUGIN_SYSTEM_PATH_1_0 passed
 # into the AppImage does not survive). No tauri.conf.json knob can do this --
-# bundle.linux.appimage only exposes bundleMediaFramework, files (copy-only, no
-# remove/symlink), and bundleXdgOpen.
+# bundle.linux.appimage only exposes bundleMediaFramework and files (copy-only,
+# no remove/symlink). External open requests also go through a small xdg-open
+# wrapper that cleans the child environment and prefers the host opener.
 
 set -euo pipefail
 
@@ -73,6 +79,7 @@ APPIMAGE_NAME="$(basename "$APPIMAGE_ABS")"
 # Locate the desktop/ directory (this script lives at desktop/scripts/).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/appimage-xdg-open-install.sh"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -163,6 +170,11 @@ done
 exec -a "buzz-desktop" "$here/buzz-desktop.bin" "$@"
 SHIM
 chmod +x "$APP_BIN"
+
+echo "==> Installing host xdg-open wrapper"
+install_appimage_xdg_open \
+  "$WORKDIR/squashfs-root" \
+  "$SCRIPT_DIR/appimage-xdg-open"
 
 echo "==> Repacking AppImage"
 # Pass a pinned type2 runtime when provided (CI sets APPIMAGETOOL_RUNTIME_FILE);

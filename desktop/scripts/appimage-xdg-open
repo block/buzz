@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+here="$(dirname "$(readlink -f "$0")")"
+appdir="$(readlink -f "$here/../..")"
+
+is_appdir_path() {
+  local resolved
+  resolved="$(realpath -m -- "${1:-.}" 2>/dev/null || true)"
+  [[ "$resolved" == "$appdir" || "$resolved" == "$appdir/"* ]]
+}
+
+filter_appdir_entries() {
+  local name="$1"
+  local value entry filtered=""
+  local -a entries
+
+  [[ -v "$name" ]] || return 0
+  value="${!name}"
+  IFS=: read -r -a entries <<< "$value"
+  for entry in "${entries[@]}"; do
+    if is_appdir_path "$entry"; then
+      continue
+    fi
+    [[ -z "$filtered" ]] || filtered+=":"
+    filtered+="$entry"
+  done
+
+  if [[ -n "$filtered" ]]; then
+    printf -v "$name" '%s' "$filtered"
+    export "$name"
+  else
+    unset "$name"
+  fi
+}
+
+unset_if_appdir_path() {
+  local name="$1"
+  [[ -v "$name" ]] || return 0
+  if is_appdir_path "${!name}"; then
+    unset "$name"
+  fi
+}
+
+# AppRun prepends AppDir paths to these search lists. Keep unrelated host and
+# user entries while preventing host opener processes from loading AppImage
+# libraries, modules, plugins, or data.
+for name in PATH LD_LIBRARY_PATH XDG_DATA_DIRS GIO_EXTRA_MODULES GTK_PATH \
+  QT_PLUGIN_PATH PYTHONPATH; do
+  filter_appdir_entries "$name"
+done
+
+for name in GSETTINGS_SCHEMA_DIR GTK_DATA_PREFIX GTK_EXE_PREFIX \
+  GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE; do
+  unset_if_appdir_path "$name"
+done
+
+# These identify or configure the AppImage process itself, not the host opener.
+unset APPDIR APPIMAGE
+if [[ ${GDK_BACKEND-} == "x11" ]]; then
+  unset GDK_BACKEND
+fi
+
+if host_xdg_open="$(command -v xdg-open 2>/dev/null)"; then
+  exec "$host_xdg_open" "$@"
+fi
+
+exec "$here/xdg-open.appimage" "$@"
