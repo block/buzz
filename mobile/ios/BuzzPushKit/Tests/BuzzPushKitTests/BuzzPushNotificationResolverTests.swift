@@ -512,6 +512,26 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result.conversationDisplayName, "#Stale General")
   }
 
+  func testLegacyAccountSnapshotEnrichesBeforeFirstAppLaunchAfterUpgrade() throws {
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Hello before app launch")
+    let profile = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 0, content: #"{"name":"Alice"}"#)
+    var legacy = community()
+    legacy.notificationSessionID = nil
+    URLProtocolStub.handler = { request in
+      Self.response(request, status: 200,
+        data: try JSONEncoder().encode(URLProtocolStub.requests.count == 1 ? [message] : [profile]))
+    }
+    let result = try XCTUnwrap(resolve(makeResolver(communitiesData: try snapshotData([legacy]))))
+    XCTAssertEqual(result.title, "Alice")
+    XCTAssertEqual(result.body, "Hello before app launch")
+    XCTAssertNotNil(result.notificationScope)
+    var newSignIn = legacy
+    newSignIn.notificationSessionID = UUID().uuidString
+    XCTAssertNotEqual(result.notificationScope, BuzzNotificationCacheScope(community: newSignIn))
+  }
+
   func testMissingCacheRefreshesVerifiedProfileAndChannelTogether() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,

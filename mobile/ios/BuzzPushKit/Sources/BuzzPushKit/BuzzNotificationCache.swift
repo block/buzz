@@ -11,12 +11,15 @@ public struct BuzzNotificationCacheScope: Codable, Equatable, Sendable {
   public init?(community: PushLeaseCommunity) {
     guard let origin = BuzzPushPresentationCacheStore.canonicalRelayOrigin(community.relayUrl),
       let account = community.pubkey, !account.isEmpty,
-      let session = community.notificationSessionID, !session.isEmpty
+      community.notificationSessionID?.isEmpty != true
     else { return nil }
     communityID = community.id
     relayOrigin = origin
     self.account = account.lowercased()
-    sessionID = session
+    // Before the first launch after upgrade, the account snapshot has no session
+    // field. Its scope is still isolated by account, relay and community. The new
+    // app replaces this marker with a UUID on its first sync and every re-add.
+    sessionID = community.notificationSessionID ?? "legacy-before-first-sync-v1"
   }
 
   /// A filename-safe identity that contains no credentials.
