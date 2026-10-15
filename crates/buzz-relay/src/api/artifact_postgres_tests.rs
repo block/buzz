@@ -171,6 +171,7 @@ async fn project_filter_survives_artifact_query_hook() {
         assert_eq!(body[0]["id"], bound.id.to_hex(), "{kind}: {body}");
         let (status, body) = f.request("/count", filter).await;
         assert!(status.is_success(), "{kind} {status}: {body}");
+        assert_eq!(body["count"], 1, "{kind}: {body}");
     }
 }
 
@@ -178,28 +179,39 @@ async fn project_filter_survives_artifact_query_hook() {
 #[ignore = "requires Postgres"]
 async fn count_honors_buzz_channel_filter() {
     let f = Fixture::new().await;
-    // Two projects bound to `home`, one bound to `private`.
+    // Two projects bound to `home`, one bound to `private`, all stored in
+    // `home` so the explicit `#h` scope alone would count all three.
     for channel in [f.home, f.home, f.private] {
         let event = EventBuilder::new(Kind::Custom(30621), "")
             .tags([
                 Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
                 Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+                Tag::parse(["t", "proj"]).unwrap(),
             ])
             .sign_with_keys(&f.owner)
             .unwrap();
         f.state
             .db
-            .insert_event(f.community, &event, None)
+            .insert_event(f.community, &event, Some(f.home))
             .await
             .unwrap();
     }
-    let filter = json!([{"kinds":[30621],"#buzz-channel":[f.home]}]);
-    let (status, body) = f.request("/query", filter.clone()).await;
-    assert!(status.is_success(), "{status}: {body}");
-    assert_eq!(body.as_array().unwrap().len(), 2, "{body}");
-    let (status, body) = f.request("/count", filter).await;
-    assert!(status.is_success(), "{status}: {body}");
-    assert_eq!(body["count"], 2, "{body}");
+    for filter in [
+        // Fast COUNT over the reader's accessible channels.
+        json!([{"kinds":[30621],"#buzz-channel":[f.home]}]),
+        // Fast COUNT on the explicit-channel path.
+        json!([{"kinds":[30621],"#h":[f.home],"#buzz-channel":[f.home]}]),
+        // `#t` is not fully pushable, forcing the per-event fallback on both paths.
+        json!([{"kinds":[30621],"#t":["proj"],"#buzz-channel":[f.home]}]),
+        json!([{"kinds":[30621],"#h":[f.home],"#t":["proj"],"#buzz-channel":[f.home]}]),
+    ] {
+        let (status, body) = f.request("/query", filter.clone()).await;
+        assert!(status.is_success(), "{filter} {status}: {body}");
+        assert_eq!(body.as_array().unwrap().len(), 2, "{filter}: {body}");
+        let (status, body) = f.request("/count", filter.clone()).await;
+        assert!(status.is_success(), "{filter} {status}: {body}");
+        assert_eq!(body["count"], 2, "{filter}: {body}");
+    }
 }
 
 #[tokio::test]
