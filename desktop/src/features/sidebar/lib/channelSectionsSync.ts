@@ -10,17 +10,31 @@ import { isReg, type Reg, type Tree } from "./sidebarLwwMap";
 
 const isString = (value: unknown) => typeof value === "string";
 
-type SectionNode = { name?: Reg; icon?: Reg; order?: Reg; live?: Reg };
+type SectionNode = {
+  name?: Reg;
+  icon?: Reg;
+  order?: Reg;
+  live?: Reg;
+  parent?: Reg;
+};
 
 export type SectionsView = {
   sections: ChannelSection[];
   assignments: Record<string, string>;
 };
 
+type RankedSection = {
+  id: string;
+  name: string;
+  icon: unknown;
+  order: number;
+  parent: unknown;
+};
+
 const val = (reg: unknown) => (isReg(reg) ? reg[2] : undefined);
 
 /** Live sections by `(order, id)`, with their canonical `order`. */
-function rankedSections(tree: Tree) {
+function rankedSections(tree: Tree): RankedSection[] {
   const nodes = (tree.s ?? {}) as Record<string, SectionNode>;
   return Object.entries(nodes)
     .filter(([, n]) => val(n.live) === true && isString(val(n.name)))
@@ -29,6 +43,7 @@ function rankedSections(tree: Tree) {
       name: val(n.name) as string,
       icon: val(n.icon),
       order: Number(val(n.order) ?? 0),
+      parent: val(n.parent),
     }))
     .sort(
       (a, b) => a.order - b.order || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
@@ -39,14 +54,68 @@ function rankedSections(tree: Tree) {
 export const maxLiveOrder = (tree: Tree) =>
   Math.max(-1, ...rankedSections(tree).map((s) => s.order));
 
-/** Live sections, densely renumbered. */
+/**
+ * Live sections in sidebar order — every top-level section followed by its
+ * children — with `order` densely renumbered inside each group.
+ *
+ * The sidebar nests one level. A `parent` register counts only when it names a
+ * live section that is itself top-level, so a parent that is missing, deleted,
+ * self-referential, or already nested leaves the section at the top level: a
+ * cycle or a deeper chain flattens instead of hiding channels.
+ */
 function liveSections(tree: Tree): ChannelSection[] {
-  return rankedSections(tree).map(({ icon, ...s }, order) => ({
-    ...s,
-    ...(isString(icon) && icon ? { icon: icon as string } : {}),
+  const ranked = rankedSections(tree);
+  const byId = new Map(ranked.map((section) => [section.id, section]));
+  const liveParent = (section: RankedSection) => {
+    const parentId = isString(section.parent)
+      ? (section.parent as string)
+      : undefined;
+    return parentId && parentId !== section.id ? byId.get(parentId) : undefined;
+  };
+  const toSection = (
+    section: RankedSection,
+    order: number,
+    parentId?: string,
+  ): ChannelSection => ({
+    id: section.id,
+    name: section.name,
+    ...(isString(section.icon) && section.icon
+      ? { icon: section.icon as string }
+      : {}),
     order,
-  }));
+    ...(parentId ? { parentId } : {}),
+  });
+
+  const roots: RankedSection[] = [];
+  const childrenByParent = new Map<string, RankedSection[]>();
+  for (const section of ranked) {
+    const parent = liveParent(section);
+    // A nested parent would make this section a grandchild: keep it top-level.
+    if (!parent || liveParent(parent)) {
+      roots.push(section);
+      continue;
+    }
+    const siblings = childrenByParent.get(parent.id);
+    if (siblings) siblings.push(section);
+    else childrenByParent.set(parent.id, [section]);
+  }
+
+  return roots.flatMap((root, order) => [
+    toSection(root, order),
+    ...(childrenByParent.get(root.id) ?? []).map((child, childOrder) =>
+      toSection(child, childOrder, root.id),
+    ),
+  ]);
 }
+
+/** Live ids sharing one parent (`undefined` = top level), in sidebar order. */
+export const siblingIds = (
+  sections: ChannelSection[],
+  parentId: string | undefined,
+): string[] =>
+  sections
+    .filter((section) => section.parentId === parentId)
+    .map((section) => section.id);
 
 /** The sections and assignments older clients (and this UI) read. */
 export function projectSections(tree: Tree): SectionsView {
@@ -73,6 +142,7 @@ export const SECTIONS_LANE: Lane = {
         icon: (v) => v === null || isString(v),
         order: Number.isSafeInteger,
         live: (v) => typeof v === "boolean",
+        parent: (v) => v === null || isString(v),
       },
     },
     a: { "*": (v) => v === null || isString(v) },
@@ -81,13 +151,14 @@ export const SECTIONS_LANE: Lane = {
     const store = parseChannelSectionPayload(json);
     if (!store) return null;
     const s: Tree = Object.fromEntries(
-      store.sections.map(({ id, name, icon, order }) => [
+      store.sections.map(({ id, name, icon, order, parentId }) => [
         id,
         {
           name: stamp(name),
           icon: stamp(icon ?? null),
           order: stamp(Math.round(order)),
           live: stamp(true),
+          parent: stamp(parentId ?? null),
         },
       ]),
     );

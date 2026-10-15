@@ -175,20 +175,27 @@ function SectionNameDialog({
 export type CreateSectionDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Name of the section the new one nests under, when creating a subsection. */
+  parentName?: string;
   onConfirm: (value: SectionDialogValue) => void;
 };
 
 export function CreateSectionDialog({
   open,
   onOpenChange,
+  parentName,
   onConfirm,
 }: CreateSectionDialogProps) {
   return (
     <SectionNameDialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Create section"
-      description="Sections let you group related channels in the sidebar."
+      title={parentName ? "Create subsection" : "Create section"}
+      description={
+        parentName
+          ? `Subsections group channels one level under "${parentName}".`
+          : "Sections let you group related channels in the sidebar."
+      }
       initialValue=""
       confirmLabel="Create"
       isConfirmDisabled={(trimmed) => trimmed.length === 0}
@@ -235,6 +242,8 @@ export type DeleteSectionAlertDialogProps = {
   onOpenChange: (open: boolean) => void;
   sectionName: string;
   channelCount: number;
+  /** Subsections nested under the section being deleted. */
+  subsectionCount?: number;
   onConfirm: () => void;
 };
 
@@ -243,14 +252,22 @@ export function DeleteSectionAlertDialog({
   onOpenChange,
   sectionName,
   channelCount,
+  subsectionCount = 0,
   onConfirm,
 }: DeleteSectionAlertDialogProps) {
   const channelLabel =
     channelCount === 1 ? "1 channel" : `${channelCount} channels`;
+  const subsectionNote =
+    subsectionCount === 0
+      ? ""
+      : subsectionCount === 1
+        ? " Its subsection moves to the top level."
+        : ` Its ${subsectionCount} subsections move to the top level.`;
   const description =
-    channelCount === 0
+    (channelCount === 0
       ? `Delete section "${sectionName}"? It has no channels.`
-      : `Delete section "${sectionName}"? Its ${channelLabel} will move back to the default Channels group.`;
+      : `Delete section "${sectionName}"? Its ${channelLabel} will move back to the default Channels group.`) +
+    subsectionNote;
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
