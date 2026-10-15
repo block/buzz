@@ -105,16 +105,24 @@ void bubbleContentTests() {
         inspect(text.text, null);
         expect(colors, [foreground]);
       }
+      final linkColor = foreground == Colors.white
+          ? foreground
+          : dark
+          ? const Color(0xFF83C4FF)
+          : const Color(0xFF0B5FA8);
       for (final label in ['Alice', 'Helper']) {
-        expect(tester.widget<Text>(find.text(label)).style?.color, foreground);
+        expect(tester.widget<Text>(find.text(label)).style?.color, linkColor);
       }
-      expect(tester.widget<Icon>(find.byIcon(BuzzIcons.bot)).color, foreground);
+      expect(
+        tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon)).color,
+        linkColor,
+      );
       final link = tester.widget<Text>(
         find.byWidgetPredicate(
           (w) => w is Text && w.textSpan?.toPlainText() == 'Website',
         ),
       );
-      expect(link.textSpan?.style?.color, foreground);
+      expect(link.textSpan?.style?.color, linkColor);
       await tester.tap(find.text('Alice'));
       expect(tapped, 'person');
       await tester.tap(find.text('Helper'));

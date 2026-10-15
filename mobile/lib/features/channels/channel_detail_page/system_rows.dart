@@ -235,17 +235,40 @@ class _SystemMessageRow extends HookConsumerWidget {
                   ),
                 if (systemEvent.type == SystemEventType.huddleStarted &&
                     systemEvent.ephemeralChannelId != null)
-                  RepaintBoundary(
-                    key: spotlightKey,
-                    child: _HuddleJoinSurface(
-                      message: message,
-                      allMessages: allMessages ?? const [],
-                      parentChannelId: channelId,
-                      isMember: isMember,
-                      isArchived: isArchived,
+                  MessageFooterLayout(
+                    animateSize: true,
+                    overlap: reactions.isNotEmpty ? Grid.xs : 0,
+                    footer: reactions.isEmpty
+                        ? const SizedBox.shrink()
+                        : Padding(
+                            padding: const EdgeInsets.only(left: Grid.xxs),
+                            child: ReactionRow(
+                              combined: true,
+                              messageId: message.id,
+                              channelId: channelId,
+                              reactions: reactions,
+                              onToggle: (emoji) =>
+                                  toggleReaction(ref, message, emoji),
+                              showAddButton: isMember && !isArchived,
+                              onAddReaction: () => showAddReactionPicker(
+                                context: context,
+                                ref: ref,
+                                message: message,
+                              ),
+                            ),
+                          ),
+                    child: RepaintBoundary(
+                      key: spotlightKey,
+                      child: _HuddleJoinSurface(
+                        message: message,
+                        allMessages: allMessages ?? const [],
+                        parentChannelId: channelId,
+                        isMember: isMember,
+                        isArchived: isArchived,
+                      ),
                     ),
                   ),
-                if (reactions.isNotEmpty)
+                if (!isHuddle && reactions.isNotEmpty)
                   IntrinsicWidth(
                     child: ReactionRow(
                       messageId: message.id,

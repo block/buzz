@@ -195,6 +195,12 @@ class MessageContent extends HookConsumerWidget {
     final markdownTheme = GptMarkdownTheme.of(context);
     final chatColors = ChatColors.of(context);
     final ownTextColor = chatColors.foreground;
+    // Desktop uses blue links on neutral bubbles and the bubble ink on colors.
+    final linkColor = ownMessage && ownTextColor == Colors.white
+        ? ownTextColor
+        : context.colors.brightness == Brightness.dark
+        ? const Color(0xFF83C4FF)
+        : const Color(0xFF0B5FA8);
     final baseTextStyle =
         (baseStyle ??
                 context.textTheme.bodyMedium?.copyWith(
@@ -424,9 +430,7 @@ class MessageContent extends HookConsumerWidget {
                         child: Theme(
                           data: Theme.of(context).copyWith(
                             colorScheme: context.colors.copyWith(
-                              primary: ownMessage
-                                  ? ownTextColor
-                                  : context.colors.primary,
+                              primary: linkColor,
                             ),
                           ),
                           child: GptMarkdownTheme(

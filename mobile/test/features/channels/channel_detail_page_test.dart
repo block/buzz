@@ -6280,6 +6280,35 @@ void main() {
       );
     });
 
+    testWidgets(
+      'huddle reactions attach to the card and open the shared tray',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(id: 'huddle-tray', kind: EventKind.huddleStarted),
+              _reaction(id: 'huddle-reaction', targetId: 'huddle-tray'),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final tray = find.byKey(const ValueKey('combined-reaction-tray'));
+        final card = find.byKey(const ValueKey('huddle-card-huddle-tray'));
+        expect(tray, findsOneWidget);
+        expect(tester.getRect(tray).top, lessThan(tester.getRect(card).bottom));
+        expect(
+          tester.getRect(tray).left,
+          greaterThan(tester.getRect(card).left),
+        );
+        await tester.tap(tray);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('reaction-details-sheet')),
+          findsOneWidget,
+        );
+      },
+    );
+
     testWidgets('renders a compact huddle activity row', (tester) async {
       await tester.pumpWidget(
         _buildTestable(

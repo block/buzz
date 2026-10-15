@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -2819,7 +2820,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
+        expect(find.byType(BuzzAgentIcon), findsOneWidget);
         expect(find.text('@'), findsNothing);
         expect(find.text('Helper Bot'), findsOneWidget);
       });
@@ -2837,7 +2838,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(BuzzIcons.bot), findsOneWidget);
+        expect(find.byType(BuzzAgentIcon), findsOneWidget);
         expect(find.text('Helper Bot'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('Bot Bot')));
       });
