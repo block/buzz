@@ -48,6 +48,16 @@ tests:
             name: BUZZ_HUDDLE_AUDIO_AVAILABLE
             value: "true"
         template: templates/deployment.yaml
+      # Default relay.resources now declares ephemeral-storage so the scheduler
+      # accounts for the per-pod emptyDir footprint (git-repos + git-pack-cache) (#5215).
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests["ephemeral-storage"]
+          value: 17Gi
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits["ephemeral-storage"]
+          value: 17Gi
+        template: templates/deployment.yaml
   - it: renders virtual-hosted S3 addressing for providers that require it
     set:
       relayUrl: wss://buzz.example.com
