@@ -23,8 +23,7 @@ class _SystemMessageRow extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final spotlightKey = useMemoized(() => GlobalKey());
     final systemEvent = message.systemEvent;
-    if (systemEvent == null ||
-        systemEvent.type == SystemEventType.huddleEnded) {
+    if (systemEvent == null) {
       return const SizedBox.shrink();
     }
 
@@ -133,7 +132,9 @@ class _SystemMessageRow extends HookConsumerWidget {
       );
     }
 
-    final isHuddle = systemEvent.type == SystemEventType.huddleStarted;
+    final isHuddle =
+        systemEvent.type == SystemEventType.huddleStarted &&
+        systemEvent.ephemeralChannelId != null;
     final actor = (systemEvent.actorPubkey ?? message.pubkey).toLowerCase();
     Widget withActor(Widget content) {
       if (!isHuddle) return content;
@@ -141,16 +142,28 @@ class _SystemMessageRow extends HookConsumerWidget {
         key: ValueKey('huddle-activity-${message.id}'),
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          GestureDetector(
+          Semantics(
+            container: true,
+            label: 'Open ${resolveLabel(actor)} profile',
+            button: true,
+            excludeSemantics: true,
             onTap: () => showUserProfileSheet(
               context,
               actor,
               names: channelIdentityNamesProvider(channelId),
             ),
-            child: _UserAvatar(
-              profile: userCache[actor],
-              pubkey: actor,
-              isAgent: userCache[actor]?.ownerPubkey != null,
+            child: GestureDetector(
+              excludeFromSemantics: true,
+              onTap: () => showUserProfileSheet(
+                context,
+                actor,
+                names: channelIdentityNamesProvider(channelId),
+              ),
+              child: _UserAvatar(
+                profile: userCache[actor],
+                pubkey: actor,
+                isAgent: userCache[actor]?.ownerPubkey != null,
+              ),
             ),
           ),
           const SizedBox(width: messageAvatarContentGap),
@@ -171,93 +184,94 @@ class _SystemMessageRow extends HookConsumerWidget {
         highlightColor: context.colors.primary.withValues(alpha: 0.1),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          child: withActor(
-            Column(
-              crossAxisAlignment: isHuddle
-                  ? CrossAxisAlignment.start
-                  : CrossAxisAlignment.center,
-              children: [
-                if (!isHuddle)
-                  RepaintBoundary(
-                    key: spotlightKey,
-                    child: Align(
-                      alignment: isHuddle
-                          ? Alignment.centerLeft
-                          : Alignment.center,
-                      child: Container(
-                        key: ValueKey('activity-card-${message.id}'),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: Grid.twelve,
-                          vertical: Grid.xxs,
-                        ),
-                        decoration: BoxDecoration(
-                          color: context.colors.onSurface.withValues(
-                            alpha: 0.06,
-                          ),
-                          borderRadius: BorderRadius.circular(Radii.container),
-                        ),
-                        child: IntrinsicWidth(
-                          child: groupedMembership != null
-                              ? _MembershipSystemMessageContent(
-                                  event: groupedMembership,
-                                  channelId: channelId,
-                                  createdAt: message.createdAt,
-                                  resolveLabel: resolveLabel,
-                                  userCache: userCache,
-                                )
-                              : messageStyleActor != null &&
-                                    messageStyleActor.isNotEmpty &&
-                                    messageStyleAction != null
-                              ? _MessageStyleSystemMessageContent(
-                                  displayPubkey: messageStyleActor,
-                                  channelId: channelId,
-                                  createdAt: message.createdAt,
-                                  resolveLabel: resolveLabel,
-                                  userCache: userCache,
-                                  actionSpans: messageStyleAction,
-                                )
-                              : Text.rich(
-                                  TextSpan(
-                                    children: [
-                                      TextSpan(
-                                        text: systemEvent.describe(
-                                          resolveLabel,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  textAlign: TextAlign.center,
-                                  style: _systemActionTextStyle(context),
+          child: Column(
+            crossAxisAlignment: isHuddle
+                ? CrossAxisAlignment.start
+                : CrossAxisAlignment.center,
+            children: [
+              if (!isHuddle)
+                RepaintBoundary(
+                  key: spotlightKey,
+                  child: Align(
+                    alignment: isHuddle
+                        ? Alignment.centerLeft
+                        : Alignment.center,
+                    child: Container(
+                      key: ValueKey('activity-card-${message.id}'),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: Grid.twelve,
+                        vertical: Grid.xxs,
+                      ),
+                      decoration: BoxDecoration(
+                        color: context.colors.onSurface.withValues(alpha: 0.06),
+                        borderRadius: BorderRadius.circular(Radii.container),
+                      ),
+                      child: IntrinsicWidth(
+                        child: groupedMembership != null
+                            ? _MembershipSystemMessageContent(
+                                event: groupedMembership,
+                                channelId: channelId,
+                                createdAt: message.createdAt,
+                                resolveLabel: resolveLabel,
+                                userCache: userCache,
+                              )
+                            : messageStyleActor != null &&
+                                  messageStyleActor.isNotEmpty &&
+                                  messageStyleAction != null
+                            ? _MessageStyleSystemMessageContent(
+                                displayPubkey: messageStyleActor,
+                                channelId: channelId,
+                                createdAt: message.createdAt,
+                                resolveLabel: resolveLabel,
+                                userCache: userCache,
+                                actionSpans: messageStyleAction,
+                              )
+                            : Text.rich(
+                                TextSpan(
+                                  children: [
+                                    TextSpan(
+                                      text: systemEvent.describe(resolveLabel),
+                                    ),
+                                  ],
                                 ),
-                        ),
+                                textAlign: TextAlign.center,
+                                style: _systemActionTextStyle(context),
+                              ),
                       ),
                     ),
                   ),
-                if (systemEvent.type == SystemEventType.huddleStarted &&
-                    systemEvent.ephemeralChannelId != null)
-                  MessageFooterLayout(
-                    animateSize: true,
-                    overlap: reactions.isNotEmpty ? Grid.xs : 0,
-                    footer: reactions.isEmpty
-                        ? const SizedBox.shrink()
-                        : Padding(
-                            padding: const EdgeInsets.only(left: Grid.xxs),
-                            child: ReactionRow(
-                              combined: true,
-                              messageId: message.id,
-                              channelId: channelId,
-                              reactions: reactions,
-                              onToggle: (emoji) =>
-                                  toggleReaction(ref, message, emoji),
-                              showAddButton: isMember && !isArchived,
-                              onAddReaction: () => showAddReactionPicker(
-                                context: context,
-                                ref: ref,
-                                message: message,
-                              ),
+                ),
+              if (systemEvent.type == SystemEventType.huddleStarted &&
+                  systemEvent.ephemeralChannelId != null)
+                MessageFooterLayout(
+                  animateSize: true,
+                  overlap: reactions.isNotEmpty ? Grid.xs : 0,
+                  footer: reactions.isEmpty
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(
+                            left:
+                                messageAvatarSize +
+                                messageAvatarContentGap +
+                                Grid.xxs,
+                          ),
+                          child: ReactionRow(
+                            combined: true,
+                            messageId: message.id,
+                            channelId: channelId,
+                            reactions: reactions,
+                            onToggle: (emoji) =>
+                                toggleReaction(ref, message, emoji),
+                            showAddButton: isMember && !isArchived,
+                            onAddReaction: () => showAddReactionPicker(
+                              context: context,
+                              ref: ref,
+                              message: message,
                             ),
                           ),
-                    child: RepaintBoundary(
+                        ),
+                  child: withActor(
+                    RepaintBoundary(
                       key: spotlightKey,
                       child: _HuddleJoinSurface(
                         message: message,
@@ -268,19 +282,19 @@ class _SystemMessageRow extends HookConsumerWidget {
                       ),
                     ),
                   ),
-                if (!isHuddle && reactions.isNotEmpty)
-                  IntrinsicWidth(
-                    child: ReactionRow(
-                      messageId: message.id,
-                      channelId: channelId,
-                      reactions: reactions,
-                      onToggle: groupedMessages == null
-                          ? (emoji) => toggleReaction(ref, message, emoji)
-                          : toggleGroupedReaction,
-                    ),
+                ),
+              if (!isHuddle && reactions.isNotEmpty)
+                IntrinsicWidth(
+                  child: ReactionRow(
+                    messageId: message.id,
+                    channelId: channelId,
+                    reactions: reactions,
+                    onToggle: groupedMessages == null
+                        ? (emoji) => toggleReaction(ref, message, emoji)
+                        : toggleGroupedReaction,
                   ),
-              ],
-            ),
+                ),
+            ],
           ),
         ),
       ),

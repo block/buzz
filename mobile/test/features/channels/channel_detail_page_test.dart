@@ -1,3 +1,4 @@
+import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
 import 'dart:async';
 import 'package:buzz/shared/push/push_bridge.dart';
@@ -89,6 +90,7 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/review_avatar_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -519,6 +521,7 @@ void main() {
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  reviewAvatarTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -2145,6 +2148,60 @@ void main() {
               pubkey: 'alice',
               content: 'Latest',
               createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      await tester.pump();
+      // Opening the channel does not read it; holding still at the bottom
+      // does, without moving the channel mark.
+      expect(readState.markedContexts, isEmpty);
+
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('hidden huddle end does not block bottom catch-up', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'represented-start',
+              kind: EventKind.huddleStarted,
+              createdAt: 900,
+            ),
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'First',
+              createdAt: 1100,
+            ),
+            _textMsg(
+              id: 'msg2',
+              pubkey: 'alice',
+              content: 'Latest',
+              createdAt: 1200,
+            ),
+            _huddleMsg(
+              id: 'hidden-end',
+              kind: EventKind.huddleEnded,
+              createdAt: 1300,
             ),
           ],
           readStateNotifier: readState,
@@ -6295,6 +6352,16 @@ void main() {
         final tray = find.byKey(const ValueKey('combined-reaction-tray'));
         final card = find.byKey(const ValueKey('huddle-card-huddle-tray'));
         expect(tray, findsOneWidget);
+        final avatar = find.descendant(
+          of: find.byKey(const ValueKey('huddle-activity-huddle-tray')),
+          matching: find.byType(AvatarImage),
+        );
+        expect(avatar, findsOneWidget);
+        expect(
+          tester.getRect(avatar).bottom,
+          closeTo(tester.getRect(card).bottom, 0.01),
+        );
+
         expect(tester.getRect(tray).top, lessThan(tester.getRect(card).bottom));
         expect(
           tester.getRect(tray).left,
@@ -6392,7 +6459,7 @@ void main() {
     testWidgets('disables a different Huddle card during an active call', (
       tester,
     ) async {
-      const otherHuddleChannelId = 'other-huddle-channel';
+      const otherHuddleChannelId = '9d764100-fd8f-44cf-9c98-6d8fbd739b8c';
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       await tester.pumpWidget(
         _buildTestable(
@@ -9158,6 +9225,12 @@ void main() {
           await tester.pumpWidget(
             _buildTestable(
               messages: [
+                if (huddleEvent.kind == EventKind.huddleEnded)
+                  _huddleMsg(
+                    id: 'represented-start',
+                    kind: EventKind.huddleStarted,
+                    createdAt: 900,
+                  ),
                 _textMsg(
                   id: 'regular-message',
                   pubkey: 'alice',
@@ -9530,30 +9603,78 @@ void main() {
       },
     );
 
+    testWidgets('malformed huddle start keeps its fallback activity row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            const NostrEvent(
+              id: 'malformed-huddle',
+              pubkey: 'alice',
+              createdAt: 1000,
+              kind: EventKind.huddleStarted,
+              tags: [
+                ['h', _channelId],
+              ],
+              content: '{}',
+              sig: '',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('activity-card-malformed-huddle')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('huddle-activity-malformed-huddle')),
+        findsNothing,
+      );
+    });
+
     testWidgets('opens a profile sheet from a huddle card avatar', (
       tester,
     ) async {
+      final semantics = tester.ensureSemantics();
+      final alice = 'a' * 64;
+
       await tester.pumpWidget(
         _buildTestable(
           messages: [
             _huddleMsg(
               id: 'sys-huddle-avatar',
               kind: EventKind.huddleStarted,
-              pubkey: 'alice',
+              pubkey: alice,
             ),
           ],
-          users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
+          users: {alice: UserProfile(pubkey: alice, displayName: 'Alice')},
         ),
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(AvatarImage).first);
+      final action = tester.getSemantics(
+        find.bySemanticsLabel('Open Alice profile'),
+      );
+      expect(action.getSemanticsData().flagsCollection.isButton, isTrue);
+      expect(action.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+      tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+        action.id,
+        SemanticsAction.tap,
+      );
+      semantics.dispose();
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(UserProfileSheet),
+          matching: find.text('Alice'),
+        ),
+        findsWidgets,
+      );
     });
 
     testWidgets(

@@ -1,3 +1,4 @@
+import 'huddle_timeline.dart';
 import 'dart:async';
 
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -99,6 +100,7 @@ MapEntry<String, int>? _catchUpMark({
   // the live bottom, for example after a jump into history.
   final showsNewest = !loaded.any(
     (message) =>
+        (threadRootId != null || !isCollapsedHuddleEnding(message, loaded)) &&
         message.createdAt > bottom.createdAt &&
         (threadRootId != null
             ? _threadRootOf(message) == threadRootId
@@ -106,9 +108,8 @@ MapEntry<String, int>? _catchUpMark({
   );
   if (!showsNewest) return null;
 
-  // Cut at the bottom row. A newer reply's time would also read a top-level
-  // message that arrives late with an earlier time. A clock ahead of now, on
-  // this device or the sender's, must not read messages before they arrive.
+  // Never read beyond the last rendered message: a message between that
+  // row and a hidden lifecycle event may still arrive out of order.
   final cut = bottom.createdAt < now ? bottom.createdAt : now;
   final key = threadRootId != null
       ? threadActivityContextKey(threadRootId)

@@ -13,8 +13,8 @@
 //!
 //! This is the application-side replacement for the `events_enqueue_push_match`
 //! and `events_refresh_channel_ttl` triggers (migrations 0023, 0024, 0040).
-//! Updated writer connections suppress the surviving push trigger. Legacy
-//! writers retain transactional enqueue until replaced. Every production
+//! Migration 0063 retires the push trigger; the TTL trigger remains installed.
+//! Push requires application enqueueing on every supported writer. Every production
 //! `INSERT INTO events` must call this module, enforced by source-policy tests.
 
 use std::collections::BTreeSet;

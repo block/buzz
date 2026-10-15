@@ -325,14 +325,10 @@ An agent's config and a team's config are [NIP-AR](NIP-AR.md) artifacts. Each li
 
 ### Relay support
 
-A client stores config on the relay only when the relay's [NIP-11](11.md) document shows that it supports all of these:
+A client stores config on the relay only when the relay's [NIP-11](11.md) document shows that it supports both of these:
 
 - NIP-CL system channels and labels;
-- NIP-AR artifacts;
-- guest roles that are read-only: a guest cannot write artifacts and cannot add anyone to the channel;
-- exempting config channels from age-based retention (see "History");
-- artifact sync that can read an artifact's complete history;
-- telling an artifact address that has never been used apart from one whose revisions have all been redacted.
+- NIP-AR artifacts.
 
 How a relay advertises each one is defined by the specification of that feature. Otherwise the client MUST keep config local, and MUST NOT create config channels.
 
@@ -400,11 +396,13 @@ When a client reads a config artifact, the artifact is in one of these states:
 - **deleted:** a lookup by `d` returned a deletion;
 - **unavailable:** anything else, including a failed read, an unreadable channel, an artifact moved to another channel, a redacted current revision, or a lookup that returns nothing without that confirmation.
 
-Only an absent artifact lets a client fall back to another source (see "Launch composition"). An invalid, deleted, or unavailable artifact blocks the start: the client MUST show the error and MUST NOT substitute an older revision, another source, or local config. A deleted artifact is recovered with NIP-AR `restore`.
+Only an absent artifact lets a client fall back to another source (see "Launch composition"). An invalid, deleted, or unavailable artifact blocks the start: the client MUST show the error and MUST NOT substitute an older revision, another source, or local config, except as "Offline start" below allows for an unavailable artifact. A deleted artifact is recovered with NIP-AR `restore`.
+
+**Offline start.** When the relay cannot be reached, because the read failed in transport rather than returning an answer, a client MAY start the agent from the last revision it confirmed as present and kept locally. It MUST NOT do so if the most recent answer it read from the relay showed that the artifact is invalid or deleted, that its current revision was redacted, that the config channel is archived, or that it has lost access to the channel, and it MUST NOT use any other source.
 
 ### Editing
 
-Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. Guests can only read them. The owner makes an agent read-only for a config channel by giving it the guest role there.
+Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. On a relay whose guest roles are read-only, guests can only read them, and the owner can make an agent read-only for a config channel by giving it the guest role there.
 
 Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires. An edit MUST keep any JSON fields and tags the client does not recognise.
 

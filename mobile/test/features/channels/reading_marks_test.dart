@@ -59,6 +59,56 @@ Map<String, int> _marks({
 );
 
 void main() {
+  test('hidden endings never advance catch-up past the visible row', () {
+    final bottom = _msg('visible', 100);
+    final end = TimelineMessage(
+      id: 'end',
+      pubkey: 'alice',
+      createdAt: 150,
+      content: '',
+      systemEvent: const SystemEvent(
+        type: SystemEventType.huddleEnded,
+        ephemeralChannelId: 'room',
+      ),
+    );
+    Map<String, int> marks(List<TimelineMessage> loaded, int now) =>
+        readingMarks(
+          readState: _state(),
+          channelId: _channel,
+          isDm: false,
+          currentPubkey: _self,
+          loaded: [
+            TimelineMessage(
+              id: 'start',
+              pubkey: 'alice',
+              createdAt: 50,
+              content: '',
+              systemEvent: const SystemEvent(
+                type: SystemEventType.huddleStarted,
+                ephemeralChannelId: 'room',
+              ),
+            ),
+            ...loaded,
+          ],
+          visible: [],
+          bottom: bottom,
+          now: now,
+        );
+    expect(marks([bottom, end], 200)['activity:$_channel'], 100);
+    expect(marks([bottom, end], 125)['activity:$_channel'], 100);
+    expect(marks([bottom, end], 90)['activity:$_channel'], 90);
+    expect(marks([bottom, _msg('unseen', 120), end], 200), isEmpty);
+    final late = _msg('late', 120);
+    expect(
+      _marks(
+        readState: _state(marks([bottom, end], 200)),
+        loaded: [bottom, late, end],
+        visible: [late],
+      ),
+      {'msg:late': 120},
+    );
+  });
+
   group('channel timeline', () {
     test('the bottom writes one catch-up mark instead of message marks', () {
       final a = _msg('a', 100);

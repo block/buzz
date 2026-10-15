@@ -1,3 +1,4 @@
+import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -616,8 +617,7 @@ class ChannelDetailPage extends HookConsumerWidget {
       // End events still update the original card through allMessages.
       timelineMessages
           .where(
-            (message) =>
-                message.systemEvent?.type != SystemEventType.huddleEnded,
+            (message) => !isCollapsedHuddleEnding(message, timelineMessages),
           )
           .toList(),
       relaySummaries: ref

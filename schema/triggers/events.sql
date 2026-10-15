@@ -1,7 +1,3 @@
-CREATE TRIGGER events_enqueue_push_match
-AFTER INSERT ON events
-FOR EACH ROW EXECUTE FUNCTION enqueue_push_match_job();
-
 CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
 AFTER INSERT ON events
 DEFERRABLE INITIALLY DEFERRED

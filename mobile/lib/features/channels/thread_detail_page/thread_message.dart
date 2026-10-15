@@ -37,11 +37,7 @@ class _ThreadMessage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
-    final mediaOffset = useValueNotifier(0.0);
-    useEffect(() {
-      mediaOffset.value = 0;
-      return null;
-    }, [message.content]);
+    final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final pk = message.pubkey.toLowerCase();
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
@@ -370,18 +366,33 @@ class _ThreadMessage extends HookConsumerWidget {
                           Positioned(
                             left: 0,
                             bottom: 0,
-                            child: GestureDetector(
-                              onTap: () => showUserProfileSheet(
-                                context,
-                                message.pubkey,
-                                names: channelIdentityNamesProvider(channelId),
-                              ),
-                              child: MessageMediaAvatar(
-                                offset: mediaOffset,
-                                child: _Avatar(
-                                  profile: profile,
-                                  pubkey: message.pubkey,
-                                  isAgent: isAgent,
+                            child: MessageMediaAvatar(
+                              offset: mediaOffset,
+                              child: Semantics(
+                                container: true,
+                                label: 'Open $displayName profile',
+                                button: true,
+                                excludeSemantics: true,
+                                onTap: () => showUserProfileSheet(
+                                  context,
+                                  message.pubkey,
+                                  names: channelIdentityNamesProvider(
+                                    channelId,
+                                  ),
+                                ),
+                                child: GestureDetector(
+                                  onTap: () => showUserProfileSheet(
+                                    context,
+                                    message.pubkey,
+                                    names: channelIdentityNamesProvider(
+                                      channelId,
+                                    ),
+                                  ),
+                                  child: _Avatar(
+                                    profile: profile,
+                                    pubkey: message.pubkey,
+                                    isAgent: isAgent,
+                                  ),
                                 ),
                               ),
                             ),

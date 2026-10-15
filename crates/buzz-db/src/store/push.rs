@@ -1558,6 +1558,30 @@ mod postgres_tests {
         pool
     }
 
+    async fn insert_push_event(
+        community: CommunityId,
+        event: &nostr::Event,
+        channel: Option<Uuid>,
+    ) -> crate::Result<(buzz_core::StoredEvent, bool)> {
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url: std::env::var("BUZZ_TEST_DATABASE_URL").expect("isolated test database"),
+            push_enabled: true,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect application writer");
+        let result = db.insert_event(community, event, channel).await;
+        db.push_enqueue
+            .as_ref()
+            .expect("enabled producer")
+            .flush()
+            .await;
+        db.cancel_push_enqueue();
+        db.join_push_enqueue().await;
+        db.pool().close().await;
+        result
+    }
+
     fn lease_event(keys: &nostr::Keys, installation: &str, created_at: u64) -> nostr::Event {
         nostr::EventBuilder::new(nostr::Kind::Custom(30_350), "ciphertext")
             .tag(nostr::Tag::parse(["d", installation]).expect("d tag"))
@@ -2204,7 +2228,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn matcher_trigger_is_allowlisted_and_deleted_events_are_discarded() {
+    async fn matcher_application_is_allowlisted_and_deleted_events_are_discarded() {
         let pool = setup_pool().await;
         // Global claim assertions below require a queue free of other tests'
         // leftovers.
@@ -2223,10 +2247,10 @@ mod postgres_tests {
         let read_state = nostr::EventBuilder::new(nostr::Kind::Custom(30_078), "read")
             .sign_with_keys(&keys)
             .expect("sign read state");
-        crate::event::insert_event(&pool, community, &push_event, None)
+        insert_push_event(community, &push_event, None)
             .await
             .expect("insert push event");
-        crate::event::insert_event(&pool, community, &read_state, None)
+        insert_push_event(community, &read_state, None)
             .await
             .expect("insert non-push event");
 
@@ -2267,12 +2291,12 @@ mod postgres_tests {
     async fn matcher_load_error_preserves_claimed_job_for_recovery() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
-        // Eligible lease required for the T1b-gated trigger to enqueue.
+        // Eligible lease required for the T1b-gated application producer to enqueue.
         activate(&pool, community, &[79; 32], "install", &[80; 32], 1).await;
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "retry me")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
 
@@ -2317,7 +2341,7 @@ mod postgres_tests {
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "size one")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&setup, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
         setup.close().await;
@@ -2361,12 +2385,12 @@ mod postgres_tests {
             .await
             .expect("drain matcher queue");
         let community = make_community(&pool).await;
-        // Eligible lease required for the T1b-gated trigger to enqueue.
+        // Eligible lease required for the T1b-gated application producer to enqueue.
         activate(&pool, community, &[81; 32], "install", &[82; 32], 1).await;
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "one job")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
         let barrier = Arc::new(Barrier::new(8));
@@ -2397,6 +2421,12 @@ mod postgres_tests {
         let event_id = [23; 32];
         activate(&pool, community, &author, "install", &[24; 32], 1).await;
         let wake_id = enqueue_one(&pool, community, &author, &event_id, 1).await;
+        sqlx::query("INSERT INTO push_match_queue (community_id, event_id) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(event_id)
+            .execute(&pool)
+            .await
+            .expect("queue a rematch independently of the delivered wake");
         sqlx::query(
             "UPDATE push_wake_outbox SET state='delivered', created_at=now()-interval '2 days' \
              WHERE community_id=$1 AND id=$2",
@@ -2440,7 +2470,7 @@ mod postgres_tests {
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "poison")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
         let wake_id = match enqueue_wake(
@@ -2661,7 +2691,7 @@ mod postgres_tests {
             let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), format!("a{i}"))
                 .sign_with_keys(&nostr::Keys::generate())
                 .expect("sign event");
-            crate::event::insert_event(&pool, community_a, &event, None)
+            insert_push_event(community_a, &event, None)
                 .await
                 .expect("insert community-a event");
             a_ids.push(event.id.as_bytes().to_vec());
@@ -2669,7 +2699,7 @@ mod postgres_tests {
         let b_event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "b0")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community_b, &b_event, None)
+        insert_push_event(community_b, &b_event, None)
             .await
             .expect("insert community-b event");
 
@@ -2770,37 +2800,41 @@ mod postgres_tests {
         );
     }
 
-    // Lease activation must wait for an event insert holding the shared gate lock.
+    // Lease activation must wait for an enqueue transaction holding the shared gate lock.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn gate_orders_lease_activation_after_in_flight_event() {
+    async fn gate_orders_lease_activation_after_in_flight_enqueue() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
 
-        // Hold the insert transaction open after its trigger takes the shared gate lock.
-        let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced wake")
+        let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced enqueue")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign raced event");
-        let mut insert_tx = pool.begin().await.expect("begin raced insert");
-        sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
-             VALUES ($1, $2, $3, now(), 9, '[]', 'raced wake', $4, now())",
-        )
-        .bind(community.as_uuid())
-        .bind(raced.id.as_bytes().as_slice())
-        .bind(raced.pubkey.as_bytes().as_slice())
-        .bind(raced.sig.serialize().as_slice())
-        .execute(&mut *insert_tx)
-        .await
-        .expect("insert raced event inside held txn");
-
-        let insert_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *insert_tx)
+        crate::event::insert_event(&pool, community, &raced, None)
             .await
-            .expect("read insert backend pid");
+            .expect("store event before post-commit enqueue");
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let enqueue = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                crate::runtime::push_enqueue::enqueue_with_gate_barrier(
+                    &pool,
+                    community,
+                    raced.id.as_bytes().to_vec(),
+                    (held_tx, release_rx),
+                )
+                .await
+                .expect("real enqueue transaction succeeds");
+            })
+        };
+        let enqueue_pid = tokio::time::timeout(Duration::from_secs(5), held_rx)
+            .await
+            .expect("enqueue reaches its gate")
+            .expect("enqueue backend pid");
 
         // A concurrent activation must block on the exclusive gate lock until
-        // the insert transaction resolves.
+        // the enqueue transaction resolves.
         let activation = {
             let pool = pool.clone();
             tokio::spawn(async move {
@@ -2830,7 +2864,7 @@ mod postgres_tests {
                 "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted \
                  AND $1 = ANY(pg_blocking_pids(pid))",
             )
-            .bind(insert_pid)
+            .bind(enqueue_pid)
             .fetch_one(&pool)
             .await
             .expect("inspect advisory waiters");
@@ -2843,8 +2877,14 @@ mod postgres_tests {
         assert!(parked, "activation must block on the exclusive gate lock");
         assert!(!activation.is_finished());
 
-        // Committing the insert releases the shared lock so activation can proceed.
-        insert_tx.commit().await.expect("commit raced insert");
+        // Committing the enqueue releases the shared lock so activation can proceed.
+        release_tx
+            .send(())
+            .expect("release real enqueue transaction");
+        tokio::time::timeout(Duration::from_secs(5), enqueue)
+            .await
+            .expect("enqueue commits")
+            .expect("join enqueue");
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(10), activation)
                 .await
@@ -2856,7 +2896,7 @@ mod postgres_tests {
         let direct = nostr::EventBuilder::new(nostr::Kind::Custom(9), "direct enqueue")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign direct event");
-        crate::event::insert_event(&pool, community, &direct, None)
+        insert_push_event(community, &direct, None)
             .await
             .expect("insert post-activation event");
         let queued: i64 = sqlx::query_scalar(
