@@ -23,6 +23,34 @@ The bootstrap script should eventually replace manual `.env` editing for normal
 users. It is responsible for generating stable secrets and, optionally, an owner
 keypair.
 
+## Site-local overrides
+
+`run.sh` passes explicit `-f` flags to `docker compose`, which disables
+Compose's automatic `compose.override.yml` loading. To layer your own override
+files (resource limits, extra labels, host-specific tweaks), set
+`BUZZ_COMPOSE_EXTRA_FILES` to a colon- or space-separated list of paths. They
+are appended after the built-in files, so your values win the Compose merge.
+Relative paths are resolved from `deploy/compose/`.
+
+For example, to cap relay memory on a shared host — instead of re-running
+`docker update` after every upgrade:
+
+```yaml
+# deploy/compose/compose.limits.yml
+services:
+  relay:
+    mem_limit: 2g
+```
+
+```bash
+BUZZ_COMPOSE_EXTRA_FILES=compose.limits.yml ./run.sh start
+```
+
+The extra files apply to every `run.sh` command, so set the variable
+persistently (e.g. in the shell profile of the deploy user) to keep `upgrade`
+and `restart` consistent with `start`. Use `./run.sh config` to verify the
+merged result.
+
 ## Production notes
 
 - Requires Docker Compose v2.24.4 or newer; the TLS override uses Compose's
