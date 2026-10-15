@@ -212,6 +212,41 @@ triggering message. Keep fallback-to-channel and placeholder/failure cases as
 explicit counts in the manual sample until privacy-preserving client telemetry
 is designed.
 
+### Relay push-trigger retirement gate
+
+Migration 0063 ends compatibility with event writers that depend on the legacy
+push trigger. **Do not merge the retirement change or authorize its migration
+until the release owner records all of the following for each database scope:**
+
+- A complete inventory of event-writing workloads, active writer sessions,
+  scheduled jobs, administrative/raw-SQL writers, and supported rollback images.
+  Unattributed sessions or an unverified rollback target block retirement.
+- Every supported event writer uses the bounded post-commit application producer
+  and immediate worker-stop behavior introduced by
+  [#8216](https://github.com/block/buzz/pull/8216), or a verified equivalent.
+  Replace or retire legacy writers and remove incompatible image rollback targets
+  before proceeding; checking only the primary relay Deployment is insufficient.
+- The rollback owner confirms flag-only rollback on the compatible image, with
+  no image downgrade, and records the exact candidate and supported image floor.
+
+This is an operator release gate, not a database-discoverable invariant: migration
+0063 cannot identify other clients' application code or historical rollback
+images. Keep automatic migration disabled during the compatibility transition;
+apply the migration only as a separately authorized operation after the gate is
+closed. Resolve overlapping retirement migrations and verify the published
+migration ledger before execution. Its lock timeout bounds acquisition waits,
+not lock-hold or statement duration.
+
+After migration, verify that `events_enqueue_push_match` is absent from the
+parent and every partition, `enqueue_push_match_job()` is absent, and the
+channel-TTL trigger/function remain intact. Verify application enqueueing and
+flag-only rollback on the exact deployed candidate. Legacy images and raw SQL
+writers without the application producer are unsupported after this point:
+their messages may commit without producing notifications. Do not restore the
+trigger or downgrade an image as an urgent rollback step. Reintroducing legacy
+writer support requires a separate reviewed forward migration and compatibility
+plan; never edit published migrations or their checksums.
+
 ### Relay rollback and reactivation
 
 Set `BUZZ_PUSH_ENABLED=false` in the approved configuration for **every writer
@@ -224,14 +259,16 @@ The relay copies the flag into `DbConfig::push_enabled`. Every physical writer
 connection, including the audit pool and replacement connections, sets the
 `buzz.push_enabled` PostgreSQL session setting. Other `DbConfig` callers default
 to disabled. Updated writers also set `buzz.push_async_enqueue=on`, which makes
-the surviving trigger skip enqueueing regardless of the enabled flag. The
+any surviving pre-0063 trigger skip enqueueing regardless of the enabled flag. The
 application producer is created only when enabled. Disabled writes perform no
 push locks, lease scans or queue writes.
-The overlap migration updates only an existing trigger function; it does not
-recreate a retired trigger or function. Deploy that migration before relying on
-the flag with a surviving trigger. Older images and raw SQL writers with a
-missing setting retain legacy enqueue behavior; inventory and replace or
-explicitly disable all such connections before declaring rollback complete.
+Before retirement, the overlap migration updates only an existing trigger
+function; it does not recreate a retired trigger or function. Deploy it before
+relying on the flag with a surviving trigger. On these pre-0063 schemas, older
+images and raw SQL writers with a missing setting retain legacy enqueue behavior;
+inventory and replace or explicitly disable all such connections before declaring
+rollback complete. After 0063, only the application producer can enqueue push
+work, and the retirement gate above excludes those legacy writers and images.
 
 On SIGTERM/Ctrl-C, the relay cancels enqueue, matcher and delivery futures immediately,
 before its listener drain. Uncommitted transactions roll back; committed claims
@@ -264,8 +301,9 @@ update, including renewal of an active lease, can also suppress a notification
 under this best-effort contract. Activation never scans
 historical messages or deliberately backfills older notifications.
 
-This isolation requires the overlap migration and updated writers. Old images
-and raw SQL writers can still run the legacy transactional trigger until replaced.
+Before 0063, this isolation requires the overlap migration and updated writers;
+legacy writers can still execute the transactional trigger. After 0063, the
+trigger is absent and all supported writers must use the application producer.
 
 Pending matcher jobs and pending/claimed delivery jobs remain dormant. Do not
 process or delete them during urgent rollback. **Before re-enabling**, inspect
