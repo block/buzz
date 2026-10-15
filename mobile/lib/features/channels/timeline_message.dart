@@ -89,7 +89,13 @@ class SystemEvent {
     try {
       final content = jsonDecode(event.content);
       if (content is Map) {
-        ephemeralChannelId = _readString(content, 'ephemeral_channel_id');
+        final value = content['ephemeral_channel_id'];
+        if (value is String &&
+            RegExp(
+              r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+            ).hasMatch(value)) {
+          ephemeralChannelId = value.toLowerCase();
+        }
       }
     } catch (_) {
       // The row still renders, but joining requires the validated room ID.

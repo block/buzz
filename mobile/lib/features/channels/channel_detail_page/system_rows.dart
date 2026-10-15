@@ -144,6 +144,7 @@ class _SystemMessageRow extends HookConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Semantics(
+            container: true,
             label: 'Open ${resolveLabel(actor)} profile',
             button: true,
             excludeSemantics: true,

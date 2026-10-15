@@ -1,3 +1,4 @@
+import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
 import 'dart:async';
 import 'package:buzz/shared/push/push_bridge.dart';
@@ -89,6 +90,7 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/review_avatar_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -519,6 +521,7 @@ void main() {
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  reviewAvatarTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -6451,7 +6454,7 @@ void main() {
     testWidgets('disables a different Huddle card during an active call', (
       tester,
     ) async {
-      const otherHuddleChannelId = 'other-huddle-channel';
+      const otherHuddleChannelId = '9d764100-fd8f-44cf-9c98-6d8fbd739b8c';
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       await tester.pumpWidget(
         _buildTestable(
@@ -9624,6 +9627,7 @@ void main() {
       tester,
     ) async {
       final semantics = tester.ensureSemantics();
+      final alice = 'a' * 64;
 
       await tester.pumpWidget(
         _buildTestable(
@@ -9631,23 +9635,35 @@ void main() {
             _huddleMsg(
               id: 'sys-huddle-avatar',
               kind: EventKind.huddleStarted,
-              pubkey: 'alice',
+              pubkey: alice,
             ),
           ],
-          users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
+          users: {alice: UserProfile(pubkey: alice, displayName: 'Alice')},
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(find.bySemanticsLabel(RegExp(r'Open .+ profile')), findsOneWidget);
+      final action = tester.getSemantics(
+        find.bySemanticsLabel('Open Alice profile'),
+      );
+      expect(action.getSemanticsData().flagsCollection.isButton, isTrue);
+      expect(action.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+      tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+        action.id,
+        SemanticsAction.tap,
+      );
       semantics.dispose();
-      await tester.tap(find.byType(AvatarImage).first);
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(UserProfileSheet),
+          matching: find.text('Alice'),
+        ),
+        findsWidgets,
+      );
     });
 
     testWidgets(
