@@ -830,3 +830,137 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+
+#[test]
+fn refusal_names_an_unreadable_keyring_when_the_key_may_still_exist() {
+    // Default and outage case: the keyring did not answer, so the key may be
+    // sitting there behind a locked keychain. Retrying is the right advice.
+    let message = super::key_refusal_message("agentpubkey", false);
+    assert!(message.contains("keyring may be unreachable"), "{message}");
+    assert!(message.contains("retry"), "{message}");
+}
+
+#[test]
+fn refusal_offers_nsec_restore_before_recreation_when_the_keyring_answered_empty() {
+    // The failure #5837 reports: the keyring was fine and simply had no key,
+    // but the message pointed the user at the keyring. It must not suggest a
+    // retry. It must also not overstate what is known — an inline key in
+    // managed-agents.json is a supported fallback, so the claim is that this
+    // session found none there, not that the file never holds one, and a key
+    // backup restores the identity without minting a new one.
+    let message = super::key_refusal_message("agentpubkey", true);
+    assert!(
+        message.contains("none inline in managed-agents.json"),
+        "{message}"
+    );
+    assert!(message.contains("none in the OS keyring"), "{message}");
+    assert!(
+        message.contains("restore it to the record's private_key_nsec field"),
+        "{message}"
+    );
+    assert!(message.contains("recreate the agent"), "{message}");
+    assert!(
+        !message.contains("never holds"),
+        "the 0600 inline fallback does hold the key when the keyring is down: {message}"
+    );
+    assert!(
+        !message.contains("retry once the keyring is reachable"),
+        "a key the keyring says is absent does not come back on retry: {message}"
+    );
+}
+
+#[test]
+fn an_absent_key_reaches_the_spawn_refusal_as_absent() {
+    // Hydrate to spawn, through the real boundary: a reachable keyring with no
+    // entry leaves the key empty, and the refusal the spawn path produces is
+    // the one about a key that is not there.
+    let pubkey = "e2e-absent-pubkey";
+    let store = FakeKeyStore::reachable();
+    let mut records = vec![record_with_pubkey_and_key(pubkey, "")];
+
+    hydrate_keys_with(&store, &mut records);
+
+    let refusal = super::spawn_key_refusal(&records[0]).expect("empty key must refuse");
+    assert!(
+        refusal.contains("restore it to the record's private_key_nsec field"),
+        "{refusal}"
+    );
+    assert!(
+        !refusal.contains("retry once the keyring is reachable"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn an_unreadable_keyring_reaches_the_spawn_refusal_as_an_outage() {
+    let pubkey = "e2e-outage-pubkey";
+    let store = FakeKeyStore::unreachable();
+    let mut records = vec![record_with_pubkey_and_key(pubkey, "")];
+
+    hydrate_keys_with(&store, &mut records);
+
+    let refusal = super::spawn_key_refusal(&records[0]).expect("empty key must refuse");
+    assert!(refusal.contains("keyring may be unreachable"), "{refusal}");
+}
+
+#[test]
+fn an_outage_after_a_known_absence_stops_claiming_the_key_is_gone() {
+    // Boot 1: keyring answers, has nothing. Boot 2: keyring cannot be read at
+    // all. What is known has weakened, so the message must weaken with it.
+    let pubkey = "e2e-absent-then-outage-pubkey";
+    let mut records = vec![record_with_pubkey_and_key(pubkey, "")];
+    hydrate_keys_with(&FakeKeyStore::reachable(), &mut records);
+    assert!(super::key_known_missing(pubkey));
+
+    hydrate_keys_with(&FakeKeyStore::unreachable(), &mut records);
+
+    assert!(!super::key_known_missing(pubkey));
+    let refusal = super::spawn_key_refusal(&records[0]).expect("empty key must refuse");
+    assert!(refusal.contains("keyring may be unreachable"), "{refusal}");
+}
+
+#[test]
+fn a_restored_inline_key_clears_an_earlier_absence() {
+    // The gap this closes: a restore or import puts the key back inline in
+    // managed-agents.json without any keyring read ever succeeding. Nothing
+    // traverses the `Ok(Some(..))` branch, so a mark left by an earlier boot
+    // would survive and keep insisting the identity is gone.
+    let pubkey = "e2e-restored-pubkey";
+    let mut absent = vec![record_with_pubkey_and_key(pubkey, "")];
+    hydrate_keys_with(&FakeKeyStore::reachable(), &mut absent);
+    assert!(super::key_known_missing(pubkey));
+
+    // Keyring still down, so the restored key stays inline (the 0600 fallback).
+    let mut restored = vec![record_with_pubkey_and_key(pubkey, "nsec1restored")];
+    hydrate_keys_with(&FakeKeyStore::unreachable(), &mut restored);
+
+    assert!(
+        !super::key_known_missing(pubkey),
+        "usable inline key material means the key is not missing"
+    );
+}
+
+#[test]
+fn persisting_a_key_clears_an_earlier_absence() {
+    // Same gap on the save side: the key arrives and is written to the keyring
+    // without any read having succeeded first.
+    let pubkey = "e2e-persisted-pubkey";
+    super::note_key_missing(pubkey);
+
+    let mut records = vec![record_with_pubkey_and_key(pubkey, "nsec1fresh")];
+    persist_agent_keys_with(&FakeKeyStore::reachable(), &mut records);
+
+    assert!(!super::key_known_missing(pubkey));
+}
+
+#[test]
+fn a_missing_key_mark_is_cleared_when_the_key_turns_up() {
+    let pubkey = "clearedagentpubkey";
+    super::note_key_missing(pubkey);
+    assert!(super::key_known_missing(pubkey));
+    super::forget_key_missing(pubkey);
+    assert!(
+        !super::key_known_missing(pubkey),
+        "a stale mark would tell the user to recreate an agent whose key is intact"
+    );
+}
