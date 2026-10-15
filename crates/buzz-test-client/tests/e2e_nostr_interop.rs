@@ -752,6 +752,93 @@ async fn test_nip17_gift_wrap_recipient_receives() {
     client_b.disconnect().await.expect("disconnect B");
 }
 
+/// The query shape `buzz dms list` uses must actually return the DM.
+///
+/// kind:41001 (`KIND_DM_CREATED`) is declared but never emitted by any code path,
+/// so the old `{kinds:[41001], "#p":[me]}` query returned `[]` for every account.
+/// This asserts the replacement — `{kinds:[39000], "#p":[me]}` — returns the DM
+/// carrying the `t=dm` tag and the `d` tag consumers pass to `messages get`.
+#[tokio::test]
+#[ignore]
+async fn test_dms_list_query_shape_returns_the_dm() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    // Negative control: the kind the old implementation queried yields nothing,
+    // so an empty result here is the defect, not an artifact of the fixture.
+    let sid_old = sub_id("dms-list-41001");
+    let old_filter = Filter::new().kind(Kind::Custom(41001)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        a_pubkey_hex.as_str(),
+    );
+    client_a
+        .subscribe(&sid_old, vec![old_filter])
+        .await
+        .expect("subscribe 41001");
+    let old_events = client_a
+        .collect_until_eose(&sid_old, Duration::from_secs(10))
+        .await
+        .expect("41001 EOSE");
+    assert!(
+        old_events.is_empty(),
+        "kind:41001 is emitted by nothing; got {} events — the premise of this fix changed",
+        old_events.len()
+    );
+
+    let sid_new = sub_id("dms-list-39000");
+    let new_filter = Filter::new().kind(Kind::Custom(39000)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        a_pubkey_hex.as_str(),
+    );
+    client_a
+        .subscribe(&sid_new, vec![new_filter])
+        .await
+        .expect("subscribe 39000");
+    let new_events = client_a
+        .collect_until_eose(&sid_new, Duration::from_secs(10))
+        .await
+        .expect("39000 EOSE");
+
+    let dm = new_events
+        .iter()
+        .find(|e| {
+            e.tags.iter().any(|t| {
+                let p = t.as_slice();
+                p.len() >= 2 && p[0] == "d" && p[1] == channel_id
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!("no kind:39000 for DM {channel_id} in a #p query addressed to its participant")
+        });
+
+    let has_dm_type = dm.tags.iter().any(|t| {
+        let p = t.as_slice();
+        p.len() >= 2 && p[0] == "t" && p[1] == "dm"
+    });
+    assert!(
+        has_dm_type,
+        "kind:39000 for a DM missing t=dm — the only relay-attested DM marker. tags: {:?}",
+        dm.tags
+    );
+
+    let lists_b = dm.tags.iter().any(|t| {
+        let p = t.as_slice();
+        p.len() >= 2 && p[0] == "p" && p[1] == b_pubkey_hex
+    });
+    assert!(lists_b, "kind:39000 for a DM missing the other participant");
+
+    client_a.disconnect().await.expect("disconnect");
+}
+
 /// Create a DM via REST, then subscribe as a participant to verify discovery events.
 /// Verify: kind:39000 event received with `hidden` and `private` tags.
 /// Verify: kind:44100 membership notification received.
