@@ -496,7 +496,12 @@ pub struct CliArgs {
     pub respond_to_allowlist: Option<Vec<String>>,
 
     /// Teammate pubkeys whose consecutive messages are capped per conversation.
-    #[arg(long, env = "BUZZ_ACP_TEAM_PUBKEYS", value_delimiter = ',', hide_env_values = true)]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_TEAM_PUBKEYS",
+        value_delimiter = ',',
+        hide_env_values = true
+    )]
     pub team_pubkeys: Option<Vec<String>>,
 
     /// Maximum consecutive teammate messages before further teammate triggers are dropped.
