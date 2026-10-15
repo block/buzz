@@ -43,6 +43,8 @@ export type TimelineMessage = {
   rootId?: string | null;
   depth: number;
   accent?: boolean;
+  /** Deterministic background tint derived from the sender's pubkey. */
+  accentColor?: string;
   pending?: boolean;
   edited?: boolean;
   highlighted?: boolean;
