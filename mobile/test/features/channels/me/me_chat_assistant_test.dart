@@ -190,6 +190,44 @@ void main() {
         ],
         sig: '',
       );
+  test('last agent inference uses newest-first equal-second ID ordering', () {
+    final older = NostrEvent(
+      id: 'z',
+      pubkey: 'me',
+      kind: EventKind.streamMessage,
+      createdAt: 2,
+      content: '',
+      tags: const [
+        ['p', 'a'],
+      ],
+      sig: '',
+    );
+    final newer = NostrEvent(
+      id: 'a',
+      pubkey: 'me',
+      kind: EventKind.streamMessage,
+      createdAt: 2,
+      content: '',
+      tags: const [
+        ['p', 'b'],
+      ],
+      sig: '',
+    );
+    for (final input in [
+      [older, newer],
+      [newer, older],
+    ]) {
+      expect(
+        resolveMeAssistant(
+          selected: null,
+          available: {'a', 'b'},
+          viewer: 'me',
+          messages: input,
+        ),
+        'b',
+      );
+    }
+  });
   test(
     'inherits the sole agent and does not reuse a removed explicit choice',
     () {

@@ -20,7 +20,7 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
   void Function()? unsubscribe;
   NostrEvent? latest;
   var hasSnapshot = false;
-  void accept(NostrEvent event) {
+  Future<void> accept(NostrEvent event) async {
     if (disposed ||
         (latest != null &&
             event.id != latest!.id &&
@@ -29,12 +29,20 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     }
     try {
       final value = service.decode(event);
+      await service.cache(event);
+      if (disposed ||
+          (latest != null &&
+              event.id != latest!.id &&
+              !meEventIsNewer(event, latest!))) {
+        return;
+      }
       latest = event;
       hasSnapshot = true;
       controller.add(value);
-      unawaited(service.cache(event).catchError((Object _) {}));
     } catch (error, stack) {
-      if (!hasSnapshot) controller.addError(error, stack);
+      if (!disposed && (!hasSnapshot || error is MeCacheException)) {
+        controller.addError(error, stack);
+      }
     }
   }
 
@@ -43,14 +51,17 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
       final event = await service.head();
       if (disposed) return;
       if (event != null) {
-        accept(event);
+        await accept(event);
       } else if (latest == null) {
+        await service.cache(null);
+        if (disposed || latest != null) return;
         hasSnapshot = true;
         controller.add(const MeGroups());
-        await service.cache(null);
       }
     } catch (error, stack) {
-      if (!disposed && !hasSnapshot) controller.addError(error, stack);
+      if (!disposed && (!hasSnapshot || error is MeCacheException)) {
+        controller.addError(error, stack);
+      }
     }
   }
 
@@ -98,7 +109,7 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
   });
   unawaited(start());
   return controller.stream;
-});
+}, retry: (_, _) => null);
 
 /// NIP-01 replacement ordering: smallest ID wins an equal timestamp.
 bool meEventIsNewer(NostrEvent a, NostrEvent b) =>
@@ -154,26 +165,50 @@ class MeSync {
     );
   }
 
-  /// Store only verified data; never overwrite a newer persisted head.
-  Future<void> cache(NostrEvent? event) async {
+  Future<void> _cacheQueue = Future.value();
+  bool _cacheDirty = false;
+
+  /// Serialize writes and report failures so callers can expose a retry.
+  Future<void> cache(NostrEvent? event) {
+    final operation = _cacheQueue.then((_) => _writeCache(event));
+    _cacheQueue = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _writeCache(NostrEvent? event) async {
     if (disposed || config.nsec == null || prefs == null) return;
     if (event != null) decode(event);
     try {
       final previous = cachedSnapshot()?.event;
-      if (previous != null &&
+      if (!_cacheDirty &&
+          previous != null &&
           (event == null || !meEventIsNewer(event, previous))) {
         return;
       }
     } catch (_) {
       // Replace corrupt local storage with verified relay data.
     }
-    await prefs!.setString(
-      cacheKey,
-      nip44Encrypt(
-        key,
-        jsonEncode({'community': community, 'event': event?.toJson()}),
-      ),
-    );
+    try {
+      if (!await prefs!.setString(
+        cacheKey,
+        nip44Encrypt(
+          key,
+          jsonEncode({'community': community, 'event': event?.toJson()}),
+        ),
+      )) {
+        throw const MeCacheException();
+      }
+      _cacheDirty = false;
+    } catch (_) {
+      // SharedPreferences updates its memory cache even if the disk write fails.
+      // Reload so Retry cannot mistake that optimistic value for durable data.
+      _cacheDirty = true;
+      try {
+        await prefs!.reload();
+      } finally {
+        throw const MeCacheException();
+      }
+    }
   }
 
   NostrFilter get filter => NostrFilter(
@@ -345,4 +380,11 @@ class MeSync {
       _saving = false;
     }
   }
+}
+
+/// A verified Solo snapshot could not be retained for offline use.
+class MeCacheException implements Exception {
+  const MeCacheException();
+  @override
+  String toString() => 'Could not save Solo for offline use. Please retry.';
 }

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
@@ -48,6 +49,19 @@ class FakeRelay extends RelaySessionNotifier {
   }
 }
 
+class _FailingCacheStore extends InMemorySharedPreferencesStore {
+  String? failure;
+  _FailingCacheStore() : super.empty();
+  @override
+  Future<bool> setValue(String type, String key, Object value) {
+    if (key.startsWith('flutter.me-cache:')) {
+      if (failure == 'throw') throw StateError('disk error');
+      if (failure == 'false') return Future.value(false);
+    }
+    return super.setValue(type, key, value);
+  }
+}
+
 void main() {
   const secret =
       '0000000000000000000000000000000000000000000000000000000000000001';
@@ -75,6 +89,63 @@ void main() {
       verify: false,
     ).toMap(),
   );
+  for (final failure in ['false', 'throw']) {
+    test(
+      'snapshot write $failure exposes failure and Retry persists the same event',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final store = _FailingCacheStore();
+        SharedPreferencesStorePlatform.instance = store;
+        final prefs = await SharedPreferences.getInstance();
+        final relay = FakeRelay();
+        final config = RelayConfig(baseUrl: origin, nsec: nsec);
+        final service = MeSync(relay, config, prefs: prefs);
+        final old = signed(timestamp: 1);
+        await service.cache(old);
+        final fresh = signed(
+          timestamp: 2,
+          groups: const MeGroups(
+            channels: ['11111111-1111-4111-8111-111111111111'],
+          ),
+        );
+        relay.events = [fresh];
+        store.failure = failure;
+        final container = ProviderContainer(
+          overrides: [meSyncProvider.overrideWithValue(service)],
+        );
+        addTearDown(container.dispose);
+        final failed = Completer<void>();
+        container.listen(meGroupsProvider, (_, next) {
+          if (next.hasError && !failed.isCompleted) failed.complete();
+        });
+        await failed.future;
+        expect(container.read(meGroupsProvider).error, isA<MeCacheException>());
+        expect(service.cachedSnapshot()?.event?.id, old.id);
+        store.failure = null;
+        container.invalidate(meGroupsProvider);
+        final restored = Completer<void>();
+        final subscription = container.listen(meGroupsProvider, (_, next) {
+          if (next.value?.channels.contains(
+                    '11111111-1111-4111-8111-111111111111',
+                  ) ==
+                  true &&
+              !restored.isCompleted) {
+            restored.complete();
+          }
+        });
+        await restored.future;
+        subscription.close();
+        await prefs.reload();
+        final restarted = MeSync(
+          FakeRelay(),
+          config,
+          prefs: prefs,
+          connected: false,
+        );
+        expect(restarted.cachedSnapshot()?.event?.id, fresh.id);
+      },
+    );
+  }
   test(
     'offline relaunch emits encrypted cached organization and isolates accounts',
     () async {

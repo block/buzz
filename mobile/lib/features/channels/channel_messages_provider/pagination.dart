@@ -32,9 +32,9 @@ extension _ChannelHistoryPagination on ChannelMessagesNotifier {
       }
     }
 
-    final currentEvents = _historyState.value;
-    if (currentEvents == null || currentEvents.isEmpty) return false;
-    final oldest = currentEvents.first;
+    // Retained notification targets are isolated rows, not a history page.
+    final oldest = _legacyHistoryCursor;
+    if (oldest == null) return false;
     final older = await session.fetchHistory(
       NostrFilters.messages(
         channelId,
@@ -47,12 +47,20 @@ extension _ChannelHistoryPagination on ChannelMessagesNotifier {
       _reachedOldest = true;
       return false;
     }
+    final preceding =
+        older
+            .where(
+              (event) =>
+                  compareChannelTimelineEventsChronologically(event, oldest) <
+                  0,
+            )
+            .toList()
+          ..sort(compareChannelTimelineEventsChronologically);
+    if (preceding.isEmpty) return false;
+    _legacyHistoryCursor = preceding.first;
     final currentIds = _historyState.value?.map((e) => e.id).toSet() ?? {};
-    final deduped = older.where((e) => !currentIds.contains(e.id)).toList();
-    if (deduped.isEmpty) {
-      // A repeated page is not proof that history is exhausted.
-      return false;
-    }
+    final deduped = preceding.where((e) => !currentIds.contains(e.id)).toList();
+    // Advance even when a page consists entirely of previously retained rows.
     _historyState = _historyState.whenData((events) {
       final merged = [...deduped, ...events];
       merged.sort(compareChannelTimelineEventsChronologically);

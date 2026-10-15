@@ -45,6 +45,27 @@ void test(String description, Future<void> Function() body) {
 }
 
 void main() {
+  test(
+    'Solo notification target does not skip the intervening history',
+    () async {
+      final relay = _CursorRelay();
+      final container = _buildContainer(relay);
+      addTearDown(container.dispose);
+      container.read(meMessagesProvider(_channelId));
+      await relay.subscribed;
+      await _pumpEventQueue();
+      final notifier = container.read(meMessagesProvider(_channelId).notifier);
+      await notifier.loadEventsById(['older']);
+      expect(
+        container.read(meMessagesProvider(_channelId)).value!.first.id,
+        'older',
+      );
+      expect(await notifier.fetchOlder(), isTrue);
+      expect(await notifier.fetchOlder(), isTrue);
+      expect(await notifier.fetchOlder(), isFalse);
+      expect(container.read(meMessagesProvider(_channelId)).value!.length, 351);
+    },
+  );
   test('Solo paginates through more than 100 equal-second events', () async {
     final relay = _CursorRelay();
     final container = _buildContainer(relay);
@@ -5760,6 +5781,9 @@ class _CursorRelay extends _RecordingRelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (filter.ids != null) {
+      return events.where((e) => filter.ids!.contains(e.id)).toList();
+    }
     final before = filter.extensions['before_id'] as String?;
     return events
         .where(

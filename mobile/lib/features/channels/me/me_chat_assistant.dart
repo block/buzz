@@ -13,6 +13,7 @@ import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/widgets/frosted_app_bar.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../channel_management_provider.dart';
+import '../channel_event_order.dart';
 import 'me_assistant_picker_sheet.dart';
 
 /// Resolves a remembered choice or the assistant already used in a synced chat.
@@ -33,7 +34,7 @@ String? resolveMeAssistant({
                 EventKind.channelMessageEventKinds.contains(event.kind),
           )
           .toList()
-        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        ..sort((a, b) => compareChannelTimelineEventsChronologically(b, a));
   for (final event in sent) {
     final recipients = event.tags
         .where((tag) => tag.length > 1 && tag[0] == 'p')
