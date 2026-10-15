@@ -32,6 +32,7 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
   NostrEvent? latest;
   var hasSnapshot = false;
   var subscriptionClosed = false;
+  var syncFailed = false;
   Future<void> accept(NostrEvent event) async {
     if (disposed ||
         (latest != null &&
@@ -47,7 +48,11 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
       controller.add(value);
       await service.cache(event);
     } catch (error, stack) {
-      if (!disposed && !hasSnapshot) controller.addError(error, stack);
+      if (!disposed) {
+        syncFailed = true;
+        service.syncClosed.value = true;
+        if (!hasSnapshot) controller.addError(error, stack);
+      }
     }
   }
 
@@ -70,7 +75,11 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         controller.add(const MeGroups());
       }
     } catch (error, stack) {
-      if (!disposed && !hasSnapshot) controller.addError(error, stack);
+      if (!disposed) {
+        syncFailed = true;
+        service.syncClosed.value = true;
+        if (!hasSnapshot) controller.addError(error, stack);
+      }
     }
   }
 
@@ -109,9 +118,15 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         return;
       }
       await refresh();
-      if (!disposed && !subscriptionClosed) service.syncClosed.value = false;
+      if (!disposed && !subscriptionClosed && !syncFailed) {
+        service.syncClosed.value = false;
+      }
     } catch (error, stack) {
-      if (!disposed && !hasSnapshot) controller.addError(error, stack);
+      if (!disposed) {
+        syncFailed = true;
+        service.syncClosed.value = true;
+        if (!hasSnapshot) controller.addError(error, stack);
+      }
     }
   }
 
@@ -231,7 +246,7 @@ class MeSync {
   /// False only after the newest candidate is durably written.
   final cacheWriteFailed = ValueNotifier(false);
 
-  /// A terminal subscription close requires explicit reader recovery.
+  /// A terminal close or invalid relay head requires explicit reader recovery.
   final syncClosed = ValueNotifier(false);
 
   /// Serialize writes and report failures so callers can expose a retry.

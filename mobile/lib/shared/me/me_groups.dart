@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:characters/characters.dart';
+
 /// Desktop-compatible personal project and chat placement record.
 class MeGroups {
   static const tag = 'buzz-me-kit-v1';
@@ -47,7 +49,7 @@ class MeGroups {
               !identifier.hasMatch(g['id'] as String) ||
               g['name'] is! String ||
               (g['name'] as String).trim().isEmpty ||
-              (g['name'] as String).length > 120 ||
+              (g['name'] as String).characters.length > 120 ||
               g['defaultTemplateId'] is! String ||
               (g['defaultTemplateId'] != '' &&
                   !identifier.hasMatch(g['defaultTemplateId'] as String)),

@@ -144,6 +144,24 @@ void main() {
       expect(find.text('Retry offline save'), findsNothing);
       expect(find.text('Saved chat'), findsOneWidget);
       expect(service.cachedSnapshot()?.event?.id, fresh.id);
+      final invalid = NostrEvent.fromJson({
+        ...head(3).toJson(),
+        'sig': '0' * 128,
+      });
+      relay.emit!(invalid);
+      await tester.pumpAndSettle();
+      expect(find.text('Saved chat'), findsOneWidget);
+      expect(find.text('Retry live updates'), findsOneWidget);
+      expect(service.cachedSnapshot()?.event?.id, fresh.id);
+      relay.events = [invalid];
+      await tester.tap(find.text('Retry live updates'));
+      await tester.pumpAndSettle();
+      expect(find.text('Retry live updates'), findsOneWidget);
+      expect(find.text('Saved chat'), findsOneWidget);
+      relay.events = [fresh];
+      await tester.tap(find.text('Retry live updates'));
+      await tester.pumpAndSettle();
+      expect(find.text('Retry live updates'), findsNothing);
       relay.closeSubscription!('terminal CLOSED');
       await tester.pumpAndSettle();
       expect(find.text('Saved chat'), findsOneWidget);

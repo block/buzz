@@ -90,6 +90,25 @@ void main() {
       expect(relay.active, 0);
     },
   );
+  test(
+    'healthy typing recovery resets the consecutive failure budget',
+    () async {
+      final relay = _Relay();
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => relay)],
+      );
+      addTearDown(container.dispose);
+      container.listen(channelTypingProvider('chat'), (_, _) {});
+      await container.pump();
+      for (var i = 0; i < 5; i++) {
+        relay.close!('closed after healthy subscription');
+        await container.pump();
+        await Future<void>.delayed(const Duration(milliseconds: 1100));
+        expect(relay.calls, i + 2);
+        expect(relay.active, 1);
+      }
+    },
+  );
   test('transport rebuilds release each typing subscription', () async {
     final relay = _Relay();
     final container = ProviderContainer(

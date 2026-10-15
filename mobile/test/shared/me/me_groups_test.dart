@@ -66,6 +66,21 @@ void main() {
       throwsFormatException,
     );
   });
+  test('project names use the editors grapheme limit', () {
+    for (final character in ['🌳', '👨‍👩‍👧‍👦', 'e\u0301']) {
+      MeGroups groups(int count) => MeGroups(
+        groups: [
+          {'id': 'project', 'name': character * count, 'defaultTemplateId': ''},
+        ],
+      );
+      final encoded = groups(120).encode(origin);
+      expect(
+        MeGroups.decode(encoded, origin).groups.single['name'],
+        character * 120,
+      );
+      expect(() => groups(121).encode(origin), throwsFormatException);
+    }
+  });
   test('capacity is measured in UTF-8 bytes before publishing', () {
     final groups = MeGroups(
       groups: List.generate(

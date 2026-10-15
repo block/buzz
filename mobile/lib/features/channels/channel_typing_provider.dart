@@ -63,6 +63,7 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
   Future<void> _subscribeLive(int generation, [int attempt = 0]) async {
     final session = ref.read(relaySessionProvider.notifier);
     var closed = false;
+    var failures = attempt;
     void failed() {
       if (closed) return;
       closed = true;
@@ -76,11 +77,11 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
         _pruneTimer?.cancel();
         _pruneTimer = null;
         // Bound retries for policy rejections; a transport reconnect resets it.
-        if (attempt < 3) {
-          _retryTimer = Timer(Duration(seconds: 1 << attempt), () {
+        if (failures < 3) {
+          _retryTimer = Timer(Duration(seconds: 1 << failures), () {
             _retryTimer = null;
             if (generation == _generation) {
-              unawaited(_subscribeLive(generation, attempt + 1));
+              unawaited(_subscribeLive(generation, failures + 1));
             }
           });
         }
@@ -108,6 +109,7 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
       if (closed || generation != _generation) {
         unsubscribe();
       } else {
+        failures = 0;
         _unsubscribe = unsubscribe;
       }
     } catch (_) {
