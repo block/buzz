@@ -43,6 +43,7 @@ enum _ApplyRemoteContextResult { unchanged, advanced }
 
 class ReadStateManager {
   final String pubkey;
+  final String relayUrl;
   final ReadStateCrypto _crypto;
   final ReadStateStorage _storage;
   final RelaySessionNotifier? _relaySession;
@@ -76,6 +77,7 @@ class ReadStateManager {
 
   ReadStateManager({
     required this.pubkey,
+    required this.relayUrl,
     required SharedPreferences prefs,
     required ReadStateCrypto crypto,
     required RelaySessionNotifier? relaySession,
@@ -88,8 +90,8 @@ class ReadStateManager {
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged {
-    _clientId = _storage.getOrCreateClientId(pubkey);
-    _slotId = _storage.getOrCreateSlotId(pubkey);
+    _clientId = _storage.getOrCreateClientId(pubkey, relayUrl);
+    _slotId = _storage.getOrCreateSlotId(pubkey, relayUrl);
     _hydrateFromLocalStorage();
   }
 
@@ -577,7 +579,7 @@ class ReadStateManager {
   }
 
   void _hydrateFromLocalStorage() {
-    final stored = _storage.read(pubkey);
+    final stored = _storage.read(pubkey, relayUrl);
     // Earlier versions merged the web app's override keys and published
     // them in this device's slot, so publishable ones are carried.
     _carriedOverrides
@@ -617,6 +619,7 @@ class ReadStateManager {
     }
     _storage.write(
       pubkey,
+      relayUrl,
       saved,
       {
         ..._publishableContextIds.where(saved.containsKey),
@@ -631,7 +634,7 @@ class ReadStateManager {
 
   void _rotateSlotId() {
     _slotId = generateReadStateSlotId();
-    _storage.writeSlotId(pubkey, _slotId);
+    _storage.writeSlotId(pubkey, relayUrl, _slotId);
   }
 
   bool _isPlausibleCreatedAt(int createdAt) =>
