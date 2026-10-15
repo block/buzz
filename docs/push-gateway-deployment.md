@@ -214,28 +214,27 @@ is designed.
 
 ### Relay push-trigger retirement gate
 
-Migration 0063 ends compatibility with event writers that depend on the legacy
-push trigger. **Do not merge the retirement change or authorize its migration
-until the release owner records all of the following for each database scope:**
+Migration 0063 removes the push trigger for supported relay message paths.
+Before merge, verify that the deployed primary and profiler relays use the
+bounded post-commit application producer and immediate worker-stop behavior from
+[#8216](https://github.com/block/buzz/pull/8216), or a verified equivalent.
+Investigate any concrete supported path that creates notification-eligible
+messages outside those relays. Hypothetical external SQL clients and unattributed
+database sessions do not require a privileged audit or block retirement.
 
-- A complete inventory of event-writing workloads, active writer sessions,
-  scheduled jobs, administrative/raw-SQL writers, and supported rollback images.
-  Unattributed sessions or an unverified rollback target block retirement.
-- Every supported event writer uses the bounded post-commit application producer
-  and immediate worker-stop behavior introduced by
-  [#8216](https://github.com/block/buzz/pull/8216), or a verified equivalent.
-  Replace or retire legacy writers and remove incompatible image rollback targets
-  before proceeding; checking only the primary relay Deployment is insufficient.
-- The rollback owner confirms flag-only rollback on the compatible image, with
-  no image downgrade, and records the exact candidate and supported image floor.
+Rollback disables push while retaining the qualified image and schema; image
+downgrades are excluded after retirement. Pending migrations must also be
+considered: migration 0062 adds system channels, which older images cannot read
+or filter correctly. The push producer floor alone is not sufficient to justify
+an image downgrade.
 
-This is an operator release gate, not a database-discoverable invariant: migration
-0063 cannot identify other clients' application code or historical rollback
-images. Keep automatic migration disabled during the compatibility transition;
-apply the migration only as a separately authorized operation after the gate is
-closed. Resolve overlapping retirement migrations and verify the published
-migration ledger before execution. Its lock timeout bounds acquisition waits,
-not lock-hold or statement duration.
+Before separately authorized migration or deployment, bind the qualified release
+and profiler image digests to the reviewed source and rollback policy. Pull
+requests build images without publishing them; final published digest binding is
+a release gate, not a prerequisite for merging the source change. Keep automatic
+migration disabled during the transition. Resolve overlapping retirement
+migrations and verify the published migration ledger before execution. Migration
+0063's lock timeout bounds acquisition waits, not lock-hold or statement duration.
 
 After migration, verify that `events_enqueue_push_match` is absent from the
 parent and every partition, `enqueue_push_match_job()` is absent, and the
