@@ -129,9 +129,25 @@ async function setupRoleplayChannel(page: import("@playwright/test").Page) {
   await waitForMockLiveSubscription(page, CHANNEL);
 }
 
-async function openThread(page: import("@playwright/test").Page) {
-  const summary = page.getByTestId("message-thread-summary").first();
+async function openThread(
+  page: import("@playwright/test").Page,
+  threadHeadId: string,
+) {
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("Missing viewport size");
+  await page.mouse.move(viewport.width - 1, 1);
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByTestId(`channel-activity-popover-${CHANNEL}`),
+  ).toBeHidden();
+
+  const summary = page.locator(
+    `[data-testid="message-thread-summary"][data-thread-head-id="${threadHeadId}"]`,
+  );
   await expect(summary).toBeVisible();
+  await summary.evaluate((element) =>
+    element.scrollIntoView({ block: "center", inline: "nearest" }),
+  );
   await summary.click();
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 }
@@ -200,7 +216,7 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
       },
     );
 
-    await openThread(page);
+    await openThread(page, root.id);
     await expandReply(page, humanReply.id);
     await expect(page.getByText("Nora: adding context")).toBeVisible();
     await expect(page.getByText("Pinky: Got it")).toBeVisible();
@@ -252,7 +268,14 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
       },
     );
 
-    await openThread(page);
+    // Reproduce the CI timing where the pointer remains over #general long
+    // enough for its newly available activity preview to cover the timeline.
+    await page.getByTestId("channel-general").hover();
+    await expect(
+      page.getByTestId("channel-activity-popover-general"),
+    ).toBeVisible();
+
+    await openThread(page, root.id);
     await expect(page.getByText("Nora: adding context")).toBeVisible();
     await expect(page.getByText("Pinky: Got it")).toBeVisible();
     await expect(
@@ -291,7 +314,7 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
       },
     );
 
-    await openThread(page);
+    await openThread(page, humanRoot.id);
     await expect(page.getByText("Pinky: Starting the audit")).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
@@ -337,7 +360,7 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
       },
     );
 
-    await openThread(page);
+    await openThread(page, root.id);
     await expandReply(page, brainReply.id);
     await expect(page.getByText("Brain: Check the anchor")).toBeVisible();
     await expect(page.getByText("Pinky: Good catch")).toBeVisible();
