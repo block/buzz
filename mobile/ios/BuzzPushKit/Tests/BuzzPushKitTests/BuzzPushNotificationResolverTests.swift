@@ -58,6 +58,42 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertTrue(URLProtocolStub.requests.isEmpty)
   }
 
+  func testInitialAccountFanoutReadsSnapshotOnce() throws {
+    let communities = (0..<64).map { community(id: "community-\($0)") }
+    let snapshot = try snapshotData(communities)
+    let lock = NSLock()
+    var reads = 0
+    let started = expectation(description: "All community requests started")
+    started.expectedFulfillmentCount = communities.count
+    let finished = expectation(description: "Cancelled requests complete resolution")
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    let session = URLSession(configuration: configuration)
+    URLProtocolStub.handler = { request in
+      started.fulfill()
+      return Self.response(request, status: 200, data: Data("[]".utf8))
+    }
+    URLProtocolStub.finishLoading = { _ in false }
+    let resolver = BuzzPushNotificationResolver(session: session,
+      loadCommunitiesData: {
+        lock.lock()
+        reads += 1
+        lock.unlock()
+        return snapshot
+      }, loadPrivateKey: { _ in Self.privateKey })
+    resolver.resolve { result in
+      XCTAssertNil(result)
+      finished.fulfill()
+    }
+    wait(for: [started], timeout: 3)
+    lock.lock()
+    let initialReads = reads
+    lock.unlock()
+    XCTAssertEqual(initialReads, 1)
+    session.invalidateAndCancel()
+    wait(for: [finished], timeout: 3)
+  }
+
   func testSnapshotAccountMustMatchKeychainBeforeAnyRequest() throws {
     let configured = community(pubkey: try Self.pubkey(for: Self.profilePrivateKey))
     URLProtocolStub.handler = { request in

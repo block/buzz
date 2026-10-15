@@ -86,7 +86,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   public func resolve(completion: @escaping (BuzzPushResolution?) -> Void) {
     let communities = loadCommunities().filter {
       $0.pubkey?.isEmpty == false
-        && matchingPrivateKey(for: $0) != nil
+        && accountPrivateKey(for: $0) != nil
         && !$0.policies.isEmpty
     }
     guard !communities.isEmpty else {
@@ -121,7 +121,15 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
 
   private func matchingPrivateKey(for community: PushLeaseCommunity) -> String? {
     guard let scope = BuzzNotificationCacheScope(community: community),
-      loadCommunities().contains(where: { BuzzNotificationCacheScope(community: $0) == scope }),
+      loadCommunities().contains(where: { BuzzNotificationCacheScope(community: $0) == scope })
+    else { return nil }
+    return accountPrivateKey(for: community)
+  }
+
+  // Initial requests share the snapshot loaded by resolve. Asynchronous results
+  // use matchingPrivateKey to check that the account and session are still current.
+  private func accountPrivateKey(for community: PushLeaseCommunity) -> String? {
+    guard let scope = BuzzNotificationCacheScope(community: community),
       let key = loadPrivateKey(community.id), scope.matchesAccountKey(key)
     else { return nil }
     return key
@@ -131,7 +139,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     _ community: PushLeaseCommunity,
     completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity)?) -> Void
   ) {
-    guard let privateKey = matchingPrivateKey(for: community), community.pubkey?.isEmpty == false else {
+    guard let privateKey = accountPrivateKey(for: community), community.pubkey?.isEmpty == false else {
       completion(nil)
       return
     }
