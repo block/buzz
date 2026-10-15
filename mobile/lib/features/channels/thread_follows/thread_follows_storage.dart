@@ -37,16 +37,12 @@ class ThreadFollowsStorage {
 
   List<ThreadFollowEntry> read(String pubkey, String relayUrl) {
     final key = threadFollowsKey(pubkey, relayUrl);
-    // The first community to open claims the shared entry. Its root ids are
-    // event ids, so they only ever match threads in their own community.
-    final legacyKey = legacyThreadFollowsKey(pubkey);
-    final legacy = _prefs.getString(legacyKey);
-    if (legacy != null) {
-      _prefs.remove(legacyKey);
-      if (!_prefs.containsKey(key)) _prefs.setString(key, legacy);
-    }
-
-    final raw = _prefs.getString(key);
+    // Each community starts from the shared entry, which stays for the
+    // others. Its root ids are event ids, so they only ever match threads in
+    // their own community, and as the oldest follows they are evicted first.
+    final raw =
+        _prefs.getString(key) ??
+        _prefs.getString(legacyThreadFollowsKey(pubkey));
     if (raw == null || raw.isEmpty) return const [];
 
     try {

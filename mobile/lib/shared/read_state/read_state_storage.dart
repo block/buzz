@@ -96,18 +96,21 @@ class ReadStateStorage {
   }
 
   StoredReadState read(String pubkey, String relayUrl) {
-    // The shared entries may hold another community's marks, which this
-    // community would then publish to its relay. The relay copy is
-    // authoritative, so drop them rather than let one community claim them.
+    // The shared marks may be another community's, so each community starts
+    // from them only as local marks. None is publishable, so none reaches its
+    // relay; another community's IDs simply never match. They stay for the
+    // other communities to start from.
     for (final prefix in const [
-      _contextsKeyPrefix,
       _publishableKeyPrefix,
       _sourceCreatedAtKeyPrefix,
     ]) {
       _prefs.remove(_legacyKey(prefix, pubkey));
     }
+    final key = localReadStateKey(pubkey, relayUrl);
     return StoredReadState(
-      contexts: _readContexts(pubkey, relayUrl),
+      contexts: _readContexts(
+        _prefs.containsKey(key) ? key : _legacyKey(_contextsKeyPrefix, pubkey),
+      ),
       publishableContextIds: _readPublishableContextIds(pubkey, relayUrl),
       sourceCreatedAt: _readSourceCreatedAt(pubkey, relayUrl),
     );
@@ -136,8 +139,8 @@ class ReadStateStorage {
     );
   }
 
-  Map<String, int> _readContexts(String pubkey, String relayUrl) {
-    final raw = _prefs.getString(localReadStateKey(pubkey, relayUrl));
+  Map<String, int> _readContexts(String key) {
+    final raw = _prefs.getString(key);
     if (raw == null || raw.isEmpty) {
       return {};
     }

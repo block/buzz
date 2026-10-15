@@ -41,17 +41,10 @@ class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
     final key = _key =
         '$_localStateKeyPrefix:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
     final prefs = ref.read(savedPrefsProvider);
-    var raw = prefs.getString(key);
-    // The first community to open claims the earlier device-wide entry. Its
-    // ids are event ids, so they only ever match rows in their own community.
-    final legacy = prefs.getString(_localStateKeyPrefix);
-    if (legacy != null) {
-      prefs.remove(_localStateKeyPrefix);
-      if (raw == null) {
-        raw = legacy;
-        prefs.setString(key, legacy);
-      }
-    }
+    // Each community starts from the earlier device-wide entry, which stays
+    // for the others. Its ids are event ids, so they only ever match rows in
+    // their own community.
+    final raw = prefs.getString(key) ?? prefs.getString(_localStateKeyPrefix);
     if (raw == null) return const InboxLocalState.empty();
     try {
       final decoded = jsonDecode(raw);
