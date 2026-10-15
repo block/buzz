@@ -8,12 +8,13 @@ let package = Package(
         .library(name: "BuzzPushKit", targets: ["BuzzPushKit"])
     ],
     dependencies: [
-        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1.git", exact: "0.21.1")
+        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1.git", exact: "0.21.1"),
+        .package(url: "https://github.com/swhitty/SwiftDraw.git", exact: "0.29.0")
     ],
     targets: [
         .target(
             name: "BuzzPushKit",
-            dependencies: [.product(name: "P256K", package: "swift-secp256k1")]
+            dependencies: [.product(name: "P256K", package: "swift-secp256k1"), .product(name: "SwiftDraw", package: "SwiftDraw")]
         ),
         .testTarget(
             name: "BuzzPushKitTests",

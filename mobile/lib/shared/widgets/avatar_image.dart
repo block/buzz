@@ -8,10 +8,8 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../animated_avatar.dart';
-import '../community/community_provider.dart';
 import '../emoji/emoji_avatar.dart';
 import '../emoji/native_emoji_glyph.dart';
-import '../push/push_presentation_cache.dart';
 import '../relay/relay.dart';
 
 part 'avatar_image_native.dart';
@@ -83,7 +81,6 @@ class AvatarImageContent extends ConsumerStatefulWidget {
 
 class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
   late _AvatarSource? _source = _AvatarSource.parse(widget.imageUrl);
-  String? _scheduledPushAvatar;
 
   @override
   void didUpdateWidget(AvatarImageContent oldWidget) {
@@ -96,7 +93,6 @@ class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
   @override
   Widget build(BuildContext context) {
     final centeredFallback = Center(child: widget.fallback);
-    final communityID = ref.watch(activeCommunityProvider).value?.id;
 
     return switch (_source) {
       _EmojiAvatarSource(:final emoji, :final color) => ColoredBox(
@@ -121,43 +117,19 @@ class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
         errorBuilder: (_, _, _) => centeredFallback,
       ),
       _RasterDataAvatarSource(:final bytes) => _rasterImage(
-        communityID: communityID,
-        sourceURL: widget.imageUrl,
         bytes: bytes,
         fallback: centeredFallback,
       ),
       _NetworkAvatarSource(:final url) => MediaImage(
         url: url,
         fit: widget.fit,
-        onBytesLoaded: communityID == null
-            ? null
-            : (bytes) => unawaited(
-                cacheBuzzPushAvatarFromLoadedBytes(communityID, url, bytes),
-              ),
         errorBuilder: (_, _, _) => centeredFallback,
       ),
       null => centeredFallback,
     };
   }
 
-  Widget _rasterImage({
-    required String? communityID,
-    required String? sourceURL,
-    required Uint8List bytes,
-    required Widget fallback,
-  }) {
-    if (communityID != null && sourceURL != null) {
-      final identity = '$communityID\u0000$sourceURL';
-      if (_scheduledPushAvatar != identity) {
-        _scheduledPushAvatar = identity;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || _scheduledPushAvatar != identity) return;
-          unawaited(
-            cacheBuzzPushAvatarFromLoadedBytes(communityID, sourceURL, bytes),
-          );
-        });
-      }
-    }
+  Widget _rasterImage({required Uint8List bytes, required Widget fallback}) {
     return Image.memory(
       bytes,
       fit: widget.fit,

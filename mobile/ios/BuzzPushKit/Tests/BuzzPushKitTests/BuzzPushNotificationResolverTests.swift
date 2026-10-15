@@ -133,20 +133,13 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(result?.0.body, "lower ID")
   }
 
-  func testDecodeResolutionSenderTitlesCanonicalizeKeysOrFallBackToNeutral() {
-    // The sender-identity presentation boundary: a verifiable key renders
-    // as the same compact npub whether it arrives as hex or as an npub, and
-    // an unverifiable key — including radix impostors like "+a"×32 that
-    // parse as hex pairs but are not literal hex keys — gets the neutral
-    // identity, never raw key material, while body, subtitle, and internal
-    // payload fields pass through untouched. Malformed-input classification
-    // itself is pinned at the codec (Bech32Tests); named senders winning
-    // over these labels is covered by the cached-profile resolve tests.
+  func testMissingSenderNameOmitsLabelWithoutExposingKey() {
+    // Keep identity in the routing payload, but do not use it as a display name.
     let senders: [(pubkey: String, title: String)] = [
-      (Self.unnamedSenderHex, "npub14f8…9nsy"),
-      (Self.unnamedSenderNpub, "npub14f8…9nsy"),
-      ("author-pubkey", "Someone"),
-      (String(repeating: "+a", count: 32), "Someone"),
+      (Self.unnamedSenderHex, ""),
+      (Self.unnamedSenderNpub, ""),
+      ("author-pubkey", ""),
+      (String(repeating: "+a", count: 32), ""),
     ]
     for sender in senders {
       let result = BuzzPushNotificationResolver.decodeResolution(
@@ -210,7 +203,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
 
     XCTAssertNotEqual(result.title, Self.gatewayBody)
     XCTAssertNotEqual(result.body, Self.gatewayBody)
-    XCTAssertEqual(result.title, "npub1ccz…mnyd")
+    XCTAssertEqual(result.title, "")
     XCTAssertEqual(result.body, "Hello Buzz")
     XCTAssertEqual(result.subtitle, "Community")
     XCTAssertEqual(
@@ -342,7 +335,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       if URLProtocolStub.requests.count == 1 {
         return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
       }
-      XCTAssertEqual(request.timeoutInterval, 3)
+      XCTAssertEqual(request.timeoutInterval, 60)
       return Self.response(request, status: 503, data: Data())
     }
 
@@ -623,7 +616,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, "npub1ccz…mnyd")
+    XCTAssertEqual(result.title, "")
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.subtitle, "Community")
     XCTAssertEqual(result.body, "Fallback content")
@@ -666,7 +659,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(result.title, "npub1ccz…mnyd")
+    XCTAssertEqual(result.title, "")
     XCTAssertNil(result.conversationDisplayName)
     XCTAssertEqual(result.body, "Bounded fallback")
     XCTAssertEqual(URLProtocolStub.requests.count, 2)
@@ -752,9 +745,56 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       session: URLSession(configuration: configuration),
       loadCommunitiesData: { communitiesData },
       loadPrivateKey: { privateKeys[$0] },
-      loadPresentationCacheData: { presentationCacheData },
+      notificationCache: makeNotificationCache(communitiesData: communitiesData, fixture: presentationCacheData, now: now),
       now: { now }
     )
+  }
+
+  private func makeNotificationCache(communitiesData: Data?, fixture: Data?, now: Date) -> BuzzNotificationCache {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let communities = communitiesData.flatMap { try? JSONDecoder().decode(PushLeaseSnapshot.self, from: $0) }?.communities ?? []
+    let scopes = communities.compactMap(BuzzNotificationCacheScope.init)
+    let cache = BuzzNotificationCache(directory: root, now: { now }, isCurrent: { scopes.contains($0) })
+    let snapshot = BuzzPushPresentationCacheSnapshot.decode(fixture)
+    do {
+      for profile in snapshot.profiles {
+        let scope = try XCTUnwrap(scopes.first { $0.communityID == profile.communityID })
+        var content = ["display_name": profile.displayName ?? ""]
+        if profile.avatarPNG != nil { content["picture"] = "https://images.example/avatar.png" }
+        let event = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+          createdAt: profile.eventCreatedAt, kind: 0,
+          content: String(decoding: JSONEncoder().encode(content), as: UTF8.self))
+        let writer = BuzzNotificationCache(directory: root,
+          now: { Date(timeIntervalSince1970: Double(profile.cachedAt)) }, isCurrent: { scopes.contains($0) })
+        try writer.save(event: event, scope: scope)
+        if let image = profile.avatarPNG {
+          try writer.saveAvatar(image, source: "https://images.example/avatar.png",
+            profileID: event.id, pubkey: event.pubkey, scope: scope)
+        }
+      }
+      for channel in snapshot.channels {
+        let scope = try XCTUnwrap(scopes.first { $0.communityID == channel.communityID })
+        let event = try Self.signedEvent(privateKey: Self.relayPrivateKey,
+          createdAt: channel.eventCreatedAt, kind: 39000,
+          tags: [["d", channel.channelID], ["name", channel.displayName ?? ""], ["t", channel.channelType ?? "stream"]])
+        let writer = BuzzNotificationCache(directory: root,
+          now: { Date(timeIntervalSince1970: Double(channel.cachedAt)) }, isCurrent: { scopes.contains($0) })
+        try writer.save(event: event, scope: scope)
+        guard let digests = channel.memberDigests else { continue }
+        let candidates = [Self.ownPubkey, try Self.pubkey(for: Self.profilePrivateKey), try Self.pubkey(for: Self.relayPrivateKey)]
+        let members = candidates.filter { candidate in
+          Self.memberDigests([candidate]).contains { digests.contains($0) }
+        }
+        let membership = try Self.signedEvent(privateKey: Self.relayPrivateKey,
+          createdAt: channel.membershipEventCreatedAt ?? channel.eventCreatedAt, kind: 39002,
+          tags: [["d", channel.channelID]] + members.map { ["p", $0] })
+        let membershipWriter = BuzzNotificationCache(directory: root,
+          now: { Date(timeIntervalSince1970: Double(channel.membershipCachedAt ?? channel.cachedAt)) }, isCurrent: { scopes.contains($0) })
+        try membershipWriter.save(event: membership, scope: scope)
+      }
+    } catch { XCTFail("Cannot seed verified cache: \(error)") }
+    return cache
   }
 
   func resolve(_ resolver: BuzzPushNotificationResolver) -> BuzzPushResolution? {
@@ -788,7 +828,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
               hTags: [Self.channelID]
             )
           )
-        ]
+        ],
+      notificationSessionID: "test-session"
     )
   }
 

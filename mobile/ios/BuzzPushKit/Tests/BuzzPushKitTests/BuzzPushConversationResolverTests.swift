@@ -142,7 +142,7 @@ extension BuzzPushNotificationResolverTests {
       if URLProtocolStub.requests.count == 1 {
         return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
       }
-      XCTAssertEqual(request.timeoutInterval, 3)
+      XCTAssertEqual(request.timeoutInterval, 60)
       return Self.response(
         request,
         status: 200,

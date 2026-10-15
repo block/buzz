@@ -185,10 +185,19 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     var snapshot = loadLocked()
-    snapshot.communities = communities
-    let retained = Set(communities.map(\.id))
-    snapshot.profiles.removeAll { !retained.contains($0.communityID) }
-    snapshot.channels.removeAll { !retained.contains($0.communityID) }
+    snapshot.communities = communities.map { community in
+      var community = community
+      let previous = snapshot.communities.first {
+        $0.id == community.id && $0.pubkey == community.pubkey
+          && Self.canonicalRelayOrigin($0.relayUrl) == Self.canonicalRelayOrigin(community.relayUrl)
+      }
+      community.notificationSessionID = previous?.notificationSessionID ?? UUID().uuidString
+      return community
+    }
+    // Account configuration is the only app-owned notification data. Discard
+    // presentation exports left by older app versions, including retained accounts.
+    snapshot.profiles.removeAll()
+    snapshot.channels.removeAll()
     try writeLocked(snapshot)
   }
 
