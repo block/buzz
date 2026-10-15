@@ -86,7 +86,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   public func resolve(completion: @escaping (BuzzPushResolution?) -> Void) {
     let communities = loadCommunities().filter {
       $0.pubkey?.isEmpty == false
-        && loadPrivateKey($0.id) != nil
+        && matchingPrivateKey(for: $0) != nil
         && !$0.policies.isEmpty
     }
     guard !communities.isEmpty else {
@@ -119,11 +119,19 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     }
   }
 
+  private func matchingPrivateKey(for community: PushLeaseCommunity) -> String? {
+    guard let scope = BuzzNotificationCacheScope(community: community),
+      loadCommunities().contains(where: { BuzzNotificationCacheScope(community: $0) == scope }),
+      let key = loadPrivateKey(community.id), scope.matchesAccountKey(key)
+    else { return nil }
+    return key
+  }
+
   private func query(
     _ community: PushLeaseCommunity,
     completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity)?) -> Void
   ) {
-    guard let privateKey = loadPrivateKey(community.id), community.pubkey?.isEmpty == false else {
+    guard let privateKey = matchingPrivateKey(for: community), community.pubkey?.isEmpty == false else {
       completion(nil)
       return
     }
@@ -153,7 +161,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     }
     request.setValue(auth, forHTTPHeaderField: "Authorization")
     session.dataTask(with: request) { data, response, _ in
-      guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
+      guard self.matchingPrivateKey(for: community) != nil,
+        let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
         let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
       else {
         completion(nil)
@@ -177,6 +186,10 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     community: PushLeaseCommunity,
     completion: @escaping (BuzzPushResolution?) -> Void
   ) {
+    guard matchingPrivateKey(for: community) != nil else {
+      completion(nil)
+      return
+    }
     if let notificationCache {
       guard let scope = BuzzNotificationCacheScope(community: community) else {
         completion(nil)
@@ -186,9 +199,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         event: event, community: community, scope: scope, cache: notificationCache,
         avatarLoader: avatarLoader, now: now,
         isCurrent: { [self] in
-          loadCommunities().contains {
-            BuzzNotificationCacheScope(community: $0) == scope
-          } && loadPrivateKey(community.id) != nil
+          matchingPrivateKey(for: community) != nil
         },
         refresh: { [self] profile, channel, done in
           refreshPresentation(event: event, community: community,
@@ -253,7 +264,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     filters: [[String: Any]], community: PushLeaseCommunity,
     completion: @escaping ([VerifiedNostrEvent]) -> Void
   ) {
-    guard let privateKey = loadPrivateKey(community.id),
+    guard let privateKey = matchingPrivateKey(for: community),
       let relayURL = community.relayURL,
       let url = URL(string: "/query", relativeTo: relayURL),
       let body = try? JSONSerialization.data(withJSONObject: filters)
@@ -276,7 +287,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       request: request, configuration: session.configuration,
       maximumBytes: Self.maximumPresentationResponseBytes
     ) { result in
-      guard case .success(let data) = result,
+      guard self.matchingPrivateKey(for: community) != nil,
+        case .success(let data) = result,
         let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
       else {
         completion([])

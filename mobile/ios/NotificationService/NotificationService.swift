@@ -84,7 +84,8 @@ final class NotificationService: UNNotificationServiceExtension {
     let accessGroup = Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
     return Self.communities(appGroupIdentifier: appGroupIdentifier).contains {
       BuzzNotificationCacheScope(community: $0) == scope
-    } && Self.loadPrivateKey(communityID: scope.communityID, keychainAccessGroup: accessGroup) != nil
+    } && scope.matchesAccountKey(
+      Self.loadPrivateKey(communityID: scope.communityID, keychainAccessGroup: accessGroup))
   }
 
   private static func communities(appGroupIdentifier: String?) -> [PushLeaseCommunity] {

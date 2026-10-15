@@ -58,6 +58,41 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertTrue(URLProtocolStub.requests.isEmpty)
   }
 
+  func testSnapshotAccountMustMatchKeychainBeforeAnyRequest() throws {
+    let configured = community(pubkey: try Self.pubkey(for: Self.profilePrivateKey))
+    URLProtocolStub.handler = { request in
+      XCTFail("Mismatched account key must not issue a request")
+      return Self.response(request, status: 200, data: Data("[]".utf8))
+    }
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([configured]))))
+    XCTAssertTrue(URLProtocolStub.requests.isEmpty)
+  }
+
+  func testKeyReplacementWhileRequestIsInFlightRejectsItsResult() throws {
+    let data = try snapshotData([community()])
+    let lock = NSLock()
+    var key = Self.privateKey
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Old account result")
+    URLProtocolStub.handler = { request in
+      lock.lock()
+      key = Self.profilePrivateKey
+      lock.unlock()
+      return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
+    }
+    let resolver = BuzzPushNotificationResolver(
+      session: URLSession(configuration: configuration), loadCommunitiesData: { data },
+      loadPrivateKey: { _ in
+        lock.lock()
+        defer { lock.unlock() }
+        return key
+      })
+    XCTAssertNil(resolve(resolver))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
   func testResolveReturnsNilForNon2xxRelayResponse() throws {
     URLProtocolStub.handler = { request in
       Self.response(request, status: 503, data: Data())

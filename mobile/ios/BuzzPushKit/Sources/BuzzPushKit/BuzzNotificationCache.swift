@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import P256K
 
 /// Account and relay identity for one local sign-in's notification cache.
 public struct BuzzNotificationCacheScope: Codable, Equatable, Sendable {
@@ -20,6 +21,14 @@ public struct BuzzNotificationCacheScope: Codable, Equatable, Sendable {
     // field. Its scope is still isolated by account, relay and community. The new
     // app replaces this marker with a UUID on its first sync and every re-add.
     sessionID = community.notificationSessionID ?? "legacy-before-first-sync-v1"
+  }
+
+  /// Confirms the loaded credential belongs to this scope's account.
+  public func matchesAccountKey(_ privateKey: String?) -> Bool {
+    guard let privateKey, let bytes = VerifiedNostrEvent.hexBytes(privateKey), bytes.count == 32,
+      let key = try? P256K.Schnorr.PrivateKey(dataRepresentation: bytes)
+    else { return false }
+    return VerifiedNostrEvent.hex(key.xonly.bytes) == account
   }
 
   /// A filename-safe identity that contains no credentials.
