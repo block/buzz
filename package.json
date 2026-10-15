@@ -9,6 +9,9 @@
     "@biomejs/biome": "^2.4.6"
   },
   "dependencies": {
-    "@tailwindcss/typography": "^0.5.19"
+    "@tailwindcss/typography": "^0.6.19"
+      },
+  "vision": {
+    "@agent/moderadtion": "^v1"
   }
 }
