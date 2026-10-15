@@ -928,14 +928,24 @@ mod postgres_tests {
         );
 
         drop(leader);
-        assert!(
-            second
+        // Dropping closes the socket; the server releases the session lock only
+        // once its backend observes the disconnect, so poll briefly.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let successor = loop {
+            let attempt = second
                 .try_lock_usage_metrics(key)
                 .await
-                .expect("lock attempt after leader drop")
-                .is_some(),
+                .expect("lock attempt after leader drop");
+            if attempt.is_some() || tokio::time::Instant::now() >= deadline {
+                break attempt;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert!(
+            successor.is_some(),
             "dropping the detached session releases its advisory lock"
         );
+        drop(successor);
 
         // Release any remaining session state before DROP DATABASE.
         drop(first);
