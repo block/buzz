@@ -64,7 +64,9 @@ pub enum BuildError {
 ///   state announcements" semantics).
 /// - OIDs validated as 40-hex (SHA-1) or 64-hex (SHA-256). Invalid OIDs are
 ///   skipped, not failed — same conservative behavior as the legacy code.
-/// - Ref names validated (no `//`, no leading `/`, alphanumeric + `/_.-`).
+/// - Ref names validated by the shared `is_safe_refname` predicate (the same
+///   one the write path accepted the manifest with), so a pushable ref can
+///   never be silently dropped from the ref-state event by alphabet drift.
 /// - Output tag ordering is deterministic for testability: `d`, refs (sorted
 ///   by `BTreeMap` iteration), HEAD, p.
 pub fn build_ref_state_event(
@@ -114,15 +116,16 @@ pub fn build_ref_state_event(
 }
 
 /// NIP-34 kind:30618 only emits refs under heads/ and tags/.
+///
+/// Character/structure rules delegate to [`super::manifest::is_safe_refname`]
+/// — the predicate every ref in a committed manifest has already passed — so
+/// this filter can only narrow by *namespace*, never by alphabet. A private
+/// re-spelling of the alphabet here is exactly how a pushable ref becomes
+/// invisible to every kind:30618 subscriber (#4194: `+`/`@` refs CASed fine
+/// and then vanished from branch listings).
 fn is_emittable_ref(name: &str) -> bool {
-    if !(name.starts_with("refs/heads/") || name.starts_with("refs/tags/")) {
-        return false;
-    }
-    if name.starts_with('/') || name.contains("//") {
-        return false;
-    }
-    name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))
+    (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+        && super::manifest::is_safe_refname(name)
 }
 
 /// Accept SHA-1 (40 hex) and SHA-256 (64 hex) OIDs.
@@ -363,6 +366,32 @@ mod tests {
         assert!(first_tag(&ev, "refs/heads/legit").is_some());
         // Malformed refs should not appear.
         assert_eq!(tags_with_kind(&ev, "refs/heads//double").len(), 0);
+    }
+
+    /// A ref that passed manifest validation must reach the kind:30618 event:
+    /// every branch lister reads this event, so an alphabet re-spelling here
+    /// turns a pushable `+`/`@` ref into a branch that CASes, hydrates, and
+    /// clones — and is invisible in every client (#4194).
+    #[test]
+    fn emits_git_legal_plus_and_at_refs() {
+        let oid = "1111111111111111111111111111111111111111";
+        let refs = refs_with(&[
+            ("refs/heads/test/842+841-devnet", oid),
+            ("refs/heads/dependabot/npm_and_yarn/@types/node-1.2.3", oid),
+            ("refs/tags/v1.0.0+build.5", oid),
+        ]);
+        let inputs = RefStateInputs {
+            repo_id: "r",
+            head: "refs/heads/test/842+841-devnet",
+            refs: &refs,
+            actor_pubkey_hex: &owner_hex(),
+        };
+        let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
+        assert!(first_tag(&ev, "refs/heads/test/842+841-devnet").is_some());
+        assert!(first_tag(&ev, "refs/heads/dependabot/npm_and_yarn/@types/node-1.2.3").is_some());
+        assert!(first_tag(&ev, "refs/tags/v1.0.0+build.5").is_some());
+        // HEAD pointing at a `+` branch emits too.
+        assert!(first_tag(&ev, "HEAD").is_some());
     }
 
     #[test]
