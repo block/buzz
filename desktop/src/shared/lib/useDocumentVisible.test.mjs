@@ -287,9 +287,26 @@ describe("visibility-gated hooks", () => {
     focused = true;
     await act(async () => window.dispatchEvent(new window.Event("focus")));
     assert.deepEqual(observed, [1_000, false]);
-    await act(
-      async () => new Promise((resolve) => window.setTimeout(resolve, 10)),
-    );
+    // Wait for the resume to actually land rather than for a fixed duration.
+    //
+    // `scheduleAfterForegroundReady` defers through `setTimeout(0)` and then,
+    // because this jsdom is built without `pretendToBeVisual` and so exposes no
+    // `requestAnimationFrame`, through the fallback `setTimeout(0)` rather than
+    // a frame (`foregroundReady.ts`). Two timer turns, then React has to
+    // re-render and flush the effect that records `observed`.
+    //
+    // None of that is bounded by 10ms once the event loop is contended: Node
+    // starves the timer phase under load, so the second callback and the effect
+    // can both land after a fixed sleep has already resolved. Measured on this
+    // file with six busy loops saturating the CPU, the old form failed 4 runs
+    // in 12. Polling keeps the assertion exactly as strict while removing the
+    // race.
+    await act(async () => {
+      const deadline = Date.now() + 2_000;
+      while (observed.length < 3 && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 5));
+      }
+    });
     assert.deepEqual(observed, [1_000, false, 1_000]);
 
     await act(async () => root.unmount());
