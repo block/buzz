@@ -42,6 +42,10 @@ have a separate bounded store. Each account and relay has separate cache data.
 Credentials are not stored in these caches. Profile and channel requests run
 independently, so a large or slow channel roster cannot block a sender profile
 or avatar that is available before the delivery deadline.
+When only channel metadata or membership refreshes successfully, the extension
+keeps that record and removes its old counterpart in the same write. It does
+not derive a group identity or recipient count from a mixed pair. If neither
+request succeeds, the previous pair remains available.
 
 Delivery happens only once. Ordinary requests can continue after delivery if
 iOS keeps the process alive. A late profile response can start an avatar fetch,

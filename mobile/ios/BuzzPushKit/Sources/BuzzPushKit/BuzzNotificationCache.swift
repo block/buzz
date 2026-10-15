@@ -113,6 +113,19 @@ public final class BuzzNotificationCache: @unchecked Sendable {
 
   /// Commits records returned together in a single atomic snapshot.
   func save(events: [VerifiedNostrEvent], scope: BuzzNotificationCacheScope) throws {
+    try save(events: events, scope: scope, channelRefresh: false)
+  }
+
+  /// Keeps a partial channel response without combining it with an old counterpart.
+  func saveChannel(
+    channel: VerifiedNostrEvent?, membership: VerifiedNostrEvent?, scope: BuzzNotificationCacheScope
+  ) throws {
+    try save(events: [channel, membership].compactMap { $0 }, scope: scope, channelRefresh: true)
+  }
+
+  private func save(
+    events: [VerifiedNostrEvent], scope: BuzzNotificationCacheScope, channelRefresh: Bool
+  ) throws {
     guard !events.isEmpty else { return }
     for event in events {
       guard [0, 39_000, 39_002].contains(event.kind), event.hasValidIDAndSignature(),
@@ -125,6 +138,20 @@ public final class BuzzNotificationCache: @unchecked Sendable {
       }
     }
     try access(scope, write: true) { state in
+      if channelRefresh {
+        // Reject the whole refresh if any returned record predates its cached
+        // version. Accepting only the other record would mix refreshes again.
+        for event in events {
+          let existing = state.metadata.first {
+            $0.event.kind == event.kind && $0.event.pubkey == event.pubkey
+              && Self.identifier($0.event) == Self.identifier(event)
+          }?.event
+          guard BuzzPushPresentationCacheStore.shouldReplace(
+            existingCreatedAt: existing?.createdAt, existingID: existing?.id,
+            candidateCreatedAt: event.createdAt, candidateID: event.id
+          ) else { return }
+        }
+      }
       for event in events {
         let index = state.metadata.firstIndex {
           $0.event.kind == event.kind && $0.event.pubkey == event.pubkey
@@ -139,6 +166,13 @@ public final class BuzzNotificationCache: @unchecked Sendable {
         else { continue }
         let record = BuzzNotificationMetadata(event: event, checkedAt: now())
         if let index { state.metadata[index] = record } else { state.metadata.append(record) }
+        if channelRefresh, events.count == 1, [39000, 39002].contains(event.kind) {
+          let counterpartKind = event.kind == 39000 ? 39002 : 39000
+          state.metadata.removeAll {
+            $0.event.kind == counterpartKind && $0.event.pubkey == event.pubkey
+              && Self.identifier($0.event) == Self.identifier(event)
+          }
+        }
         if event.kind == 0, Self.removesPicture(event) {
           state.avatars.removeAll { $0.pubkey == event.pubkey }
         }

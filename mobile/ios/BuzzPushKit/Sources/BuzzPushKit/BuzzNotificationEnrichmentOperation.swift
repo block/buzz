@@ -79,7 +79,7 @@ final class BuzzNotificationEnrichmentOperation {
                   case .profile(let profile):
                     if let profile { try cache.save(event: profile, scope: scope) }
                   case .channel(let channel, let membership):
-                    try cache.save(events: [channel, membership].compactMap { $0 }, scope: scope)
+                    try cache.saveChannel(channel: channel, membership: membership, scope: scope)
                   }
                 } catch { report(error) }
               }

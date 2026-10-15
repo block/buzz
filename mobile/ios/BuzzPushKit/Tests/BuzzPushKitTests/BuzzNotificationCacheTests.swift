@@ -139,6 +139,52 @@ struct BuzzNotificationCacheTests {
     #expect(snapshot.membership?.event == members)
   }
 
+  @Test("Partial channel refreshes cannot reuse an old counterpart")
+  func partialChannelRefresh() throws {
+    let root = try directory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let scope = try scope()
+    let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+    for refreshedKind in [39000, 39002] {
+      let old = try [39000, 39002].map {
+        try signedEvent(privateKey: key, createdAt: 1, kind: $0, tags: [["d", "room-\(refreshedKind)"]])
+      }
+      try cache.saveChannel(channel: old[0], membership: old[1], scope: scope)
+      let newer = try signedEvent(
+        privateKey: key, createdAt: 2, kind: refreshedKind,
+        tags: [["d", "room-\(refreshedKind)"]])
+      try cache.saveChannel(
+        channel: refreshedKind == 39000 ? newer : nil,
+        membership: refreshedKind == 39002 ? newer : nil, scope: scope)
+      let snapshot = try cache.presentation(
+        scope: scope, sender: newer.pubkey,
+        channelID: "room-\(refreshedKind)", authority: newer.pubkey)
+      #expect(snapshot.channel?.event == (refreshedKind == 39000 ? newer : nil))
+      #expect(snapshot.membership?.event == (refreshedKind == 39002 ? newer : nil))
+    }
+  }
+
+  @Test("Older channel responses cannot invalidate or partly replace a newer pair")
+  func olderChannelRefresh() throws {
+    let root = try directory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let scope = try scope()
+    let cache = BuzzNotificationCache(directory: root, isCurrent: { $0 == scope })
+    let current = try [39000, 39002].map {
+      try signedEvent(privateKey: key, createdAt: 2, kind: $0, tags: [["d", "room"]])
+    }
+    try cache.saveChannel(channel: current[0], membership: current[1], scope: scope)
+    let older = try signedEvent(privateKey: key, createdAt: 1, kind: 39000, tags: [["d", "room"]])
+    let newer = try signedEvent(privateKey: key, createdAt: 3, kind: 39002, tags: [["d", "room"]])
+    try cache.saveChannel(channel: older, membership: nil, scope: scope)
+    try cache.saveChannel(channel: older, membership: newer, scope: scope)
+    try cache.saveChannel(channel: nil, membership: nil, scope: scope)
+    let snapshot = try cache.presentation(
+      scope: scope, sender: current[0].pubkey, channelID: "room", authority: current[0].pubkey)
+    #expect(snapshot.channel?.event == current[0])
+    #expect(snapshot.membership?.event == current[1])
+  }
+
   @Test("Concurrent channel readers see one complete refresh")
   func atomicBatchReaders() throws {
     let root = try directory()
