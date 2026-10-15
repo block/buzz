@@ -1851,11 +1851,6 @@ function MarkdownInner({
   );
 }
 
-export const Markdown = React.memo(
-  MarkdownInner,
-  (prev, next) =>
-    markdownPropsAreEqual(prev, next) &&
-    prev.leadingInlineContent === next.leadingInlineContent,
-);
+export const Markdown = React.memo(MarkdownInner, markdownPropsAreEqual);
 Markdown.displayName = "Markdown";
 export { SyntaxHighlightedCode } from "./markdown/CodeBlock";
