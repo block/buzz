@@ -9,6 +9,8 @@ import {
   useChannelMembersQuery,
   useChannelsQuery,
 } from "@/features/channels/hooks";
+import { managedAgentsForRelay } from "@/features/agents/lib/managedAgentRelayScope";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
@@ -105,6 +107,15 @@ export function useMentions(
   const members = externalMembers ?? membersQuery.data;
   const isArchivedDiscovery = useIsArchivedPredicate();
   const managedAgentsQuery = useManagedAgentsQuery();
+  // Records outlive the relay URL they were minted against, so the raw list
+  // carries one entry per historical relay. Only the ones reachable on the
+  // community we are connected to belong in the picker.
+  const { activeCommunity } = useCommunities();
+  const managedAgents = React.useMemo(
+    () =>
+      managedAgentsForRelay(managedAgentsQuery.data, activeCommunity?.relayUrl),
+    [activeCommunity?.relayUrl, managedAgentsQuery.data],
+  );
   const relayAgentsQuery = useRelayAgentsQuery();
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
@@ -126,42 +137,37 @@ export function useMentions(
   const managedAgentNamesByPubkey = React.useMemo(
     () =>
       new Map(
-        (managedAgentsQuery.data ?? []).map((agent) => [
+        managedAgents.map((agent) => [
           normalizePubkey(agent.pubkey),
           agent.name,
         ]),
       ),
-    [managedAgentsQuery.data],
+    [managedAgents],
   );
   const managedAgentPersonaIdsByPubkey = React.useMemo(
     () =>
       new Map(
-        (managedAgentsQuery.data ?? [])
+        managedAgents
           .filter((agent) => Boolean(agent.personaId))
           .map((agent) => [
             normalizePubkey(agent.pubkey),
             agent.personaId as string,
           ]),
       ),
-    [managedAgentsQuery.data],
+    [managedAgents],
   );
   const managedAgentPersonaIds = React.useMemo(
     () =>
       new Set(
-        (managedAgentsQuery.data ?? [])
+        managedAgents
           .map((agent) => agent.personaId)
           .filter((personaId): personaId is string => Boolean(personaId)),
       ),
-    [managedAgentsQuery.data],
+    [managedAgents],
   );
   const managedAgentPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (managedAgentsQuery.data ?? []).map((agent) =>
-          normalizePubkey(agent.pubkey),
-        ),
-      ),
-    [managedAgentsQuery.data],
+    () => new Set(managedAgents.map((agent) => normalizePubkey(agent.pubkey))),
+    [managedAgents],
   );
   const relayAgentNamesByPubkey = React.useMemo(
     () =>
@@ -174,7 +180,7 @@ export function useMentions(
     [relayAgentsQuery.data],
   );
   const activeAgentPubkeys = useActiveAgentPubkeys(
-    managedAgentsQuery.data,
+    managedAgents,
     relayAgentsQuery.data,
   );
   const sharedChannelIds = React.useMemo(
@@ -209,7 +215,7 @@ export function useMentions(
     ],
   );
   const personaNameByPubkey = React.useMemo(() => {
-    const agents = managedAgentsQuery.data ?? [];
+    const agents = managedAgents;
     const personas = personasQuery.data ?? [];
     const personaById = new Map(personas.map((p) => [p.id, p.displayName]));
     const lookup = new Map<string, string>();
@@ -220,7 +226,7 @@ export function useMentions(
       }
     }
     return lookup;
-  }, [managedAgentsQuery.data, personasQuery.data]);
+  }, [managedAgents, personasQuery.data]);
   const knownAgentPubkeys = React.useMemo(
     () => new Set([...mentionableAgentPubkeys, ...managedAgentPubkeys]),
     [managedAgentPubkeys, mentionableAgentPubkeys],
@@ -264,7 +270,7 @@ export function useMentions(
         managedAgentNamesByPubkey,
         managedAgentPersonaIds,
         managedAgentPersonaIdsByPubkey,
-        managedAgents: managedAgentsQuery.data,
+        managedAgents,
         memberPubkeys,
         members,
         mentionChannelId,
@@ -288,7 +294,7 @@ export function useMentions(
       managedAgentNamesByPubkey,
       managedAgentPersonaIds,
       managedAgentPersonaIdsByPubkey,
-      managedAgentsQuery.data,
+      managedAgents,
       memberPubkeys,
       members,
       mentionChannelId,
