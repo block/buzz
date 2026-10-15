@@ -13,6 +13,7 @@ import 'me_section.dart';
 import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
 import '../../../shared/me/me_chat_creation.dart';
+import '../../../shared/me/me_project_creation.dart';
 import '../../../shared/me/me_sync.dart';
 import '../../../shared/me/me_recovery.dart';
 import '../../../shared/me/me_assistants.dart';
@@ -30,6 +31,7 @@ import '../channels_provider.dart';
 part 'me_page_helpers.dart';
 part 'new_me_chat.dart';
 part 'native_new_me_chat.dart';
+part 'new_me_project.dart';
 
 /// Personal chats and projects shared with the desktop Me workspace.
 class MePage extends HookConsumerWidget {
@@ -85,21 +87,7 @@ class MePage extends HookConsumerWidget {
     final VoidCallback? newProject = busy.value || !groups.hasValue
         ? null
         : () => perform(() async {
-            final name = await _name(context, 'New project');
-            if (name == null || !context.mounted) return;
-            final id = const Uuid().v4();
-            await ref
-                .read(meSyncProvider)
-                .update(
-                  (current) => MeGroups(
-                    groups: [
-                      ...current.groups,
-                      {'id': id, 'name': name, 'defaultTemplateId': ''},
-                    ],
-                    assignments: current.assignments,
-                    channels: current.channels,
-                  ),
-                );
+            await _createMeProject(context, ref);
           });
     final VoidCallback? newChat = busy.value || !groups.hasValue
         ? null
