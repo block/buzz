@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "inference-sh": {
+      "command": "inference-mcp-bridge",
+      "args": [],
+      "env": {
+        "INFERENCE_API_KEY": "${INFERENCE_API_KEY}"
+      }
+    }
+  }
+}
