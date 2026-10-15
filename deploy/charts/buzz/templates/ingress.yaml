@@ -39,5 +39,18 @@ spec:
                 port:
                   number: {{ $svcPort }}
           {{- end }}
+          {{- if $.Values.pairingRelay.enabled }}
+          {{- /* Same reason as the HTTPRoute default rules: the legacy client
+               fallback is `/pair` on the relay host, and the main relay 404s
+               it. Longest-path matching sends `/pair` here, everything else
+               to the relay. */}}
+          - path: /pair
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-pairing
+                port:
+                  number: {{ $.Values.pairingRelay.service.port }}
+          {{- end }}
     {{- end }}
 {{- end }}
