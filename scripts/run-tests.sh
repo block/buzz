@@ -255,6 +255,13 @@ run_unit_tests() {
       handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions \
       handlers::req::tests::group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds
 
+  # Infra-free bridge search extension parser tests, by exact name: the rest of
+  # api::bridge::postgres_tests needs a database.
+  run_test_step "buzz-relay bridge search extension tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      api::bridge::postgres_tests::bridge_search_mode_extension_accepts_prefix_snake_or_camel_case \
+      api::bridge::postgres_tests::bridge_search_sort_extension_selects_newest_only_when_named
+
   run_test_step "buzz-relay readiness tests" \
     cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture
 
