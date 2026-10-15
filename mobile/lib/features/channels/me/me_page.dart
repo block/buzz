@@ -10,6 +10,7 @@ import '../../../shared/animated_avatar.dart';
 import '../../../shared/widgets/app_list.dart';
 import 'me_assistant_list.dart';
 import 'me_section.dart';
+import 'me_unread_provider.dart';
 import '../../../shared/widgets/avatar_image.dart';
 import '../../../shared/me/me_groups.dart';
 import '../../../shared/me/me_chat_creation.dart';
@@ -62,6 +63,7 @@ class MePage extends HookConsumerWidget {
     }, [assistants]);
     final groups = ref.watch(meGroupsProvider);
     final channels = ref.watch(channelsProvider);
+    final unreadIds = ref.watch(meUnreadChannelIdsProvider);
     final busy = useState(false);
     Future<void> perform(Future<void> Function() action) async {
       if (busy.value) return;
@@ -184,6 +186,7 @@ class MePage extends HookConsumerWidget {
                   );
             Widget row(Channel channel) => _MeChatRow(
               name: channel.name,
+              isUnread: unreadIds.contains(channel.id),
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) =>
@@ -232,6 +235,11 @@ class MePage extends HookConsumerWidget {
                       key: ValueKey(group['id']),
                       icon: BuzzIcons.folder,
                       label: group['name'] as String,
+                      hasUnread: visible.any(
+                        (c) =>
+                            organization.assignments[c.id] == group['id'] &&
+                            unreadIds.contains(c.id),
+                      ),
                       children: [
                         for (final channel in visible.where(
                           (c) => organization.assignments[c.id] == group['id'],
@@ -251,6 +259,11 @@ class MePage extends HookConsumerWidget {
                       key: const ValueKey('me-ungrouped-chats'),
                       icon: BuzzIcons.messageCircle,
                       label: 'Chats',
+                      hasUnread: visible.any(
+                        (c) =>
+                            !organization.assignments.containsKey(c.id) &&
+                            unreadIds.contains(c.id),
+                      ),
                       children: [
                         for (final channel in visible.where(
                           (c) => !organization.assignments.containsKey(c.id),

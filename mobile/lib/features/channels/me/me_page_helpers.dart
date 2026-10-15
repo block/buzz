@@ -82,44 +82,58 @@ class _NewMeProject extends HookConsumerWidget {
 }
 
 class _MeChatRow extends StatelessWidget {
-  const _MeChatRow({required this.name, required this.onTap});
+  const _MeChatRow({
+    required this.name,
+    required this.onTap,
+    required this.isUnread,
+  });
   final String name;
+  final bool isUnread;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final color = navigationPrimaryForeground(context).withValues(alpha: 0.8);
-    return InkWell(
-      borderRadius: BorderRadius.circular(Radii.md),
+    final color = navigationPrimaryForeground(
+      context,
+    ).withValues(alpha: isUnread ? 1 : 0.8);
+    return Semantics(
+      label: isUnread ? '$name, unread' : name,
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Grid.xxs,
-          vertical: Grid.twelve,
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 22,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Icon(BuzzIcons.messageCircle, size: 18, color: color),
-              ),
-            ),
-            const SizedBox(width: Grid.xxs),
-            Expanded(
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: contentListTitleTextStyle.copyWith(
-                  color: color,
-                  fontSize: 17,
-                  height: 22 / 17,
+      excludeSemantics: true,
+      button: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(Radii.md),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Grid.xxs,
+            vertical: Grid.twelve,
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 22,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(BuzzIcons.messageCircle, size: 18, color: color),
                 ),
               ),
-            ),
-          ],
+              const SizedBox(width: Grid.xxs),
+              Expanded(
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: contentListTitleTextStyle.copyWith(
+                    color: color,
+                    fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
+                    fontSize: 17,
+                    height: 22 / 17,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -149,4 +163,15 @@ Future<void> _offerMeRecovery(BuildContext context, MeSync sync) async {
     ),
   );
   if (discard == true) await sync.discardPending(pending);
+}
+
+// Reconnects replace the transport service while an editor may still be open.
+// Retain the reviewed account/community boundary but use its current connection.
+MeSync _currentMeSync(WidgetRef ref, MeSync reviewed) {
+  final current = ref.read(meSyncProvider);
+  if (current.community != reviewed.community ||
+      current.pubkey != reviewed.pubkey) {
+    throw StateError('Your account or community changed. Open Solo again.');
+  }
+  return current;
 }

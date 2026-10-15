@@ -23,6 +23,7 @@ class HomePage extends HookConsumerWidget {
     this.mePageBuilder,
     this.communityAppearancePageBuilder,
     required this.hasUnreadInbox,
+    this.hasUnreadSolo = false,
     super.key,
   });
 
@@ -37,6 +38,9 @@ class HomePage extends HookConsumerWidget {
   /// Builds the appearance destination opened from the community sheet.
   final WidgetBuilder? communityAppearancePageBuilder;
   final bool hasUnreadInbox;
+
+  /// Whether a visible Solo chat has unread activity.
+  final bool hasUnreadSolo;
 
   static const double _tabBarHeight = mobileTabBarHeight;
   static const double _tabBarRadius = _tabBarHeight / 2;
@@ -213,6 +217,7 @@ class HomePage extends HookConsumerWidget {
             bottomNavigationBar: _FloatingTabBar(
               selectedIndex: tabIndex.value,
               hasUnreadInbox: hasUnreadInbox,
+              hasUnreadSolo: hasUnreadSolo,
               onDestinationSelected: (i) {
                 if (i == tabIndex.value) {
                   switch (i) {
@@ -311,12 +316,14 @@ class _HomeDestination {
 class _FloatingTabBar extends StatelessWidget {
   final int selectedIndex;
   final bool hasUnreadInbox;
+  final bool hasUnreadSolo;
   final ValueChanged<int> onDestinationSelected;
   final List<_HomeDestination> destinations;
 
   const _FloatingTabBar({
     required this.selectedIndex,
     required this.hasUnreadInbox,
+    this.hasUnreadSolo = false,
     required this.onDestinationSelected,
     required this.destinations,
   });
@@ -382,7 +389,9 @@ class _FloatingTabBar extends StatelessWidget {
                     child: _FloatingTabDestination(
                       destination: destinations[i],
                       selected: i == safeSelectedIndex,
-                      showUnreadBadge: i == 1 && hasUnreadInbox,
+                      showUnreadBadge:
+                          (i == 1 && hasUnreadInbox) ||
+                          (i == 2 && hasUnreadSolo),
                       onTap: () => onDestinationSelected(i),
                     ),
                   ),
@@ -531,7 +540,9 @@ class _FloatingTabDestination extends StatelessWidget {
                         top: 0,
                         right: 0,
                         child: AnimatedScale(
-                          key: const ValueKey('activity-tab-unread-dot-scale'),
+                          key: ValueKey(
+                            '${destination.label.toLowerCase()}-tab-unread-dot-scale',
+                          ),
                           scale: selected ? 0 : 1,
                           alignment: const Alignment(-0.5, 0.5),
                           duration: reducedMotion
@@ -539,7 +550,9 @@ class _FloatingTabDestination extends StatelessWidget {
                               : HomePage._tabUnreadBadgeDuration,
                           curve: Curves.easeOutCubic,
                           child: Container(
-                            key: const ValueKey('activity-tab-unread-dot'),
+                            key: ValueKey(
+                              '${destination.label.toLowerCase()}-tab-unread-dot',
+                            ),
                             width: 12,
                             height: 12,
                             padding: const EdgeInsets.all(2),

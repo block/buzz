@@ -130,7 +130,9 @@ Future<Channel> _createMeChat(
   String name,
   String assistant,
 ) async {
-  final actions = ref.read(channelActionsProvider);
+  sync = _currentMeSync(ref, sync);
+  final intent = MeChatCreation(channelId, name, assistant);
+  await intent.save(sync);
   final owned = await isOwnedMeAssistant(sync, assistant);
   sync.check();
   if (!owned) {
@@ -140,7 +142,8 @@ Future<Channel> _createMeChat(
   (head == null ? const MeGroups() : sync.decode(head))
       .place(channelId)
       .encode(sync.community);
-  return MeChatCreation(channelId, name, assistant).complete<Channel>(
+  final actions = ref.read(channelActionsProvider);
+  return intent.complete<Channel>(
     sync,
     findChannel: () async {
       ref.invalidate(channelsProvider);

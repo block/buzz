@@ -41,7 +41,7 @@ Future<void> _createMeProject(BuildContext context, WidgetRef ref) async {
     intent = MeProjectCreation(const Uuid().v4(), name);
   }
   try {
-    await intent.complete(sync);
+    await intent.complete(_currentMeSync(ref, sync));
   } catch (error) {
     if (error is MeRecoveryConflict) rethrow;
     if (MeProjectCreation.pending(sync) != null) {

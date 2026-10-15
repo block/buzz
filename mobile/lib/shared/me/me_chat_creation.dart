@@ -35,7 +35,7 @@ class MeChatCreation {
 
   /// Persist before any relay mutation. Do not replace another pending intent.
   Future<void> save(MeSync sync) async {
-    sync.check();
+    if (sync.disposed) throw StateError('Your community changed. Try again.');
     final previous = pending(sync);
     if (previous != null &&
         (previous.id != id ||
@@ -53,7 +53,7 @@ class MeChatCreation {
         )) {
       throw StateError('Couldn’t save this chat on your phone. Try again.');
     }
-    sync.check();
+    if (sync.disposed) throw StateError('Your community changed. Try again.');
   }
 
   /// Abandon only this reviewed intent, preserving any relay channel/messages.
@@ -80,6 +80,7 @@ class MeChatCreation {
     required Future<void> Function() place,
   }) async {
     await save(sync);
+    sync.check();
     final existing = await findChannel();
     sync.check();
     final result = existing ?? await createChannel();

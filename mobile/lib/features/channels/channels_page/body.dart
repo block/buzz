@@ -183,13 +183,13 @@ class _SliverChannelsList extends HookConsumerWidget {
       });
     }, [readState.isReady, readState.pubkey, visibleChannels]);
 
-    final unreadState = _computeUnreadChannelState(
+    final unreadState = computeUnreadChannelIds(
       channels: visibleChannels,
       readState: readState,
       channelsNotifier: ref.read(channelsProvider.notifier),
     );
     final unreadChannelIds = {
-      for (final channelId in unreadState.ids)
+      for (final channelId in unreadState)
         if (seedCompleteForPubkey ||
             readState.effectiveTimestamp(channelId) != null)
           channelId,

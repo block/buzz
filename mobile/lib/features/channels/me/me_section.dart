@@ -12,9 +12,13 @@ class MeSection extends HookWidget {
     required this.label,
     required this.icon,
     required this.children,
+    this.hasUnread = false,
   });
 
   final String label;
+
+  /// Keeps unread activity visible when this section is collapsed.
+  final bool hasUnread;
   final IconData icon;
   final List<Widget> children;
 
@@ -27,6 +31,9 @@ class MeSection extends HookWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Semantics(
+          label: hasUnread ? '$label, unread' : label,
+          excludeSemantics: true,
+          onTap: () => expanded.value = !expanded.value,
           button: true,
           expanded: expanded.value,
           child: InkWell(
@@ -60,6 +67,18 @@ class MeSection extends HookWidget {
                         ),
                       ),
                     ),
+                    if (hasUnread) ...[
+                      Container(
+                        key: ValueKey('solo-section-unread-$label'),
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: context.colors.primary,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: Grid.xxs),
+                    ],
                     AnimatedRotation(
                       turns: expanded.value ? 0 : -0.25,
                       duration: reducedMotion
