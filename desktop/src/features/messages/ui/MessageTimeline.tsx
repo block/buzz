@@ -226,6 +226,15 @@ const MessageTimelineBase = React.forwardRef<
     React.useState<HTMLDivElement | null>(null);
   const [virtualizerRenderVersion, bumpVirtualizerRenderVersion] =
     React.useReducer((version: number) => version + 1, 0);
+  const reachedTargetIdRef = React.useRef<string | null>(null);
+  if (targetMessageId === null) reachedTargetIdRef.current = null;
+  const handleTargetReached = React.useCallback(
+    (messageId: string) => {
+      reachedTargetIdRef.current = messageId;
+      onTargetReached?.(messageId);
+    },
+    [onTargetReached],
+  );
   const [timelineVirtualizerApi, setTimelineVirtualizerApi] =
     React.useState<TimelineVirtualizerApi | null>(null);
   const useTimelineVirtualizer = true;
@@ -365,7 +374,7 @@ const MessageTimelineBase = React.forwardRef<
     contentRef,
     isLoading: showTimelineSkeleton,
     messages: renderedMessages,
-    onTargetReached,
+    onTargetReached: handleTargetReached,
     scrollContainerRef: activeScrollContainerRef,
     splitPanelOpen: splitThreadPanelOpen,
     targetMessageId,
@@ -646,9 +655,17 @@ const MessageTimelineBase = React.forwardRef<
     [activeChannelIntro, activeDirectMessageIntro, activePinnedIntro],
   );
 
+  // Scroll events arrive at input rate; re-rendering the timeline on each one
+  // only pays off while a jump target is still waiting for the virtualizer to
+  // realize its row.
   const handleVirtualizerRangeChanged = React.useCallback(() => {
-    bumpVirtualizerRenderVersion();
-  }, []);
+    const deepLinkPending =
+      targetMessageId !== null &&
+      reachedTargetIdRef.current !== targetMessageId;
+    if (pendingSearchTargetRef.current !== null || deepLinkPending) {
+      bumpVirtualizerRenderVersion();
+    }
+  }, [targetMessageId]);
 
   const timelineList = showMessageList ? (
     <TimelineMessageList
@@ -751,9 +768,6 @@ const MessageTimelineBase = React.forwardRef<
                   : "pb-4",
               ),
           )}
-          data-buzz-conversation-scroll={
-            useTimelineVirtualizer && showMessageList ? undefined : "true"
-          }
           data-scroll-restoration-id={scrollRestorationId}
           data-testid={
             useTimelineVirtualizer && showMessageList
