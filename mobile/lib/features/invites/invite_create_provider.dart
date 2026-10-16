@@ -395,9 +395,9 @@ final communityInviteDirectorySearchProvider = FutureProvider.autoDispose
       }
       ref.watch(relayConfigProvider);
       final currentPubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
-      final events = await ref
-          .watch(relaySessionProvider.notifier)
-          .searchProfiles(trimmed, limit: 50);
+      final events = await ref.watch(relaySessionProvider.notifier).queryRelay([
+        NostrFilters.searchUsers(trimmed, limit: 50),
+      ]);
       return _directoryUsersFromEvents(
         events,
       ).where((user) => user.pubkey != currentPubkey).toList();
