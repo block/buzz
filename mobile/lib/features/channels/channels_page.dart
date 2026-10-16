@@ -461,6 +461,7 @@ class ChannelsPage extends HookConsumerWidget {
           if (onSearch != null)
             IosNavigationAction(
               label: 'Search',
+              symbol: 'magnifyingglass',
               sharesBackground: true,
               icon: BuzzIcons.search300,
               onPressed: onSearch,
@@ -468,6 +469,7 @@ class ChannelsPage extends HookConsumerWidget {
           if (onInbox != null)
             IosNavigationAction(
               label: 'Inbox',
+              symbol: 'tray',
               sharesBackground: true,
               icon: BuzzIcons.inbox300,
               activityColor: hasUnreadInbox ? context.colors.primary : null,

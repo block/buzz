@@ -57,12 +57,21 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     const support = MethodChannel('buzz/concentric_sheet_surface');
     final created = <Map<Object?, Object?>>[];
+    final initialHeaders = <Map<Object?, Object?>>[];
     messenger.setMockMethodCallHandler(support, (call) async => true);
     messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
       call,
     ) async {
       if (call.method == 'create') {
         final args = call.arguments as Map<Object?, Object?>;
+        if (args['viewType'] == 'buzz/ios_navigation_bar') {
+          initialHeaders.add(
+            const StandardMessageCodec().decodeMessage(
+                  ByteData.sublistView(args['params'] as Uint8List),
+                )
+                as Map<Object?, Object?>,
+          );
+        }
         if (args['viewType'] == 'buzz/concentric_sheet_surface') {
           created.add(
             const StandardMessageCodec().decodeMessage(
@@ -81,6 +90,18 @@ void main() {
     await tester.pumpWidget(await buildHome(unreadInboxCount: 2));
     await tester.pump();
     await tester.pump();
+    // Inspect the creation payload, not a later configure call after PNG rendering.
+    final initialActions = initialHeaders.first['actions'] as List;
+    for (final entry in {
+      'Search': 'magnifyingglass',
+      'Inbox': 'tray',
+    }.entries) {
+      final action = initialActions.cast<Map>().firstWhere(
+        (action) => action['label'] == entry.key,
+      );
+      expect(action['iconData'], isNull);
+      expect(action['symbol'], entry.value);
+    }
     final bar = find.byKey(const ValueKey('home-ios-glass-tabs'));
     expect(bar, findsOneWidget);
     expect(tester.getSize(bar), const Size(148, 56));

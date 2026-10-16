@@ -61,6 +61,7 @@ enum NativeTabler {
     "arrowshape.turn.up.left": 0xeb77, // arrow-back-up
     "circle.lefthalf.filled": 0xf4a3, // sun-moon
     "magnifyingglass": 0xeb1c, // search
+    "tray": 0xeac4, // inbox
     "sparkles": 0xf6d7, // sparkles
     "clock": 0xea70, // clock
     "leaf": 0xed4f, // leaf
