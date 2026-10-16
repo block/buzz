@@ -77,6 +77,10 @@ impl Db {
         )
         .await?;
         let mut tx = Transaction::begin(connection, None).await?;
+        // Deletion lock before the row lock, the order deletion takes them.
+        self.deletion_store()
+            .guard_transaction(&mut tx, community)
+            .await?;
         // Serializes with the backfill, which locks the same row.
         sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR NO KEY UPDATE")
             .bind(community.as_uuid())
@@ -500,6 +504,59 @@ mod postgres_tests {
             .await
             .is_err());
         assert!(!community_exists(&db, &bootstrap).await);
+    }
+
+    // Deletion takes its exclusive lock, then the community row. A bind that
+    // held the row while waiting for that lock would deadlock with it.
+    // Mutation: locking the row before `guard_transaction` in
+    // `bind_nip_fi_issuers` aborts one side with a deadlock.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn operator_bind_takes_locks_in_deletion_order() {
+        let db = setup_db().await;
+        let id = db
+            .ensure_configured_community(&unique_host("lock-order"))
+            .await
+            .expect("seed")
+            .id;
+        let mut deletion = db.pool.begin().await.expect("begin deletion");
+        let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *deletion)
+            .await
+            .expect("pid");
+        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+            .bind(id.as_uuid())
+            .execute(&mut *deletion)
+            .await
+            .expect("exclusive deletion lock");
+
+        let bind = tokio::spawn({
+            let db = db.clone();
+            async move { db.bind_nip_fi_issuers(id, &issuers()).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(deletion_pid)
+            .fetch_one(&db.pool)
+            .await
+            .expect("observe bind blocked")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("bind must wait for the deletion lock");
+
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(id.as_uuid())
+            .execute(&mut *deletion)
+            .await
+            .expect("deletion takes the community row");
+        deletion.commit().await.expect("commit deletion");
+        assert_eq!(bind.await.expect("join").expect("bind"), 1);
     }
 
     #[tokio::test]
