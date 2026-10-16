@@ -193,9 +193,7 @@ export function buildMentionCandidates({
       displayName: agent.name,
       isMember: memberPubkeys.has(pubkey),
       isAgent: true,
-      // Remote (`deployed`) activity merges in from the relay directory entry
-      // above: the receipt alone outlives a shut-down or reaped body.
-      isActiveAgent: agent.status === "running",
+      isActiveAgent: agent.status === "running" || agent.status === "deployed",
       isManagedAgent: true,
       personaId: agent.personaId ?? undefined,
       personaName:

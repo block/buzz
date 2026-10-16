@@ -2,7 +2,6 @@ import {
   commandsMatch,
   findReusableGenericAgent,
   findReusablePersonaAgent,
-  type ManagedAgentActivity,
   pickPreferredManagedAgent,
   resolveReusableAgentAccessPolicy,
 } from "@/features/agents/agentReuse";
@@ -19,6 +18,7 @@ import {
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
 import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
+import { fetchAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -26,7 +26,6 @@ import type {
   CreateManagedAgentInput,
   ManagedAgent,
   ManagedAgentBackend,
-  PresenceStatus,
   RespondToMode,
 } from "@/shared/api/types";
 
@@ -49,11 +48,6 @@ export type AttachManagedAgentToChannelInput = {
    * published message and an aborted send leaves no orphan wake.
    */
   detachedStart?: (agent: ManagedAgent) => void;
-  /**
-   * Relay presence, when the caller read it. A provider `deployed` receipt
-   * established offline (shut down or reaped) is redeployed, not trusted.
-   */
-  availability?: PresenceStatus;
 };
 
 export type AttachManagedAgentToChannelResult = {
@@ -135,9 +129,6 @@ export type CreateChannelManagedAgentsResult = {
 type ChannelAgentReuseContext = {
   managedAgents: ManagedAgent[];
   channelMemberPubkeys: ReadonlySet<string>;
-  /** Presence-aware liveness for ranking reuse candidates; without it a
-   * provider's stale `deployed` receipt outranks a running local sibling. */
-  isActive?: ManagedAgentActivity;
   personas: readonly Pick<
     AgentPersona,
     "id" | "respondTo" | "respondToAllowlist"
@@ -213,7 +204,15 @@ export async function attachManagedAgentToChannel(
     // community's (agent, relay) pair, and `startManagedAgent` spawns that same
     // pair — so this ensures the pair the caller is attaching to, never
     // another community's.
-    if (!isManagedAgentLive(input.agent, input.availability)) {
+    // A provider's `deployed` receipt outlives a shut-down or reaped body, so
+    // read presence once: established offline means this attach redeploys.
+    // Every attach path (mention, add-to-channel, persona provisioning) shares
+    // this check rather than each caller threading presence in.
+    const availability =
+      input.agent.status === "deployed"
+        ? await fetchAgentAvailability(input.agent.pubkey)
+        : undefined;
+    if (!isManagedAgentLive(input.agent, availability)) {
       if (input.detachedStart) {
         input.detachedStart(input.agent);
       } else {
@@ -345,7 +344,6 @@ export async function provisionChannelManagedAgent(
       context.managedAgents,
       input.personaId,
       context.channelMemberPubkeys,
-      context.isActive,
     );
     if (reusable) {
       const definition = context.personas.find(
@@ -378,7 +376,6 @@ export async function provisionChannelManagedAgent(
       context.managedAgents,
       input.runtime.command,
       context.channelMemberPubkeys,
-      context.isActive,
     );
     if (reusable) {
       const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(

@@ -168,33 +168,3 @@ for (const locallyManaged of [true, false]) {
     assert.equal(Boolean(candidate.isManagedAgent), locallyManaged);
   });
 }
-
-test("a deployed managed agent ranks active only when the relay shows it present", () => {
-  const activeFor = (relayStatus) =>
-    buildMentionCandidates(
-      input({
-        managedAgents: [
-          {
-            pubkey: AGENT_PUBKEY,
-            name: "Slurms",
-            status: "deployed",
-            personaId: null,
-          },
-        ],
-        managedAgentNamesByPubkey: new Map([[AGENT_PUBKEY, "Slurms"]]),
-        mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
-        relayAgents: [
-          {
-            pubkey: AGENT_PUBKEY,
-            name: "Slurms",
-            ownerPubkey: null,
-            status: relayStatus,
-          },
-        ],
-      }),
-    ).find((candidate) => candidate.pubkey === AGENT_PUBKEY)?.isActiveAgent;
-
-  // The `deployed` receipt outlives a shut-down or reaped body.
-  assert.equal(activeFor("offline"), false);
-  assert.equal(activeFor("online"), true);
-});

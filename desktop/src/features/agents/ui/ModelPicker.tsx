@@ -14,8 +14,6 @@ import {
   subscribeControlResults,
 } from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
-import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
-import { useAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import {
   useAgentConfigSurface,
   managedAgentsQueryKey,
@@ -51,10 +49,7 @@ export function ModelPicker({
   const { data: configSurface } = useAgentConfigSurface(agent.pubkey);
   const queryClient = useQueryClient();
 
-  // A provider's `deployed` receipt outlives a shut-down or reaped body; an
-  // offline remote agent needs no restart prompt after a model change.
-  const { status: availability } = useAgentAvailability(agent.pubkey);
-  const isRunning = isManagedAgentLive(agent, availability);
+  const isRunning = agent.status === "running" || agent.status === "deployed";
   const activeTurns = useActiveAgentTurns(agent.pubkey);
   // A live switch rides the agent's running session(s) instead of persisting a
   // new default. It applies only to a persona-linked running agent with at

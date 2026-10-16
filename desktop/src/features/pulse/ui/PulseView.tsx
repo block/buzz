@@ -1,5 +1,3 @@
-import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
-import { useAgentAvailabilityLookup } from "@/features/agents/lib/useAgentAvailability";
 import { Search } from "lucide-react";
 import * as React from "react";
 
@@ -92,17 +90,6 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
 
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
-  // A provider's `deployed` receipt outlives a shut-down or reaped body, so
-  // its fallback status below reads presence rather than the receipt.
-  const deployedManagedPubkeys = React.useMemo(
-    () =>
-      (managedAgentsQuery.data ?? [])
-        .filter((agent) => agent.status === "deployed")
-        .map((agent) => agent.pubkey),
-    [managedAgentsQuery.data],
-  );
-  const { getAvailability: getManagedAvailability } =
-    useAgentAvailabilityLookup(deployedManagedPubkeys);
   const relayAgents = React.useMemo(() => {
     const agentsByPubkey = new Map<
       string,
@@ -121,19 +108,17 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
           channels: [],
           channelIds: [],
           capabilities: [],
-          status: isManagedAgentLive(
-            agent,
-            getManagedAvailability(agent.pubkey),
-          )
-            ? "online"
-            : "offline",
+          status:
+            agent.status === "running" || agent.status === "deployed"
+              ? "online"
+              : "offline",
           respondTo: agent.respondTo,
           respondToAllowlist: agent.respondToAllowlist,
         });
       }
     }
     return [...agentsByPubkey.values()];
-  }, [managedAgentsQuery.data, relayAgentsQuery.data, getManagedAvailability]);
+  }, [managedAgentsQuery.data, relayAgentsQuery.data]);
   const agentPubkeys = React.useMemo(
     () => relayAgents.map((a) => a.pubkey),
     [relayAgents],

@@ -26,30 +26,17 @@ export function resolveAgentAvailability(
 export async function fetchAgentAvailability(
   pubkey: string,
 ): Promise<PresenceStatus | undefined> {
-  return (await fetchAgentsAvailability([pubkey])).get(normalizePubkey(pubkey));
-}
-
-/** Batched {@link fetchAgentAvailability}: one presence read for many agents,
- * keyed by normalized pubkey. A failed read leaves every entry unknown. */
-export async function fetchAgentsAvailability(
-  pubkeys: readonly string[],
-): Promise<Map<string, PresenceStatus | undefined>> {
-  const normalized = [...new Set(pubkeys.map(normalizePubkey))];
-  const availability = new Map<string, PresenceStatus | undefined>();
-  if (normalized.length === 0) return availability;
+  const normalized = normalizePubkey(pubkey);
   try {
-    const lookup = await getPresence(normalized);
-    const connected = relayClient.getConnectionState() === "connected";
-    for (const pubkey of normalized) {
-      availability.set(
-        pubkey,
-        resolveAgentAvailability(lookup[pubkey], true, connected),
-      );
-    }
+    const lookup = await getPresence([normalized]);
+    return resolveAgentAvailability(
+      lookup[normalized],
+      true,
+      relayClient.getConnectionState() === "connected",
+    );
   } catch {
-    // Unknown, never offline: callers keep trusting the lifecycle receipt.
+    return undefined;
   }
-  return availability;
 }
 
 /** Positive presence blocks another start, but never grants lifecycle control.

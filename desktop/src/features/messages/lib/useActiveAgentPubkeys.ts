@@ -9,10 +9,11 @@ export function useActiveAgentPubkeys(
   return React.useMemo(
     () =>
       new Set([
-        // A provider's `deployed` receipt outlives a shut-down or reaped body,
-        // so remote activity comes from the relay directory entry below.
         ...(managedAgents ?? [])
-          .filter((agent) => agent.status === "running")
+          .filter(
+            (agent) =>
+              agent.status === "running" || agent.status === "deployed",
+          )
           .map((agent) => normalizePubkey(agent.pubkey)),
         ...(relayAgents ?? [])
           .filter(

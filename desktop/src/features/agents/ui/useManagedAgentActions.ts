@@ -28,6 +28,7 @@ import { removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
+  isManagedAgentActive,
   isManagedAgentLive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
@@ -417,9 +418,7 @@ export function useManagedAgentActions() {
 
   async function handleBulkStopRunning() {
     await runBulkAction(
-      managedAgents.filter((a) =>
-        isManagedAgentLive(a, getAvailability(a.pubkey)),
-      ),
+      managedAgents.filter((a) => isManagedAgentActive(a)),
       "Stop",
       "stop",
       async (a) => {

@@ -48,7 +48,6 @@ type AttachAgentToChannel = (input: {
   agent: ManagedAgent;
   role: "bot";
   detachedStart: (agent: ManagedAgent) => void;
-  availability?: PresenceStatus;
 }) => Promise<unknown>;
 
 type UseEnsureAgentMentionsReadyOptions = {
@@ -128,20 +127,23 @@ export function useEnsureAgentMentionsReady({
             wroteRelayState = true;
           }
           if (isCancelled()) break;
-          const availability =
-            readyAgent.status === "deployed"
-              ? await readAvailability(pubkey)
-              : undefined;
           if (participants.has(pubkey)) {
+            const availability =
+              readyAgent.status === "deployed"
+                ? await readAvailability(pubkey)
+                : undefined;
+            // The presence read awaited the relay; a send cancelled meanwhile
+            // must not queue a wake for a message that will never publish.
+            if (isCancelled()) break;
             if (mentionedAgentNeedsWake(readyAgent, availability)) {
               enqueueAgentWake(agentsToWake, readyAgent);
             }
           } else {
+            // The attach reads presence itself after the membership write.
             await attachAgentToChannel({
               channelId: capturedChannelId,
               agent: readyAgent,
               role: "bot",
-              availability,
               detachedStart: (agentToWake) =>
                 enqueueAgentWake(agentsToWake, agentToWake),
             });

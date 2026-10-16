@@ -56,15 +56,6 @@ export function isManagedAgentLive(
   return agent.status === "running";
 }
 
-/** Presence-aware liveness for ranking candidate instances, from a one-shot
- * availability read keyed by normalized pubkey (see `fetchAgentsAvailability`). */
-export function managedAgentActivityFrom(
-  availability: ReadonlyMap<string, PresenceStatus | undefined>,
-) {
-  return (agent: Pick<ManagedAgent, "pubkey" | "status">) =>
-    isManagedAgentLive(agent, availability.get(normalizePubkey(agent.pubkey)));
-}
-
 /** The status to display: a `deployed` receipt whose agent is established
  * offline reads as stopped, the same as a local agent that is not running. */
 export function displayedManagedAgentStatus(
