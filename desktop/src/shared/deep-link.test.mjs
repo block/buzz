@@ -27,8 +27,104 @@ globalThis.__TAURI_INTERNALS__ = tauriInternals;
 const {
   listenForEntityDeepLinks,
   listenForNavigationDeepLinks,
+  listenForNostrBindDeepLinks,
   resetNavigationDeepLinkDrain,
 } = await import("@/shared/deep-link.ts");
+
+for (const delivery of ["cold-start", "running-instance"]) {
+  test(`nostr-bind request is delivered and acknowledged after listener readiness: ${delivery}`, async () => {
+    const payload = {
+      challengeId: "550e8400-e29b-41d4-a716-446655440000",
+      nonce: "z".repeat(43),
+      verificationCode: "123456",
+      audience: "buzz:nostr-identity",
+      action: "bind_nostr_identity",
+      protocol: "buzz-nostr-identity",
+      version: "1",
+      origin: "https://example.com",
+      expiresAt: "2999-01-01T00:00:00Z",
+      returnMode: "clipboard",
+    };
+    const pending = { id: "pending-bind", payload };
+    const queue = delivery === "cold-start" ? [pending] : [];
+    const opened = [];
+    const acknowledged = [];
+    let notify;
+    ipcHandlers.set("plugin:event|listen", ({ handler }) => {
+      notify = callbacks.get(handler);
+      return handler;
+    });
+    ipcHandlers.set("plugin:event|unlisten", () => {});
+    ipcHandlers.set(
+      "take_pending_nostr_bind_deep_link",
+      () => queue[0] ?? null,
+    );
+    ipcHandlers.set("acknowledge_pending_nostr_bind_deep_link", ({ id }) => {
+      assert.equal(queue[0]?.id, id);
+      assert.equal(opened.length, acknowledged.length + 1);
+      acknowledged.push(id);
+      queue.shift();
+      return true;
+    });
+    const unlisten = await listenForNostrBindDeepLinks((next) => {
+      opened.push(next);
+      return true;
+    });
+    await settle();
+    if (delivery === "running-instance") {
+      queue.push(pending);
+      notify({ payload: pending });
+    }
+    await settle();
+    await settle();
+    assert.deepEqual(opened, [payload]);
+    assert.deepEqual(acknowledged, [pending.id]);
+    unlisten();
+  });
+}
+
+test("nostr-bind unmount before drain keeps the request for the next listener", async () => {
+  const payload = { challengeId: "first" };
+  const pending = { id: "pending-bind", payload };
+  const queue = [pending];
+  const firstTake = deferred();
+  const opened = [];
+  const acknowledged = [];
+  let takeCount = 0;
+  ipcHandlers.set("plugin:event|listen", ({ handler }) => handler);
+  ipcHandlers.set("plugin:event|unlisten", () => {});
+  ipcHandlers.set("take_pending_nostr_bind_deep_link", () => {
+    takeCount += 1;
+    return takeCount === 1 ? firstTake.promise : (queue[0] ?? null);
+  });
+  ipcHandlers.set("acknowledge_pending_nostr_bind_deep_link", ({ id }) => {
+    acknowledged.push(id);
+    queue.shift();
+    return true;
+  });
+
+  let cancelled = false;
+  const unlisten = await listenForNostrBindDeepLinks((next) => {
+    if (cancelled) return false;
+    opened.push(next);
+    return true;
+  });
+  cancelled = true;
+  unlisten();
+  firstTake.resolve(pending);
+  await settle();
+  assert.deepEqual(opened, []);
+  assert.deepEqual(acknowledged, []);
+
+  const nextUnlisten = await listenForNostrBindDeepLinks((next) => {
+    opened.push(next);
+    return true;
+  });
+  await settle();
+  assert.deepEqual(opened, [payload]);
+  assert.deepEqual(acknowledged, [pending.id]);
+  nextUnlisten();
+});
 
 function deferred() {
   let resolve;
