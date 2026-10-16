@@ -13,7 +13,7 @@ class ComposeMorphIcon extends StatelessWidget {
   final bool compose;
   final Color color;
 
-  /// Includes the button surface in the same rotation and scale as its icon.
+  /// Includes the button surface in the same scale pulse as its icon.
   final Widget Function(Widget icon)? surfaceBuilder;
 
   @override
@@ -39,12 +39,15 @@ class ComposeMorphIcon extends StatelessWidget {
                 size: const Size.square(24),
                 painter: _ComposePainter(progress, color),
               );
-        return Transform.rotate(
+        final rotatingIcon = Transform.rotate(
+          key: const ValueKey('compose-icon-rotation'),
           angle: progress * math.pi / 2,
-          child: Transform.scale(
-            scale: 1 + 0.08 * lift,
-            child: surfaceBuilder?.call(icon) ?? icon,
-          ),
+          child: icon,
+        );
+        return Transform.scale(
+          key: const ValueKey('compose-surface-scale'),
+          scale: 1 + 0.08 * lift,
+          child: surfaceBuilder?.call(rotatingIcon) ?? rotatingIcon,
         );
       },
     );
@@ -98,7 +101,7 @@ class _ComposePainter extends CustomPainter {
     canvas.save();
     canvas.scale(size.width / 24, size.height / 24);
     canvas.translate(12, 12);
-    // The whole button supplies the quarter-turn.
+    // The icon wrapper supplies the quarter-turn.
     final paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke

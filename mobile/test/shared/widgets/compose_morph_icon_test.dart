@@ -29,22 +29,20 @@ void main() {
     await tester.pumpWidget(app(true));
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.byIcon(BuzzIcons.edit), findsNothing);
-    final transforms = tester
-        .widgetList<Transform>(
-          find.descendant(
-            of: find.byType(ComposeMorphIcon),
-            matching: find.byType(Transform),
-          ),
-        )
-        .toList();
-    expect(transforms.first.transform.entry(1, 0), greaterThan(0));
-    expect(transforms.last.transform.entry(0, 0), greaterThan(1));
+    Transform rotation() => tester.widget<Transform>(
+      find.byKey(const ValueKey('compose-icon-rotation')),
+    );
+    expect(rotation().transform.entry(1, 0), greaterThan(0));
+    final scale = tester.widget<Transform>(
+      find.byKey(const ValueKey('compose-surface-scale')),
+    );
+    expect(scale.transform.entry(0, 0), greaterThan(1));
     expect(
       find.ancestor(
         of: find.byKey(const ValueKey('button-surface')),
-        matching: find.byWidget(transforms.last),
+        matching: find.byKey(const ValueKey('compose-icon-rotation')),
       ),
-      findsOneWidget,
+      findsNothing,
     );
     await tester.pumpWidget(app(false));
     await tester.pumpAndSettle();
@@ -52,42 +50,12 @@ void main() {
     await tester.pumpWidget(app(true));
     await tester.pumpAndSettle();
     expect(find.byIcon(BuzzIcons.edit), findsOneWidget);
-    final settled = tester.widget<Transform>(
-      find
-          .descendant(
-            of: find.byType(ComposeMorphIcon),
-            matching: find.byType(Transform),
-          )
-          .first,
-    );
-    expect(settled.transform.entry(1, 0), closeTo(1, 0.001));
-    expect(settled.transform.entry(0, 0), closeTo(0, 0.001));
+    expect(rotation().transform.entry(1, 0), closeTo(1, 0.001));
     await tester.pump(const Duration(milliseconds: 500));
-    expect(
-      tester
-          .widget<Transform>(
-            find
-                .descendant(
-                  of: find.byType(ComposeMorphIcon),
-                  matching: find.byType(Transform),
-                )
-                .first,
-          )
-          .transform
-          .entry(1, 0),
-      closeTo(1, 0.001),
-    );
+    expect(rotation().transform.entry(1, 0), closeTo(1, 0.001));
     await tester.pumpWidget(app(false));
     await tester.pump(const Duration(milliseconds: 100));
-    final reverse = tester.widget<Transform>(
-      find
-          .descendant(
-            of: find.byType(ComposeMorphIcon),
-            matching: find.byType(Transform),
-          )
-          .first,
-    );
-    expect(reverse.transform.entry(1, 0), inExclusiveRange(0, 1));
+    expect(rotation().transform.entry(1, 0), inExclusiveRange(0, 1));
     await tester.pumpWidget(app(false, reduced: true));
     await tester.pump();
     expect(find.byIcon(BuzzIcons.plus), findsOneWidget);
