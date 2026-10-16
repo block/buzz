@@ -778,17 +778,27 @@ impl RelayEventPublisher {
     }
 
     /// Test-only publisher pair: published events are forwarded to the
-    /// returned receiver instead of a live relay socket.
+    /// returned receiver instead of a live relay socket. An acknowledged
+    /// publish is accepted once it has been forwarded.
     #[cfg(test)]
     pub(crate) fn test_pair() -> (Self, mpsc::Receiver<Event>) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<RelayCommand>(64);
         let (event_tx, event_rx) = mpsc::channel(64);
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if let RelayCommand::PublishEvent { event } = cmd {
-                    if event_tx.send(*event).await.is_err() {
-                        break;
-                    }
+                let (event, ack) = match cmd {
+                    RelayCommand::PublishEvent { event } => (event, None),
+                    RelayCommand::PublishEventAcked { event, ack } => (event, Some(ack)),
+                    _ => continue,
+                };
+                if event_tx.send(*event).await.is_err() {
+                    break;
+                }
+                if let Some(ack) = ack {
+                    let _ = ack.send(PublishAck {
+                        accepted: true,
+                        message: String::new(),
+                    });
                 }
             }
         });
@@ -1425,6 +1435,13 @@ impl BgState {
         self.trim_gated_observer_pending();
     }
 
+    /// Drop every acknowledged-publish waiter: the socket that carried those
+    /// events is gone, so no `OK` will arrive and each waiter observes
+    /// non-delivery now instead of at its own timeout.
+    fn fail_pending_acks(&mut self) {
+        self.pending_acks.clear();
+    }
+
     /// Re-park a frame the relay explicitly refused, ahead of frames parked
     /// after the gate armed.
     ///
@@ -1591,9 +1608,9 @@ fn retain_deferred_command_intent(
 
 /// Execute a command on a live WebSocket connection.
 ///
-/// Handles the five data commands: Subscribe, Unsubscribe,
-/// SubscribeMembership, PublishEvent, SetStartupWatermark. Callers handle
-/// Shutdown and Reconnect for control flow before dispatching here.
+/// Handles the data commands (subscriptions, publishes, and the startup
+/// watermark). Callers handle Shutdown and Reconnect for control flow before
+/// dispatching here.
 ///
 /// Returns `true` if the command succeeded (or was a no-op). Returns `false`
 /// if a WebSocket send failed — the caller should treat this as a dead socket
@@ -1764,12 +1781,10 @@ async fn execute_connected_command(
             true
         }
         RelayCommand::PublishEventAcked { event, ack } => {
-            // A rate-gated or failed send drops `ack` unresolved, which the
-            // waiter observes as non-delivery — never as a relay acceptance.
-            if state.check_rate_gate().is_some() {
-                debug!("rate-gated: dropping acknowledged PublishEvent");
-                return true;
-            }
+            // Sent even while rate-gated: the caller is waiting on this one
+            // event (the shutdown `offline`), and a gated relay answers with a
+            // refusing `OK`, which is still a verdict. A failed send drops
+            // `ack` unresolved, which the waiter observes as non-delivery.
             if send_publish_event_frame(ws, &event).await {
                 state.pending_acks.retain(|_, waiter| !waiter.is_closed());
                 state.pending_acks.insert(event.id.to_hex(), ack);
@@ -3157,6 +3172,7 @@ async fn try_autonomous_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    state.fail_pending_acks();
     // 5 attempts, up to 16s base backoff. Shares delay values with the
     // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
     // see its doc comment for how the two loops consume the array differently.
@@ -3288,6 +3304,7 @@ async fn wait_for_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    state.fail_pending_acks();
     if !skip_drain {
         // Drain commands until we get Reconnect (or Shutdown).
         // Other commands update state so reconnect reflects latest intent.
@@ -6628,7 +6645,7 @@ mod tests {
         );
     }
 
-    /// Build a signed observer telemetry frame (kind 24200) for gate tests.
+    /// Build a signed presence event (kind 20001) for acknowledged-publish tests.
     fn make_presence_event(keys: &Keys, status: &str) -> Event {
         EventBuilder::new(
             Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16),
@@ -6765,16 +6782,15 @@ mod tests {
         );
     }
 
-    /// With no socket, or while rate-gated, nothing is sent and the waiter
-    /// learns of non-delivery immediately instead of timing out or succeeding.
+    /// With no socket, nothing is sent and the waiter learns of non-delivery
+    /// immediately instead of timing out or succeeding.
     #[tokio::test]
-    async fn acked_publish_that_is_not_sent_reports_non_delivery() {
+    async fn acked_publish_without_a_socket_reports_non_delivery() {
         let keys = Keys::generate();
-
-        let mut disconnected = BgState::new();
+        let mut state = BgState::new();
         let (ack, mut ack_rx) = oneshot::channel();
         apply_command_to_state(
-            &mut disconnected,
+            &mut state,
             RelayCommand::PublishEventAcked {
                 event: Box::new(make_presence_event(&keys, "offline")),
                 ack,
@@ -6784,14 +6800,49 @@ mod tests {
             ack_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
         ));
+    }
 
+    /// The shutdown `offline` is the one event its caller waits on, so it is
+    /// sent through an armed rate gate: a gated relay still answers with `OK`.
+    #[tokio::test]
+    async fn acked_publish_is_sent_while_rate_gated() {
         let (mut client, mut server) = test_ws_pair().await;
-        let mut gated = BgState::new();
-        gated.rate_limit_gate = Some(tokio::time::Instant::now() + Duration::from_secs(60));
+        let mut state = BgState::new();
+        state.rate_limit_gate = Some(tokio::time::Instant::now() + Duration::from_secs(60));
+        let keys = Keys::generate();
+        let offline = make_presence_event(&keys, "offline");
         let (ack, mut ack_rx) = oneshot::channel();
         execute_connected_command(
             &mut client,
-            &mut gated,
+            &mut state,
+            "agent-pubkey",
+            RelayCommand::PublishEventAcked {
+                event: Box::new(offline.clone()),
+                ack,
+            },
+        )
+        .await;
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[1]["id"], offline.id.to_hex());
+        assert!(
+            ack_rx.try_recv().is_err(),
+            "a gated publish still waits for its verdict"
+        );
+        assert!(state.pending_acks.contains_key(&offline.id.to_hex()));
+    }
+
+    /// A socket lost after the write can never deliver the `OK`: entering
+    /// reconnect resolves the waiter as non-delivery rather than leaving it
+    /// to the caller's timeout.
+    #[tokio::test]
+    async fn acked_publish_reports_non_delivery_when_the_connection_drops() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let (ack, mut ack_rx) = oneshot::channel();
+        execute_connected_command(
+            &mut client,
+            &mut state,
             "agent-pubkey",
             RelayCommand::PublishEventAcked {
                 event: Box::new(make_presence_event(&keys, "offline")),
@@ -6799,18 +6850,37 @@ mod tests {
             },
         )
         .await;
+        next_test_frame(&mut server).await;
+        assert!(ack_rx.try_recv().is_err());
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        cmd_tx
+            .send(RelayCommand::Shutdown)
+            .await
+            .expect("queue shutdown");
+        let (event_tx, _event_rx) = mpsc::channel::<Option<BuzzEvent>>(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel::<Event>(4);
+        let outcome = wait_for_reconnect(
+            &mut client,
+            &mut cmd_rx,
+            &mut state,
+            &keys,
+            "wss://relay.test",
+            "agent-pubkey",
+            &event_tx,
+            &observer_control_tx,
+            false,
+            None,
+        )
+        .await;
+        assert!(matches!(outcome, ReconnectOutcome::Shutdown));
         assert!(matches!(
             ack_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
         ));
-        assert!(
-            timeout(Duration::from_millis(50), server.next())
-                .await
-                .is_err(),
-            "a rate-gated acknowledged publish must not reach the wire"
-        );
     }
 
+    /// Build a signed observer telemetry frame (kind 24200) for gate tests.
     fn make_observer_frame(keys: &Keys) -> Event {
         let recipient = Keys::generate();
         let encrypted = buzz_core::observer::encrypt_observer_payload(

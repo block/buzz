@@ -2459,6 +2459,34 @@ fn idle_pool_sleep_due(
 }
 
 #[cfg(test)]
+mod offline_presence_tests {
+    use super::*;
+    use nostr::Keys;
+
+    /// Shutdown closes the socket right after this returns, so it must go
+    /// through the acknowledged publish: a fire-and-forget send would return
+    /// before the relay has processed the event and lose the race to the close.
+    #[tokio::test]
+    async fn offline_presence_waits_for_the_relay_verdict() {
+        let (publisher, mut published_rx) = relay::RelayEventPublisher::test_pair();
+        let keys = Keys::generate();
+
+        let ack = publish_offline_presence(&publisher, &keys)
+            .await
+            .expect("acknowledged publish resolves");
+        assert!(ack.accepted);
+
+        let event = published_rx.recv().await.expect("offline was published");
+        assert_eq!(
+            event.kind.as_u16() as u32,
+            buzz_core::kind::KIND_PRESENCE_UPDATE
+        );
+        assert_eq!(event.content, "offline");
+        assert_eq!(event.pubkey, keys.public_key());
+    }
+}
+
+#[cfg(test)]
 mod inactivity_tests {
     use super::*;
 
