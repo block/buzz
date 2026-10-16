@@ -148,8 +148,6 @@ export function AddTeamToChannelDialog({
           model: persona.model ?? undefined,
           personaId: persona.id,
           teamId: team.id,
-          // One persona can be deployed under multiple teams with different instructions.
-          forceNewInstance: true,
           role,
         };
       });
