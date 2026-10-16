@@ -34,6 +34,9 @@ pub struct RelayInfo {
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
+    /// Current shared-session audience authority, bound to the request community.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience_authority: Option<serde_json::Value>,
     /// Opt-in, host-bound private accessory API; separate from legacy NIP-RS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buzz_v1: Option<BuzzV1Descriptor>,
@@ -278,6 +281,7 @@ impl RelayInfo {
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
+            audience_authority: None,
             buzz_v1: None,
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
@@ -399,6 +403,11 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
                 eligible_kinds: ELIGIBLE_KINDS,
             });
         }
+        info.audience_authority = Some(serde_json::json!({
+            "version": 1,
+            "community_id": tenant.community().as_uuid(),
+            "max_sources": buzz_db::audience_authority::MAX_SOURCES,
+        }));
         info.read_state_snapshot = Some(serde_json::json!({
             "version": 1,
             "community_id": tenant.community().as_uuid(),

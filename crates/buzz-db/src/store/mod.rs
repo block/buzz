@@ -81,3 +81,6 @@ mod artifact_postgres_tests;
 
 #[cfg(test)]
 mod admission_postgres_tests;
+
+/// Current shared-session audience authority.
+pub mod audience_authority;

@@ -3,6 +3,7 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod audience_authority;
 mod read_state_snapshot;
 
 use std::sync::Arc;
@@ -1475,6 +1476,10 @@ async fn query_events_authed(
             StatusCode::FORBIDDEN,
             "restricted: author-only kinds require authors=[self]",
         ));
+    }
+
+    if audience_authority::requested(&raw_filters) {
+        return audience_authority::query(state, tenant, &pubkey, &raw_filters).await;
     }
 
     if thread_windows.iter().any(Option::is_some) {
