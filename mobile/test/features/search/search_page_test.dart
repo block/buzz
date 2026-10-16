@@ -61,7 +61,7 @@ void main() {
         expect(find.text('Search'), findsNothing);
         expect(find.text('Cancel'), findsNothing);
         expect(fieldRect.top, greaterThanOrEqualTo(59));
-        expect(tester.getRect(close).left, greaterThan(fieldRect.right));
+        expect(tester.getRect(close).right, lessThan(fieldRect.left));
         expect(tester.getSize(close), const Size(48, 48));
         for (final label in ['All', 'Messages', 'Channels', 'People']) {
           expect(
