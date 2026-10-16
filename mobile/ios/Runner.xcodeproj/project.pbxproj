@@ -756,6 +756,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -775,6 +776,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
@@ -795,6 +797,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -813,6 +816,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -945,6 +949,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -969,6 +974,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -995,6 +1001,7 @@
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
 				OTHER_LDFLAGS = "";
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1020,6 +1027,7 @@
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
 				OTHER_LDFLAGS = "";
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1045,6 +1053,7 @@
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
 				OTHER_LDFLAGS = "";
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
