@@ -295,6 +295,11 @@ impl Db {
     /// Operator-plane callers must authenticate before exposing this cross-tenant read.
     #[datastore_span(name = "list_communities_joined_by", system = "postgresql")]
     pub async fn list_communities_joined_by(&self, pubkey: &str) -> Result<Vec<CommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
         let rows = sqlx::query(
             r#"
             SELECT c.id, c.host FROM communities c
@@ -308,7 +313,7 @@ impl Db {
             "#,
         )
         .bind(pubkey.to_ascii_lowercase())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?;
         rows.into_iter()
             .map(|row| {
