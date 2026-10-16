@@ -45,6 +45,11 @@ pub enum EngramError {
     /// Event failed *Head selection* rule (1) — tag shape or addressing.
     #[error("invalid envelope: {0}")]
     InvalidEnvelope(String),
+    /// A supplied pubkey is not a point on the secp256k1 curve, so no
+    /// conversation key exists for it. `PublicKey::from_hex` accepts any
+    /// 32 bytes; only the ECDH step rejects a non-curve x-coordinate.
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
     /// NIP-44 decryption failed.
     #[error("decrypt failed")]
     Decrypt,
@@ -133,8 +138,24 @@ pub fn normalize_slug(raw: &str) -> Result<String, EngramError> {
 /// Derive the conversation key `K_c` for the agent ↔ owner pair (NIP-44 v2).
 ///
 /// `K_c` is symmetric: `derive(seckey_a, pubkey_o) == derive(seckey_o, pubkey_a)`.
-pub fn conversation_key(my_seckey: &SecretKey, their_pubkey: &PublicKey) -> ConversationKey {
-    ConversationKey::derive(my_seckey, their_pubkey).expect("valid keys produce conversation key")
+///
+/// Fallible because a `PublicKey` is *not* proof of a curve point:
+/// `PublicKey::from_hex` only hex-decodes 32 bytes ([`nostr`] 0.44
+/// `key/public_key.rs`), while ECDH needs the x-only key to lift to a real
+/// point. An x-coordinate with no corresponding y (e.g. `00…05`) reaches
+/// this function intact and fails here, so every caller that accepts a
+/// pubkey from user input MUST surface [`EngramError::InvalidKey`] rather
+/// than unwrap it.
+pub fn conversation_key(
+    my_seckey: &SecretKey,
+    their_pubkey: &PublicKey,
+) -> Result<ConversationKey, EngramError> {
+    ConversationKey::derive(my_seckey, their_pubkey).map_err(|e| {
+        EngramError::InvalidKey(format!(
+            "{} is not a valid secp256k1 public key: {e}",
+            their_pubkey.to_hex()
+        ))
+    })
 }
 
 /// Compute the `d` tag for a slug under a conversation key.
@@ -449,7 +470,7 @@ pub fn build_event(
     let plaintext_str = std::str::from_utf8(&plaintext)
         .map_err(|e| EngramError::Encrypt(format!("body JSON not UTF-8: {e}")))?;
 
-    let k_c = conversation_key(agent_keys.secret_key(), owner_pubkey);
+    let k_c = conversation_key(agent_keys.secret_key(), owner_pubkey)?;
     let ciphertext = nip44::encrypt(
         agent_keys.secret_key(),
         owner_pubkey,
@@ -546,7 +567,7 @@ pub fn validate_and_decrypt(
     let body = Body::from_json_bytes(plaintext.as_bytes())?;
 
     // Rule (4): body slug re-derives to the event's d tag.
-    let k_c = conversation_key(my_seckey, their_pubkey);
+    let k_c = conversation_key(my_seckey, their_pubkey)?;
     let derived = d_tag(&k_c, body.slug());
     if derived != d_value {
         return Err(EngramError::InvalidEnvelope(
@@ -636,17 +657,111 @@ mod tests {
     fn conversation_key_matches_spec() {
         let a = keys_from_hex(SECKEY_A);
         let o = keys_from_hex(SECKEY_O);
-        let k_c_ao = conversation_key(a.secret_key(), &o.public_key());
-        let k_c_oa = conversation_key(o.secret_key(), &a.public_key());
+        let k_c_ao = conversation_key(a.secret_key(), &o.public_key()).unwrap();
+        let k_c_oa = conversation_key(o.secret_key(), &a.public_key()).unwrap();
         assert_eq!(hex::encode(k_c_ao.as_bytes()), K_C_HEX, "agent-side K_c");
         assert_eq!(hex::encode(k_c_oa.as_bytes()), K_C_HEX, "owner-side K_c");
+    }
+
+    /// `PublicKey::from_hex` accepts any 32 bytes, so an x-coordinate with no
+    /// curve point reaches `conversation_key` intact. It must return
+    /// `InvalidKey` rather than panic. Discriminating pair: on secp256k1
+    /// `x = 1` lifts to a point and `x = 5` does not, so the only difference
+    /// between these two inputs is curve membership.
+    #[test]
+    fn conversation_key_rejects_off_curve_pubkey() {
+        let a = keys_from_hex(SECKEY_A);
+        let on_curve = PublicKey::from_hex(&format!("{:0>64}", 1)).unwrap();
+        let off_curve = PublicKey::from_hex(&format!("{:0>64}", 5)).unwrap();
+
+        // Positive control: without it, an always-Err implementation would
+        // also pass the negative assertion below.
+        assert!(
+            conversation_key(a.secret_key(), &on_curve).is_ok(),
+            "x=1 is on-curve and must derive"
+        );
+
+        let err = conversation_key(a.secret_key(), &off_curve).unwrap_err();
+        assert!(
+            matches!(err, EngramError::InvalidKey(_)),
+            "expected InvalidKey, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains(&off_curve.to_hex()),
+            "message must name the offending key: {err}"
+        );
+    }
+
+    /// The same off-curve key must not panic through `build_event`, which
+    /// derives `K_c` for the `d` tag before encrypting.
+    ///
+    /// `validate_and_decrypt` also derives `K_c` (head-selection rule 4), but
+    /// `nip44::decrypt` runs first and derives the same key internally, so an
+    /// off-curve peer surfaces there as `Decrypt`; its `?` is defensive depth,
+    /// not a separately reachable path. Pinned by
+    /// `off_curve_peer_in_validate_and_decrypt_is_decrypt_error` below.
+    #[test]
+    fn off_curve_owner_is_an_error_not_a_panic_in_build_event() {
+        let a = keys_from_hex(SECKEY_A);
+        let off_curve = PublicKey::from_hex(&format!("{:0>64}", 5)).unwrap();
+        let body = Body::Core {
+            profile: "x".into(),
+        };
+
+        // Positive control on the same body: a real owner key succeeds.
+        let o = keys_from_hex(SECKEY_O);
+        assert!(build_event(&a, &o.public_key(), &body, 1_700_000_000).is_ok());
+
+        let err = build_event(&a, &off_curve, &body, 1_700_000_000).unwrap_err();
+        assert!(
+            matches!(err, EngramError::InvalidKey(_)),
+            "expected InvalidKey, got: {err:?}"
+        );
+    }
+
+    /// Documents which error an off-curve *peer* key actually produces on the
+    /// read path, so a future reader doesn't assume `InvalidKey`: NIP-44
+    /// decrypt fails before rule (4) re-derives `K_c`. Either way it does not
+    /// panic, which is the property under test.
+    #[test]
+    fn off_curve_peer_in_validate_and_decrypt_is_decrypt_error() {
+        let a = keys_from_hex(SECKEY_A);
+        let o = keys_from_hex(SECKEY_O);
+        let off_curve = PublicKey::from_hex(&format!("{:0>64}", 5)).unwrap();
+        let body = Body::Core {
+            profile: "x".into(),
+        };
+        let ev = build_event(&a, &o.public_key(), &body, 1_700_000_000).unwrap();
+
+        // Positive control: the real pair validates.
+        assert!(validate_and_decrypt(
+            &ev,
+            &a.public_key(),
+            &o.public_key(),
+            a.secret_key(),
+            &o.public_key()
+        )
+        .is_ok());
+
+        let err = validate_and_decrypt(
+            &ev,
+            &a.public_key(),
+            &o.public_key(),
+            a.secret_key(),
+            &off_curve,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EngramError::Decrypt),
+            "expected Decrypt, got: {err:?}"
+        );
     }
 
     #[test]
     fn d_tags_match_spec() {
         let a = keys_from_hex(SECKEY_A);
         let o = keys_from_hex(SECKEY_O);
-        let k_c = conversation_key(a.secret_key(), &o.public_key());
+        let k_c = conversation_key(a.secret_key(), &o.public_key()).unwrap();
         assert_eq!(d_tag(&k_c, "core"), D_CORE);
         assert_eq!(d_tag(&k_c, "mem/example"), D_EXAMPLE);
         assert_eq!(d_tag(&k_c, "mem/notes/2026-05-12"), D_NOTES);
