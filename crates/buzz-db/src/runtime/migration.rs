@@ -709,7 +709,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 65);
+        assert_eq!(migrations.len(), 66);
         assert_eq!(migrations[64].version, 65);
         let retire_ttl = strip_sql_comments(migrations[64].sql.as_str());
         for statement in [
@@ -741,8 +741,8 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE FUNCTION profile_name_fields"));
-        assert_eq!(migrations[64].version, 65);
-        assert!(migrations[64]
+        assert_eq!(migrations[65].version, 66);
+        assert!(migrations[65]
             .sql
             .as_str()
             .contains("CREATE TABLE community_nip_fi_issuers"));
@@ -2308,10 +2308,10 @@ mod postgres_tests {
         }
         expected_fences.extend(personal.fence_attachments);
         expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
-        // 0065 fences the NIP-FI issuer bindings table.
+        // 0066 fences the NIP-FI issuer bindings table.
         assert!(MIGRATOR
             .iter()
-            .find(|m| m.version == 65)
+            .find(|m| m.version == 66)
             .expect("NIP-FI binding migration")
             .sql
             .as_str()
