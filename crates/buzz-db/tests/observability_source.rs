@@ -2853,29 +2853,36 @@ fn single_table_guard_violations(
         if ["update", "delete from"]
             .iter()
             .any(|verb| !sql_table_suffixes(&sql, verb, "community_deletion_approvals").is_empty())
+            || !sql_update_sets(&sql, "community_deletion_approvals").is_empty()
         {
-            reject("approval UPDATE or DELETE");
+            reject("approval UPDATE, upsert or DELETE");
         }
-        let manifest_writes: usize = ["insert into", "update", "delete from"]
-            .iter()
-            .map(|verb| sql_table_suffixes(&sql, verb, "community_deletion_manifest_keys").len())
-            .sum();
+        let manifest = "community_deletion_manifest_keys";
+        let manifest_updates = sql_table_suffixes(&sql, "update", manifest).len();
+        let manifest_writes = manifest_updates
+            + sql_table_suffixes(&sql, "insert into", manifest).len()
+            + sql_table_suffixes(&sql, "delete from", manifest).len();
         if manifest_writes > 0 {
-            let sets = sql_update_sets(&sql, "community_deletion_manifest_keys");
-            let deletion_stamp = header.starts_with("pub async fn mark_manifest_chunk_deleted(")
+            // Chunk content never changes. The only UPDATE is the one-way
+            // `deleted_at` stamp, held to the same plain-conjunct rule as guards.
+            let sets = sql_update_sets(&sql, manifest);
+            let deletion_stamp = path == DELETION_STORE_PATH
+                && header.starts_with("pub async fn mark_manifest_chunk_deleted(")
                 && manifest_writes == 1
+                && manifest_updates == 1
                 && sets.len() == 1
-                && sql_assigned_columns(sets[0].0) == ["deleted_at"]
-                && sets[0].1.contains("and deleted_at is null");
+                && sets[0].0.trim() == "deleted_at = now()"
+                && plain_guard(sets[0].1, "request_id = $1")
+                && plain_guard(sets[0].1, "deleted_at is null");
+            let guarded = code.contains("guard_manifest_chunk_write(");
             if deletion_stamp {
                 rule_hits[1].push(name.to_owned());
-            } else if code.contains("guard_manifest_chunk_write(") {
+            } else if manifest_updates > 0 || !sets.is_empty() {
+                reject("manifest chunk UPDATE other than the one-way deleted_at stamp");
+            } else if path == DELETION_STORE_PATH && guarded {
                 rule_hits[2].push(name.to_owned());
-            }
-            if path != DELETION_STORE_PATH
-                || !(code.contains("guard_manifest_chunk_write(") || deletion_stamp)
-            {
-                reject("manifest chunk writer must use guard_manifest_chunk_write or the deleted_at-only stamp");
+            } else {
+                reject("manifest chunk INSERT or DELETE must use guard_manifest_chunk_write");
             }
         }
     }
@@ -3151,6 +3158,7 @@ fn single_table_policy_rejects_approval_mutations() {
     for sql in [
         "UPDATE community_deletion_approvals SET approved_by = $1 WHERE request_id = $2",
         "DELETE FROM community_deletion_approvals WHERE request_id = $1",
+        "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT (request_id) DO UPDATE SET note = EXCLUDED.note",
     ] {
         let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
         assert_eq!(
@@ -3160,13 +3168,20 @@ fn single_table_policy_rejects_approval_mutations() {
             "{sql}"
         );
     }
+    let append = r#"async fn approve() {
+        query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2)");
+        query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT (request_id) DO NOTHING");
+    }"#;
+    assert!(
+        single_table_guard_violations(DELETION_STORE_PATH, append, &mut Default::default())
+            .is_empty()
+    );
 }
 
 #[test]
 fn single_table_policy_rejects_unguarded_manifest_writers() {
     for sql in [
         "INSERT INTO community_deletion_manifest_keys (keys) VALUES ($1)",
-        "UPDATE community_deletion_manifest_keys SET keys = $1 WHERE request_id = $2",
         "DELETE FROM community_deletion_manifest_keys WHERE request_id = $1",
     ] {
         let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
@@ -3206,31 +3221,64 @@ fn single_table_policy_rejects_unguarded_manifest_writers() {
             1
         );
     }
+}
+
+#[test]
+fn single_table_policy_rejects_manifest_content_updates() {
+    // The chunk guard admits INSERT and DELETE only: content never changes.
+    for sql in [
+        "UPDATE community_deletion_manifest_keys SET keys = $1 WHERE request_id = $2",
+        "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no, keys) VALUES ($1, $2, $3) ON CONFLICT (request_id, chunk_no) DO UPDATE SET keys = EXCLUDED.keys",
+    ] {
+        let source = format!("async fn append() {{ guard_manifest_chunk_write(); query(\"{sql}\"); }}");
+        let violations =
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default());
+        assert_eq!(violations.len(), 1, "{sql}: {violations:?}");
+        assert!(violations[0].contains("other than the one-way deleted_at stamp"));
+    }
+}
+
+#[test]
+fn single_table_policy_holds_the_manifest_stamp_to_plain_conjuncts() {
     let stamp = r#"pub async fn mark_manifest_chunk_deleted() {
-        query("UPDATE community_deletion_manifest_keys SET deleted_at = now() WHERE request_id = $1 AND deleted_at IS NULL");
+        query("UPDATE community_deletion_manifest_keys SET deleted_at = now() WHERE request_id = $1 AND chunk_no = $2 AND deleted_at IS NULL");
     }"#;
-    assert!(
-        single_table_guard_violations(DELETION_STORE_PATH, stamp, &mut Default::default())
-            .is_empty()
-    );
-    let repeatable_stamp = stamp.replace(" AND deleted_at IS NULL", "");
+    let mut hits: [Vec<String>; 5] = Default::default();
+    assert!(single_table_guard_violations(DELETION_STORE_PATH, stamp, &mut hits).is_empty());
+    assert_eq!(hits[1], ["mark_manifest_chunk_deleted"]);
+    for (from, to) in [
+        (" AND deleted_at IS NULL", ""),
+        ("deleted_at = now()", "deleted_at = now(), keys = $3"),
+        ("deleted_at = now()", "deleted_at = NULL"),
+        ("deleted_at IS NULL", "deleted_at IS NULL OR true"),
+        (
+            "chunk_no = $2 AND deleted_at IS NULL",
+            "chunk_no IN (SELECT chunk_no FROM chunks WHERE request_id = $1 AND deleted_at IS NULL)",
+        ),
+        ("request_id = $1 AND ", ""),
+    ] {
+        let weakened = stamp.replace(from, to);
+        assert_ne!(weakened, stamp);
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &weakened, &mut Default::default())
+                .len(),
+            1,
+            "{weakened}"
+        );
+    }
+    let guarded_elsewhere = stamp.replace("mark_manifest_chunk_deleted", "restamp");
     assert_eq!(
         single_table_guard_violations(
             DELETION_STORE_PATH,
-            &repeatable_stamp,
+            &guarded_elsewhere,
             &mut Default::default()
         )
         .len(),
         1
     );
-    let mutating_stamp = stamp.replace("deleted_at = now()", "deleted_at = now(), keys = $2");
     assert_eq!(
-        single_table_guard_violations(
-            DELETION_STORE_PATH,
-            &mutating_stamp,
-            &mut Default::default()
-        )
-        .len(),
+        single_table_guard_violations("buzz-relay/src/bypass.rs", stamp, &mut Default::default())
+            .len(),
         1
     );
 }
