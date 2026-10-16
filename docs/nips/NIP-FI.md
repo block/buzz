@@ -139,8 +139,9 @@ NOT issue an agent assertion while the owner is not authorized by the issuer.
 A relay advertising `agent_assertions: true` MUST verify `nostr_owner_pubkey`
 as part of the assertion.  A malformed value, or one equal to `nostr_pubkey`,
 MUST deny `evidence_rejected`.  The relay MUST record the value as the
-owner of the session or request the assertion admits.  If the relay already associates a different owner with the
-asserted key in the resolved community, it MUST deny `authorization_denied`.
+owner of the session or request the assertion admits.  If the relay already
+associates a different owner with the asserted key in the resolved community,
+it MUST deny `authorization_denied`.
 For every agent assertion, regardless of whether the asserted key is itself
 authorized in the community, the relay MUST deny when the community bans the
 asserted key or the owner, or when the issuer has denied either key.  Only
@@ -309,8 +310,9 @@ On WebSocket upgrade:
    ensures any connection that straddles a concurrent disconnect is caught by
    one side or the other: either the close scan sees the registered session, or
    the deny-set check (step 7) sees the inserted entry.  Both checks use the
-   same keys: `(iss, k)` and, for a session with an owner, `(iss, o)`.  A concurrent disconnect close scan MAY cancel this
-   registered connection before step 8; cancellation is terminal, so a
+   same keys: `(iss, k)` and, for a session with an owner,
+   `(iss, verified.owner)`.  A concurrent disconnect close scan MAY cancel
+   this registered connection before step 8; cancellation is terminal, so a
    cancelled connection MUST NOT be admitted.
 7. Check the deny set for `(iss, k)` and, if `verified.owner` is present, for
    `(iss, verified.owner)`.  Either active entry (`now < until`) denies
@@ -384,8 +386,9 @@ A disconnect call causes the relay to:
    `503`; no sessions are closed and no replay state is consumed.
 2. Close all live WebSocket connections registered under the command's issuer
    whose proven `k` equals the target pubkey or whose recorded owner equals
-   the target pubkey, whether or not admission has completed, synchronously.  Disconnect cancellation is terminal: a cancelled
-   in-progress connection MUST NOT be subsequently admitted.  Connections
+   the target pubkey, whether or not admission has completed, synchronously.
+   Disconnect cancellation is terminal: a cancelled in-progress connection
+   MUST NOT be subsequently admitted.  Connections
    registered under another issuer are not affected.
 
 The deny set is held **in relay memory only** — no durable storage, no schema
