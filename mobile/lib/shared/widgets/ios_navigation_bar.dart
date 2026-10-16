@@ -9,6 +9,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
+import '../theme/theme_extensions.dart';
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
 import 'app_route_observer.dart';
@@ -34,6 +35,7 @@ class IosNavigationAction {
     this.avatarHidden = false,
 
     this.plain = false,
+    this.sharesBackground = true,
   });
 
   final String label;
@@ -60,6 +62,9 @@ class IosNavigationAction {
   /// Omits the shared Liquid Glass background for a text-only action.
   final bool plain;
 
+  /// Whether this action can share its glass background with adjacent actions.
+  final bool sharesBackground;
+
   Map<String, Object?> _encode(String id) => {
     'id': id,
     'label': label,
@@ -76,6 +81,7 @@ class IosNavigationAction {
     'avatarHidden': avatarHidden,
 
     'plain': plain,
+    'sharesBackground': sharesBackground,
     'children': [
       for (var i = 0; i < children.length; i++) children[i]._encode('$id.$i'),
     ],
@@ -296,6 +302,7 @@ class IosNavigationBar extends HookConsumerWidget {
 
     final payload = <String, Object?>{
       'title': title,
+      'safeTop': MediaQuery.viewPaddingOf(context).top,
       'subtitle': subtitle,
       'ephemeralLabel': ephemeralLabel,
       'titleAvatar': titleAvatar == null
@@ -311,6 +318,7 @@ class IosNavigationBar extends HookConsumerWidget {
         for (var i = 0; i < actions.length; i++) encodeAction(actions[i], '$i'),
       ],
       'background': colors.surface.toARGB32(),
+      'controlBackground': context.controlSurface.toARGB32(),
       'dark': Theme.of(context).brightness == Brightness.dark,
       'foreground': (foregroundColor ?? Theme.of(context).colorScheme.onSurface)
           .toARGB32(),
@@ -397,13 +405,15 @@ class IosNavigationBar extends HookConsumerWidget {
     }, [channel.value, signature]);
 
     useEffect(() {
+      // UIKit owns its collapse range. Send real page depth so a changed native
+      // inset cannot leave a deeply scrolled page short of the collapse point.
       void sync() {
         final current = channel.value;
         if (current != null) {
           unawaited(
             current.invokeMethod<void>(
               'scroll',
-              (offset?.value ?? 0).clamp(0.0, collapseRange),
+              (offset?.value ?? 0).clamp(0.0, double.infinity),
             ),
           );
         }
@@ -431,7 +441,7 @@ class IosNavigationBar extends HookConsumerWidget {
           // depth before asking UIKit to lay out the revealed navigation bar.
           await current.invokeMethod<void>(
             'scroll',
-            (offset?.value ?? 0).clamp(0.0, collapseRange),
+            (offset?.value ?? 0).clamp(0.0, double.infinity),
           );
           if (!active || route?.isCurrent != true) return;
           await current.invokeMethod<void>('prepareForReveal');
@@ -440,18 +450,27 @@ class IosNavigationBar extends HookConsumerWidget {
         }
       }
 
-      final observer = _NavigationRevealObserver(() {
-        // didPopNext is independent of route transition compatibility. Defer
-        // until Flutter has painted the uncovered platform view for this frame.
+      void scheduleRestore() {
+        // Restore at reveal and again after the covering route exits. Route
+        // transforms can change UIKit's safe-area layout during transitions.
+        // The initial didPopNext alone runs before that transform has settled.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           unawaited(restoreOnReveal());
         });
         WidgetsBinding.instance.ensureVisualUpdate();
-      });
-      if (route != null) appRouteObserver.subscribe(observer, route);
+      }
+
+      final observer = _NavigationRevealObserver(scheduleRestore);
+      if (route != null) {
+        appRouteObserver.subscribe(observer, route);
+        appRouteObserver.addRevealListener(route, scheduleRestore);
+      }
       return () {
         active = false;
         appRouteObserver.unsubscribe(observer);
+        if (route != null) {
+          appRouteObserver.removeRevealListener(route, scheduleRestore);
+        }
       };
     }, [channel.value, offset, collapseRange, route]);
 

@@ -50,7 +50,7 @@ class AgentActivityCard extends HookConsumerWidget {
                     AvatarImage(
                       imageUrl: profile?.avatarUrl,
                       radius: 18,
-                      backgroundColor: context.colors.primaryContainer,
+                      backgroundColor: context.controlSurface,
                       fallback: const Icon(BuzzIcons.bot, size: 18),
                       isAgent: true,
                     ),

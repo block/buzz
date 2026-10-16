@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		DAAB00000000000000000001 /* NativeTabler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAB00000000000000000002; };
 		4A71C0192F40D00100A17E02 /* MeAvatarLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */; };
 		C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000002 /* NativeConfirmationDialog.swift */; };
 		C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000022 /* NativePresenceMenu.swift */; };
@@ -94,6 +95,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		DAAB00000000000000000002 /* NativeTabler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTabler.swift; sourceTree = "<group>"; };
 		4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeAvatarLoader.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000002 /* NativeConfirmationDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeConfirmationDialog.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000022 /* NativePresenceMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePresenceMenu.swift; sourceTree = "<group>"; };
@@ -276,6 +278,7 @@
 				BZZ00000000000000000027 /* PushEndpointGrantStore.swift */,
 				BZZ0000000000000000002A /* PushSnapshotBridge.swift */,
 				DCAF00000000000000000002 /* IosNavigationBar.swift */,
+				DAAB00000000000000000002 /* NativeTabler.swift */,
 				331C809A294A618700263BE5 /* MediaSanitizer.swift */,
 				4A71C0022F40100100A17E01 /* InlinePhotoPicker.swift */,
 				4A71C0042F40200100A17E01 /* NativeAttachmentPopover.swift */,
@@ -614,6 +617,7 @@
 				BZZ00000000000000000026 /* PushEndpointGrantStore.swift in Sources */,
 				BZZ00000000000000000029 /* PushSnapshotBridge.swift in Sources */,
 				DCAF00000000000000000001 /* IosNavigationBar.swift in Sources */,
+				DAAB00000000000000000001 /* NativeTabler.swift in Sources */,
 				331C809B294A63AB00263BE5 /* MediaSanitizer.swift in Sources */,
 				4A71C0012F40100100A17E01 /* InlinePhotoPicker.swift in Sources */,
 				4A71C0032F40200100A17E01 /* NativeAttachmentPopover.swift in Sources */,
@@ -756,6 +760,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -775,6 +780,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
@@ -795,6 +801,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -813,6 +820,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -945,6 +953,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -969,6 +978,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -995,6 +1005,7 @@
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
 				OTHER_LDFLAGS = "";
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1020,6 +1031,7 @@
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
 				OTHER_LDFLAGS = "";
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1045,6 +1057,7 @@
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
 				OTHER_LDFLAGS = "";
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;

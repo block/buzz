@@ -124,8 +124,7 @@ final class NativeMessageMenuViewController: UIViewController {
         title.adjustsFontForContentSizeCategory = true
         title.numberOfLines = 0
         title.textColor = color
-        let icon = UIImageView(image: UIImage(systemName: action["symbol"] as? String ?? "ellipsis",
-          withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)))
+        let icon = UIImageView(image: NativeTabler.image(action["symbol"] as? String ?? "ellipsis", size: 18))
         icon.tintColor = color
         icon.contentMode = .center
         icon.widthAnchor.constraint(equalToConstant: 24).isActive = true
@@ -189,7 +188,7 @@ final class NativeMessageMenuViewController: UIViewController {
       reactionButtons.append(button)
     }
     let more = UIButton(primaryAction: UIAction { [weak self] _ in self?.select(["action": "more"]) })
-    more.setImage(UIImage(systemName: "plus"), for: .normal)
+    more.setImage(NativeTabler.image("plus"), for: .normal)
     more.tintColor = .secondaryLabel
     more.accessibilityLabel = "More emoji"
     more.widthAnchor.constraint(equalToConstant: 48).isActive = true

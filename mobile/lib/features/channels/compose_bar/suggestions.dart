@@ -76,7 +76,7 @@ class _MentionSuggestions extends StatelessWidget {
               leading: AvatarImage(
                 imageUrl: avatarUrl,
                 radius: 18,
-                backgroundColor: context.colors.primaryContainer,
+                backgroundColor: context.controlSurface,
                 fallback: Text(
                   // Name-derived for named candidates; keyed to the hex
                   // public key for unnamed ones so the compact-npub label

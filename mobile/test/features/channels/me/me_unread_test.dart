@@ -208,7 +208,7 @@ void main() {
               home: Consumer(
                 builder: (context, ref, _) => HomePage(
                   settingsPageBuilder: (_) => const SizedBox(),
-                  mePageBuilder: (_) => const MePage(),
+                  mePageBuilder: (_, action) => MePage(newChatAction: action),
                   hasUnreadInbox: false,
                   hasUnreadSolo: ref
                       .watch(meUnreadChannelIdsProvider)

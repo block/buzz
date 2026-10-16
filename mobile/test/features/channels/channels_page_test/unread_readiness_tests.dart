@@ -47,7 +47,13 @@ void _communityUnreadLandingTests(
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -61,7 +67,7 @@ void _communityUnreadLandingTests(
     expect(session.destinationUnreadRequests, greaterThan(0));
     expect(find.byKey(const Key('community-switcher-page')), findsNothing);
     expect(find.byKey(const Key('community-switch-loading')), findsNothing);
-    expect(find.text('bravo'), findsOneWidget);
+    expect(find.text('bravo'), findsNothing);
     expect(find.text('bravo-channel'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());

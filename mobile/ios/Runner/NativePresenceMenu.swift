@@ -65,7 +65,7 @@ private final class NativePresenceMenu: NSObject, FlutterPlatformView {
     let options: [(String, String, UIColor)] = [("online", "Online", .systemGreen), ("away", "Away", .systemOrange), ("offline", "Offline", .systemGray)]
     button.menu = UIMenu(children: options.map { value, title, color in
       UIAction(title: title,
-        image: UIImage(systemName: "circle.fill")?.withTintColor(color, renderingMode: .alwaysOriginal),
+        image: NativeTabler.image("circle.fill")?.withTintColor(color, renderingMode: .alwaysOriginal),
         state: presence == value ? .on : .off
       ) { [weak self] _ in self?.channel.invokeMethod("selected", arguments: value) }
     })

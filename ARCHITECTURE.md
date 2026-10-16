@@ -873,6 +873,18 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 Applied in: `buzz-auth` (JWKS boundary), `buzz-workflow` (CallWebhook action),
 desktop `link_preview` (SSRF check).
 
+JWKS uses `public_https` by default and applies this public-address check to
+every resolved answer before pinning the first permitted address. Explicit
+`mesh` mode accepts HTTP only for a DNS hostname (not an IP literal) without
+userinfo, query, fragment, or backslash. It checks every DNS answer against the
+positive address allow-list in the
+[NIP-FI JWKS snapshot contract](docs/nips/NIP-FI.md#jwks-snapshot), rejects
+empty or mixed answers, and pins the first checked address. Mesh selection is
+an operator assertion, not a transport property the Rust relay verifies.
+Operators must enforce mutual TLS peer authentication and integrity
+protection, authorize the JWKS endpoint, and restrict egress. Unauthenticated
+HTTP permits key substitution and issuer impersonation.
+
 ### Audit Integrity
 
 - Hash chain: each entry's SHA-256 covers all fields including `prev_hash` — tampering any entry breaks all subsequent hashes

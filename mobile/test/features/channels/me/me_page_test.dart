@@ -41,6 +41,37 @@ class FakeChannels extends ChannelsNotifier {
 }
 
 void main() {
+  testWidgets('empty workspace stays centered behind the New chat keyboard', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    tester.view.padding = const FakeViewPadding(bottom: 34);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(const MeGroups()),
+          ),
+          channelsProvider.overrideWith(FakeChannels.new),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final heading = find.text('A place to work with your agents');
+    final position = tester.getCenter(heading);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    tester.view.padding = FakeViewPadding.zero;
+    await tester.pumpAndSettle();
+    expect(tester.getCenter(heading), position);
+    tester.view.viewInsets = FakeViewPadding.zero;
+    tester.view.padding = const FakeViewPadding(bottom: 34);
+    await tester.pumpAndSettle();
+    expect(tester.getCenter(heading), position);
+  });
+
   testWidgets(
     'live desktop placement displays projects and only accessible Me chats',
     (tester) async {
@@ -67,13 +98,13 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Search chats'), findsNothing);
       expect(find.byType(TextField), findsNothing);
-      expect(find.byIcon(BuzzIcons.plus), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.edit), findsOneWidget);
       expect(find.byIcon(BuzzIcons.folderPlus), findsOneWidget);
       final header = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
       expect(header.nativeLargeTitle, isTrue);
       expect(header.nativeActions!.map((action) => action.icon), [
         BuzzIcons.folderPlus,
-        BuzzIcons.plus,
+        BuzzIcons.edit,
       ]);
       expect(find.text('App work'), findsOneWidget);
       expect(find.text('Design agent'), findsOneWidget);
@@ -111,54 +142,62 @@ void main() {
       expect(find.text('A place to work with your agents'), findsOneWidget);
     },
   );
-  testWidgets('new chat opens both fields in one dismissible sheet', (
-    tester,
-  ) async {
-    final sync = MeSync(
-      RelaySessionNotifier(),
-      RelayConfig(
-        baseUrl: 'https://relay.test',
-        nsec: nostr.Nip19.encode(
-          prefix: nostr.Nip19Prefix.nsec,
-          data:
-              '0000000000000000000000000000000000000000000000000000000000000001',
-        ),
-      ),
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          meGroupsProvider.overrideWith(
-            (ref) => Stream.value(const MeGroups()),
+  testWidgets(
+    'footer new chat action opens both fields in one dismissible sheet',
+    (tester) async {
+      final action = ValueNotifier<VoidCallback?>(null);
+      addTearDown(action.dispose);
+      final sync = MeSync(
+        RelaySessionNotifier(),
+        RelayConfig(
+          baseUrl: 'https://relay.test',
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data:
+                '0000000000000000000000000000000000000000000000000000000000000001',
           ),
-          meSyncProvider.overrideWithValue(sync),
-          channelsProvider.overrideWith(FakeChannels.new),
-          meAssistantsProvider.overrideWith((ref) async => []),
-        ],
-        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('New chat'));
-    await tester.pumpAndSettle();
-    expect(find.byType(BottomSheet), findsOneWidget);
-    expect(
-      find.byKey(const ValueKey('new-session-name')).hitTestable(),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('new-session-assistant')).hitTestable(),
-      findsOneWidget,
-    );
-    await tester.enterText(
-      find.byKey(const ValueKey('new-session-name')),
-      'Design session',
-    );
-    await tester.tap(find.text('Create chat'));
-    await tester.pumpAndSettle();
-    expect(find.text('Enter a name and choose an agent.'), findsOneWidget);
-    expect(find.text('Design session'), findsOneWidget);
-  });
+        ),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(const MeGroups()),
+            ),
+            meSyncProvider.overrideWithValue(sync),
+            channelsProvider.overrideWith(FakeChannels.new),
+            meAssistantsProvider.overrideWith((ref) async => []),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: MePage(newChatAction: action),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('New chat'), findsNothing);
+      expect(action.value, isNotNull);
+      action.value!();
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('new-session-name')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('new-session-assistant')).hitTestable(),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('new-session-name')),
+        'Design session',
+      );
+      await tester.tap(find.text('Create chat'));
+      await tester.pumpAndSettle();
+      expect(find.text('Enter a name and choose an agent.'), findsOneWidget);
+      expect(find.text('Design session'), findsOneWidget);
+    },
+  );
 
   testWidgets('iOS new chat uses the native profile form with both fields', (
     tester,

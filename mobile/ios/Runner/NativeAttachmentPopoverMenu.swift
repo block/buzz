@@ -111,7 +111,7 @@ extension NativeAttachmentPopoverViewController {
       configuration.baseBackgroundColor = .black
     }
     if let symbol {
-      configuration.image = UIImage(systemName: symbol)
+      configuration.image = NativeTabler.image(symbol)
     }
     configuration.imagePadding = 8
     configuration.baseForegroundColor = .white

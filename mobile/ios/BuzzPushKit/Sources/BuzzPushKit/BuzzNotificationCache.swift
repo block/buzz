@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import P256K
 
 /// Account and relay identity for one local sign-in's notification cache.
 public struct BuzzNotificationCacheScope: Codable, Equatable, Sendable {
@@ -26,9 +25,9 @@ public struct BuzzNotificationCacheScope: Codable, Equatable, Sendable {
   /// Confirms the loaded credential belongs to this scope's account.
   public func matchesAccountKey(_ privateKey: String?) -> Bool {
     guard let privateKey, let bytes = VerifiedNostrEvent.hexBytes(privateKey), bytes.count == 32,
-      let key = try? P256K.Schnorr.PrivateKey(dataRepresentation: bytes)
+      let pubkey = try? NostrSchnorr.publicKey(secret: bytes)
     else { return false }
-    return VerifiedNostrEvent.hex(key.xonly.bytes) == account
+    return VerifiedNostrEvent.hex(pubkey) == account
   }
 
   /// A filename-safe identity that contains no credentials.

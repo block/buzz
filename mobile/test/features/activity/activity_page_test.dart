@@ -195,7 +195,7 @@ void main() {
     expect(find.text('No activity yet'), findsOneWidget);
   });
 
-  testWidgets('does not imply a back button for the top-level Activity tab', (
+  testWidgets('Inbox exposes close navigation for its modal route', (
     tester,
   ) async {
     await tester.pumpWidget(await buildTestable());
@@ -205,6 +205,9 @@ void main() {
       find.byType(FrostedAppBar).last,
     );
     expect(appBar.automaticallyImplyLeading, isFalse);
+    expect(appBar.nativeLeading?.symbol, 'xmark');
+    expect(appBar.nativeLeading?.label, 'Close inbox');
+    expect(appBar.nativeTitle, 'Inbox');
     expect(appBar.gradient, isNull);
     expect(appBar.frosted, isTrue);
     expect(appBar.showBottomDivider, isTrue);
