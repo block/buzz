@@ -397,6 +397,35 @@ mod tests {
     }
 
     #[test]
+    fn dsh_is_exposed_in_the_runtime_catalog() {
+        use crate::managed_agents::custom_harnesses::registry_test_lock;
+
+        // Discovery touches process-global command-resolution and the loaded
+        // harness registry. Serialize with the other discovery tests.
+        let _path_guard = crate::managed_agents::lock_path_mutex();
+        let _registry_guard = registry_test_lock();
+
+        let entry = super::super::discover_acp_runtimes_from(None, true)
+            .into_iter()
+            .find(|entry| entry.id == "dsh")
+            .expect("DSH should appear in the runtime catalog");
+
+        // dsh is a BUILTIN ACP runtime (KNOWN_ACP_RUNTIMES), not a tier-2
+        // preset: only builtins produce the `known_acp_runtime` match at spawn time, which
+        // is what lets spawn (a) pin `--profile acp` into `BUZZ_ACP_AGENT_ARGS`
+        // (dsh's CLI refuses to boot without an explicit profile) and (b) hand
+        // it a piped stdin instead of a null one (dsh exits on stdin EOF). A
+        // preset entry could drive neither special case.
+        assert_eq!(entry.label, "DeepSeek Harness");
+        assert_eq!(entry.command.as_deref(), Some("dsh"));
+        assert_eq!(
+            entry.install_instructions_url,
+            "https://github.com/deepseek-ai/deepseek-harness"
+        );
+        assert_eq!(entry.source, HarnessSource::Builtin);
+    }
+
+    #[test]
     fn pi_preset_uses_zero_arg_adapter_and_reports_missing_component() {
         let preset = PRESET_HARNESSES
             .iter()

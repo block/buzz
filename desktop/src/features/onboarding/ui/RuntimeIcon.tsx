@@ -5,6 +5,7 @@ import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import claudeLogoUrl from "../assets/harness-logos/claude.png?inline";
+import dshLogoUrl from "../assets/harness-logos/dsh.svg?inline";
 import { RUNTIME_MARKS } from "./HarnessMarks";
 
 // Bundled logos for compiled-in runtimes (inline base64, no network fetch).
@@ -12,10 +13,12 @@ import { RUNTIME_MARKS } from "./HarnessMarks";
 // `currentColor`, so they adapt to dark/light without bitmap filters.
 const RUNTIME_LOGOS: Record<string, string> = {
   claude: claudeLogoUrl,
+  dsh: dshLogoUrl,
 };
 
 // Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
 // Keys match the preset `id` values emitted by the backend PRESET_HARNESSES.
+// (dsh is a compiled-in runtime — its logo is inlined above, not public-path.)
 export const PRESET_LOGOS: Record<string, string> = {
   devin: "/harness-logos/devin.svg",
   omp: "/harness-logos/omp.svg",
