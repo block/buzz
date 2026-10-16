@@ -8,6 +8,8 @@ import 'package:uuid/uuid.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/animated_avatar.dart';
 import '../../../shared/widgets/app_list.dart';
+import '../../../shared/widgets/concentric_sheet_surface.dart';
+import '../../../shared/widgets/bee_refresh_indicator.dart';
 import 'me_assistant_list.dart';
 import 'me_section.dart';
 import 'me_unread_provider.dart';
@@ -30,13 +32,17 @@ import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 
 part 'me_page_helpers.dart';
+part 'me_empty_state.dart';
 part 'new_me_chat.dart';
 part 'native_new_me_chat.dart';
 part 'new_me_project.dart';
 
 /// Personal chats and projects shared with the desktop Me workspace.
 class MePage extends HookConsumerWidget {
-  const MePage({super.key});
+  const MePage({this.newChatAction, super.key});
+
+  /// Publishes the current chat action to the persistent Home footer.
+  final ValueNotifier<VoidCallback?>? newChatAction;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -110,7 +116,17 @@ class MePage extends HookConsumerWidget {
             );
           });
 
+    useEffect(() {
+      var active = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (active) newChatAction?.value = newChat;
+      });
+      return () => active = false;
+    }, [newChatAction, busy.value, groups.hasValue]);
+
     return FrostedScaffold(
+      // New chat owns its keyboard; keep the workspace behind it stationary.
+      resizeToAvoidBottomInset: false,
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
         nativeTitle: 'Solo',
@@ -123,12 +139,12 @@ class MePage extends HookConsumerWidget {
             icon: BuzzIcons.folderPlus,
             onPressed: newProject,
           ),
-          IosNavigationAction(
-            label: 'New chat',
-            symbol: 'plus',
-            icon: BuzzIcons.plus,
-            onPressed: newChat,
-          ),
+          if (newChatAction == null)
+            IosNavigationAction(
+              label: 'New chat',
+              icon: BuzzIcons.edit,
+              onPressed: newChat,
+            ),
         ],
         horizontalInset: Grid.gutter,
         showBottomDivider: true,
@@ -139,7 +155,7 @@ class MePage extends HookConsumerWidget {
           ClipRRect(
             borderRadius: BorderRadius.circular(Radii.full),
             child: ColoredBox(
-              color: context.colors.primaryContainer,
+              color: context.controlSurface,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: Grid.quarter),
                 child: Row(
@@ -150,11 +166,12 @@ class MePage extends HookConsumerWidget {
                       icon: const Icon(BuzzIcons.folderPlus, size: 20),
                       onPressed: newProject,
                     ),
-                    IconButton(
-                      tooltip: 'New chat',
-                      icon: const Icon(BuzzIcons.plus, size: 20),
-                      onPressed: newChat,
-                    ),
+                    if (newChatAction == null)
+                      IconButton(
+                        tooltip: 'New chat',
+                        icon: const Icon(BuzzIcons.edit, size: 20),
+                        onPressed: newChat,
+                      ),
                   ],
                 ),
               ),
@@ -197,116 +214,128 @@ class MePage extends HookConsumerWidget {
                 ),
               ),
             );
-            return RefreshIndicator(
+            return BeeRefreshIndicator(
+              edgeOffset: topSectionHeight,
               onRefresh: () async {
                 ref.invalidate(meGroupsProvider);
                 await ref.read(channelsProvider.notifier).refresh();
                 await ref.read(meGroupsProvider.future);
               },
-              child: ListView(
-                padding: EdgeInsets.fromLTRB(
-                  Grid.gutter - Grid.xxs,
-                  topSectionHeight + Grid.xxs,
-                  Grid.gutter - Grid.xxs,
-                  MediaQuery.paddingOf(context).bottom + Grid.gutter,
-                ),
+              child: CustomScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
-                children: [
-                  if (syncClosed)
-                    Semantics(
-                      liveRegion: true,
-                      child: Column(
-                        children: [
-                          const Text(
-                            'Live updates stopped. Your saved chats are still available.',
-                          ),
-                          TextButton(
-                            onPressed: () => ref.invalidate(meGroupsProvider),
-                            child: const Text('Retry live updates'),
-                          ),
-                        ],
-                      ),
+                slivers: [
+                  SliverPadding(
+                    padding: EdgeInsets.fromLTRB(
+                      Grid.gutter - Grid.xxs,
+                      topSectionHeight + Grid.xxs,
+                      Grid.gutter - Grid.xxs,
+                      organization.channels.isEmpty &&
+                              organization.groups.isEmpty
+                          ? 0
+                          : MediaQuery.viewPaddingOf(context).bottom +
+                                Grid.gutter,
                     ),
-                  if (offlineSaveFailed)
-                    Semantics(
-                      liveRegion: true,
-                      child: Column(
-                        children: [
-                          const Text(
-                            'Your chats are available, but couldn’t be saved for offline use.',
+                    sliver: SliverList.list(
+                      children: [
+                        if (syncClosed)
+                          Semantics(
+                            liveRegion: true,
+                            child: Column(
+                              children: [
+                                const Text(
+                                  'Live updates stopped. Your saved chats are still available.',
+                                ),
+                                TextButton(
+                                  onPressed: () =>
+                                      ref.invalidate(meGroupsProvider),
+                                  child: const Text('Retry live updates'),
+                                ),
+                              ],
+                            ),
                           ),
-                          TextButton(
-                            onPressed: () => ref.invalidate(meGroupsProvider),
-                            child: const Text('Retry offline save'),
+                        if (offlineSaveFailed)
+                          Semantics(
+                            liveRegion: true,
+                            child: Column(
+                              children: [
+                                const Text(
+                                  'Your chats are available, but couldn’t be saved for offline use.',
+                                ),
+                                TextButton(
+                                  onPressed: () =>
+                                      ref.invalidate(meGroupsProvider),
+                                  child: const Text('Retry offline save'),
+                                ),
+                              ],
+                            ),
                           ),
-                        ],
-                      ),
+                        for (final group in organization.groups)
+                          MeSection(
+                            key: ValueKey(group['id']),
+                            icon: BuzzIcons.folder,
+                            label: group['name'] as String,
+                            hasUnread: visible.any(
+                              (c) =>
+                                  organization.assignments[c.id] ==
+                                      group['id'] &&
+                                  unreadIds.contains(c.id),
+                            ),
+                            children: [
+                              for (final channel in visible.where(
+                                (c) =>
+                                    organization.assignments[c.id] ==
+                                    group['id'],
+                              ))
+                                row(channel),
+                              if (!visible.any(
+                                (c) =>
+                                    organization.assignments[c.id] ==
+                                    group['id'],
+                              ))
+                                const ListTile(
+                                  title: Text('No chats in this project'),
+                                ),
+                            ],
+                          ),
+                        if (organization.channels.isNotEmpty ||
+                            organization.groups.isNotEmpty)
+                          MeSection(
+                            key: const ValueKey('me-ungrouped-chats'),
+                            icon: BuzzIcons.messageCircle,
+                            label: 'Chats',
+                            hasUnread: visible.any(
+                              (c) =>
+                                  !organization.assignments.containsKey(c.id) &&
+                                  unreadIds.contains(c.id),
+                            ),
+                            children: [
+                              for (final channel in visible.where(
+                                (c) =>
+                                    !organization.assignments.containsKey(c.id),
+                              ))
+                                row(channel),
+                              if (!visible.any(
+                                (c) =>
+                                    !organization.assignments.containsKey(c.id),
+                              ))
+                                const ListTile(title: Text('No chats yet')),
+                            ],
+                          ),
+                      ],
                     ),
+                  ),
                   if (organization.channels.isEmpty &&
                       organization.groups.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.all(Grid.gutter),
-                      child: Column(
-                        children: [
-                          const Icon(Icons.chat_bubble_outline, size: 48),
-                          const SizedBox(height: Grid.gutter),
-                          Text(
-                            'A place to work with your agents',
-                            style: context.textTheme.titleLarge,
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: Grid.xs),
-                          const Text(
-                            'Your chats and projects appear here on mobile and desktop.',
-                            textAlign: TextAlign.center,
-                          ),
-                        ],
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          bottom:
+                              MediaQuery.viewPaddingOf(context).bottom +
+                              Grid.gutter,
+                        ),
+                        child: Center(child: _MeEmptyState(onNewChat: newChat)),
                       ),
-                    ),
-                  for (final group in organization.groups)
-                    MeSection(
-                      key: ValueKey(group['id']),
-                      icon: BuzzIcons.folder,
-                      label: group['name'] as String,
-                      hasUnread: visible.any(
-                        (c) =>
-                            organization.assignments[c.id] == group['id'] &&
-                            unreadIds.contains(c.id),
-                      ),
-                      children: [
-                        for (final channel in visible.where(
-                          (c) => organization.assignments[c.id] == group['id'],
-                        ))
-                          row(channel),
-                        if (!visible.any(
-                          (c) => organization.assignments[c.id] == group['id'],
-                        ))
-                          const ListTile(
-                            title: Text('No chats in this project'),
-                          ),
-                      ],
-                    ),
-                  if (organization.channels.isNotEmpty ||
-                      organization.groups.isNotEmpty)
-                    MeSection(
-                      key: const ValueKey('me-ungrouped-chats'),
-                      icon: BuzzIcons.messageCircle,
-                      label: 'Chats',
-                      hasUnread: visible.any(
-                        (c) =>
-                            !organization.assignments.containsKey(c.id) &&
-                            unreadIds.contains(c.id),
-                      ),
-                      children: [
-                        for (final channel in visible.where(
-                          (c) => !organization.assignments.containsKey(c.id),
-                        ))
-                          row(channel),
-                        if (!visible.any(
-                          (c) => !organization.assignments.containsKey(c.id),
-                        ))
-                          const ListTile(title: Text('No chats yet')),
-                      ],
                     ),
                 ],
               ),

@@ -60,7 +60,7 @@ struct NativeEmojiPickerView: View {
   private var header: some View {
     HStack(spacing: 8) {
       HStack(spacing: 10) {
-        Image(systemName: "magnifyingglass")
+        TablerNativeIcon(symbol: "magnifyingglass")
           .font(.system(size: 17, weight: .medium))
           .foregroundStyle(Color(uiColor: appearance.secondaryText))
         TextField("Search emoji", text: $query)
@@ -72,7 +72,7 @@ struct NativeEmojiPickerView: View {
           Button {
             query = ""
           } label: {
-            Image(systemName: "xmark.circle.fill")
+            TablerNativeIcon(symbol: "xmark.circle.fill")
               .foregroundStyle(Color(uiColor: appearance.secondaryText))
           }
           .buttonStyle(.plain)
@@ -88,7 +88,7 @@ struct NativeEmojiPickerView: View {
       }
 
       Button(action: onClose) {
-        Image(systemName: "xmark")
+        TablerNativeIcon(symbol: "xmark")
           .font(.system(size: 17, weight: .semibold))
           .foregroundStyle(Color(uiColor: appearance.text))
           .frame(width: 44, height: 44)
@@ -238,7 +238,7 @@ struct NativeEmojiPickerView: View {
 
       if sections.isEmpty {
         VStack(spacing: 10) {
-          Image(systemName: "magnifyingglass")
+          TablerNativeIcon(symbol: "magnifyingglass")
             .font(.system(size: 28))
           Text("No emoji found").font(.body)
         }
@@ -380,7 +380,7 @@ private struct NativeEmojiCategoryButton: View {
   var body: some View {
     let isSelected = selection.selectedSectionID == section.id
     Button(action: onSelect) {
-      Image(systemName: section.systemImage)
+      TablerNativeIcon(symbol: section.systemImage)
         .font(.system(size: 18, weight: .medium))
         .foregroundStyle(
           Color(
@@ -421,7 +421,7 @@ struct NativeEmojiRemoteImage: View {
       case .success(let image):
         Image(uiImage: image).resizable().scaledToFit()
       case .failure:
-        Image(systemName: "sparkles")
+        TablerNativeIcon(symbol: "sparkles")
           .foregroundStyle(Color(uiColor: fallbackColor))
       }
     }
@@ -612,5 +612,14 @@ actor NativeEmojiRemoteImageLoader {
       by: cgImage.height
     )
     return overflow ? Int.max : cost
+  }
+}
+
+private struct TablerNativeIcon: View {
+  let symbol: String
+  var body: some View {
+    if let image = NativeTabler.image(symbol) {
+      Image(uiImage: image).renderingMode(.template)
+    }
   }
 }

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -365,7 +366,7 @@ class ManageChannelSheet extends HookConsumerWidget {
                   maxLines: 4,
                   overflow: TextOverflow.ellipsis,
                 ),
-                trailing: const Icon(Icons.chevron_right),
+                trailing: const Icon(BuzzIcons.chevronRight),
                 enabled: canEditCanvas && !busy,
                 onTap: canEditCanvas && !busy ? editCanvas : null,
               ),

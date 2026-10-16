@@ -538,7 +538,7 @@ class _ProfilePhotoEditor extends ConsumerWidget {
           key: const ValueKey('profile-edit-avatar'),
           imageUrl: profile?.avatarUrl,
           radius: ProfileEditPage._avatarRadius,
-          backgroundColor: context.colors.primaryContainer,
+          backgroundColor: context.controlSurface,
           loadingImage: activeHandoff == null
               ? null
               : MemoryImage(activeHandoff.animation),

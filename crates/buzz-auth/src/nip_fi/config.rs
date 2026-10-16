@@ -378,10 +378,11 @@ pub struct IssuerPolicy {
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
-    /// The authenticated key-source contract: validated JWKS URI, refresh
-    /// interval, and hard deadline. Included in `derive_assertion_policy_id`
-    /// so that a change to the endpoint, refresh schedule, or hard-deadline
-    /// rule changes the policy ID and invalidates all prepared evidence.
+    /// The authenticated key-source contract: validated JWKS URI, transport,
+    /// refresh interval, and hard deadline. Included in
+    /// `derive_assertion_policy_id` so that a change to the endpoint, trusted
+    /// transport, refresh schedule, or hard-deadline rule changes the policy
+    /// ID and invalidates all prepared evidence.
     jwks_source_contract: JwksSourceContract,
     id: AssertionPolicyId,
 }
@@ -735,12 +736,16 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
     hasher.update(maximum_assertion_age_seconds.to_be_bytes());
     hasher.update((*maximum_status_age_seconds).unwrap_or(0).to_be_bytes());
     // Authenticated key-source contract (NIP-FI.md, "Policy identity and
-    // snapshots"): URI selects the authenticated source; interval defines
-    // bounded refresh; hard deadline defines the accepted time rule. These are
-    // contract, not mutable state — key rotation (JWKS content change) leaves
-    // all three unchanged and must not move the ID.
+    // snapshots"): URI selects the key source; mesh mode delegates transport
+    // authentication to the deployment; interval defines bounded refresh; and
+    // hard deadline defines the accepted time rule. The mesh transport tag is
+    // present only when that mode is selected.
     hasher.update(b"jwks-source-contract\0");
     hash_field(&mut hasher, jwks_source_contract.jwks_uri().as_bytes());
+    if jwks_source_contract.uses_mesh_transport() {
+        hasher.update(b"jwks-transport\0");
+        hasher.update(b"mesh\0");
+    }
     hasher.update(
         jwks_source_contract
             .refresh_interval_seconds()
@@ -765,5 +770,58 @@ fn hash_seq<'a>(hasher: &mut Sha256, items: impl ExactSizeIterator<Item = &'a [u
     hasher.update((items.len() as u64).to_be_bytes());
     for item in items {
         hash_field(hasher, item);
+    }
+}
+
+#[cfg(test)]
+mod jwks_transport_identity_tests {
+    use super::*;
+    use crate::nip_fi::jwks::JwksSourceContract;
+
+    fn policy(contract: JwksSourceContract) -> IssuerPolicy {
+        IssuerPolicy::new(
+            "https://issuer.example".to_owned(),
+            vec!["https://relay.example".to_owned()],
+            TokenClass::DedicatedNipFi,
+            FreshnessClass::OfflineJwt,
+            vec![Algorithm::ES256],
+            60,
+            3600,
+            None,
+            contract,
+        )
+        .expect("valid policy")
+    }
+
+    #[test]
+    fn public_https_policy_id_golden_omits_mesh_transport_tag() {
+        let contract = JwksSourceContract::new(
+            "https://issuer.example/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid public contract");
+
+        assert_eq!(
+            hex::encode(policy(contract).id().as_bytes()),
+            "1f904aaaad1c1db3a22ae50bd2d24cdf7181d5d0b8c5006cc1ae9ac1107f9832",
+            "public_https mode omits the mesh transport tag"
+        );
+    }
+
+    #[test]
+    fn mesh_transport_policy_id_has_a_separate_golden() {
+        let contract = JwksSourceContract::new_mesh(
+            "http://mesh.example.test/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid mesh contract");
+
+        assert_eq!(
+            hex::encode(policy(contract).id().as_bytes()),
+            "33e4cf02148ca494c12ffc49cd0bb223e0e007de4084ac5b406f2742bbb91c0a",
+            "mesh transport is part of policy identity"
+        );
     }
 }

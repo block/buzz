@@ -61,12 +61,30 @@ const MAX_CONNECTION_LIFETIME_SECS: u64 = 30 * 24 * 3600;
 ///     "skew_seconds": 30,
 ///     "maximum_assertion_age_seconds": 3600,
 ///     "jwks_uri": "https://login.example.com/.well-known/jwks.json",
+///     "jwks_transport": "public_https",
 ///     "jwks_refresh_interval_seconds": 300,
 ///     "jwks_hard_deadline_seconds": 86400,
 ///     "maximum_command_age_seconds": 30,
 ///     "authorized_principals": ["admin-svc@login.example.com"]
 ///   }
 /// ]
+/// ```
+/// `jwks_transport` is optional and defaults to `public_https`. The `mesh`
+/// form requires an HTTP URI with a DNS hostname (not an IP literal) and no
+/// userinfo, query, fragment, or backslash. Every DNS answer is checked
+/// against the positive address allow-list in the
+/// [NIP-FI JWKS snapshot contract](../../../docs/nips/NIP-FI.md#jwks-snapshot);
+/// empty or mixed answers deny, and the first checked address is pinned.
+/// Selecting `mesh` is an operator assertion: the deployment must enforce
+/// mutual TLS peer authentication and integrity protection, authorize the
+/// JWKS endpoint, and restrict egress. The relay cannot verify those
+/// properties, and unauthenticated HTTP permits key substitution and issuer
+/// impersonation.
+///
+/// For example:
+/// ```json
+/// { "jwks_uri": "http://mesh.example.test/.well-known/jwks.json",
+///   "jwks_transport": "mesh" }
 /// ```
 /// The `require_attested_key` field is not part of this schema; S2 removed it
 /// from buzz-auth. S3 enforces key pairing structurally for every issuer.
@@ -90,8 +108,13 @@ pub(super) struct IssuerEnvConfig {
     pub skew_seconds: u64,
     /// `iat + maximum_assertion_age` residual bound in seconds.
     pub maximum_assertion_age_seconds: u64,
-    /// HTTPS endpoint serving the JWK Set for this issuer.
+    /// JWK Set endpoint for this issuer; HTTPS by default, or HTTP with the
+    /// explicitly selected mesh transport and its
+    /// [NIP-FI address allow-list](../../../docs/nips/NIP-FI.md#jwks-snapshot).
     pub jwks_uri: String,
+    /// Per-issuer JWKS transport. Unknown values are rejected during parsing.
+    #[serde(default)]
+    pub jwks_transport: JwksTransportEnvConfig,
     /// Seconds between JWKS refreshes.
     pub jwks_refresh_interval_seconds: u64,
     /// Hard deadline for accepting a JWKS snapshot in seconds.
@@ -120,6 +143,18 @@ pub(super) enum TokenClassEnvConfig {
     DedicatedNipFi,
     #[serde(rename = "at+jwt")]
     AccessTokenAtJwt,
+}
+
+/// Transport selected for one issuer's JWKS endpoint.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum JwksTransportEnvConfig {
+    /// Existing public HTTPS behavior; used when the field is omitted.
+    #[default]
+    PublicHttps,
+    /// HTTP whose authentication, integrity, endpoint authorization, and
+    /// egress restrictions are enforced by the deployment.
+    Mesh,
 }
 
 /// One entry in the `BUZZ_NIP_FI_COMMUNITIES` JSON array.
@@ -586,13 +621,20 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
         }
     };
 
-    let jwks_contract = JwksSourceContract::new(
-        entry.jwks_uri.clone(),
-        entry.jwks_refresh_interval_seconds,
-        entry.jwks_hard_deadline_seconds,
-    )
+    let jwks_contract = match entry.jwks_transport {
+        JwksTransportEnvConfig::PublicHttps => JwksSourceContract::new(
+            entry.jwks_uri.clone(),
+            entry.jwks_refresh_interval_seconds,
+            entry.jwks_hard_deadline_seconds,
+        ),
+        JwksTransportEnvConfig::Mesh => JwksSourceContract::new_mesh(
+            entry.jwks_uri.clone(),
+            entry.jwks_refresh_interval_seconds,
+            entry.jwks_hard_deadline_seconds,
+        ),
+    }
     .ok_or_else(|| {
-        "invalid JWKS source contract (check jwks_uri is HTTPS, \
+        "invalid JWKS source contract (check jwks_transport and jwks_uri, \
              refresh_interval < hard_deadline, and both are positive)"
             .to_string()
     })?;
@@ -835,6 +877,100 @@ mod tests {
             "maximum_command_age_seconds": 30,
             "authorized_principals": ["admin@issuer.test"]
         })
+    }
+
+    #[test]
+    fn jwks_transport_defaults_to_public_and_is_per_issuer() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        let public = valid_enforce_issuer();
+        let mut mesh = valid_enforce_issuer();
+        mesh["issuer"] = "https://mesh-issuer.test".into();
+        mesh["jwks_uri"] = "http://mesh.example.test/.well-known/jwks.json".into();
+        mesh["jwks_transport"] = "mesh".into();
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        set_issuers(serde_json::json!([public, mesh]).to_string());
+        let cfg = NipFiRelayConfig::from_env().expect("mixed transport config is valid");
+
+        let public_policy = cfg
+            .registry
+            .policy_for_issuer("https://issuer.test")
+            .expect("public issuer is registered");
+        let mesh_policy = cfg
+            .registry
+            .policy_for_issuer("https://mesh-issuer.test")
+            .expect("mesh issuer is registered");
+        let public_contract = JwksSourceContract::new(
+            "https://issuer.test/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid public contract");
+        let mesh_contract = JwksSourceContract::new_mesh(
+            "http://mesh.example.test/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid mesh contract");
+
+        assert_eq!(public_policy.jwks_source_contract(), &public_contract);
+        assert_eq!(mesh_policy.jwks_source_contract(), &mesh_contract);
+        assert_eq!(public_policy.issuer(), "https://issuer.test");
+        assert_eq!(mesh_policy.issuer(), "https://mesh-issuer.test");
+        for policy in [public_policy, mesh_policy] {
+            assert_eq!(policy.command_audiences().len(), 1);
+            assert_eq!(policy.command_audiences()[0], "https://relay.test");
+            assert_eq!(policy.community_audiences().len(), 1);
+            assert_eq!(policy.community_audiences()[0], "https://relay.test");
+        }
+        assert_eq!(cfg.jwks_configs.len(), 2);
+        assert_eq!(cfg.jwks_configs[0].contract, public_contract);
+        assert_eq!(cfg.jwks_configs[1].contract, mesh_contract);
+    }
+
+    #[test]
+    fn invalid_jwks_transport_is_rejected_without_echoing_uri() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+
+        let mut unknown = valid_enforce_issuer();
+        unknown["jwks_uri"] = "https://sentinel-uri.example.test/jwks".into();
+        unknown["jwks_transport"] = "sentinel-unknown-transport".into();
+        set_issuers(serde_json::json!([unknown]).to_string());
+        let error = NipFiRelayConfig::from_env().expect_err("unknown transport must fail");
+        let message = error.to_string();
+        assert!(message.contains("BUZZ_NIP_FI_ISSUERS"));
+        assert!(!message.contains("sentinel-uri.example.test"));
+        assert!(!message.contains("sentinel-unknown-transport"));
+
+        let mut implicit_http = valid_enforce_issuer();
+        implicit_http["jwks_uri"] = "http://sentinel-uri.example.test/jwks".into();
+        set_issuers(serde_json::json!([implicit_http]).to_string());
+        let error = NipFiRelayConfig::from_env()
+            .expect_err("HTTP without an explicit mesh transport must fail");
+        let message = error.to_string();
+        assert!(message.contains("invalid JWKS source contract"));
+        assert!(!message.contains("sentinel-uri.example.test"));
+
+        let mut wrong_scheme = valid_enforce_issuer();
+        wrong_scheme["jwks_uri"] = "https://sentinel-uri.example.test/jwks".into();
+        wrong_scheme["jwks_transport"] = "mesh".into();
+        set_issuers(serde_json::json!([wrong_scheme]).to_string());
+        let error =
+            NipFiRelayConfig::from_env().expect_err("mesh transport must reject HTTPS scheme");
+        let message = error.to_string();
+        assert!(message.contains("invalid JWKS source contract"));
+        assert!(!message.contains("sentinel-uri.example.test"));
     }
 
     #[test]

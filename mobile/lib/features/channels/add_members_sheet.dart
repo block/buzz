@@ -343,8 +343,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                                   leading: AvatarImage(
                                     imageUrl: user.avatarUrl,
                                     radius: 20,
-                                    backgroundColor:
-                                        context.colors.primaryContainer,
+                                    backgroundColor: context.controlSurface,
                                     fallback: Text(user.initial),
                                     isAgent: user.isAgent,
                                   ),

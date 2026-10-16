@@ -58,10 +58,13 @@ void main() {
         final close = find.byKey(const Key('search-close'));
         final fieldRect = tester.getRect(field);
         final filtersRect = tester.getRect(filters);
-        expect(find.text('Search'), findsNothing);
+        expect(
+          find.descendant(of: field, matching: find.text('Search')),
+          findsOneWidget,
+        );
         expect(find.text('Cancel'), findsNothing);
         expect(fieldRect.top, greaterThanOrEqualTo(59));
-        expect(tester.getRect(close).left, greaterThan(fieldRect.right));
+        expect(tester.getRect(close).right, lessThan(fieldRect.left));
         expect(tester.getSize(close), const Size(48, 48));
         for (final label in ['All', 'Messages', 'Channels', 'People']) {
           expect(

@@ -425,7 +425,7 @@ class App extends HookConsumerWidget {
           AuthStatus.authenticated => HostedAppGate(
             authenticated: true,
             child: HomePage(
-              mePageBuilder: (_) => const MePage(),
+              mePageBuilder: (_, action) => MePage(newChatAction: action),
               settingsPageBuilder: _buildSettingsPage,
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),

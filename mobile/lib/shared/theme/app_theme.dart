@@ -5,6 +5,7 @@ import 'app_colors.dart';
 import 'color_scheme.dart';
 import 'grid.dart';
 import 'text_theme.dart';
+import 'theme_extensions.dart';
 
 /// Border radius constants matching desktop shadcn "New York" style.
 /// Desktop uses --radius: 0.625rem (10px) as base:
@@ -134,8 +135,8 @@ class AppTheme {
       // Buttons: desktop uses rounded-md (8px), h-9 (36px), px-4 (16px)
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          backgroundColor: scheme.primary,
-          foregroundColor: scheme.onPrimary,
+          backgroundColor: neutralControlSurface(brightness),
+          foregroundColor: scheme.onSurface,
           elevation: 0,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           minimumSize: const Size(0, 36),
@@ -149,6 +150,8 @@ class AppTheme {
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
+          backgroundColor: neutralControlSurface(brightness),
+          foregroundColor: scheme.onSurface,
           elevation: 0,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           minimumSize: const Size(0, 36),
@@ -162,7 +165,7 @@ class AppTheme {
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
-          backgroundColor: scheme.surface,
+          backgroundColor: neutralControlSurface(brightness),
           foregroundColor: scheme.onSurface,
           side: BorderSide(color: scheme.outline, width: 1),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),

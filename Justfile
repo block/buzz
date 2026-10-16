@@ -401,6 +401,10 @@ test-unit:
     cargo test -p buzz-audio-client
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        # Mesh JWKS proxy-bypass regression: infra-free loopback I/O with
+        # child-process environment isolation. Its integration-test binary
+        # is not selected by --lib above. Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-auth --test mesh_jwks_proxy
         cargo nextest run -p buzz-audit --lib
         # Cross-pod disconnect payload tests (NIP-FI and community archive
         # fence); all infra-free.

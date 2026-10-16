@@ -574,13 +574,15 @@ async fn http_fetcher_rejects_private_ip_uri_before_connection() {
 
 #[tokio::test]
 async fn resolve_ssrf_rejects_ipv6_loopback_fast_path() {
-    let err = super::resolve_and_check_ssrf("::1", 443).await.unwrap_err();
+    let err = super::resolve_for_transport("::1", 443, JwksTransport::PublicHttps)
+        .await
+        .unwrap_err();
     assert_eq!(err, JwksFetchError::InvalidUri);
 }
 
 #[tokio::test]
 async fn resolve_ssrf_accepts_public_ipv6_fast_path() {
-    let ip = super::resolve_and_check_ssrf("2606:4700::1", 443)
+    let ip = super::resolve_for_transport("2606:4700::1", 443, JwksTransport::PublicHttps)
         .await
         .unwrap();
     assert_eq!(ip, "2606:4700::1".parse::<std::net::IpAddr>().unwrap());
@@ -1297,17 +1299,17 @@ fn jwks_contract_uri_canonicalization_convergence_and_divergence() {
 /// **Fix 2 — Public bracketed-IPv6 JWKS URI through the resolved-target and pin-input seam.**
 ///
 /// This seam test is network-free: both public `2606:4700::1` and site-local
-/// `fec0::1` are IP literals, so `resolve_and_check_ssrf` takes the fast path
-/// (`host.parse::<IpAddr>()` then `is_not_global_unicast`) without any DNS
-/// lookup.
+/// `fec0::1` are IP literals, so `resolve_for_transport` with `PublicHttps`
+/// takes the fast path (`host.parse::<IpAddr>()` then `is_not_global_unicast`)
+/// without any DNS lookup.
 ///
 /// The seam covers the three stages `fetch_jwks_inner` traverses in order:
 /// 1. `extract_url_host_and_port` — typed `Url::host()` yields bare
 ///    `"2606:4700::1"`, not the bracketed `"[2606:4700::1]"` that
 ///    `host_str()` returns.
-/// 2. `resolve_and_check_ssrf(host, port)` — fast path: `host.parse::<IpAddr>()`
-///    succeeds only for the bare form, passes `is_not_global_unicast`, and
-///    returns the `IpAddr`.
+/// 2. `resolve_for_transport(host, port, JwksTransport::PublicHttps)` — the
+///    `host.parse::<IpAddr>()` fast path succeeds only for the bare form, passes
+///    `is_not_global_unicast`, and returns the `IpAddr`.
 /// 3. Reqwest `.resolve(host, SocketAddr::new(ip, port))` uses the raw `host`
 ///    string as its pin key. The key must equal the URL authority form —
 ///    bare for IPv6, brackets forbidden.
@@ -1317,7 +1319,8 @@ fn jwks_contract_uri_canonicalization_convergence_and_divergence() {
 /// reqwest connector; connector-boundary behavior is a runtime concern.
 ///
 /// For `fec0::1`: `extract_url_host_and_port` still extracts the bare address;
-/// `resolve_and_check_ssrf` rejects it via `is_not_global_unicast`.
+/// `resolve_for_transport` rejects it under the `PublicHttps` policy via
+/// `is_not_global_unicast`.
 ///
 /// ## Mutation oracle
 /// Replace `Some(url::Host::Ipv6(addr)) => addr.to_string()` with
@@ -1326,7 +1329,7 @@ fn jwks_contract_uri_canonicalization_convergence_and_divergence() {
 /// - `"[2606:4700::1]".parse::<IpAddr>()` fails → SSRF fast path unreachable
 ///   → public acceptance assertion flips red.
 /// - `is_not_global_unicast` is never called on `fec0::1` (the parse also
-///   fails) → `resolve_and_check_ssrf` returns `NetworkError` not `InvalidUri`
+///   fails) → `resolve_for_transport` returns `NetworkError` not `InvalidUri`
 ///   → fec0 rejection-kind assertion flips red.
 /// - The pin-input equality assertion also flips red (bracket mismatch).
 #[tokio::test]
@@ -1345,7 +1348,7 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
 
     // ── Stage 2: IpAddr resolution (SSRF fast path) ───────────────────────────
     // `host.parse::<IpAddr>()` succeeds only for the bare form. This is exactly
-    // the fast path in `resolve_and_check_ssrf` that bypasses DNS.
+    // the fast path in `resolve_for_transport` that bypasses DNS.
     let ip: std::net::IpAddr = host
         .parse()
         .expect("bracket-free host must parse as IpAddr; mutation: bracketed form fails here");
@@ -1357,8 +1360,8 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
         "2606:4700::1 must pass as globally reachable; mutation: SSRF check would reject it"
     );
 
-    // Confirm resolve_and_check_ssrf accepts the public address (network-free fast path).
-    let resolved = super::resolve_and_check_ssrf(&host, port)
+    // Confirm the production resolver accepts the public address under PublicHttps.
+    let resolved = super::resolve_for_transport(&host, port, JwksTransport::PublicHttps)
         .await
         .expect("public IPv6 must be accepted by SSRF check");
     assert_eq!(
@@ -1404,8 +1407,8 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
          bypasses this check (parse fails, NetworkError not InvalidUri)"
     );
 
-    // resolve_and_check_ssrf must return InvalidUri for fec0::1.
-    let fec0_err = super::resolve_and_check_ssrf(&fec0_host, fec0_port)
+    // The production resolver must return InvalidUri for fec0::1 under PublicHttps.
+    let fec0_err = super::resolve_for_transport(&fec0_host, fec0_port, JwksTransport::PublicHttps)
         .await
         .unwrap_err();
     assert_eq!(

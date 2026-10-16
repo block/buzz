@@ -55,7 +55,7 @@ class ProfileAvatar extends ConsumerWidget {
   Widget _buildPlaceholder(BuildContext context) {
     return CircleAvatar(
       radius: size / 2,
-      backgroundColor: context.colors.primaryContainer,
+      backgroundColor: context.controlSurface,
     );
   }
 
@@ -74,7 +74,7 @@ class ProfileAvatar extends ConsumerWidget {
           child: ColoredBox(
             key: const ValueKey('profile-avatar-background'),
             color: animatedAvatar == null
-                ? context.colors.primaryContainer
+                ? context.controlSurface
                 : Colors.transparent,
             child: AvatarImageContent(
               imageUrl: animatedAvatar?.posterUrl ?? profile?.avatarUrl,

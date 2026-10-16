@@ -52,7 +52,7 @@ class MeAssistantList extends ConsumerWidget {
                                     ?.avatarUrl,
                             radius: 20,
                             isAgent: true,
-                            backgroundColor: context.colors.primaryContainer,
+                            backgroundColor: context.controlSurface,
                             fallback: Text(
                               agent.displayName?.isNotEmpty == true
                                   ? agent.displayName![0]
