@@ -290,11 +290,13 @@ mod tests {
                 event_id: vec![1_u8; 32],
                 barrier: None,
             };
-            let err = enqueue(&db.pool, &quiescing)
+            let err = enqueue(&db.pool, &quiescing, None)
                 .await
                 .expect_err("quiescing enqueue");
             assert!(crate::test_support::is_admission_rejection(&err));
-            enqueue(&db.pool, &active).await.expect("admitted enqueue");
+            enqueue(&db.pool, &active, None)
+                .await
+                .expect("admitted enqueue");
             for (community, expected) in [(communities[0], 1), (communities[1], 0)] {
                 let count: i64 = sqlx::query_scalar(
                     "SELECT count(*) FROM push_match_queue WHERE community_id = $1",
