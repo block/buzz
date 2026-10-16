@@ -2625,11 +2625,10 @@ fn sql_update_sets<'a>(source: &'a str, table: &str) -> Vec<(&'a str, &'a str)> 
         .into_iter()
         .filter_map(|rest| {
             let rest = rest.split(['"', ';']).next()?.trim_start();
-            rest.strip_prefix("set ").or_else(|| {
-                // UPDATE table [AS] alias SET ...
-                let (alias, set) = rest.split_once(" set ")?;
-                (alias.split_whitespace().count() <= 2).then_some(set)
-            })
+            // UPDATE table [[AS] alias] SET ..., including SET(a, b) = ...
+            let set = *sql_token_suffixes(rest, "set").first()?;
+            let alias = &rest[..rest.len() - set.len() - "set".len()];
+            (alias.split_whitespace().count() <= 2).then_some(set.trim_start())
         });
     let conflict_updates = sql_table_suffixes(source, "insert into", table)
         .into_iter()
@@ -3083,6 +3082,7 @@ fn single_table_policy_rejects_implicit_community_insert_columns() {
 fn single_table_policy_checks_tuple_assignments() {
     for (sql, reason) in [
         ("UPDATE channels SET (name, community_id) = ($1, $2) WHERE id = $3", "channels.community_id UPDATE"),
+        ("UPDATE channels SET(name, community_id) = ($1, $2) WHERE id = $3", "channels.community_id UPDATE"),
         ("UPDATE communities SET (icon, deletion_state) = (NULL, 'active') WHERE id = $1 AND deletion_state = 'active'", "lifecycle UPDATE"),
         ("UPDATE community_deletion_requests SET (stage, community_id) = ($1, $2) WHERE id = $3", "identity/provenance UPDATE"),
         ("UPDATE community_deletion_requests SET (inventory_digest, inventory_manifest) = (NULL, NULL) WHERE id = $1", "inventory_frozen_at IS NULL"),
@@ -3169,6 +3169,7 @@ fn single_table_policy_rejects_approval_mutations() {
         "DELETE FROM community_deletion_approvals WHERE request_id = $1",
         "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT (request_id) DO UPDATE SET note = EXCLUDED.note",
         "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT(request_id) DO UPDATE SET note = EXCLUDED.note",
+        "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT(request_id) DO UPDATE SET(note) = ROW(EXCLUDED.note)",
     ] {
         let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
         assert_eq!(
