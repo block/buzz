@@ -123,7 +123,7 @@ use buzz_core::kind::{
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
@@ -692,6 +692,13 @@ enum RelayCommand {
     SubscribeObserverControls,
     /// Publish a signed event to the relay (for typing indicators, etc.).
     PublishEvent { event: Box<Event> },
+    /// Publish a signed event and report the relay's `OK` for it on `ack`.
+    /// A send failure, rate-gate drop, or lost connection drops `ack`
+    /// unresolved, so the waiter observes non-delivery instead of success.
+    PublishEventAcked {
+        event: Box<Event>,
+        ack: oneshot::Sender<PublishAck>,
+    },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
 }
@@ -726,6 +733,15 @@ pub struct HarnessRelay {
     bg_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// The relay's `OK` verdict for one acknowledged publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishAck {
+    /// Whether the relay accepted the event.
+    pub accepted: bool,
+    /// The relay's `OK` message (empty on a plain acceptance).
+    pub message: String,
+}
+
 /// Cloneable publisher handle for signed events on the relay background socket.
 #[derive(Clone)]
 pub struct RelayEventPublisher {
@@ -733,6 +749,24 @@ pub struct RelayEventPublisher {
 }
 
 impl RelayEventPublisher {
+    /// Publish a signed event and wait for the relay's `OK` for it.
+    ///
+    /// Use this when the caller must not proceed until the relay has processed
+    /// the event — e.g. the `offline` presence publish on shutdown, which the
+    /// relay drops as unauthenticated if the socket close overtakes it.
+    /// Callers bound the wait with their own timeout.
+    pub async fn publish_event_acked(&self, event: Event) -> Result<PublishAck, RelayError> {
+        let (ack, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RelayCommand::PublishEventAcked {
+                event: Box::new(event),
+                ack,
+            })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)?;
+        ack_rx.await.map_err(|_| RelayError::ConnectionClosed)
+    }
+
     /// Publish a signed event through the relay background task.
     pub async fn publish_event(&self, event: Event) -> Result<(), RelayError> {
         self.cmd_tx
@@ -1215,6 +1249,10 @@ struct BgState {
     /// relay's rate-limit NOTICE does not carry an event ID, so all unresolved
     /// observer writes are moved back ahead of the parked FIFO when one arrives.
     observer_in_flight: VecDeque<Box<Event>>,
+    /// Waiters for the relay's `OK` on an acknowledged publish, keyed by event
+    /// id hex. Waiters that gave up are pruned on every insert, so the map is
+    /// bounded by concurrent waiters, not by publishes.
+    pending_acks: HashMap<String, oneshot::Sender<PublishAck>>,
     /// Frames evicted from the bounded pending/in-flight observer buffers since
     /// summary log. Makes overflow loss visible instead of silent.
     gated_observer_dropped: u64,
@@ -1256,6 +1294,7 @@ impl BgState {
             observer_resub_needed: false,
             gated_observer_pending: VecDeque::new(),
             observer_in_flight: VecDeque::new(),
+            pending_acks: HashMap::new(),
             gated_observer_dropped: 0,
             resubscribe_retry: HashSet::new(),
             connection_generation: 0,
@@ -1491,6 +1530,9 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                 state.membership_last_seen = Some(ts);
             }
         }
+        // No socket, so no OK can arrive: dropping `ack` unresolved tells the
+        // waiter the event was not delivered.
+        RelayCommand::PublishEventAcked { .. } => {}
         // Observer telemetry frames are durable: park them (bounded, visible
         // overflow) so they are delivered by the post-reconnect drain. Other
         // ephemeral publishes (typing indicators) are meaningless while
@@ -1718,6 +1760,19 @@ async fn execute_connected_command(
                 }
             } else if is_observer {
                 state.park_gated_observer_frame(event);
+            }
+            true
+        }
+        RelayCommand::PublishEventAcked { event, ack } => {
+            // A rate-gated or failed send drops `ack` unresolved, which the
+            // waiter observes as non-delivery — never as a relay acceptance.
+            if state.check_rate_gate().is_some() {
+                debug!("rate-gated: dropping acknowledged PublishEvent");
+                return true;
+            }
+            if send_publish_event_frame(ws, &event).await {
+                state.pending_acks.retain(|_, waiter| !waiter.is_closed());
+                state.pending_acks.insert(event.id.to_hex(), ack);
             }
             true
         }
@@ -2529,6 +2584,14 @@ async fn handle_ws_message(
                     accepted,
                     message,
                 } => {
+                    // Resolve an acknowledged publish first: its refusal may be
+                    // an `auth…` message, and the branch below returns early.
+                    if let Some(waiter) = state.pending_acks.remove(&event_id) {
+                        let _ = waiter.send(PublishAck {
+                            accepted,
+                            message: message.clone(),
+                        });
+                    }
                     if !accepted && message.starts_with("auth") {
                         // AUTH OK with accepted=false means auth was rejected.
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
@@ -6566,6 +6629,188 @@ mod tests {
     }
 
     /// Build a signed observer telemetry frame (kind 24200) for gate tests.
+    fn make_presence_event(keys: &Keys, status: &str) -> Event {
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16),
+            status,
+        )
+        .sign_with_keys(keys)
+        .expect("sign presence event")
+    }
+
+    async fn deliver_ok(
+        client: &mut WsStream,
+        state: &mut BgState,
+        keys: &Keys,
+        event_id: &str,
+        accepted: bool,
+        message: &str,
+    ) -> bool {
+        let (event_tx, _event_rx) = mpsc::channel::<Option<BuzzEvent>>(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel::<Event>(4);
+        handle_ws_message(
+            Message::Text(
+                json!(["OK", event_id, accepted, message])
+                    .to_string()
+                    .into(),
+            ),
+            client,
+            &event_tx,
+            &observer_control_tx,
+            state,
+            keys,
+            "wss://relay.test",
+            "agent-pubkey",
+            None,
+        )
+        .await
+    }
+
+    /// The shutdown `offline` publish must not count as delivered until the
+    /// relay's `OK` for that exact event arrives: closing the socket behind an
+    /// unacknowledged publish lets the relay drop it as unauthenticated.
+    #[tokio::test]
+    async fn acked_publish_resolves_only_on_its_own_ok() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let offline = make_presence_event(&keys, "offline");
+        let (ack, mut ack_rx) = oneshot::channel();
+
+        let ok = execute_connected_command(
+            &mut client,
+            &mut state,
+            "agent-pubkey",
+            RelayCommand::PublishEventAcked {
+                event: Box::new(offline.clone()),
+                ack,
+            },
+        )
+        .await;
+        assert!(ok);
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "EVENT");
+        assert_eq!(frame[1]["id"], offline.id.to_hex());
+        assert!(
+            ack_rx.try_recv().is_err(),
+            "a written frame is not a relay acceptance"
+        );
+
+        let other = make_presence_event(&keys, "online");
+        assert!(deliver_ok(&mut client, &mut state, &keys, &other.id.to_hex(), true, "").await);
+        assert!(
+            ack_rx.try_recv().is_err(),
+            "another event's OK must not resolve this publish"
+        );
+
+        assert!(
+            deliver_ok(
+                &mut client,
+                &mut state,
+                &keys,
+                &offline.id.to_hex(),
+                true,
+                ""
+            )
+            .await
+        );
+        assert_eq!(
+            ack_rx.try_recv().expect("own OK resolves the publish"),
+            PublishAck {
+                accepted: true,
+                message: String::new(),
+            }
+        );
+        assert!(state.pending_acks.is_empty());
+    }
+
+    /// A refusal reaches the waiter even when it is an `auth…` message — the
+    /// exact refusal the shutdown race produces — although that OK also takes
+    /// the reconnect branch.
+    #[tokio::test]
+    async fn acked_publish_reports_an_auth_refusal() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let offline = make_presence_event(&keys, "offline");
+        let (ack, mut ack_rx) = oneshot::channel();
+        execute_connected_command(
+            &mut client,
+            &mut state,
+            "agent-pubkey",
+            RelayCommand::PublishEventAcked {
+                event: Box::new(offline.clone()),
+                ack,
+            },
+        )
+        .await;
+        next_test_frame(&mut server).await;
+
+        let message = "auth-required: not authenticated";
+        deliver_ok(
+            &mut client,
+            &mut state,
+            &keys,
+            &offline.id.to_hex(),
+            false,
+            message,
+        )
+        .await;
+        assert_eq!(
+            ack_rx.try_recv().expect("refusal resolves the publish"),
+            PublishAck {
+                accepted: false,
+                message: message.to_string(),
+            }
+        );
+    }
+
+    /// With no socket, or while rate-gated, nothing is sent and the waiter
+    /// learns of non-delivery immediately instead of timing out or succeeding.
+    #[tokio::test]
+    async fn acked_publish_that_is_not_sent_reports_non_delivery() {
+        let keys = Keys::generate();
+
+        let mut disconnected = BgState::new();
+        let (ack, mut ack_rx) = oneshot::channel();
+        apply_command_to_state(
+            &mut disconnected,
+            RelayCommand::PublishEventAcked {
+                event: Box::new(make_presence_event(&keys, "offline")),
+                ack,
+            },
+        );
+        assert!(matches!(
+            ack_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+
+        let (mut client, mut server) = test_ws_pair().await;
+        let mut gated = BgState::new();
+        gated.rate_limit_gate = Some(tokio::time::Instant::now() + Duration::from_secs(60));
+        let (ack, mut ack_rx) = oneshot::channel();
+        execute_connected_command(
+            &mut client,
+            &mut gated,
+            "agent-pubkey",
+            RelayCommand::PublishEventAcked {
+                event: Box::new(make_presence_event(&keys, "offline")),
+                ack,
+            },
+        )
+        .await;
+        assert!(matches!(
+            ack_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(
+            timeout(Duration::from_millis(50), server.next())
+                .await
+                .is_err(),
+            "a rate-gated acknowledged publish must not reach the wire"
+        );
+    }
+
     fn make_observer_frame(keys: &Keys) -> Event {
         let recipient = Keys::generate();
         let encrypted = buzz_core::observer::encrypt_observer_payload(
