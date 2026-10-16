@@ -37,7 +37,8 @@ DEVELOPER_DIR=/Applications/Xcode-27.0.0.app/Contents/Developer xcodebuild -vers
 Adjust the path to your installation. Keep the compiler and SDK from the same
 Xcode installation. The pinned Flutter native-assets tooling can discover the
 globally selected SDK even when `DEVELOPER_DIR` selects another compiler, so
-use a build machine with a matching default Xcode when validating Xcode 26.
+use a build machine with a matching default Xcode when validating either
+Xcode 26 or Xcode 27.
 
 The native cryptography dependency is pinned upstream C source in
 `ios/BuzzPushKit/Sources/CSecp256k1`; it requires no Swift build-plugin approval.
