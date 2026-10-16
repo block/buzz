@@ -18,9 +18,11 @@ test("empty/whitespace lastError → null", () => {
   assert.equal(friendlyAgentLastError("   "), null);
 });
 
-test("buzz-acp wrapped auth failure → denied copy", () => {
+test("buzz-acp wrapped auth failure (legacy string, mesh provider) → denied copy", () => {
   const result = friendlyAgentLastError(
     "Agent reported error: llm auth: 401 unauthorized: ...",
+    null,
+    "relay-mesh",
   );
   assert.deepEqual(result, {
     severity: "denied",
@@ -28,11 +30,15 @@ test("buzz-acp wrapped auth failure → denied copy", () => {
   });
 });
 
-test("unwrapped buzz-agent prefix → denied copy", () => {
+test("unwrapped buzz-agent prefix (legacy string, mesh provider) → denied copy", () => {
   // buzz-agent's AgentError::LlmAuth Display is "llm auth: <body>"; if the
   // desktop ever picks that up directly (no AcpError wrapper), we should
-  // still recognize it as denial.
-  const result = friendlyAgentLastError("llm auth: 403 forbidden");
+  // still recognize it as denial when the agent is a mesh agent.
+  const result = friendlyAgentLastError(
+    "llm auth: 403 forbidden",
+    null,
+    "relay-mesh",
+  );
   assert.deepEqual(result, {
     severity: "denied",
     copy: RELAY_MESH_DENIED_COPY,
@@ -50,6 +56,8 @@ test("generic harness exit message → passthrough", () => {
 test("trims whitespace before matching", () => {
   const result = friendlyAgentLastError(
     "  Agent reported error: llm auth: nope\n",
+    null,
+    "relay-mesh",
   );
   assert.equal(result?.severity, "denied");
   assert.equal(result?.copy, RELAY_MESH_DENIED_COPY);
@@ -89,18 +97,45 @@ test("code -32002 → model-not-found copy (severity: denied)", () => {
   });
 });
 
-test("code -32001 → Buzz shared compute denied copy (structured path)", () => {
-  const result = friendlyAgentLastError("any error text", -32001);
+test("code -32001 → Buzz shared compute denied copy (structured path, mesh)", () => {
+  const result = friendlyAgentLastError("any error text", -32001, "relay-mesh");
   assert.deepEqual(result, {
     severity: "denied",
     copy: RELAY_MESH_DENIED_COPY,
   });
 });
 
-test("code null falls through to legacy string matching", () => {
+test("code -32001 non-mesh provider → raw message preserved", () => {
+  // Regression for #4205: a Local-OpenAI-compatible agent whose llama.cpp
+  // 401s must see the underlying message (e.g. "multi-user-authorization"),
+  // not "Community access denied".
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32001): llm auth: 401 Unauthorized: {\"message\":\"multi-user-authorization\"}",
+    -32001,
+    "openai",
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "Agent reported error (code -32001): llm auth: 401 Unauthorized: {\"message\":\"multi-user-authorization\"}",
+  });
+});
+
+test("code -32001 null provider → raw message (conservative)", () => {
+  // When provider is absent (older record), never substitute the mesh copy —
+  // mislabeling a non-mesh 401 is worse than showing more detail to a mesh
+  // user.
+  const result = friendlyAgentLastError("any error text", -32001, null);
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "any error text",
+  });
+});
+
+test("code null falls through to legacy string matching (mesh)", () => {
   const result = friendlyAgentLastError(
     "Agent reported error: llm auth: 401 unauthorized",
     null,
+    "relay-mesh",
   );
   assert.deepEqual(result, {
     severity: "denied",
@@ -108,10 +143,11 @@ test("code null falls through to legacy string matching", () => {
   });
 });
 
-test("code undefined falls through to legacy string matching", () => {
+test("code undefined falls through to legacy string matching (mesh)", () => {
   const result = friendlyAgentLastError(
     "Agent reported error: llm auth: 403 forbidden",
     undefined,
+    "relay-mesh",
   );
   assert.deepEqual(result, {
     severity: "denied",
@@ -134,10 +170,21 @@ test("friendlyTurnErrorCopy: numeric code -32002 → model-not-found copy", () =
   );
 });
 
-test("friendlyTurnErrorCopy: string-encoded code coerces to number", () => {
+test("friendlyTurnErrorCopy: string-encoded code coerces to number (mesh)", () => {
   assert.equal(
-    friendlyTurnErrorCopy("raw error", "-32001"),
+    friendlyTurnErrorCopy("raw error", "-32001", "relay-mesh"),
     RELAY_MESH_DENIED_COPY,
+  );
+});
+
+test("friendlyTurnErrorCopy: -32001 non-mesh → raw text preserved", () => {
+  assert.equal(
+    friendlyTurnErrorCopy(
+      "llm auth: 401 Unauthorized: multi-user-authorization",
+      -32001,
+      "openai",
+    ),
+    "llm auth: 401 Unauthorized: multi-user-authorization",
   );
 });
 
@@ -165,23 +212,42 @@ test("unknown code prevents string-pattern cross-classification", () => {
   });
 });
 
-test("NaN code param treated as absent — string path applies", () => {
-  // NaN is not finite; falls back to string matching.
-  const result = friendlyAgentLastError("llm auth: denied", NaN);
+test("NaN code param treated as absent — legacy string path applies (mesh)", () => {
+  // NaN is not finite; falls back to string matching. Mesh provider preserves
+  // the historical denied-copy mapping for the legacy form.
+  const result = friendlyAgentLastError(
+    "llm auth: denied",
+    NaN,
+    "relay-mesh",
+  );
   assert.deepEqual(result, {
     severity: "denied",
     copy: RELAY_MESH_DENIED_COPY,
   });
 });
 
-test("embedded code -32001 recovered from message when code param is null", () => {
+test("embedded code -32001 recovered from message when code param is null (mesh)", () => {
   const result = friendlyAgentLastError(
     "Agent reported error (code -32001): llm auth: 401",
     null,
+    "relay-mesh",
   );
   assert.deepEqual(result, {
     severity: "denied",
     copy: RELAY_MESH_DENIED_COPY,
+  });
+});
+
+test("embedded code -32001, non-mesh provider → raw preserved (regression)", () => {
+  // Even the embedded-code fallback must respect the provider gate.
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32001): llm auth: 401 from api.openai.com",
+    null,
+    "openai",
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "Agent reported error (code -32001): llm auth: 401 from api.openai.com",
   });
 });
 
@@ -207,10 +273,10 @@ test("embedded unknown code is authoritative — no cross-classification", () =>
   });
 });
 
-test("friendlyTurnErrorCopy: garbage string code coerces to NaN → string path", () => {
+test("friendlyTurnErrorCopy: garbage string code coerces to NaN → legacy string path (mesh)", () => {
   // "garbage" → NaN → not finite → null → string prefix matches "llm auth:".
   assert.equal(
-    friendlyTurnErrorCopy("llm auth: denied", "garbage"),
+    friendlyTurnErrorCopy("llm auth: denied", "garbage", "relay-mesh"),
     RELAY_MESH_DENIED_COPY,
   );
 });
@@ -307,9 +373,15 @@ test("friendlyTurnErrorCopy: code -32603 bare Internal error → cli-acp interna
 });
 
 test("-32603 does not affect -32001/-32002 classification (regression)", () => {
-  assert.deepEqual(friendlyAgentLastError("any", -32001), {
+  assert.deepEqual(friendlyAgentLastError("any", -32001, "relay-mesh"), {
     severity: "denied",
     copy: RELAY_MESH_DENIED_COPY,
+  });
+  // -32001 non-mesh now passes raw through (the #4205 fix); -32002 is
+  // provider-independent.
+  assert.deepEqual(friendlyAgentLastError("any", -32001, "openai"), {
+    severity: "generic",
+    copy: "any",
   });
   assert.deepEqual(friendlyAgentLastError("any", -32002), {
     severity: "denied",
