@@ -234,20 +234,27 @@ async fn desired_state_schema_matches_migrations() {
         probes.clone(),
     ))
     .await;
+    // Attempt every drop before reporting any failure, so one failed drop
+    // never leaks the other probe.
+    let mut drop_failures = Vec::new();
     for db in &probes {
-        let dropped = sqlx::query(AssertSqlSafe(format!(
+        if let Err(error) = sqlx::query(AssertSqlSafe(format!(
             "DROP DATABASE IF EXISTS {db} WITH (FORCE)"
         )))
         .execute(&admin)
-        .await;
-        match (dropped, &outcome) {
-            (Ok(_), _) => {}
-            (Err(error), Ok(())) => panic!("drop probe database {db}: {error}"),
-            (Err(error), Err(_)) => eprintln!("could not drop probe database {db}: {error}"),
+        .await
+        {
+            drop_failures.push(format!("drop probe database {db}: {error}"));
         }
     }
-    if let Err(failure) = outcome {
-        std::panic::resume_unwind(failure.into_panic());
+    match outcome {
+        Err(failure) => {
+            for message in &drop_failures {
+                eprintln!("{message}");
+            }
+            std::panic::resume_unwind(failure.into_panic());
+        }
+        Ok(()) => assert!(drop_failures.is_empty(), "{}", drop_failures.join("; ")),
     }
 
     struct PgschemaConnection {
