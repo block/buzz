@@ -2328,6 +2328,25 @@ fn assigns_event_floor_column(assignments: &str) -> bool {
         })
 }
 
+/// Whether a `SET` list (up to the first `WHERE`) is missing from its
+/// literal: empty, or holding an item with no `=`, such as a `{…}`
+/// placeholder or a column whose value follows in another literal.
+fn set_list_is_unreadable(assignments: &str) -> bool {
+    let assignments = assignments.split(" where ").next().expect("first part");
+    let mut depth = 0usize;
+    assignments.trim().is_empty()
+        || assignments
+            .split(|ch| {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                ch == ',' && depth == 0
+            })
+            .any(|assignment| !assignment.contains('='))
+}
+
 /// The table a write targets, without its schema (a literal or a `{…}`
 /// placeholder; any schema may hold an `events` table).
 fn unqualified_table(target: &str) -> &str {
@@ -2337,21 +2356,26 @@ fn unqualified_table(target: &str) -> &str {
 /// Whether one SQL literal (normalized) assigns a floor column through a
 /// direct `UPDATE` of `events`, or of a target it does not spell: a
 /// placeholder, or a `SET` list whose `UPDATE` lies in another literal.
+/// A `SET` list it cannot read counts as assigning one.
 fn literal_updates_event_floor_columns(sql: &str) -> bool {
     // `SET(` with no space is still a row assignment.
     let sql = format!(" {} ", sql.trim()).replace(" set(", " set (");
     sql.match_indices(" set ").any(|(index, marker)| {
-        if !assigns_event_floor_column(&sql[index + marker.len()..]) {
+        let assignments = &sql[index + marker.len()..];
+        // A SET list continued in another literal or argument cannot be read.
+        let unreadable = set_list_is_unreadable(assignments);
+        if !unreadable && !assigns_event_floor_column(assignments) {
             return false;
         }
         let before = &sql[..index];
         if before.ends_with(" do update") {
             // The upsert check resolves the INSERT, which may be in another
-            // literal of the same builder.
-            return false;
+            // literal of the same builder, but only from a readable SET list.
+            return unreadable;
         }
         let Some(update) = before.rfind(" update ") else {
-            return true;
+            // A bare SET (Redis `SET`, prose) is not SQL unless it assigns.
+            return !unreadable;
         };
         let mut target = before[update + " update ".len()..].split_whitespace();
         let mut table = target.next();
@@ -2361,7 +2385,9 @@ fn literal_updates_event_floor_columns(sql: &str) -> bool {
         // The target may have an alias, with or without AS.
         let alias = target.collect::<Vec<_>>();
         let (Some(table), [] | [_] | ["as", _]) = (table, alias.as_slice()) else {
-            return true;
+            // An unreadable target is a violation only when it assigns a
+            // floor column; prose ("update … is set") assigns nothing.
+            return !unreadable;
         };
         let table = unqualified_table(table);
         table == "events" || table.contains('{')
@@ -2865,7 +2891,7 @@ async fn two_phase(tx: &mut AdmittedTx) {
     // the per-literal checks cannot read it whole.
     const WRITER: &str = "async fn writer(tx: &mut AdmittedTx) {";
     const OPAQUE_INSERT: &str = "INSERT target is not a literal table";
-    let shapes: [(&str, &[&str]); 19] = [
+    let shapes: [(&str, &[&str]); 23] = [
         // Controls: an opaque WHERE predicate (the retention deletes), a
         // placeholder table with no floor column (tenant severing), and a
         // builder whose upsert continues in another literal.
@@ -2933,6 +2959,23 @@ async fn two_phase(tx: &mut AdmittedTx) {
         ),
         (
             r#"format!("UPDATE public.events SET {column} = $1")"#,
+            &[WRITER],
+        ),
+        // A SET list continued in another literal or argument.
+        (
+            r#"format!("UPDATE events SET {}", "created_at = $1")"#,
+            &[WRITER],
+        ),
+        (
+            r#"["UPDATE events SET ", "channel_id = $1"].concat()"#,
+            &[WRITER],
+        ),
+        (
+            r#"QueryBuilder::new("UPDATE events SET ").push("created_at = ")"#,
+            &[WRITER],
+        ),
+        (
+            r#"QueryBuilder::new("INSERT INTO events (id) ").push(" ON CONFLICT (id) DO UPDATE SET ").push("channel_id = EXCLUDED.channel_id")"#,
             &[WRITER],
         ),
         (
