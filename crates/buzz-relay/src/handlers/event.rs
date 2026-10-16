@@ -671,6 +671,18 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    // Ephemeral kinds return before ingest, so the system-channel membership
+    // notices (24100/24101) need ingest's relay-signed-only rule here too.
+    if buzz_core::kind::is_membership_notification(kind_u32) {
+        reject("invalid");
+        conn.send(RelayMessage::ok(
+            &event_id_hex,
+            false,
+            "invalid: membership notifications are relay-signed only",
+        ));
+        return;
+    }
+
     // Observer frames and ephemeral kinds return before ingest, so they take
     // the ban / timeout write-block here, over a short-TTL cache because it
     // runs per frame. Persistent kinds get the uncached check in ingest, and

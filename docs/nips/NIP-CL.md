@@ -190,6 +190,18 @@ The relay MUST NOT send push notifications or kind:44100/44101 membership
 notifications for system channels. A client that received one would show the
 channel.
 
+Instead, when a member is added to or removed from a system channel, the relay
+sends kind:24100 (added) or kind:24101 (removed). These have the same tags and
+content as 44100/44101: `p` is the member and `h` is the channel ID. The relay
+signs them, and clients cannot submit them. A REQ that can match them must
+have `#p` set to the reader's own pubkey, as for 44100/44101.
+
+They are ephemeral: the relay does not store them. A client that reconnects
+learns of missed changes by reading its system channels again. Clients that do
+not know system channels never ask for these kinds, so they never see the
+channel. A client that knows system channels can subscribe to them to learn of
+a new membership at once, and then read the channel by its ID.
+
 ### Asking for system channels
 
 A filter whose kinds are all 39000–39003 also returns the system channels that
