@@ -4,6 +4,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 const CHANNEL = "general";
 const REPLY_COUNT = 2_419;
+const OFFSCREEN_REPLY_NUMBER = 201;
 
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
@@ -25,7 +26,7 @@ async function waitForMockLiveSubscription(
     .toBe(true);
 }
 
-test("a 2,419-reply thread keeps only the visible rows mounted and remains writable", async ({
+test("a 2,419-reply thread opens an off-screen deep link and stays windowed", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -33,8 +34,8 @@ test("a 2,419-reply thread keeps only the visible rows mounted and remains writa
   await page.getByTestId(`channel-${CHANNEL}`).click();
   await waitForMockLiveSubscription(page);
 
-  const rootId = await page.evaluate(
-    ({ channelName, replyCount }) => {
+  const seeded = await page.evaluate(
+    ({ channelName, offscreenReplyNumber, replyCount }) => {
       const emit = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -55,38 +56,86 @@ test("a 2,419-reply thread keeps only the visible rows mounted and remains writa
         content: "Long-running project thread",
         createdAt: base,
       });
+      let targetId = "";
       for (let index = 0; index < replyCount; index += 1) {
-        emit({
+        const reply = emit({
           channelName,
           content: `Reply ${index + 1} of ${replyCount}`,
           parentEventId: root.id,
           createdAt: base + index + 1,
         });
+        if (index + 1 === offscreenReplyNumber) {
+          targetId = reply.id;
+        }
       }
-      return root.id;
+      return { rootId: root.id, targetId };
     },
-    { channelName: CHANNEL, replyCount: REPLY_COUNT },
+    {
+      channelName: CHANNEL,
+      offscreenReplyNumber: OFFSCREEN_REPLY_NUMBER,
+      replyCount: REPLY_COUNT,
+    },
   );
-  expect(rootId).not.toBeNull();
+  expect(seeded?.rootId).toBeTruthy();
+  expect(seeded?.targetId).toBeTruthy();
 
-  const summary = page.getByTestId("message-thread-summary").last();
-  await expect(summary).toBeVisible({ timeout: 30_000 });
-  await summary.click();
+  await page.evaluate(
+    ({ messageId, threadRootId }) => {
+      const hash = window.location.hash.replace(/^#/, "") || "/";
+      const [path, query = ""] = hash.split("?");
+      const params = new URLSearchParams(query);
+      params.set("messageId", messageId);
+      params.set("thread", threadRootId);
+      params.set("threadRootId", threadRootId);
+      const nextHash = `#${path}?${params.toString()}`;
+      window.history.pushState(
+        {},
+        "",
+        `${window.location.pathname}${nextHash}`,
+      );
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    },
+    {
+      messageId: seeded?.targetId ?? "",
+      threadRootId: seeded?.rootId ?? "",
+    },
+  );
 
   const threadPanel = page.getByTestId("message-thread-panel");
   const replies = threadPanel.getByTestId("message-thread-replies");
+  const targetReply = replies.getByText(
+    `Reply ${OFFSCREEN_REPLY_NUMBER} of ${REPLY_COUNT}`,
+    { exact: true },
+  );
+  const latestReply = replies.getByText(
+    `Reply ${REPLY_COUNT} of ${REPLY_COUNT}`,
+    { exact: true },
+  );
   await expect(threadPanel).toBeVisible();
   await expect(replies).toHaveAttribute("data-virtualized", "true", {
     timeout: 30_000,
   });
-  await expect(
-    replies.getByText(`Reply ${REPLY_COUNT} of ${REPLY_COUNT}`, {
-      exact: true,
-    }),
-  ).toBeVisible();
+  await expect(targetReply).toBeVisible({ timeout: 30_000 });
+  await expect(latestReply).toHaveCount(0);
 
   const mountedReplyRows = replies.getByTestId("message-row");
   await expect.poll(() => mountedReplyRows.count()).toBeGreaterThan(0);
+  expect(await mountedReplyRows.count()).toBeLessThan(80);
+
+  await threadPanel.getByTestId("thread-scroll-to-latest").click();
+  await expect(latestReply).toBeVisible({ timeout: 30_000 });
+  await expect
+    .poll(async () =>
+      threadPanel.getByTestId("message-thread-body").evaluate((element) => {
+        const scroller = element as HTMLElement;
+        return (
+          scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
+          32
+        );
+      }),
+    )
+    .toBe(true);
   expect(await mountedReplyRows.count()).toBeLessThan(80);
 
   const editor = threadPanel

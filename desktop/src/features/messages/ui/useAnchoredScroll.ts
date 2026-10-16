@@ -23,6 +23,9 @@ type AnchorState =
   | { kind: "message"; messageId: string; topOffset: number }
   | { kind: "pinned-center"; messageId: string; contentTop: number };
 
+/** `pending` is a known virtual row that has not mounted yet. */
+type VirtualTargetScrollResult = "scrolled" | "pending" | "missing";
+
 type UseAnchoredScrollOptions = {
   /** Scroll container. Owned by the parent so external refs still compose. */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -80,7 +83,7 @@ type UseAnchoredScrollResult = {
    *  (used by the composer's send flow). */
   scrollToBottomOnNextUpdate: () => void;
   /** Imperative: scroll a specific message into view; optionally pulse it.
-   *  Returns true if the row was found and scrolled, false otherwise. */
+   *  Returns true once the row is mounted and scrolled. */
   scrollToMessage: (
     messageId: string,
     options?: { highlight?: boolean; behavior?: ScrollBehavior },
@@ -432,9 +435,9 @@ export function useAnchoredScroll({
     (
       messageId: string,
       options: { highlight?: boolean; behavior?: ScrollBehavior } = {},
-    ): boolean => {
+    ): VirtualTargetScrollResult => {
       const container = scrollContainerRef.current;
-      if (!container) return false;
+      if (!container) return "missing";
       const el = container.querySelector<HTMLElement>(
         `[data-message-id="${messageId}"]`,
       );
@@ -443,6 +446,11 @@ export function useAnchoredScroll({
         // chosen. The already-mounted fast path centers the DOM node directly
         // and would otherwise leave durable bottom intent armed.
         virtualCancelBottomIntent?.();
+        const holdVirtualTarget = () => {
+          anchorRef.current = { kind: "message", messageId, topOffset: 0 };
+          virtualizerAtBottomRef.current = false;
+          setIsAtBottom(false);
+        };
         if (el) {
           const rect = el.getBoundingClientRect();
           const containerRect = container.getBoundingClientRect();
@@ -451,11 +459,10 @@ export function useAnchoredScroll({
             rect.bottom <= containerRect.bottom;
           if (!isInViewport) {
             if (!virtualScrollToMessage(messageId, { behavior: "auto" })) {
-              return false;
+              return "missing";
             }
-            anchorRef.current = { kind: "message", messageId, topOffset: 0 };
-            setIsAtBottom(false);
-            return false;
+            holdVirtualTarget();
+            return "pending";
           }
           const centeredTop = (container.clientHeight - rect.height) / 2;
           container.scrollTo({
@@ -472,15 +479,14 @@ export function useAnchoredScroll({
             behavior: options.behavior ?? "auto",
           })
         ) {
-          return false;
+          return "missing";
         }
-        anchorRef.current = { kind: "message", messageId, topOffset: 0 };
-        setIsAtBottom(false);
+        holdVirtualTarget();
         if (el && options.highlight) highlightMessage(messageId);
-        return el !== null;
+        return el ? "scrolled" : "pending";
       }
 
-      if (!el) return false;
+      if (!el) return "missing";
 
       const rect = el.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
@@ -532,7 +538,7 @@ export function useAnchoredScroll({
       }
 
       if (options.highlight) highlightMessage(messageId);
-      return true;
+      return "scrolled";
     },
     [
       highlightMessage,
@@ -630,19 +636,16 @@ export function useAnchoredScroll({
         });
       };
       if (targetMessageId) {
-        // A cold deep-link target may not be in the DOM on this first
-        // commit — the route screen fetches it by id and splices it in a
-        // render or two later. If centering fails now, leave the timeline at
-        // its default position and let the post-mount target effect (keyed on
-        // `messages`) retry once the row lands, rather than marking it handled.
-        if (
-          scrollToMessageImperative(targetMessageId, {
-            highlight: highlightTargetMessage,
-          })
-        ) {
+        // `pending` is a known virtual row that is not mounted yet. Pinning
+        // to the bottom would overwrite that request and open an off-screen
+        // deep link on the latest reply. `missing` is not in the list yet.
+        const targetResult = scrollToMessageImperative(targetMessageId, {
+          highlight: highlightTargetMessage,
+        });
+        if (targetResult === "scrolled") {
           handledTargetIdRef.current = targetMessageId;
           onTargetReached?.(targetMessageId);
-        } else {
+        } else if (targetResult === "missing") {
           pinToBottomOnMount();
         }
       } else {
@@ -902,7 +905,7 @@ export function useAnchoredScroll({
       if (
         scrollToMessageImperative(targetMessageId, {
           highlight: highlightTargetMessage,
-        })
+        }) === "scrolled"
       ) {
         handledTargetIdRef.current = targetMessageId;
         onTargetReached?.(targetMessageId);
@@ -947,6 +950,14 @@ export function useAnchoredScroll({
     };
   }, []);
 
+  const scrollToMessage = React.useCallback(
+    (
+      messageId: string,
+      options?: { highlight?: boolean; behavior?: ScrollBehavior },
+    ) => scrollToMessageImperative(messageId, options) === "scrolled",
+    [scrollToMessageImperative],
+  );
+
   const onVirtualizerAtBottomStateChange = React.useCallback(
     (atBottom: boolean) => {
       if (!virtualizerOwnsPrependAnchoring) return;
@@ -968,7 +979,7 @@ export function useAnchoredScroll({
     scrollToBottom: scrollToBottomImperative,
     settleAtBottomAfterLayout,
     scrollToBottomOnNextUpdate,
-    scrollToMessage: scrollToMessageImperative,
+    scrollToMessage,
     onVirtualizerAtBottomStateChange,
   };
 }
