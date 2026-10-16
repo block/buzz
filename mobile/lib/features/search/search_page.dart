@@ -142,6 +142,30 @@ class SearchPage extends HookConsumerWidget {
               ),
               child: Row(
                 children: [
+                  if (nativeIos)
+                    IosGlassNavigationButton(
+                      key: const Key('search-close'),
+                      icon: IosGlassNavigationIcon.close,
+                      semanticLabel: 'Close search',
+                      onPressed: closeSearch,
+                      controlSize: 48,
+                      foregroundColor: searchPrimaryColor,
+                    )
+                  else
+                    SizedBox.square(
+                      key: const Key('search-close'),
+                      dimension: 48,
+                      child: IconButton(
+                        tooltip: 'Close search',
+                        onPressed: closeSearch,
+                        style: IconButton.styleFrom(
+                          backgroundColor: searchSurfaceColor,
+                          foregroundColor: searchPrimaryColor,
+                        ),
+                        icon: const Icon(BuzzIcons.x),
+                      ),
+                    ),
+                  const SizedBox(width: Grid.xxs),
                   Expanded(
                     child: SizedBox(
                       key: const Key('search-field-container'),
@@ -182,30 +206,6 @@ class SearchPage extends HookConsumerWidget {
                       ),
                     ),
                   ),
-                  const SizedBox(width: Grid.xxs),
-                  if (nativeIos)
-                    IosGlassNavigationButton(
-                      key: const Key('search-close'),
-                      icon: IosGlassNavigationIcon.close,
-                      semanticLabel: 'Close search',
-                      onPressed: closeSearch,
-                      controlSize: 48,
-                      foregroundColor: searchPrimaryColor,
-                    )
-                  else
-                    SizedBox.square(
-                      key: const Key('search-close'),
-                      dimension: 48,
-                      child: IconButton(
-                        tooltip: 'Close search',
-                        onPressed: closeSearch,
-                        style: IconButton.styleFrom(
-                          backgroundColor: searchSurfaceColor,
-                          foregroundColor: searchPrimaryColor,
-                        ),
-                        icon: const Icon(BuzzIcons.x),
-                      ),
-                    ),
                 ],
               ),
             ),
