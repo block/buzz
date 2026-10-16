@@ -475,11 +475,14 @@ pub enum MessagesCmd {
         reply_to: Option<String>,
     },
     /// Edit a previously sent message
+    #[command(
+        after_help = "Examples:\n  buzz messages edit --event <EVENT_ID> --content \"fixed text\"\n  cat note.md | buzz messages edit --event <EVENT_ID> --content -"
+    )]
     Edit {
         /// Event ID of the message to edit (64-char hex)
         #[arg(long)]
         event: String,
-        /// New message content
+        /// New message content (use '-' to read from stdin)
         #[arg(long)]
         content: String,
     },
