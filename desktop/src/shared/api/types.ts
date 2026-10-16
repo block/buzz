@@ -499,6 +499,11 @@ export type AcpRuntimeCatalogEntry = {
   modelEnvVar: string | null;
   /** Environment variable used to apply the selected LLM provider, when supported. */
   providerEnvVar: string | null;
+  /**
+   * True when the harness publishes its own LLM provider inventory over ACP
+   * (goose). Gates the provider dropdown's discovered rows.
+   */
+  providerInventory: boolean;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
   /**
@@ -590,6 +595,25 @@ export type AgentModelInfo = {
   id: string;
   name: string | null;
   description: string | null;
+};
+
+/** Harness LLM-provider inventory, from `discover_agent_providers`. */
+export type AgentProvidersResponse = {
+  agentName: string;
+  agentVersion: string;
+  providers: AgentProviderInfo[];
+};
+
+/** One LLM provider the harness knows about (goose's provider inventory). */
+export type AgentProviderInfo = {
+  /** Value a harness accepts on its provider env var (e.g. `GOOSE_PROVIDER`). */
+  id: string;
+  name: string | null;
+  /** Whether the harness already has credentials/configuration for it. */
+  configured: boolean;
+  defaultModel: string | null;
+  /** True when the provider is an ACP agent rather than a plain LLM API. */
+  acp: boolean;
 };
 
 // ── Config bridge types ──────────────────────────────────────────────────────

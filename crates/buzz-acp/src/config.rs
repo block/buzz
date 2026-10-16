@@ -194,6 +194,26 @@ pub struct ModelsArgs {
     pub json: bool,
 }
 
+/// CLI args for `buzz-acp providers` — query the harness's LLM provider
+/// inventory (goose's `_goose/unstable/providers/list`).
+///
+/// Standalone `Parser` for the same reason as [`ModelsArgs`]: the path bypasses
+/// `Config::from_cli()` — no relay, no private key, no harness setup.
+#[derive(Debug, Parser)]
+#[command(
+    name = "buzz-acp providers",
+    about = "Query the harness's LLM provider inventory"
+)]
+pub struct ProvidersArgs {
+    /// Agent binary to spawn (e.g. "goose").
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
+
+    /// Output structured JSON instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Shared agent-spawn flags for lightweight local ACP helper subcommands.
 #[derive(Debug, Parser)]
 pub struct AuthAgentArgs {
