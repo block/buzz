@@ -679,7 +679,10 @@ async fn sample_writer(
         //    `pg_prepared_xacts` does not expose, so `prepared` no longer bounds
         //    their rows. No supported writer issues PREPARE TRANSACTION (the
         //    source policy enforces it) and `max_prepared_transactions` defaults
-        //    to 0, so any prepared transaction is out-of-band: fail closed.
+        //    to 0, so any prepared transaction is out-of-band: fail closed. The
+        //    count is cluster-wide, like the activity scan: a prepared
+        //    transaction in any database on the writer is outside the supported
+        //    deploy, so it closes the fence rather than being scoped away.
         let row = sqlx::query(
             r#"
             SELECT
