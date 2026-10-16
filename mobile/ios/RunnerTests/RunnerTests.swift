@@ -187,8 +187,9 @@ class RunnerTests: XCTestCase {
         (view is UIControl ? [view] : []) + view.subviews.flatMap(controls)
       }
       let buttons = controls(navigation.navigationBar)
-      let back = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Back" })
-      let huddle = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Huddle" })
+      let found = "width \(width), controls: \(buttons.map { $0.accessibilityLabel ?? String(describing: type(of: $0)) })"
+      let back = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Back" }, found)
+      let huddle = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Huddle" }, found)
       let backFrame = back.convert(back.bounds, to: navigation.navigationBar)
       let huddleFrame = huddle.convert(huddle.bounds, to: navigation.navigationBar)
       XCTAssertGreaterThan(titleFrame.minX, backFrame.maxX)

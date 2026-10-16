@@ -194,37 +194,43 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Install Flutter dependencies
         run: cd mobile && flutter pub get
-      - name: Build
-        if: matrix.lane == 'native'
-        run: swift build --package-path mobile/ios/BuzzPushKit
-      - name: Build release
-        if: matrix.lane == 'native'
-        run: swift build -c release --package-path mobile/ios/BuzzPushKit
+      # `swift test` builds BuzzPushKit; the Release lane covers its release build.
       - name: Test
         if: matrix.lane == 'native'
         run: swift test --package-path mobile/ios/BuzzPushKit
       - name: Test native pagination geometry
         if: matrix.lane == 'native'
         run: /bin/bash scripts/test-mobile-pagination.sh
-      - name: Build complete iOS simulator app
+      - name: Generate iOS build configuration
         if: matrix.lane == 'native'
-        run: cd mobile && flutter build ios --simulator --debug --no-pub
+        run: cd mobile && flutter build ios --simulator --debug --no-pub --config-only
+      # Build the complete simulator app and RunnerTests once, in the
+      # background, while the simulator boots and runs the native-control
+      # scripts. The build also guards Apple Silicon simulator linking (#7646).
       - name: Test native controls and Runner unit tests
         if: matrix.lane == 'native'
         run: |
-          device=$(xcrun simctl create "Pagination accessibility" "iPhone 16")
+          device=$(xcrun simctl create "Native tests" "iPhone 16")
           trap 'xcrun simctl shutdown "$device"; xcrun simctl delete "$device"' EXIT
+          xcode=(xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner
+            -configuration Debug -destination "platform=iOS Simulator,id=$device"
+            CODE_SIGNING_ALLOWED=NO)
+          build_log="$RUNNER_TEMP/runner-build.log"
+          "${xcode[@]}" build-for-testing > "$build_log" 2>&1 &
+          build=$!
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
           /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
           /bin/bash scripts/test-mobile-carousel.sh "$device"
           /bin/bash scripts/test-mobile-member-picker.sh "$device"
           /bin/bash scripts/test-mobile-me-agent-accessibility.sh "$device"
-          xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner \
-            -configuration Debug -destination "platform=iOS Simulator,id=$device" \
-            -parallel-testing-enabled NO \
-            -only-testing:RunnerTests \
-            CODE_SIGNING_ALLOWED=NO test
+          if ! wait "$build"; then
+            cat "$build_log"
+            exit 1
+          fi
+          tail -n 5 "$build_log"
+          "${xcode[@]}" -parallel-testing-enabled NO -only-testing:RunnerTests \
+            test-without-building
       - name: Build complete unsigned iOS release
         if: matrix.lane == 'release'
         run: |
