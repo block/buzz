@@ -2488,7 +2488,11 @@ fn admin_seed_refuses_remote_database_before_invoking_psql() {
     )
     .expect("copy script without developer .env");
     let psql = root.join("psql");
-    std::fs::write(&psql, "#!/bin/sh\ntouch \"$SEED_PSQL_WITNESS\"\nexit 1\n").expect("stub psql");
+    std::fs::write(
+        &psql,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SEED_PSQL_WITNESS\"\nexit 1\n",
+    )
+    .expect("stub psql");
     std::fs::set_permissions(&psql, std::fs::Permissions::from_mode(0o755))
         .expect("executable stub");
     let witness = root.join("psql-was-invoked");
@@ -2503,15 +2507,16 @@ fn admin_seed_refuses_remote_database_before_invoking_psql() {
             .env("SEED_PSQL_WITNESS", &witness)
             .output()
             .expect("run local seed guard");
-        let invoked = witness.exists();
-        if invoked {
+        let args = std::fs::read_to_string(&witness).ok();
+        if args.is_some() {
             std::fs::remove_file(&witness).expect("clear witness");
         }
-        (output, invoked)
+        (output, args)
     };
     // Control: a local host with a plain database name reaches psql, so the
     // refusals below come from the guard rather than an unrunnable fixture.
-    let (_, control_invoked) = run("localhost", "", "", "buzz");
+    // It must also pass -X so a psqlrc cannot \connect after the guard.
+    let (_, control_args) = run("localhost", "", "", "buzz");
     let cases = [
         ("remote host", "shared-db.example.invalid", "", "", ""),
         ("address override", "localhost", "192.0.2.1", "", ""),
@@ -2567,11 +2572,15 @@ fn admin_seed_refuses_remote_database_before_invoking_psql() {
         ),
     ];
     let results = cases.map(|(name, host, address, service, database)| {
-        let (output, invoked) = run(host, address, service, database);
-        (name, output, invoked)
+        let (output, args) = run(host, address, service, database);
+        (name, output, args.is_some())
     });
     std::fs::remove_dir_all(root).expect("remove scratch fixture");
-    assert!(control_invoked, "plain local target did not reach psql");
+    let control_args = control_args.expect("plain local target did not reach psql");
+    assert!(
+        control_args.lines().any(|arg| arg == "-X"),
+        "psql invoked without -X: {control_args:?}"
+    );
     for (name, output, invoked) in results {
         assert!(!invoked, "{name} reached psql");
         assert!(!output.status.success(), "{name} accepted");

@@ -38,15 +38,16 @@ if [[ ! "${PGDATABASE}" =~ ^[A-Za-z0-9_-]+$ ]]; then
   exit 1
 fi
 
+# -X skips psqlrc, which runs after this guard and could \connect elsewhere.
 if command -v psql >/dev/null 2>&1; then
   run_psql() {
-    PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" \
+    PGPASSWORD="${PGPASSWORD}" psql -X -h "${PGHOST}" -p "${PGPORT}" \
       -U "${PGUSER}" -d "${PGDATABASE}" "$@"
   }
 elif docker exec buzz-postgres psql --version >/dev/null 2>&1; then
   run_psql() {
     docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
-      psql -U "${PGUSER}" -d "${PGDATABASE}" "$@"
+      psql -X -U "${PGUSER}" -d "${PGDATABASE}" "$@"
   }
 else
   echo "error: neither psql nor buzz-postgres docker psql is available" >&2
