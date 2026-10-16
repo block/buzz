@@ -79,6 +79,9 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i functions/attach_community_write_fence.sql
 \i functions/profile_name_fields.sql
 
+\i functions/invite_admission_lock.sql
+\i functions/backfill_invite_revocations.sql
+
 -- tables
 \i tables/public/communities.sql
 \i tables/public/channels.sql

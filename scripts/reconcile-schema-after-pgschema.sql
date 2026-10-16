@@ -240,3 +240,19 @@ BEGIN
         RAISE EXCEPTION 'replica_heartbeat must contain its singleton row after pgschema apply';
     END IF;
 END $$;
+
+-- Invitation revocation is historical DML; pgschema does not execute it.
+-- Use the same tenant-fenced, idempotent repair as migration 0065.
+SELECT backfill_invite_revocations();
+DO $$
+BEGIN
+    IF backfill_invite_revocations() <> 0 THEN
+        RAISE EXCEPTION 'invitation revocation backfill did not converge';
+    END IF;
+    IF (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal
+        AND tgname IN ('invite_restriction_lock', 'invite_issuer_revocation',
+                       'invite_owner_lock', 'invite_owner_revocation')) <> 0 THEN
+        RAISE EXCEPTION 'invitation revocation must use supported application writers, not triggers';
+    END IF;
+END
+$$;

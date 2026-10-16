@@ -168,20 +168,38 @@ fn wait_for_relay_metrics(process: &mut RelayProcess, port: u16) -> String {
 /// [`METRICS_SCRAPE_DEADLINE`]. A relay that exits first is a failure, not a
 /// timeout, so the panic names the real cause.
 fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) -> String {
+    wait_for_scraped_metrics(process, port, &[needle])
+}
+
+/// Waits for one scrape to contain every requested sample, bounded by
+/// [`METRICS_SCRAPE_DEADLINE`]. A scrape can overlap the sampler's sequential
+/// metric writes, so related series may appear in different responses.
+fn wait_for_scraped_metrics(process: &mut RelayProcess, port: u16, needles: &[&str]) -> String {
+    let requested = needles.join(", ");
+    let mut last_scrape = String::new();
+    let mut last_error: Option<String>;
     let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
     loop {
         assert!(
             process.try_wait().is_none(),
-            "relay exited before exporting {needle}"
+            "relay exited before exporting {requested}"
         );
-        if let Ok(response) = scrape_metrics(port) {
-            if response.contains(needle) {
-                return response;
+        match scrape_metrics(port) {
+            Ok(response) => {
+                if needles
+                    .iter()
+                    .all(|needle| response.lines().any(|line| line.starts_with(needle)))
+                {
+                    return response;
+                }
+                last_scrape = response;
+                last_error = None;
             }
+            Err(error) => last_error = Some(error.to_string()),
         }
         assert!(
             Instant::now() < deadline,
-            "relay did not export {needle} within {METRICS_SCRAPE_DEADLINE:?}"
+            "relay did not export {requested} within {METRICS_SCRAPE_DEADLINE:?}; last error: {last_error:?}; last scrape: {last_scrape}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -814,10 +832,10 @@ mod postgres_tests {
     /// fires immediately, so the wait is bounded by
     /// [`METRICS_SCRAPE_DEADLINE`] and never a fixed sleep.
     ///
-    /// The completion-timestamp gauge is the needle because `sample` writes it
-    /// last, after the cache already serves the report: observing it proves the
-    /// whole cycle ran, with no window where the counters have landed but the
-    /// timestamp has not.
+    /// The sampler writes counters and histograms before the completion gauge,
+    /// but a concurrent `/metrics` scrape is not an atomic snapshot. Wait for
+    /// the actual timestamp, counter, and duration samples together so a scrape
+    /// that overlaps those sequential writes cannot report a false failure.
     #[test]
     #[ignore = "requires PostgreSQL"]
     fn startup_owns_the_dependency_sampler() {
@@ -839,10 +857,14 @@ mod postgres_tests {
             ("REDIS_URL", &redis_url),
             ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
         ]);
-        let scrape = wait_for_scraped_metric(
+        let scrape = wait_for_scraped_metrics(
             &mut process,
             metrics_port,
-            "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+            &[
+                "buzz_readiness_dependency_sample_completed_timestamp_seconds ",
+                "buzz_readiness_dependency_checks_total{",
+                "buzz_readiness_check_duration_seconds_count{check=\"overall\"}",
+            ],
         );
         let output = process.terminate();
         let logs = format!(
@@ -851,14 +873,6 @@ mod postgres_tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        assert!(
-            scrape.contains("buzz_readiness_dependency_checks_total{"),
-            "the same cycle must publish its per-dependency outcomes: {scrape}"
-        );
-        assert!(
-            scrape.contains("buzz_readiness_check_duration_seconds"),
-            "a completed evaluation must publish its latency too: {scrape}"
-        );
         assert!(
             !scrape.contains("buzz_readiness_checks_total{"),
             "no readiness probe was sent, so the sampler alone produced this: {scrape}"

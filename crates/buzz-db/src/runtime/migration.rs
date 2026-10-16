@@ -709,7 +709,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 64);
+        assert_eq!(migrations.len(), 65);
+        assert_eq!(migrations[64].version, 65);
+        assert!(migrations[64]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN revoked_at"));
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[59].version, 60);

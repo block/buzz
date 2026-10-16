@@ -353,7 +353,29 @@ async fn set_agent_owner_with_operation(
     owner_pubkey: &[u8],
     operation: crate::observability::WriterOperation,
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    // Ownership is first-write-wins and is never cleared by supported writers.
+    // Already-linked agents are the common authorization path: avoid queuing
+    // those read-only calls behind a community's claim/restriction transaction.
+    let recorded: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .fetch_optional(&mut *connection)
+    .await?;
+    match recorded {
+        None => {
+            return Err(crate::error::DbError::NotFound(
+                "agent pubkey not found in users table".into(),
+            ))
+        }
+        Some(Some(_)) => return Ok(false),
+        Some(None) => {}
+    }
+    drop(connection);
     let mut tx = crate::begin_community_write_transaction(pool, community_id, operation).await?;
+    crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
     // Conditional UPDATE: only set owner if currently NULL. This makes
     // "first mint wins" atomic — no TOCTOU race between concurrent mints.
     let result = sqlx::query(
@@ -382,6 +404,13 @@ async fn set_agent_owner_with_operation(
         tx.commit().await?;
         return Ok(false);
     }
+    crate::relay_invite::revoke_restricted_agent_invites(
+        tx.conn(),
+        community_id,
+        agent_pubkey,
+        owner_pubkey,
+    )
+    .await?;
     tx.commit().await?;
     Ok(true)
 }

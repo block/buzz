@@ -8699,6 +8699,7 @@ pub(crate) mod postgres_tests {
                 "CREATE SCHEMA {schema}; \
                  CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
                  CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+                 CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
                  CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL); \
                  CREATE TABLE {schema}.join_policy_acceptances \
                      (LIKE public.join_policy_acceptances INCLUDING ALL); \
@@ -8718,6 +8719,12 @@ pub(crate) mod postgres_tests {
             )
             .await
             .expect("schema pool");
+            sqlx::raw_sql(include_str!(
+                "../../../../schema/functions/invite_admission_lock.sql"
+            ))
+            .execute(&pool)
+            .await
+            .expect("invite admission lock function");
             Arc::get_mut(&mut state).expect("unique state").db = buzz_db::Db::from_pool(pool);
 
             let tenant = fresh_tenant("late-owner.test");
@@ -8803,12 +8810,6 @@ pub(crate) mod postgres_tests {
                 "{action}: the HTTP request recorded the owner"
             );
 
-            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-                "ALTER TABLE {schema}.users RENAME TO users_unavailable"
-            )))
-            .execute(&admin)
-            .await
-            .expect("break the owner-to-agent lookup");
             let owner_hex = owner.public_key().to_hex();
             match action {
                 "ban" => state
@@ -8841,6 +8842,12 @@ pub(crate) mod postgres_tests {
                         .expect("removal commits");
                 }
             }
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.users RENAME TO users_unavailable"
+            )))
+            .execute(&admin)
+            .await
+            .expect("break the owner-to-agent lookup");
             let revoked = state
                 .revoke_live_access(
                     &tenant,
