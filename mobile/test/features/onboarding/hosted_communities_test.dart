@@ -15,7 +15,7 @@ import '../../helpers/widget_helpers.dart';
 
 void main() {
   testWidgets(
-    'welcome discovery selection and empty-state handoff use the real flow',
+    'welcome auto-add discovery and empty-state handoff use the real flow',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(440, 956));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -60,26 +60,14 @@ void main() {
         expect(find.byType(HostedConnectPage), findsNothing);
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
-        expect(find.text('Choose your communities'), findsOneWidget);
-        expect(
-          tester
-              .widgetList<CheckboxListTile>(find.byType(CheckboxListTile))
-              .every((tile) => tile.value == true),
-          isTrue,
-        );
-        await tester.tap(find.text('one'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Continue').hitTestable());
-        await tester.pumpAndSettle();
-        expect(f.admitted, ['two']);
+        expect(find.byType(CheckboxListTile), findsNothing);
+        expect(f.admitted, ['one', 'two']);
         expect(find.byType(HostedConnectPage), findsNothing);
         f.admitted.clear();
         f.beforeAdmission = (name) async {
           if (name == 'two') throw const SavedCommunityIdentityConflict();
         };
         await tester.tap(find.text('Continue with Builderlab'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Continue').hitTestable());
         await tester.pumpAndSettle();
         expect(find.text('Keep saved identity and skip'), findsOneWidget);
         expect(find.text('1 community added and kept.'), findsOneWidget);
@@ -92,8 +80,6 @@ void main() {
           if (name == 'two') throw AccountFailure.rejected;
         };
         await tester.tap(find.text('Continue with Builderlab'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Continue').hitTestable());
         await tester.pumpAndSettle();
         expect(find.text('1 community added and kept.'), findsOneWidget);
         expect(find.text('Try again').hitTestable(), findsNothing);
