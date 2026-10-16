@@ -8,6 +8,7 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_EDIT,
+  KIND_TYPING_INDICATOR,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 
@@ -39,6 +40,25 @@ export function buildChannelFilter(
   }
 
   return filter;
+}
+
+/** Huddle lifecycle events (kinds 48100–48103) for one channel. */
+export function buildHuddleEventsFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return { kinds: [48100, 48101, 48102, 48103], "#h": [channelId], limit: 100 };
+}
+
+/** Typing indicators for one channel from the last 10 seconds onward. */
+export function buildTypingIndicatorFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return {
+    kinds: [KIND_TYPING_INDICATOR],
+    "#h": [channelId],
+    limit: 10,
+    since: Math.floor(Date.now() / 1_000) - 10,
+  };
 }
 
 /**
