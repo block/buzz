@@ -57,6 +57,22 @@ class RelayConfig {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     return uri.replace(scheme: scheme).toString();
   }
+
+  /// Value equality, so that re-emitting the active community (any save of
+  /// its record — e.g. reserving a push-lease generation) does not read as a
+  /// relay change. Without this every such save rebuilt [RelayConfigNotifier]
+  /// with a fresh instance, `previous != next` fell back to identity, and the
+  /// relay session disconnected and reconnected — which is exactly what the
+  /// push-lease publish that triggered the save was waiting on.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RelayConfig &&
+          other._baseUrl == _baseUrl &&
+          other.nsec == nsec;
+
+  @override
+  int get hashCode => Object.hash(_baseUrl, nsec);
 }
 
 /// Compile-time environment config via --dart-define.
