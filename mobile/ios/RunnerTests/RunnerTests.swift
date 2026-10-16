@@ -521,6 +521,28 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testNavigationIgnoresNonFiniteScrollOffsets() throws {
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let messenger = NavigationTestMessenger()
+    let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 120),
+      viewIdentifier: 999990,
+      arguments: ["title": "general", "alwaysFrosted": true])
+    parent.view.addSubview(bar.view())
+    bar.view().layoutIfNeeded()
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
+    messenger.scroll(to: 52)
+    XCTAssertEqual(scroll.contentOffset.y, 52, accuracy: 0.5)
+    messenger.scroll(to: .infinity)
+    XCTAssertEqual(scroll.contentOffset.y, 52, accuracy: 0.5)
+  }
+
+  @MainActor
   func testSubtitlelessThreadKeepsFullFallbackBehindControls() throws {
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
