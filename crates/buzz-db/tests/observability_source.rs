@@ -2870,10 +2870,11 @@ fn single_table_guard_violations(
                 && header.starts_with("pub async fn mark_manifest_chunk_deleted(")
                 && manifest_writes == 1
                 && manifest_updates == 1
-                && sets.len() == 1
-                && sets[0].0.trim() == "deleted_at = now()"
-                && plain_guard(sets[0].1, "request_id = $1")
-                && plain_guard(sets[0].1, "deleted_at is null");
+                && matches!(sets.as_slice(), [(set, predicate)]
+                    if set.trim() == "deleted_at = now()"
+                        && ["request_id = $1", "chunk_no = $2", "deleted_at is null"]
+                            .iter()
+                            .all(|guard| plain_guard(predicate, guard)));
             let guarded = code.contains("guard_manifest_chunk_write(");
             if deletion_stamp {
                 rule_hits[1].push(name.to_owned());
@@ -3256,6 +3257,17 @@ fn single_table_policy_holds_the_manifest_stamp_to_plain_conjuncts() {
             "chunk_no IN (SELECT chunk_no FROM chunks WHERE request_id = $1 AND deleted_at IS NULL)",
         ),
         ("request_id = $1 AND ", ""),
+        ("chunk_no = $2 AND ", ""),
+        // A second write in the stamp function does not share its exemption.
+        (
+            "deleted_at IS NULL\");",
+            "deleted_at IS NULL\"); query(\"DELETE FROM community_deletion_manifest_keys WHERE request_id = $1\");",
+        ),
+        // The stamp must be a plain UPDATE, not a conflict upsert.
+        (
+            "UPDATE community_deletion_manifest_keys SET",
+            "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no) VALUES ($1, $2) ON CONFLICT (request_id, chunk_no) DO UPDATE SET",
+        ),
     ] {
         let weakened = stamp.replace(from, to);
         assert_ne!(weakened, stamp);
@@ -3266,14 +3278,10 @@ fn single_table_policy_holds_the_manifest_stamp_to_plain_conjuncts() {
             "{weakened}"
         );
     }
-    let guarded_elsewhere = stamp.replace("mark_manifest_chunk_deleted", "restamp");
+    let renamed_stamp = stamp.replace("mark_manifest_chunk_deleted", "restamp");
     assert_eq!(
-        single_table_guard_violations(
-            DELETION_STORE_PATH,
-            &guarded_elsewhere,
-            &mut Default::default()
-        )
-        .len(),
+        single_table_guard_violations(DELETION_STORE_PATH, &renamed_stamp, &mut Default::default())
+            .len(),
         1
     );
     assert_eq!(
