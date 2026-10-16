@@ -35,7 +35,7 @@ void main() {
           expect(f.flow.problem, HostedFlowProblem.identityMismatch);
         }
         expect(
-          f.requests.any((path) => path.endsWith('/communities/list')),
+          f.requests.any((path) => path.endsWith('/communities/joined')),
           isFalse,
         );
         expect(
@@ -73,7 +73,6 @@ void main() {
       if (name == 'a-two') throw AccountFailure.unavailable;
     };
     await f.flow.signInAccount();
-    await f.flow.addSelectedCommunities();
     expect(f.admitted, ['a-one']);
     f.expired = true;
     await f.flow.retry();

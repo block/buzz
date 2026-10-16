@@ -1153,6 +1153,9 @@ private final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresenta
       }
       session.presentationContextProvider = self
       session.prefersEphemeralWebBrowserSession = false
+      #if DEBUG
+      session.prefersEphemeralWebBrowserSession = args["ephemeral"] == "true"
+      #endif
       self.session = session
       if !session.start() { self.finish(nil, code: "unavailable") }
     }

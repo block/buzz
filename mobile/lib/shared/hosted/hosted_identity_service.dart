@@ -5,6 +5,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'account_identity_store.dart';
 import 'builderlab_account.dart';
 import 'device_identity_source.dart';
+import 'debug_backup.dart';
 
 enum HostedIdentityState {
   ready,
@@ -81,7 +82,12 @@ class HostedIdentityService {
     }
     if (local != null && bound != null) return _result(local, bound, subject);
 
-    final status = await account.post('/v1/buzz/nsec-backups/status', {});
+    final status = DebugBackup.enabled
+        ? <String, dynamic>{
+            'backup_nostr_pubkeys': <String>[],
+            'current_nostr_pubkey': bound,
+          }
+        : await account.post('/v1/buzz/nsec-backups/status', {});
     _sameAccount(subject);
     checkCurrent();
     final listed = status['backup_nostr_pubkeys'];
@@ -163,6 +169,10 @@ class HostedIdentityService {
           : _result(generated, bound, subject);
     }
 
+    // A bound identity missing locally cannot be recovered by this simulation.
+    if (DebugBackup.enabled) {
+      return const HostedIdentityResult(HostedIdentityState.recoveryBlocked);
+    }
     final recovered = await account.post('/v1/buzz/nsec-backups/recovery', {});
     _sameAccount(subject);
     final backups = recovered['backups'];

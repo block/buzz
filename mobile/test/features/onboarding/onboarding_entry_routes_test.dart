@@ -114,12 +114,7 @@ void main() {
     await openEntry();
     await tester.tap(find.text('Continue with Builderlab').hitTestable());
     await tester.pumpAndSettle();
-    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
-    expect(find.text('Choose your communities').hitTestable(), findsOneWidget);
-    expect(find.byType(CheckboxListTile).hitTestable(), findsNWidgets(2));
-    expect(find.text('Continue').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Continue').hitTestable());
-    await tester.pumpAndSettle();
+    expect(f.admitted, ['one']);
     expect(f.flow.stage, HostedFlowStage.communityConflict);
     expect(
       find.text('Keep saved identity and skip').hitTestable(),
@@ -179,14 +174,13 @@ void main() {
     await pair();
     await tester.pumpAndSettle();
     expect(f.flow.stage, HostedFlowStage.signIn);
-    expect(
-      find.text('Complete sign-in in your browser.').hitTestable(),
-      findsOneWidget,
-    );
-    expect(find.text('Leave setup').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Leave setup').hitTestable());
+    // Native browser owns sign-in presentation; the welcome/form stays behind it.
+    expect(find.byType(HostedConnectPage), findsNothing);
+    await f.flow.leave();
     await tester.pumpAndSettle();
     expect(f.flow.stage, HostedFlowStage.idle);
+    await tester.tap(find.text('Back').hitTestable());
+    await tester.pumpAndSettle();
     expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
     expect(container.read(hostedInlineEntryProvider), isTrue);
     f.expired = false;
@@ -306,11 +300,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(restarted.stage, HostedFlowStage.signIn);
-    expect(
-      find.text('Complete sign-in in your browser.').hitTestable(),
-      findsOneWidget,
-    );
-    expect(find.text('Leave setup').hitTestable(), findsOneWidget);
+    expect(find.text('Cancel sign-in').hitTestable(), findsOneWidget);
     expect(find.byType(BuzzSheetHeader), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();

@@ -10,6 +10,7 @@ import 'account_identity_store.dart';
 import 'builderlab_account.dart';
 import 'hosted_environment.dart';
 import 'hpke_backup.dart';
+import 'debug_backup.dart';
 
 enum HostedBackupFailure {
   identityMismatch,
@@ -53,6 +54,17 @@ class HostedBackupService {
     final backend = HostedEnvironment.origin.origin;
     final key = pendingKey(subject, local.pubkey);
     if (local.hasBackupFor(backend: backend, subject: subject)) return;
+    if (DebugBackup.enabled) {
+      await identity.confirmBackup(
+        BackupReceipt(
+          backend: backend,
+          subject: subject,
+          pubkey: local.pubkey,
+          backupId: '${DebugBackup.receiptPrefix}${local.pubkey}',
+        ),
+      );
+      return;
+    }
     void checkAccount() {
       if (account.account?.subject != subject) {
         throw HostedBackupFailure.identityMismatch;

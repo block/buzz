@@ -1,4 +1,5 @@
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/features/onboarding/hosted_profile_setup.dart';
@@ -42,8 +43,22 @@ void main() {
         signedIn: false,
       );
       f.starterFailures = 1;
+      final browserReturn = Completer<void>();
+      f.beforeBrowserReturn = () => browserReturn.future;
       await f.mount(tester);
       await f.link(tester, 'one');
+      try {
+        expect(
+          find.text('Enter a community link').hitTestable(),
+          findsOneWidget,
+        );
+        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
+        expect(find.text('Start login again'), findsNothing);
+        expect(find.text('Complete sign-in in your browser.'), findsNothing);
+      } finally {
+        browserReturn.complete();
+      }
+      await f.settle(tester);
       expect(f.browserStarts, 1);
       final generated = (await f.store.read())!;
       expect(generated.pubkey, f.bound);
@@ -115,8 +130,8 @@ void main() {
       expect(find.text('Use Builderlab identity'), findsNWidgets(2));
       await f.tap(tester, fullNpub(f.secondKeys.public)!);
       expect((await f.store.read())!.pubkey, f.secondKeys.public);
-      expect(find.byType(CheckboxListTile).hitTestable(), findsNWidgets(2));
-      await f.tap(tester, 'Continue');
+      // Joined communities are added automatically after choosing the identity.
+      expect(find.byType(CheckboxListTile).hitTestable(), findsNothing);
       expect(find.byType(HostedProfileSetup), findsOneWidget);
       final firstSaved = (await f.storage.loadAll()).firstWhere(
         (c) => c.name == 'one',

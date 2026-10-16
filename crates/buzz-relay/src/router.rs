@@ -344,6 +344,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
         )
         .route(
+            "/operator/communities/joined",
+            get(api::operator::list_joined_communities),
+        )
+        .route(
             "/operator/listener/pubkeys",
             post(api::operator::register_listener_pubkeys)
                 .delete(api::operator::remove_listener_pubkeys),

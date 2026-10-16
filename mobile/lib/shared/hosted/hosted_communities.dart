@@ -2,12 +2,12 @@ import '../deeplink/deep_link.dart';
 import 'builderlab_account.dart';
 import 'hosted_environment.dart';
 
-/// Validated, active communities owned by the signed-in Builderlab identity.
+/// Validated, active communities joined by the signed-in Builderlab identity.
 /// Discovery never grants admission; each target still goes through HostedAdmission.
 Future<List<AddCommunityDeepLink>> loadHostedCommunities(
   BuilderlabAccountClient account,
 ) async {
-  final response = await account.post('/v1/buzz/communities/list', {});
+  final response = await account.post('/v1/buzz/communities/joined', {});
   final rows = response['communities'];
   if (response['error'] != null || rows is! List) {
     throw AccountFailure.invalidResponse;

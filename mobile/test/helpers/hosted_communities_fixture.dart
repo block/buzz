@@ -58,7 +58,7 @@ class WidgetDiscoveryAccount extends BuilderlabAccountClient {
         'identity': {'pubkey_hex': fixture.bound},
       };
     }
-    if (path.endsWith('/communities/list')) {
+    if (path.endsWith('/communities/joined')) {
       return {'communities': fixture.rows};
     }
     throw AccountFailure.unavailable;
@@ -121,7 +121,7 @@ class HostedCommunitiesFixture {
             200,
           );
         }
-        if (path.endsWith('/communities/list')) {
+        if (path.endsWith('/communities/joined')) {
           await beforeList?.call();
           if (rejectList) return http.Response('{}', 503);
           return http.Response(jsonEncode({'communities': rows}), 200);

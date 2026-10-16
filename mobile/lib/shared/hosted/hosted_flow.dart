@@ -260,7 +260,7 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
-  /// Explicit Connect completes identity setup and discovers owned communities.
+  /// Explicit Connect completes identity setup and discovers joined communities.
   /// Passive startup restore only checks the saved session.
   Future<void> signInAccount({bool openBrowser = true}) {
     if (_target != null ||
@@ -610,10 +610,8 @@ class HostedFlow extends ChangeNotifier {
         await leave(noCommunities: true);
         return;
       }
-      if (listed.length != 1) {
-        _set(HostedFlowStage.chooseCommunities);
-        return;
-      }
+      // Direct account entry imports every joined community. The existing
+      // switcher handles choosing which community to enter after admission.
       _addingCommunities = true;
     }
     for (final community in communities) {

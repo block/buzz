@@ -338,7 +338,7 @@ class ChannelsPage extends HookConsumerWidget {
             opaque: false,
             transitionDuration: Duration.zero,
             reverseTransitionDuration: Duration.zero,
-            pageBuilder: (_, _, _) => _CommunitySwitcherPage(
+            pageBuilder: (_, _, _) => CommunitySwitcherPage(
               arrivingCommunity: arrivingCommunity,
               destination: measureCommunityAvatar(),
               prepareLanding: prepareCommunityLanding,
@@ -369,7 +369,7 @@ class ChannelsPage extends HookConsumerWidget {
       late final _CommunitySwitcherRoute route;
       route = _CommunitySwitcherRoute(
         onTransitionProgress: onSettingsTransitionProgress,
-        builder: (_) => _CommunitySwitcherPage(
+        builder: (_) => CommunitySwitcherPage(
           destination: destination,
           prepareLanding: prepareCommunityLanding,
           onFlightChanged: (flying) {
@@ -383,6 +383,25 @@ class ChannelsPage extends HookConsumerWidget {
         if (context.mounted) communityFlightActive.value = false;
       });
     }
+
+    final showImportedCommunities = ref.watch(communityGridLandingProvider);
+    useEffect(() {
+      if (!showImportedCommunities) return null;
+      var cancelled = false;
+      Future<void> revealImportedCommunities() async {
+        // Let the hosted sheet and pushed Add route finish dismissing first.
+        do {
+          await WidgetsBinding.instance.endOfFrame;
+          if (cancelled || !context.mounted) return;
+        } while (ModalRoute.of(context)?.isCurrent == false);
+        if (!ref.read(communityGridLandingProvider)) return;
+        ref.read(communityGridLandingProvider.notifier).clear();
+        openCommunityGrid();
+      }
+
+      unawaited(revealImportedCommunities());
+      return () => cancelled = true;
+    }, [showImportedCommunities]);
 
     void openCommunitySwitcher() {
       // Freeze the menu shape for this presentation. If a cold permission

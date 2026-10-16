@@ -11,6 +11,7 @@ import 'shared/relay/relay_provider.dart';
 import 'features/onboarding/hosted_connect_page.dart';
 import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
+import 'shared/community/paired_community_landing.dart';
 import 'shared/theme/grid.dart';
 import 'shared/deeplink/deep_link.dart';
 import 'shared/hosted/account_identity_store.dart';
@@ -114,7 +115,15 @@ HostedFlow createHostedFlow(
       }
     },
   );
+  void onCompleted() {
+    if (flow.accountOnly && flow.stage == HostedFlowStage.complete) {
+      ref.read(communityGridLandingProvider.notifier).request();
+    }
+  }
+
+  flow.addListener(onCompleted);
   ref.onDispose(() {
+    flow.removeListener(onCompleted);
     flow.dispose();
     browser.dispose();
     account.dispose();

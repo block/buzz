@@ -64,6 +64,9 @@ class OnboardingAppEntry extends HookConsumerWidget {
     }, [flow]);
     final inlineSetup =
         !flow.accountOnly &&
+        flow.stage != HostedFlowStage.signIn &&
+        !(flow.stage == HostedFlowStage.working &&
+            flow.account.account == null) &&
         flow.stage != HostedFlowStage.idle &&
         flow.stage != HostedFlowStage.complete &&
         flow.stage != HostedFlowStage.chooseIdentity &&

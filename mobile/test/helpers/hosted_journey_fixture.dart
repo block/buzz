@@ -34,6 +34,7 @@ class HostedJourneyFixture {
   final store = AccountIdentityStore();
   final storage = CommunityStorage();
   final requests = <http.Request>[];
+  Future<void> Function()? beforeBrowserReturn;
   final probes = <Community>[];
   final profileWrites = <String>[];
   final recoveryScopes = <InviteJoinRecoveryScope>[];
@@ -156,7 +157,7 @@ class HostedJourneyFixture {
         'stored': true,
         'backup_id': jsonDecode(request.body)['backup_id'],
       };
-    } else if (path.endsWith('/communities/list')) {
+    } else if (path.endsWith('/communities/joined')) {
       result = {'communities': rows};
     } else if (path == '/api/join-policy') {
       if (policyFailures-- > 0) throw AccountFailure.unavailable;
@@ -184,7 +185,10 @@ class HostedJourneyFixture {
 
   HostedFlow createFlow(Ref ref) => flow = createHostedFlow(
     ref,
-    browserAuth: _Browser(() => browserStarts++),
+    browserAuth: _Browser(() async {
+      browserStarts++;
+      await beforeBrowserReturn?.call();
+    }),
     probe: (community) async {
       probes.add(community);
       if (Uri.parse(community.relayUrl).host.startsWith('two.') &&
@@ -338,10 +342,10 @@ class _Recovery implements InviteJoinRecovery {
 }
 
 class _Browser extends BrowserAuth {
-  _Browser(void Function() onStart)
+  _Browser(Future<void> Function() onStart)
     : super(
         openBrowser: (uri) async {
-          onStart();
+          await onStart();
           return Uri.parse(BrowserAuth.callback)
               .replace(
                 queryParameters: {

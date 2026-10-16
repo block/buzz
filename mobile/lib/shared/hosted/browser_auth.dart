@@ -271,7 +271,12 @@ class BrowserAuth {
 
   static Future<String?> _openPlatformBrowser(Uri uri) async {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return _channel.invokeMethod<String>('start', {'url': uri.toString()});
+      return _channel.invokeMethod<String>('start', {
+        'url': uri.toString(),
+        if (kDebugMode &&
+            const bool.fromEnvironment('BUZZ_DEBUG_PRIVATE_LOGIN'))
+          'ephemeral': 'true',
+      });
     }
     if (defaultTargetPlatform == TargetPlatform.android &&
         await launchUrl(uri, mode: LaunchMode.inAppBrowserView)) {
