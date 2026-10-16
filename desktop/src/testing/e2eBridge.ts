@@ -678,6 +678,7 @@ type E2eConfig = {
         description?: string | null;
       }>;
       supportsSwitching: boolean;
+      effortOption?: import("@/shared/api/types").AgentModelsResponse["effortOption"];
       agentDefaultModel?: string | null;
       selectedModel?: string | null;
     };
@@ -14208,6 +14209,7 @@ export function maybeInstallE2eTauriMocks() {
             agentDefaultModel: discoverOverride.agentDefaultModel ?? null,
             selectedModel: discoverOverride.selectedModel ?? null,
             supportsSwitching: discoverOverride.supportsSwitching,
+            effortOption: discoverOverride.effortOption,
           };
         }
         const input = (

@@ -11,6 +11,7 @@ import { runtimeSupportsLlmProviderSelection } from "./agentConfigOptions";
  * `modelProviderEditableWithoutRuntime` path.
  */
 export function buildRuntimeModelProviderPayload({
+  inheritHarness = false,
   runtime,
   model,
   provider,
@@ -21,6 +22,7 @@ export function buildRuntimeModelProviderPayload({
   initialProvider,
   initialModelProviderEditableWithoutRuntime,
 }: {
+  inheritHarness?: boolean;
   runtime: string;
   model: string;
   provider: string;
@@ -35,6 +37,8 @@ export function buildRuntimeModelProviderPayload({
   model: string | undefined;
   provider: string | undefined;
 } {
+  if (inheritHarness)
+    return { runtime: undefined, model: undefined, provider: undefined };
   const trimmedRuntime = runtime.trim();
   const previousRuntime = initialPreviousRuntime;
   const isAutoSeededRuntimeForBuiltinEdit =

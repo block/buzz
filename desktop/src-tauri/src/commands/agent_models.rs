@@ -176,6 +176,8 @@ use discovery_config::{
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverAgentModelsInput {
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub acp_command: Option<String>,
     pub agent_command: String,
     #[serde(default)]
@@ -260,6 +262,7 @@ pub async fn discover_agent_models(
             }));
         }
         return Ok(AgentModelsResponse {
+            effort_option: None,
             agent_name: crate::managed_agents::RELAY_MESH_PROVIDER_ID.to_string(),
             agent_version: "relay-availability".to_string(),
             models: availability
@@ -320,7 +323,14 @@ pub async fn discover_agent_models(
         return Ok(models);
     }
 
-    run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
+    run_agent_models_command(
+        resolved_acp,
+        resolved_agent,
+        agent_args,
+        input.model,
+        merged_env,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,6 +542,7 @@ async fn discover_openai_compatible_models(
     }
 
     Ok(Some(AgentModelsResponse {
+        effort_option: None,
         agent_name: provider.as_deref().unwrap_or("openai").trim().to_string(),
         agent_version: "models-api".to_string(),
         models,
@@ -674,6 +685,7 @@ async fn discover_anthropic_models(
     }
 
     Ok(Some(AgentModelsResponse {
+        effort_option: None,
         agent_name: provider
             .as_deref()
             .unwrap_or("anthropic")
@@ -743,7 +755,11 @@ pub(super) fn normalize_agent_models(
                         if seen_ids.insert(value.to_string()) {
                             models.push(AgentModelInfo {
                                 id: value.to_string(),
-                                name: o.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                                name: o
+                                    .get("displayName")
+                                    .or_else(|| o.get("name"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string),
                                 description: o
                                     .get("description")
                                     .and_then(|v| v.as_str())
@@ -782,6 +798,9 @@ pub(super) fn normalize_agent_models(
     let supports_switching = !models.is_empty();
 
     AgentModelsResponse {
+        effort_option: raw["stable"]["effortOption"]
+            .as_object()
+            .map(|_| raw["stable"]["effortOption"].clone()),
         agent_name,
         agent_version,
         models,

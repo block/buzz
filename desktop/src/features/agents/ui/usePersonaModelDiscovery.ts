@@ -198,6 +198,7 @@ export function isSuccessfulEmptyDiscovery({
 }
 
 export function usePersonaModelDiscovery({
+  model,
   envVars,
   isCustomProviderEditing,
   modelFieldVisible,
@@ -205,6 +206,7 @@ export function usePersonaModelDiscovery({
   provider,
   selectedRuntime,
 }: {
+  model?: string;
   envVars: EnvVarsValue;
   isCustomProviderEditing: boolean;
   modelFieldVisible: boolean;
@@ -228,10 +230,13 @@ export function usePersonaModelDiscovery({
     new Map<string, AgentModelsResponse>(),
   );
   const modelDiscoveryRequestRef = React.useRef(0);
+  const activeProbeRef = React.useRef<Promise<AgentModelsResponse> | null>(
+    null,
+  );
 
   const trimmedProvider = provider.trim();
   const shouldDebounceModelDiscovery =
-    providerRequiresExplicitModel(trimmedProvider);
+    model !== undefined || providerRequiresExplicitModel(trimmedProvider);
   const discoveryAgentCommand = selectedRuntime?.command?.trim()
     ? selectedRuntime.command
     : null;
@@ -261,12 +266,14 @@ export function usePersonaModelDiscovery({
     }
 
     return JSON.stringify({
+      model,
       agentCommand: discoveryAgentCommand,
       agentArgs: modelDiscoveryArgsKey,
       provider: trimmedProvider,
       envVars: modelDiscoveryEnvKey,
     });
   }, [
+    model,
     canDiscoverModelOptions,
     discoveryAgentCommand,
     modelDiscoveryArgsKey,
@@ -323,15 +330,28 @@ export function usePersonaModelDiscovery({
     setModelDiscoveryStatusKey(activeModelDiscoveryKey);
     setModelDiscoveryLoading(true);
     function runModelDiscovery() {
-      void discoverAgentModels({
-        agentCommand: activeAgentCommand,
-        agentArgs: selectedRuntimeDefaultArgs ?? [],
-        provider: trimmedProvider || undefined,
-        envVars,
-        definitionEnv: selectedRuntimeDefinitionEnv ?? {},
-      })
+      // Native probes are processes: finish the active probe before starting
+      // the newest request. Superseded inputs never launch a queued process.
+      const response = (async () => {
+        await activeProbeRef.current?.catch(() => undefined);
+        if (modelDiscoveryRequestRef.current !== requestId) return null;
+        const probe = discoverAgentModels({
+          model,
+          agentCommand: activeAgentCommand,
+          agentArgs: selectedRuntimeDefaultArgs ?? [],
+          provider: trimmedProvider || undefined,
+          envVars,
+          definitionEnv: selectedRuntimeDefinitionEnv ?? {},
+        });
+        activeProbeRef.current = probe;
+        return probe;
+      })();
+      void response
         .then((response) => {
-          if (modelDiscoveryRequestRef.current !== requestId) {
+          if (
+            response === null ||
+            modelDiscoveryRequestRef.current !== requestId
+          ) {
             return;
           }
           // Only cache responses that yielded usable model options.  An
@@ -375,7 +395,10 @@ export function usePersonaModelDiscovery({
 
     if (!shouldDebounceModelDiscovery) {
       runModelDiscovery();
-      return;
+      return () => {
+        if (modelDiscoveryRequestRef.current === requestId)
+          modelDiscoveryRequestRef.current += 1;
+      };
     }
 
     const timeout = window.setTimeout(
@@ -391,6 +414,7 @@ export function usePersonaModelDiscovery({
       }
     };
   }, [
+    model,
     discoveryAgentCommand,
     envVars,
     modelDiscoveryKey,
@@ -434,6 +458,7 @@ export function usePersonaModelDiscovery({
   });
 
   return {
+    discoveredEffortOption: activeModelDiscoveryData?.effortOption,
     discoveredModelOptions,
     modelDiscoveryLoading: modelDiscoveryPending,
     modelDiscoveryStatus:

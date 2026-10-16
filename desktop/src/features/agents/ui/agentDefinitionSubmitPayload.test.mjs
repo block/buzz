@@ -90,3 +90,20 @@ test("explicit-runtime-chosen: runtime and model both persisted when user explic
   assert.equal(result.model, "claude-opus-4-8", "model must be persisted");
   assert.equal(result.provider, undefined, "empty provider must be omitted");
 });
+
+test("Use harness defaults clears an existing explicit harness and model", () => {
+  const result = buildRuntimeModelProviderPayload({
+    ...BUILTIN_EDIT_BASE,
+    inheritHarness: true,
+    runtime: "claude",
+    model: "sonnet",
+    provider: "",
+    isAutoSeeded: false,
+    initialPreviousRuntime: "claude",
+  });
+  assert.deepEqual(result, {
+    runtime: undefined,
+    model: undefined,
+    provider: undefined,
+  });
+});
