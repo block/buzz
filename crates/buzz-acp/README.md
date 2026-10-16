@@ -149,8 +149,17 @@ Controls which authors' events the harness forwards to the agent. Events from di
 |------|----------|
 | `owner-only` | Forward only events from the agent's registered owner. If no owner is set, all events are dropped until the owner is resolved. |
 | `allowlist` | Forward events from the listed pubkeys plus the owner. |
-| `anyone` | Forward all events (no author filtering). |
+| `anyone` | Forward all authors in verified non-DM channels; DMs remain owner/sibling-only. |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
+
+In a verified DM, `allowlist` admits explicitly listed public keys plus the owner
+and verified sibling agents. `owner-only` and `anyone` admit only owner/siblings;
+`nobody` denies everyone. Removing a key from the effective allowlist revokes its
+admission. Missing, failed, or unrecognized channel metadata never grants an
+external author access, including under `allowlist` or `anyone`; resolution is
+retried for later events. This policy is shared by normal and setup listeners.
+Signature checks, relay membership, workflow attribution, and session/audience
+boundaries still apply.
 
 Relay-signed workflow messages delegate to their recorded owner only when they
 explicitly target this agent with authenticated workflow-mention provenance.
@@ -178,7 +187,7 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   --mention <agent-pubkey> --content '!cancel'
 ```
 
-> **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
+> **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. `--respond-to anyone` broadens verified non-DM channels only.
 
 **Examples:**
 
