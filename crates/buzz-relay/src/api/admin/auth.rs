@@ -216,11 +216,14 @@ pub async fn authorize(
         .as_ref()
         .ok_or_else(ApiError::not_found)?;
 
-    let AdminAuth::Nip98 = config.auth else {
-        return check_admin_origin(state, headers, config)
-            .map(|()| AdminAccess::NetworkTrusted)
-            .map_err(|(e, _)| e);
-    };
+    match config.auth {
+        AdminAuth::Nip98 => {}
+        AdminAuth::Disabled => {
+            return check_admin_origin(state, headers, config)
+                .map(|()| AdminAccess::NetworkTrusted)
+                .map_err(|(e, _)| e);
+        }
+    }
     // One access line per NIP-98 attempt, logged once the decision is final,
     // or `aborted` if the request is dropped during a roster or replay wait.
     let full_path = format!("{ADMIN_API_PREFIX}{path_and_query}");
@@ -270,8 +273,18 @@ async fn authorize_staff(
     // request that clears authorization claims its event ID.
     let principal = match lookup_admin_principal(state, pubkey_bytes).await {
         Ok(Some(principal)) => principal,
-        Ok(None) => return Err((ApiError::forbidden(), AuthResult::Denied("not_staff"))),
-        Err(e) => return Err((e, AuthResult::Denied("roster_unavailable"))),
+        Ok(None) => {
+            return Err((
+                ApiError::forbidden(),
+                AuthResult::Denied(crate::access::AuthReason::NotStaff),
+            ))
+        }
+        Err(e) => {
+            return Err((
+                e,
+                AuthResult::Denied(crate::access::AuthReason::RosterUnavailable),
+            ))
+        }
     };
     check_admin_origin(state, headers, config)?;
 
@@ -291,7 +304,7 @@ fn check_admin_origin(
     if !is_admin_host(state, headers) {
         return Err((
             ApiError::forbidden(),
-            AuthResult::Denied("admin_host_mismatch"),
+            AuthResult::Denied(crate::access::AuthReason::AdminHostMismatch),
         ));
     }
     if headers.get(header::ORIGIN).is_some_and(|origin| {
@@ -299,7 +312,10 @@ fn check_admin_origin(
             .to_str()
             .map_or(true, |origin| !origin_matches_host(origin, &config.host))
     }) {
-        return Err((ApiError::forbidden(), AuthResult::Denied("origin_mismatch")));
+        return Err((
+            ApiError::forbidden(),
+            AuthResult::Denied(crate::access::AuthReason::OriginMismatch),
+        ));
     }
     Ok(())
 }
@@ -555,7 +571,10 @@ async fn claim_nip98_replay(
                 error = %err,
                 "admin NIP-98 replay guard failed; rejecting request fail-closed"
             );
-            Err((unauth(), AuthResult::Denied("replay_check_unavailable")))
+            Err((
+                unauth(),
+                AuthResult::Denied(crate::access::AuthReason::ReplayCheckUnavailable),
+            ))
         }
     }
 }

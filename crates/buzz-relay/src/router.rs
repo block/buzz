@@ -189,7 +189,9 @@ async fn nip_fi_assertion_guard(
     // Refusals here end the request before any handler, so the guard logs
     // them; shadow mode refuses nothing and logs nothing.
     if mode.denies_unconditionally() {
-        guard_attempt(&request).log(AuthResult::Denied("authorization_unavailable"));
+        guard_attempt(&request).log(AuthResult::Denied(
+            crate::access::AuthReason::AuthorizationUnavailable,
+        ));
         return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
     }
 
@@ -205,9 +207,25 @@ async fn nip_fi_assertion_guard(
     match verdict {
         Ok(()) => next.run(request).await,
         Err(((_, class), result)) => {
-            guard_attempt(&request).log(result);
+            guard_attempt(&request).log(guard_result(&request, result));
             http_denial(class)
         }
+    }
+}
+
+/// A git request with no credentials at all is git's normal first step,
+/// asking for the challenge, so it is logged as `challenged`, not a failure.
+fn guard_result(request: &Request<Body>, result: AuthResult) -> AuthResult {
+    let bare = !request
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION);
+    match result {
+        AuthResult::Failed("assertion_missing")
+            if bare && request.uri().path().starts_with("/git/") =>
+        {
+            AuthResult::Challenged
+        }
+        other => other,
     }
 }
 

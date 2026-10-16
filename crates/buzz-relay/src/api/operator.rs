@@ -220,7 +220,7 @@ async fn authorize_operator_request(
         .iter()
         .any(|pk| pk == &pubkey_hex)
     {
-        line.finish(AuthResult::Denied("not_operator"));
+        line.finish(AuthResult::Denied(crate::access::AuthReason::NotOperator));
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "actor not authorized: not a relay operator",
@@ -257,7 +257,9 @@ async fn authorize_operator_listener_request(
         .operator_listener_delivery_urls
         .contains_key(&pubkey.to_hex())
     {
-        line.finish(AuthResult::Denied("not_operator_listener"));
+        line.finish(AuthResult::Denied(
+            crate::access::AuthReason::NotOperatorListener,
+        ));
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "actor not authorized: not a configured operator listener",
@@ -356,7 +358,9 @@ async fn check_operator_replay(
             ))
         }
         Err(error) => {
-            line.finish(AuthResult::Denied("replay_check_unavailable"));
+            line.finish(AuthResult::Denied(
+                crate::access::AuthReason::ReplayCheckUnavailable,
+            ));
             tracing::warn!(
                 scope = OPERATOR_REPLAY_SCOPE,
                 error = %error,

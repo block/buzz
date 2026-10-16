@@ -56,6 +56,7 @@ pub(crate) async fn authenticate_member_post(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
+        path,
         make_nip98_closure_for_admission(
             headers.clone(),
             "POST",
@@ -65,7 +66,7 @@ pub(crate) async fn authenticate_member_post(
             true,
         ),
     )?;
-    let mut caller = ProvenCaller::new(admission, path, &tenant);
+    let mut caller = ProvenCaller::new(admission, &tenant);
     caller
         .rate_limit_and_replay(state, &tenant)
         .await
@@ -96,40 +97,15 @@ pub(crate) struct ProvenCaller<'a> {
     line: AuthLine<'a>,
 }
 
-/// The NIP-98 side-data a route's admission closure returns: the proof's
-/// event id, and its `created_at` when the route needs it.
-pub(crate) trait Nip98Extra {
-    fn split(self) -> ([u8; 32], Option<u64>);
-}
-
-impl Nip98Extra for [u8; 32] {
-    fn split(self) -> ([u8; 32], Option<u64>) {
-        (self, None)
-    }
-}
-
-impl Nip98Extra for ([u8; 32], Option<u64>) {
-    fn split(self) -> ([u8; 32], Option<u64>) {
-        self
-    }
-}
-
 impl<'a> ProvenCaller<'a> {
+    /// The caller from a NIP-98 admission whose proof closure returned the
+    /// proof's event id and its signed `created_at`.
     pub(crate) fn new(
-        admission: crate::nip_fi_http::NipFiAdmission<impl Nip98Extra>,
-        route: &'a str,
+        admitted: crate::nip_fi_http::AdmittedRequest<'a, ([u8; 32], Option<u64>)>,
         tenant: &TenantContext,
     ) -> Self {
-        let pubkey = *admission.proven_pubkey();
-        let mut line = AuthLine::new(
-            admission
-                .auth_attempt(route)
-                .in_community(tenant.community()),
-        );
-        // A request that ends before admission decides (a malformed body,
-        // a client disconnect) is still one line.
-        line.abort_reason("request_ended");
-        let (event_id_bytes, signed_at) = admission.into_extra().split();
+        let pubkey = *admitted.proven_pubkey();
+        let (line, (event_id_bytes, signed_at)) = admitted.into_line(tenant.community());
         Self {
             pubkey,
             event_id_bytes,
@@ -189,9 +165,13 @@ impl<'a> ProvenCaller<'a> {
     /// [`Self::admit`] for the relay membership and ban check.
     pub(crate) fn admit_member<T>(
         &mut self,
-        membership: Result<T, (StatusCode, Json<Value>)>,
+        membership: Result<T, super::relay_members::MembershipRefusal>,
     ) -> Result<T, (StatusCode, Json<Value>)> {
-        self.admit(membership, super::relay_members::membership_refusal)
+        self.admit(
+            membership,
+            super::relay_members::MembershipRefusal::auth_result,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -287,14 +267,12 @@ pub(crate) fn verify_bridge_auth_with_options(
         require_payload,
     )
     .map_err(|rejected| {
-        crate::access::AuthAttempt {
-            method: crate::access::AuthMethod::Nip98,
-            community: None,
-            conn_id: None,
-            route: Some(crate::access::url_path(url)),
-            pubkey: rejected.claimed,
-            pubkey_verified: false,
-        }
+        crate::access::AuthAttempt::http(
+            crate::access::AuthMethod::Nip98,
+            url,
+            rejected.claimed,
+            false,
+        )
         .log(crate::access::AuthResult::Failed(rejected.reason));
         api_error(StatusCode::UNAUTHORIZED, &rejected.message)
     })
@@ -535,7 +513,9 @@ impl ReplayRejection {
     pub(crate) fn auth_result(&self) -> crate::access::AuthResult {
         match self {
             Self::Replayed => crate::access::AuthResult::Failed("nip98_replay"),
-            Self::Unavailable => crate::access::AuthResult::Denied("replay_check_unavailable"),
+            Self::Unavailable => {
+                crate::access::AuthResult::Denied(crate::access::AuthReason::ReplayCheckUnavailable)
+            }
         }
     }
 }
@@ -559,8 +539,8 @@ impl IntoResponse for ReplayRejection {
 /// The access-log result for a refusal from [`enforce_http_admission`].
 pub(crate) fn admission_refusal(e: &(StatusCode, Json<Value>)) -> crate::access::AuthResult {
     crate::access::AuthResult::Denied(match e.0 {
-        StatusCode::TOO_MANY_REQUESTS => "quota_exceeded",
-        _ => "admission_unavailable",
+        StatusCode::TOO_MANY_REQUESTS => crate::access::AuthReason::QuotaExceeded,
+        _ => crate::access::AuthReason::AdmissionUnavailable,
     })
 }
 
@@ -1223,7 +1203,7 @@ pub async fn submit_event(
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         bridge_strict_proof(&headers, "POST", &url, Some(&body), true)
     });
-    let admission = admit_nip_fi_http_on_state(&state, &headers, || {
+    let admission = admit_nip_fi_http_on_state(&state, &headers, &url, || {
         verify_bridge_auth_with_options(
             &headers,
             "POST",
@@ -1235,7 +1215,7 @@ pub async fn submit_event(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let caller = ProvenCaller::new(admission, &url, &tenant);
+    let caller = ProvenCaller::new(admission, &tenant);
     let pubkey_hex = caller.pubkey.to_hex();
 
     // Everything after auth — admission, replay, membership, parse, ingest —
@@ -1558,7 +1538,7 @@ pub async fn query_events(
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         bridge_strict_proof(&headers, "POST", &url, Some(&body), true)
     });
-    let admission = admit_nip_fi_http_on_state(&state, &headers, || {
+    let admission = admit_nip_fi_http_on_state(&state, &headers, &url, || {
         verify_bridge_auth_with_options(
             &headers,
             "POST",
@@ -1570,7 +1550,7 @@ pub async fn query_events(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let caller = ProvenCaller::new(admission, &url, &tenant);
+    let caller = ProvenCaller::new(admission, &tenant);
     let pubkey_hex = caller.pubkey.to_hex();
 
     // Admission, replay, membership, and filter execution all run inside the
@@ -2222,7 +2202,7 @@ pub async fn count_events(
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         bridge_strict_proof(&headers, "POST", &url, Some(&body), true)
     });
-    let admission = admit_nip_fi_http_on_state(&state, &headers, || {
+    let admission = admit_nip_fi_http_on_state(&state, &headers, &url, || {
         verify_bridge_auth_with_options(
             &headers,
             "POST",
@@ -2234,7 +2214,7 @@ pub async fn count_events(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let caller = ProvenCaller::new(admission, &url, &tenant);
+    let caller = ProvenCaller::new(admission, &tenant);
     let pubkey_hex = caller.pubkey.to_hex();
 
     // Admission, replay, membership, and count execution all run inside the
@@ -3053,7 +3033,7 @@ async fn authorize_moderation_read(
     crate::nip_fi_shadow::observe_strict_proof(state, headers, "bridge", || {
         bridge_strict_proof(headers, "GET", &url, None, false)
     });
-    let admission = admit_nip_fi_http_on_state(state, headers, || {
+    let admission = admit_nip_fi_http_on_state(state, headers, &url, || {
         verify_bridge_auth(
             headers,
             "GET",
@@ -3061,10 +3041,10 @@ async fn authorize_moderation_read(
             None,
             state.config.require_auth_token || nip_fi_active,
         )
-        .map(|auth| auth.proof(auth.event_id_bytes))
+        .map(|auth| auth.proof((auth.event_id_bytes, None)))
         .map_err(|e| e.into_response())
     })?;
-    let mut caller = ProvenCaller::new(admission, &url, &tenant);
+    let mut caller = ProvenCaller::new(admission, &tenant);
     caller
         .replay(state, &tenant)
         .await
@@ -3081,7 +3061,10 @@ async fn authorize_moderation_read(
     )
     .await;
     caller
-        .check(membership, super::relay_members::membership_refusal)
+        .check(
+            membership,
+            super::relay_members::MembershipRefusal::auth_result,
+        )
         .map_err(IntoResponse::into_response)?;
 
     // Moderator authority is this route's last admission step.
@@ -3095,7 +3078,9 @@ async fn authorize_moderation_read(
     )
     .await;
     caller
-        .admit(moderator, |_| AuthResult::Denied("not_moderator"))
+        .admit(moderator, |_| {
+            AuthResult::Denied(crate::access::AuthReason::NotModerator)
+        })
         .map_err(|_| {
             api_error(
                 StatusCode::FORBIDDEN,
@@ -5974,6 +5959,67 @@ pub(crate) mod postgres_tests {
         assert_eq!(line["method"], "nip98");
         assert_eq!(line["pubkey"], keys.public_key().to_hex());
         assert_eq!(line["pubkey_verified"], true);
+    }
+
+    /// The same signed `/query` sent twice: the second is refused by the
+    /// replay check inside `ProvenCaller`, and that refusal is its one line.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn replayed_query_logs_one_failed_line() {
+        /// Admits each event id once, like the Redis guard.
+        struct SeenOnce(std::sync::Mutex<std::collections::HashSet<String>>);
+        impl Nip98ReplayGuard for SeenOnce {
+            fn try_mark_in_scope<'a>(
+                &'a self,
+                scope: &'a str,
+                event_id: &'a nostr::EventId,
+                _ttl_secs: u64,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let fresh = self
+                    .0
+                    .lock()
+                    .expect("seen set")
+                    .insert(format!("{scope}:{event_id}"));
+                Box::pin(async move { Ok(fresh) })
+            }
+        }
+        let mut state = (*nip_fi_off_test_state().await.expect("local Postgres")).clone();
+        state.nip98_replay = Arc::new(SeenOnce(Default::default()));
+        let state = Arc::new(state);
+        let host = with_community(&state).await;
+        let keys = Keys::generate();
+        let headers =
+            make_nip98_headers(&keys, &format!("https://{host}/query"), "POST", QUERY_BODY);
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        for expected in [
+            axum::http::StatusCode::OK,
+            axum::http::StatusCode::UNAUTHORIZED,
+        ] {
+            let status = oneshot_request(
+                Arc::clone(&state),
+                "POST",
+                "/query",
+                &host,
+                headers.clone(),
+                QUERY_BODY,
+            )
+            .await;
+            assert_eq!(status, expected);
+        }
+        let lines: Vec<_> = out
+            .lines()
+            .into_iter()
+            .filter(|line| line["event"] == "auth")
+            .collect();
+        assert_eq!(lines.len(), 2, "one line per request: {lines:?}");
+        assert_eq!(lines[0]["outcome"], "success", "{lines:?}");
+        assert_one_auth_line(&lines[1..], "failed", Some("nip98_replay"));
     }
 
     /// A valid proof from a banned identity is refused by the ban check
@@ -8869,6 +8915,7 @@ pub(crate) mod postgres_tests {
             let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(4);
             let cancel = tokio_util::sync::CancellationToken::new();
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant: TenantContext::resolved(self.community, self.host.clone()),
                 remote_addr: "127.0.0.1:1234".parse().expect("addr"),

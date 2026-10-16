@@ -328,8 +328,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             AuthState::Pending { challenge, .. } => (challenge, conn.conn_id),
             AuthState::Authenticated(_) => {
                 debug!(conn_id = %conn.conn_id, "AUTH received but already authenticated");
-                AuthAttempt::nip42(&conn, event.pubkey, false)
-                    .log(AuthResult::Denied("already_authenticated"));
+                AuthAttempt::nip42(&conn, event.pubkey, false).log_after_decision(
+                    &conn,
+                    AuthResult::Denied(crate::access::AuthReason::AlreadyAuthenticated),
+                );
                 crate::metrics::record_post_terminal_auth_frame(
                     AuthPostTerminalState::Authenticated,
                 );
@@ -342,8 +344,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             AuthState::Failed => {
                 debug!(conn_id = %conn.conn_id, "AUTH received after failed auth");
-                AuthAttempt::nip42(&conn, event.pubkey, false)
-                    .log(AuthResult::Denied("already_failed"));
+                AuthAttempt::nip42(&conn, event.pubkey, false).log_after_decision(
+                    &conn,
+                    AuthResult::Denied(crate::access::AuthReason::AlreadyFailed),
+                );
                 crate::metrics::record_post_terminal_auth_frame(AuthPostTerminalState::Failed);
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
@@ -732,7 +736,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         &asserted_key,
                         chrono::Utc::now(),
                     ) {
-                        attempt.log(AuthResult::Denied("deny_set"));
+                        attempt.log(AuthResult::Denied(crate::access::AuthReason::DenySet));
                         metrics::counter!(
                             "buzz_nip_fi_admission_denied_total",
                             "reason" => "deny_set_post_registration"
@@ -963,6 +967,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -1092,6 +1097,7 @@ mod tests {
         cancel.cancel();
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -1168,6 +1174,7 @@ mod tests {
                 )
             });
             let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
@@ -1642,6 +1649,7 @@ mod tests {
             let backpressure = Arc::new(std::sync::atomic::AtomicU8::new(0));
             let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2285,6 +2293,7 @@ mod tests {
                 crate::state::CommunityConnectionControl::new(cancel.clone());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2492,6 +2501,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2667,6 +2677,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2842,6 +2853,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2960,6 +2972,7 @@ mod tests {
             let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
             let cancel = CancellationToken::new();
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -3115,6 +3128,7 @@ mod tests {
             let cancel = CancellationToken::new();
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),

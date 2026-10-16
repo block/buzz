@@ -101,6 +101,7 @@ pub(super) async fn authorize(
     let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
         state,
         headers,
+        uri.path(),
         bridge::make_nip98_closure_for_admission(
             headers.clone(),
             method,
@@ -118,7 +119,7 @@ pub(super) async fn authorize(
             bridge_error((response.status(), Json(Value::Null)))
         }
     })?;
-    let mut caller = bridge::ProvenCaller::new(admission, uri.path(), &tenant);
+    let mut caller = bridge::ProvenCaller::new(admission, &tenant);
     caller
         .rate_limit_and_replay(state, &tenant)
         .await
@@ -164,8 +165,8 @@ async fn admission_checks(
     )
     .await
     .map_err(|e| {
-        let refusal = relay_members::membership_refusal(&e);
-        (bridge_error(e), refusal)
+        let refusal = e.auth_result();
+        (bridge_error(e.into()), refusal)
     })?;
     let restrictions = state
         .db
@@ -174,13 +175,13 @@ async fn admission_checks(
         .map_err(|_| {
             (
                 Error::unavailable(),
-                crate::access::AuthResult::Denied("ban_check_unavailable"),
+                crate::access::AuthResult::Denied(crate::access::AuthReason::BanCheckUnavailable),
             )
         })?;
     if restrictions.banned {
         return Err((
             Error::new(StatusCode::FORBIDDEN, "forbidden"),
-            crate::access::AuthResult::Denied("banned"),
+            crate::access::AuthResult::Denied(crate::access::AuthReason::Banned),
         ));
     }
     // Timeouts block posting conversation content, not personal reading.

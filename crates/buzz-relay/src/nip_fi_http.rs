@@ -57,11 +57,12 @@ use axum::{
     http::{HeaderMap, Response},
 };
 use buzz_auth::{DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion};
+use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
 use nostr::PublicKey;
 use std::fmt;
 
-use crate::access::{AuthAttempt, AuthMethod, AuthResult};
+use crate::access::{AuthAttempt, AuthLine, AuthMethod, AuthResult};
 use crate::nip_fi_config::NipFiCommunities;
 use crate::nip_fi_core::{
     asserted_key_matches, evaluate_attached_assertion, http_denial, resolve_community,
@@ -195,6 +196,8 @@ pub(crate) struct NipFiAdmission<X = ()> {
     assertion: Option<VerifiedAssertion>,
     /// Caller-supplied side-data from the NIP-98 extraction closure.
     extra: X,
+    /// False for a dev-mode `X-Pubkey` identity, which nothing signed.
+    signed: bool,
 }
 
 impl<X> fmt::Debug for NipFiAdmission<X> {
@@ -232,30 +235,75 @@ impl<X> NipFiAdmission<X> {
     }
 
     /// The access-log attempt for this admitted request on `route`: an
-    /// enterprise assertion in Enforce, a plain NIP-98 proof otherwise. The
-    /// caller logs it once the request's auth decision is final (after the
-    /// replay check, where there is one).
-    pub(crate) fn auth_attempt<'a>(&self, route: &'a str) -> AuthAttempt<'a> {
-        self.auth_attempt_as(route, AuthMethod::Nip98)
-    }
-
-    /// [`Self::auth_attempt`] for a route whose proof is `proof_method`
-    /// rather than NIP-98 (a Blossom upload).
-    pub(crate) fn auth_attempt_as<'a>(
-        &self,
-        route: &'a str,
-        proof_method: AuthMethod,
-    ) -> AuthAttempt<'a> {
-        let method = match self.assertion {
-            Some(_) => AuthMethod::NipFi,
-            None => proof_method,
+    /// enterprise assertion in Enforce, the unsigned dev-mode `X-Pubkey`
+    /// identity, or `proof_method` (NIP-98 or Blossom) otherwise.
+    fn auth_attempt<'a>(&self, route: &'a str, proof_method: AuthMethod) -> AuthAttempt<'a> {
+        let method = match (&self.assertion, self.signed) {
+            (Some(_), _) => AuthMethod::NipFi,
+            (None, false) => AuthMethod::XPubkey,
+            (None, true) => proof_method,
         };
-        AuthAttempt::http(method, route, Some(self.proven_pubkey), true)
+        AuthAttempt::http(method, route, Some(self.proven_pubkey), self.signed)
     }
 
     /// Consume the admission, returning ownership of the side-data.
     pub(crate) fn into_extra(self) -> X {
         self.extra
+    }
+}
+
+/// A NIP-FI admission for one HTTP request on `route`, holding the request's
+/// single access line from the moment the identity is proven. The route's
+/// later steps (rate limit, replay, membership) decide it; a route that
+/// returns without deciding still logs `aborted/request_ended`, so a new
+/// route cannot log nothing.
+#[must_use]
+pub(crate) struct AdmittedRequest<'a, X = ()> {
+    admission: NipFiAdmission<X>,
+    route: &'a str,
+    line: AuthLine<'a>,
+}
+
+impl<'a, X> AdmittedRequest<'a, X> {
+    fn new(admission: NipFiAdmission<X>, route: &'a str) -> Self {
+        let mut line = AuthLine::new(admission.auth_attempt(route, AuthMethod::Nip98));
+        line.abort_reason("request_ended");
+        Self {
+            admission,
+            route,
+            line,
+        }
+    }
+
+    /// The pubkey proven by NIP-98 (and, in Enforce, by assertion pairing).
+    pub(crate) fn proven_pubkey(&self) -> &PublicKey {
+        self.admission.proven_pubkey()
+    }
+
+    /// The admission itself.
+    #[cfg(test)]
+    pub(crate) fn admission(&self) -> &NipFiAdmission<X> {
+        &self.admission
+    }
+
+    /// This request's proof was `method` (a Blossom authorization) rather
+    /// than NIP-98.
+    pub(crate) fn proved_by(mut self, method: AuthMethod) -> Self {
+        self.line
+            .retarget(self.admission.auth_attempt(self.route, method));
+        self
+    }
+
+    /// The request's access line, bound to `community`, and the side-data
+    /// from the proof closure.
+    pub(crate) fn into_line(self, community: CommunityId) -> (AuthLine<'a>, X) {
+        let Self {
+            admission,
+            mut line,
+            ..
+        } = self;
+        line.in_community(community);
+        (line, admission.into_extra())
     }
 }
 
@@ -329,7 +377,9 @@ where
     // request shape (duplicate, missing, or invalid `Authorization`) can turn
     // it into a 401/403, and so neither NIP-98 nor the verifier runs.
     if mode.denies_unconditionally() {
-        AuthAttempt::nip_fi(None, false).log(AuthResult::Denied("authorization_unavailable"));
+        AuthAttempt::nip_fi(None, false).log(AuthResult::Denied(
+            crate::access::AuthReason::AuthorizationUnavailable,
+        ));
         return Err(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
@@ -346,6 +396,7 @@ where
             proven_pubkey: proof.pubkey,
             assertion: None,
             extra: proof.extra,
+            signed: proof.signed,
         });
     }
 
@@ -377,6 +428,7 @@ where
         proven_pubkey: proof.pubkey,
         assertion: Some(assertion),
         extra: proof.extra,
+        signed: proof.signed,
     })
 }
 
@@ -517,13 +569,16 @@ where
         )
     };
     if !asserted_key_matches(&assertion, proof.pubkey) {
-        return Err(denied(Stage::Pairing, "key_mismatch"));
+        return Err(denied(
+            Stage::Pairing,
+            crate::access::AuthReason::KeyMismatch,
+        ));
     }
 
     // Step 7: deny-map check — (iss, pubkey) must not be in an active deny
     // window.  Private-state denial.  [FI-INV-14] [NIP-FI.md:624-627]
     if deny_map.is_denied(assertion.identity().issuer(), &proof.pubkey, Utc::now()) {
-        return Err(denied(Stage::DenySet, "deny_set"));
+        return Err(denied(Stage::DenySet, crate::access::AuthReason::DenySet));
     }
 
     Ok((proof, assertion))
@@ -545,18 +600,19 @@ where
 /// [FI-TRACE-AUTHORITY-UNIFORM]
 // Response<Body> is intentionally large (axum's design); see admit_nip_fi_http.
 #[allow(clippy::result_large_err)]
-pub(crate) fn admit_nip_fi_http_on_state<X, F>(
+pub(crate) fn admit_nip_fi_http_on_state<'a, X, F>(
     state: &crate::state::AppState,
     headers: &HeaderMap,
+    route: &'a str,
     extract_nip98: F,
-) -> Result<NipFiAdmission<X>, Response<Body>>
+) -> Result<AdmittedRequest<'a, X>, Response<Body>>
 where
     F: FnOnce() -> Result<Nip98Proof<X>, Response<Body>>,
 {
     let mode = state.config.nip_fi.mode;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = &state.config.nip_fi.communities;
-    match state.nip_fi_deny_map.as_deref() {
+    let admission = match state.nip_fi_deny_map.as_deref() {
         Some(deny_map) => admit_nip_fi_http(
             headers,
             extract_nip98,
@@ -573,7 +629,8 @@ where
             mode,
             &NoDenyMapConfigured,
         ),
-    }
+    }?;
+    Ok(AdmittedRequest::new(admission, route))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -621,6 +678,29 @@ mod tests {
 
     fn any_pubkey() -> PublicKey {
         nostr::Keys::generate().public_key()
+    }
+
+    /// An unsigned dev-mode `X-Pubkey` identity never logs as a verified
+    /// signature; a signed NIP-98 proof does.
+    #[test]
+    fn unsigned_x_pubkey_logs_as_unverified_x_pubkey() {
+        for (signed, method) in [(false, "x_pubkey"), (true, "nip98")] {
+            let admission = NipFiAdmission {
+                proven_pubkey: any_pubkey(),
+                assertion: None,
+                extra: (),
+                signed,
+            };
+            let ((), out) = crate::access::tests::capture(|| {
+                admission
+                    .auth_attempt("/query", AuthMethod::Nip98)
+                    .log(AuthResult::Success);
+            });
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(lines[0]["method"], method);
+            assert_eq!(lines[0]["pubkey_verified"], signed);
+        }
     }
 
     // ── extract_bearer_token ─────────────────────────────────────────────────

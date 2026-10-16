@@ -127,7 +127,7 @@ pub async fn handle_req(
         {
             Ok(ids) => ids,
             Err(e) => {
-                warn!(conn_id = %conn_id, error_kind = %crate::access::db_error_kind(&e), "Failed to get accessible channels");
+                warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get accessible channels");
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
                 access.error("database_error");
                 return;
@@ -151,7 +151,7 @@ pub async fn handle_req(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(conn_id = %conn_id, error_kind = %crate::access::db_error_kind(&e), "Failed to get readable system channels");
+            warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get readable system channels");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
             access.error("database_error");
             return;
@@ -193,7 +193,7 @@ pub async fn handle_req(
             Err(e) => {
                 warn!(
                     conn_id = %conn_id,
-                    error_kind = %crate::access::db_error_kind(&e),
+                    error_kind = %e.kind(),
                     "Channel membership confirmation failed"
                 );
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
@@ -215,7 +215,7 @@ pub async fn handle_req(
         )
         .await
         {
-            warn!(conn_id = %conn_id, error_kind = %crate::access::db_error_kind(&e), "Failed to classify repaired channels");
+            warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to classify repaired channels");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
             access.error("database_error");
             return;
@@ -515,7 +515,7 @@ pub async fn handle_req(
                     warn!(
                         conn_id = %conn_id,
                         sub_id = %sub_id,
-                        error_kind = %crate::access::db_error_kind(&e),
+                        error_kind = %e.kind(),
                         "Historical query failed"
                     );
                     if e.is_statement_cancelled() {
@@ -555,7 +555,7 @@ pub async fn handle_req(
                     Err(e) => {
                         warn!(
                             conn_id = %conn_id, sub_id = %sub_id,
-                            error_kind = %crate::access::db_error_kind(&e),
+                            error_kind = %e.kind(),
                             "conformance row-community lookup failed"
                         );
                         std::collections::HashMap::new()
@@ -918,7 +918,7 @@ async fn handle_search_req(
                     // Fixed kind only: the error must never carry query text.
                     warn!(
                         sub_id = %sub_id,
-                        error_kind = %crate::access::sqlx_error_kind(&e),
+                        error_kind = %buzz_db::error::sqlx_error_kind(&e),
                         "NIP-50 search failed"
                     );
                     failure = Some("search_failed");
@@ -952,7 +952,7 @@ async fn handle_search_req(
                     Err(e) => {
                         warn!(
                             sub_id = %sub_id,
-                            error_kind = %crate::access::db_error_kind(&e),
+                            error_kind = %e.kind(),
                             "NIP-50 batch fetch failed"
                         );
                         failure = Some("database_error");
@@ -986,7 +986,7 @@ async fn handle_search_req(
                             Err(e) => {
                                 warn!(
                                     sub_id = %sub_id,
-                                    error_kind = %crate::access::db_error_kind(&e),
+                                    error_kind = %e.kind(),
                                     "conformance row-community lookup failed"
                                 );
                                 std::collections::HashMap::new()
@@ -1495,7 +1495,7 @@ async fn handle_huddle_liveness_req(
         Ok(links) => links,
         Err(error) => {
             warn!(
-                error_kind = %crate::access::db_error_kind(&error),
+                error_kind = %error.kind(),
                 "Huddle liveness linkage batch failed"
             );
             conn.send(RelayMessage::closed(sub_id, "error: database error"));
@@ -1956,6 +1956,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -2331,6 +2332,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = Arc::new(ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -2391,6 +2393,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = Arc::new(ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -3543,6 +3546,7 @@ mod tests {
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3672,6 +3676,7 @@ mod tests {
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3809,6 +3814,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3952,6 +3958,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),

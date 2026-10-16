@@ -85,6 +85,11 @@ const COMMIT_CONFIRM_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// [FI-TRACE-COMMIT-CONFIRM-TIMEOUT]
 const CLEAN_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The request path of a channel's huddle audio socket, for access lines.
+fn audio_route(channel_id: Uuid) -> String {
+    format!("/huddle/{channel_id}/audio")
+}
+
 /// WebSocket upgrade handler for `/huddle/:channel_id/audio`.
 pub async fn ws_audio_handler(
     State(state): State<Arc<AppState>>,
@@ -585,14 +590,16 @@ pub(crate) async fn handle_active_audio_connection(
     let shadow_attempt = crate::nip_fi_shadow_session::AuthAttempt(control.nip_fi_shadow());
     // The audio login's single access line: decided at the final admission
     // check below; any earlier return without a decision logs `aborted`.
-    let mut auth_line = AuthLine::new(AuthAttempt {
-        method: AuthMethod::Nip42,
-        community: Some(tenant.community()),
-        conn_id: None,
-        route: Some("audio"),
-        pubkey: Some(auth_msg.event.pubkey),
-        pubkey_verified: false,
-    });
+    let route = audio_route(channel_id);
+    let mut auth_line = AuthLine::new(
+        AuthAttempt::http(
+            AuthMethod::Nip42,
+            &route,
+            Some(auth_msg.event.pubkey),
+            false,
+        )
+        .in_community(tenant.community()),
+    );
     // Why a login cut off before its decision ended, read when the cut-off
     // is seen: the session deadline passed, or the connection was cancelled
     // for any other reason (the gate reports both as `SessionExpired`).
@@ -688,7 +695,7 @@ pub(crate) async fn handle_active_audio_connection(
     .await
         == crate::nip_fi_session::PairingOutcome::Denied
     {
-        auth_line.finish(AuthResult::Denied("key_mismatch"));
+        auth_line.finish(AuthResult::Denied(crate::access::AuthReason::KeyMismatch));
         return;
     }
 
@@ -703,7 +710,9 @@ pub(crate) async fn handle_active_audio_connection(
                 pubkey = %pubkey_hex,
                 "NIP-FI session deadline already expired at pairing — rejecting audio admission"
             );
-            auth_line.finish(AuthResult::Denied("session_expired"));
+            auth_line.finish(AuthResult::Denied(
+                crate::access::AuthReason::SessionExpired,
+            ));
             deny_audio_authorization(&mut ws_send, &control, &mut terminal_ctrl_rx).await;
             return;
         }
@@ -736,7 +745,7 @@ pub(crate) async fn handle_active_audio_connection(
                     pubkey = %pubkey_hex,
                     "NIP-FI deny-set hit at audio post-registration check — denying"
                 );
-                auth_line.finish(AuthResult::Denied("deny_set"));
+                auth_line.finish(AuthResult::Denied(crate::access::AuthReason::DenySet));
                 deny_audio_authorization(&mut ws_send, &control, &mut terminal_ctrl_rx).await;
                 return;
             }
@@ -783,8 +792,10 @@ pub(crate) async fn handle_active_audio_connection(
     };
     if let Some(class) = relay_refusal {
         auth_line.finish(AuthResult::Denied(match class {
-            buzz_auth::DenialClass::AuthorizationUnavailable => "relay_membership_unavailable",
-            _ => "relay_membership_denied",
+            buzz_auth::DenialClass::AuthorizationUnavailable => {
+                crate::access::AuthReason::MembershipUnavailable
+            }
+            _ => crate::access::AuthReason::NotRelayMember,
         }));
         shadow_attempt.refused();
         #[cfg(test)]
@@ -816,7 +827,9 @@ pub(crate) async fn handle_active_audio_connection(
     {
         Ok(admission) => admission,
         Err(refusal) => {
-            auth_line.finish(AuthResult::Denied("channel_membership_denied"));
+            auth_line.finish(AuthResult::Denied(
+                crate::access::AuthReason::ChannelMembershipDenied,
+            ));
             shadow_attempt.refused();
             warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership denied: {refusal}");
             exit_authorization_refusal(
@@ -870,7 +883,9 @@ pub(crate) async fn handle_active_audio_connection(
                 .await
         };
         if !linked {
-            auth_line.finish(AuthResult::Denied("nip_oa_owner_unlinked"));
+            auth_line.finish(AuthResult::Denied(
+                crate::access::AuthReason::NipOaOwnerUnlinked,
+            ));
             shadow_attempt.refused();
             warn!(channel_id = %channel_id, pubkey = %pubkey_hex, nip_oa_owner = %owner.to_hex(),
                 "audio: NIP-OA owner could not be materialized, denying");

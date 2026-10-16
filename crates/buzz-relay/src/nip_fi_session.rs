@@ -39,6 +39,14 @@ impl NipFiWsRoute {
             Self::Audio => "audio",
         }
     }
+
+    /// The route an upgrade denial's access line names.
+    pub(crate) const fn path(self) -> &'static str {
+        match self {
+            Self::Root => "/",
+            Self::Audio => "/huddle/{channel_id}/audio",
+        }
+    }
 }
 
 // ── Pairing seam ──────────────────────────────────────────────────────────────

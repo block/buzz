@@ -325,6 +325,7 @@ async fn mint_invite_checked(
     let admission = match admit_nip_fi_http_on_state(
         &state,
         &headers,
+        "/api/invites",
         bridge::make_nip98_closure_for_admission(
             headers.clone(),
             "POST",
@@ -337,7 +338,7 @@ async fn mint_invite_checked(
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    let mut caller = bridge::ProvenCaller::new(admission, "/api/invites", &tenant);
+    let mut caller = bridge::ProvenCaller::new(admission, &tenant);
     let pubkey = caller.pubkey;
 
     // Replay detection runs after NIP-98+assertion admission (both proofs verified).

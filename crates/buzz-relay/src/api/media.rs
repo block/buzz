@@ -133,10 +133,10 @@ fn media_denial(error: MediaError, strictness: BlossomStrictness) -> MediaDenial
 /// Map a shared membership-step refusal to media's response shape: a failed
 /// lookup stays 503, a real refusal (non-member or banned) is a policy denial.
 fn membership_denial(
-    (status, _): (StatusCode, axum::Json<serde_json::Value>),
+    refusal: crate::api::relay_members::MembershipRefusal,
     strictness: BlossomStrictness,
 ) -> MediaDenial {
-    let error = if status.is_server_error() {
+    let error = if refusal.response.0.is_server_error() {
         MediaError::AuthorizationUnavailable
     } else {
         MediaError::RelayMembershipRequired
@@ -347,7 +347,7 @@ pub(crate) async fn upload_blob(
     let headers_clone = headers.clone();
     // The closure logs its own rejected proof; the helper logs only its
     // enterprise-assertion refusals, so exactly one of them writes the line.
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, route, move || {
         let reject = |e: MediaError, claimed: Option<nostr::PublicKey>| {
             AuthAttempt::http(AuthMethod::Blossom, route, claimed, false)
                 .log(AuthResult::Failed(blossom_proof_code(&e)));
@@ -367,13 +367,9 @@ pub(crate) async fn upload_blob(
     // One line from here on: a refusal at any admission step below, success
     // once the concurrency permit is held, or `aborted` if the request ends
     // before either.
-    let mut line = AuthLine::new(
-        admission
-            .auth_attempt_as(route, AuthMethod::Blossom)
-            .in_community(ctx.tenant.community()),
-    );
-    line.abort_reason("request_ended");
-    let auth_event = admission.into_extra();
+    let (mut line, auth_event) = admission
+        .proved_by(AuthMethod::Blossom)
+        .into_line(ctx.tenant.community());
 
     // Post-admission: validate X-SHA-256 header and hash binding.
     // These are Blossom-protocol checks, not NIP-FI — Off mode still enforces
@@ -408,7 +404,10 @@ pub(crate) async fn upload_blob(
         Some(auth_event.created_at.as_secs()),
     )
     .await;
-    if let Err(e) = line.gate(membership, crate::api::relay_members::membership_refusal) {
+    if let Err(e) = line.gate(
+        membership,
+        crate::api::relay_members::MembershipRefusal::auth_result,
+    ) {
         return membership_denial(e, strictness).into_response();
     }
 
@@ -416,7 +415,7 @@ pub(crate) async fn upload_blob(
     if upload_rate_limited(&state, ctx.tenant.community(), &auth_event.pubkey) {
         metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
             .increment(1);
-        line.finish(AuthResult::Denied("quota_exceeded"));
+        line.finish(AuthResult::Denied(crate::access::AuthReason::QuotaExceeded));
         return MediaError::UploadRateLimitExceeded.into_response();
     }
     let upload_permit = match acquire_upload_permit(
@@ -430,7 +429,9 @@ pub(crate) async fn upload_blob(
     }) {
         Ok(p) => p,
         Err(e) => {
-            line.finish(AuthResult::Denied("concurrency_limit"));
+            line.finish(AuthResult::Denied(
+                crate::access::AuthReason::ConcurrencyLimit,
+            ));
             return e.into_response();
         }
     };
@@ -713,19 +714,29 @@ async fn enforce_blossom_read_membership(
     auth_event: &nostr::Event,
     headers: &HeaderMap,
     strictness: BlossomStrictness,
+    line: &mut AuthLine<'_>,
 ) -> Result<(), MediaDenial> {
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
-    crate::api::relay_members::enforce_relay_membership(
+    let membership = crate::api::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         auth_event.pubkey.as_bytes(),
         auth_tag,
         Some(auth_event.created_at.as_secs()),
     )
-    .await
-    .map(|_| ())
-    .map_err(|e| membership_denial(e, strictness))
+    .await;
+    line.gate(
+        membership,
+        crate::api::relay_members::MembershipRefusal::auth_result,
+    )
+    .map_err(|e| membership_denial(e, strictness))?;
+    line.finish(AuthResult::Success);
+    Ok(())
 }
+
+/// Route recorded on Blossom read (GET/HEAD) access lines. The hash itself
+/// is not logged.
+const BLOB_ROUTE: &str = "/<sha256>";
 
 fn blob_cache_control() -> &'static str {
     "private, max-age=31536000, immutable"
@@ -842,16 +853,29 @@ pub(crate) async fn get_blob(
         )
         .map(drop)
     });
-    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
-            .map_err(|e| e.into_response())
+    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, BLOB_ROUTE, move || {
+        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness).map_err(|e| {
+            AuthAttempt::http(AuthMethod::Blossom, BLOB_ROUTE, None, false)
+                .log(AuthResult::Failed(blossom_proof_code(&e)));
+            e.into_response()
+        })
     }) {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
-    let auth_event = admission.into_extra();
+    let (mut line, auth_event) = admission
+        .proved_by(AuthMethod::Blossom)
+        .into_line(tenant.community());
     // Post-admission: membership gate.
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &req_headers, strictness).await?;
+    enforce_blossom_read_membership(
+        &state,
+        &tenant,
+        &auth_event,
+        &req_headers,
+        strictness,
+        &mut line,
+    )
+    .await?;
     serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers)
         .await
         .map_err(MediaDenial::from)
@@ -1136,15 +1160,28 @@ pub(crate) async fn head_blob(
         extract_blossom_read_proof(&headers, &sha256, &tenant_host, BlossomStrictness::Strict)
             .map(drop)
     });
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
-            .map_err(|e| e.into_response())
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, BLOB_ROUTE, move || {
+        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness).map_err(|e| {
+            AuthAttempt::http(AuthMethod::Blossom, BLOB_ROUTE, None, false)
+                .log(AuthResult::Failed(blossom_proof_code(&e)));
+            e.into_response()
+        })
     }) {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
-    let auth_event = admission.into_extra();
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &headers, strictness).await?;
+    let (mut line, auth_event) = admission
+        .proved_by(AuthMethod::Blossom)
+        .into_line(tenant.community());
+    enforce_blossom_read_membership(
+        &state,
+        &tenant,
+        &auth_event,
+        &headers,
+        strictness,
+        &mut line,
+    )
+    .await?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
@@ -1222,13 +1259,6 @@ async fn resolve_s3_key(
     }
 }
 
-/// Extract and verify a kind:24242 Blossom auth event from the `Authorization` header.
-///
-/// Accepts both base64url (BUD-11 spec) and standard base64 (nostr-tools compat).
-///
-/// Takes the first `Authorization` value. Repeated `Authorization` fields are
-/// rejected in Enforce by the cardinality gate in `admit_nip_fi_http`; Off keeps
-/// the legacy first-value behavior [FI-INV-15].
 /// A fixed access-log code for a rejected Blossom proof.
 fn blossom_proof_code(e: &MediaError) -> &'static str {
     match e {
@@ -1243,6 +1273,13 @@ fn blossom_proof_code(e: &MediaError) -> &'static str {
     }
 }
 
+/// Extract and verify a kind:24242 Blossom auth event from the `Authorization` header.
+///
+/// Accepts both base64url (BUD-11 spec) and standard base64 (nostr-tools compat).
+///
+/// Takes the first `Authorization` value. Repeated `Authorization` fields are
+/// rejected in Enforce by the cardinality gate in `admit_nip_fi_http`; Off keeps
+/// the legacy first-value behavior [FI-INV-15].
 fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError> {
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
@@ -3423,6 +3460,7 @@ mod tests {
                 .expect("valid header"),
             );
 
+            let (guard, out) = crate::access::tests::capture_scoped();
             let (status, resp_headers, body) = rt.block_on(media_oneshot(
                 Arc::clone(&state),
                 "GET",
@@ -3431,6 +3469,17 @@ mod tests {
                 headers,
                 b"",
             ));
+            drop(guard);
+            // The rejected read proof writes exactly one access line.
+            let auth: Vec<_> = out
+                .lines()
+                .into_iter()
+                .filter(|l| l["event"] == "auth")
+                .collect();
+            assert_eq!(auth.len(), 1, "{auth:?}");
+            assert_eq!(auth[0]["method"], "blossom");
+            assert_eq!(auth[0]["outcome"], "failed");
+            assert_eq!(auth[0]["route"], "/<sha256>");
 
             assert_eq!(
                 status,

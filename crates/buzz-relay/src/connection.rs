@@ -150,6 +150,9 @@ pub struct ConnectionState {
     /// peer cleanup) cannot start until all pre-expiry effects finish their
     /// bounded commits. [FI-TRACE-LEASE-BOUND, one-gate-per-connection]
     pub(crate) nip_fi_gate: std::sync::Arc<crate::nip_fi_gate::SessionAdmissionGate>,
+
+    /// Bounds the access lines this client can trigger without being served.
+    pub(crate) refusal_budget: Arc<crate::access::RefusalBudget>,
 }
 
 impl ConnectionState {
@@ -598,6 +601,7 @@ async fn handle_active_connection(
     });
 
     let conn = Arc::new(ConnectionState {
+        refusal_budget: Default::default(),
         conn_id,
         tenant,
         remote_addr: addr,
@@ -782,6 +786,7 @@ async fn handle_active_connection(
         closed_as.as_ref(),
         opened.elapsed(),
         &queued,
+        &conn.refusal_budget,
     );
 
     drop(permit);
@@ -1369,7 +1374,13 @@ fn log_aborted_auth(conn: &ConnectionState, claimed: nostr::PublicKey) {
     } else {
         "connection_closed"
     };
-    crate::access::AuthAttempt::nip42(conn, claimed, false)
+    // Cut off after `authenticate()` succeeded: the close line will show
+    // this key as authenticated, so this line must not call it unverified.
+    let verified = matches!(
+        conn.auth_state_snapshot(),
+        AuthState::Authenticated(ctx) if ctx.pubkey == claimed
+    );
+    crate::access::AuthAttempt::nip42(conn, claimed, verified)
         .log(crate::access::AuthResult::Aborted(reason));
 }
 
@@ -1414,6 +1425,7 @@ pub(crate) mod tests {
         let (terminal_ctrl_tx, terminal_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let conn = ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -2306,6 +2318,51 @@ pub(crate) mod tests {
     mod postgres_tests {
         use super::*;
 
+        /// Each decided AUTH frame, sent through the production dispatcher,
+        /// writes exactly one line: its decision, never also an `aborted`.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn decided_auth_frames_log_exactly_one_line_each() {
+            let mut state = (*crate::api::bridge::postgres_tests::bridge_handler_test_state()
+                .await
+                .expect("local Postgres"))
+            .clone();
+            Arc::make_mut(&mut state.config).require_relay_membership = false;
+            let state = Arc::new(state);
+            let keys = Keys::generate();
+            let other = Keys::generate();
+            for (good, outcome) in [(true, "success"), (false, "failed")] {
+                let (conn, _rx) = test_conn_with_auth(pending_state());
+                let relay_url: RelayUrl = crate::api::bridge::nip42_expected_relay_url(
+                    &state.config.relay_url,
+                    &conn.tenant,
+                )
+                .parse()
+                .expect("relay url");
+                let event = EventBuilder::auth("test-challenge", relay_url.clone())
+                    .sign_with_keys(&keys)
+                    .expect("sign auth");
+                let mut frame = serde_json::json!(["AUTH", event]);
+                if !good {
+                    // A well-formed signature over a different event.
+                    let foreign = EventBuilder::auth("other", relay_url)
+                        .sign_with_keys(&other)
+                        .expect("sign foreign");
+                    frame[1]["sig"] = serde_json::json!(foreign.sig.to_string());
+                }
+                let (guard, out) = crate::access::tests::capture_scoped();
+                handle_text_message(frame.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
+                drop(guard);
+                let lines: Vec<_> = out
+                    .lines()
+                    .into_iter()
+                    .filter(|l| l["event"] == "auth")
+                    .collect();
+                assert_eq!(lines.len(), 1, "{outcome}: {lines:?}");
+                assert_eq!(lines[0]["outcome"], outcome, "{lines:?}");
+            }
+        }
+
         /// Drive a real upgraded root connection (watcher, timeout and expiry
         /// tasks included) through an AUTH that stalls after its policy reads,
         /// end the connection with `end` while it waits, and return the captured
@@ -3103,6 +3160,7 @@ pub(crate) mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
 
         let conn = Arc::new(ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),

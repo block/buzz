@@ -918,12 +918,7 @@ pub async fn emit_system_message(
         .db
         .insert_event(tenant.community(), &event, Some(channel_id))
         .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "system message insert failed: {}",
-                crate::access::db_error_kind(&e)
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("system message insert failed: {}", e.kind()))?;
 
     // Fan out to subscribers: best-effort, clients can retrieve the persisted event.
     if let Err(e) = state
@@ -1099,12 +1094,7 @@ pub async fn emit_membership_notification(
         .db
         .insert_event(tenant.community(), &event, None)
         .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "membership notification insert failed: {}",
-                crate::access::db_error_kind(&e)
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("membership notification insert failed: {}", e.kind()))?;
     if !was_inserted {
         return Ok(());
     }
@@ -1191,12 +1181,7 @@ async fn emit_addressable_discovery_event(
         .db
         .replace_addressable_event(tenant.community(), &event, Some(channel_id))
         .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "channel state write failed: {}",
-                crate::access::db_error_kind(&e)
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("channel state write failed: {}", e.kind()))?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
         dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
@@ -2446,10 +2431,7 @@ pub(crate) async fn persist_workflow_deletion(
         .await
         .map_err(|e| {
             // The write carries the whole event: log only a fixed kind.
-            anyhow::anyhow!(
-                "workflow deletion write failed: {}",
-                crate::access::db_error_kind(&e)
-            )
+            anyhow::anyhow!("workflow deletion write failed: {}", e.kind())
         })?;
     if let Some(channel_id) = channel_id {
         state
@@ -3774,12 +3756,7 @@ pub async fn publish_nipia_archival_list(
             .db
             .replace_addressable_event(tenant.community(), &event, None)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "archive snapshot write failed: {}",
-                    crate::access::db_error_kind(&e)
-                )
-            })?;
+            .map_err(|e| anyhow::anyhow!("archive snapshot write failed: {}", e.kind()))?;
         if !was_inserted {
             continue;
         }
@@ -3885,12 +3862,7 @@ pub async fn publish_dm_visibility_snapshot(
         .db
         .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
         .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "DM visibility write failed: {}",
-                crate::access::db_error_kind(&e)
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("DM visibility write failed: {}", e.kind()))?;
     if was_inserted {
         dispatch_persistent_event(
             tenant,

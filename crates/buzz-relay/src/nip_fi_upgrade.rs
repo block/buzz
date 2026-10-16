@@ -16,9 +16,7 @@ use axum::http::{HeaderMap, Response};
 use buzz_auth::{DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion};
 
 use crate::nip_fi_config::NipFiCommunities;
-use crate::nip_fi_core::{
-    evaluate_attached_assertion, http_denial, resolve_community, AssertionRejection,
-};
+use crate::nip_fi_core::{evaluate_attached_assertion, http_denial, resolve_community};
 
 /// Outcome of NIP-FI assertion validation at upgrade time.
 pub(crate) enum NipFiUpgradeOutcome {
@@ -93,9 +91,10 @@ pub(crate) fn check_nip_fi_at_upgrade(
         return NipFiUpgradeOutcome::NotRequired;
     }
 
-    use crate::access::{AuthAttempt, AuthResult};
+    use crate::access::{AuthAttempt, AuthMethod, AuthReason, AuthResult};
+    let attempt = AuthAttempt::http(AuthMethod::NipFi, route.path(), None, false);
     if mode.denies_unconditionally() {
-        AuthAttempt::nip_fi(None, false).log(AuthResult::Denied("authorization_unavailable"));
+        attempt.log(AuthResult::Denied(AuthReason::AuthorizationUnavailable));
         return NipFiUpgradeOutcome::Denied(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
@@ -103,20 +102,14 @@ pub(crate) fn check_nip_fi_at_upgrade(
     let community = match resolve_community(headers, communities) {
         Ok(community) => community,
         Err(class) => {
-            AuthAttempt::nip_fi(None, false).log(AuthResult::Failed("community_unresolved"));
+            attempt.log(AuthResult::Failed("community_unresolved"));
             return NipFiUpgradeOutcome::Denied(http_denial(class));
         }
     };
     match evaluate_attached_assertion(headers, community, verifier) {
         Ok(assertion) => NipFiUpgradeOutcome::Admitted(assertion),
         Err(rejection) => {
-            let attempt = AuthAttempt::nip_fi(None, false);
-            match rejection {
-                AssertionRejection::VerifierUnavailable => {
-                    attempt.log(AuthResult::Denied(rejection.code()))
-                }
-                _ => attempt.log(AuthResult::Failed(rejection.code())),
-            }
+            attempt.log(rejection.auth_result());
             NipFiUpgradeOutcome::Denied(http_denial(rejection.denial_class()))
         }
     }

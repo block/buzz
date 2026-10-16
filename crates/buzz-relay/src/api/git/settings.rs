@@ -185,6 +185,7 @@ async fn authenticate(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
+        path,
         bridge::make_nip98_closure_for_admission(
             headers.clone(),
             method,
@@ -194,7 +195,7 @@ async fn authenticate(
             require_payload,
         ),
     )?;
-    let mut caller = bridge::ProvenCaller::new(admission, path, &tenant);
+    let mut caller = bridge::ProvenCaller::new(admission, &tenant);
     let (pubkey, signed_created_at) = (caller.pubkey, caller.signed_at);
 
     caller
@@ -211,7 +212,7 @@ async fn authenticate(
     )
     .await;
     caller
-        .check(membership, relay_members::membership_refusal)
+        .check(membership, relay_members::MembershipRefusal::auth_result)
         .map_err(IntoResponse::into_response)?;
     let ban = deny_banned_git_principal(
         &state.db,
@@ -223,8 +224,8 @@ async fn authenticate(
     .await;
     caller.admit(ban, |refused| {
         crate::access::AuthResult::Denied(match refused.status() {
-            StatusCode::FORBIDDEN => "banned",
-            _ => "ban_check_unavailable",
+            StatusCode::FORBIDDEN => crate::access::AuthReason::Banned,
+            _ => crate::access::AuthReason::BanCheckUnavailable,
         })
     })?;
     // Admission ignores kind= restrictions by design (NIP-AA). Repository

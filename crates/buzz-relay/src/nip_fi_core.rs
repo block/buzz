@@ -60,7 +60,9 @@ impl AssertionRejection {
     /// other rejection is a failed proof.
     pub(crate) const fn auth_result(self) -> crate::access::AuthResult {
         match self {
-            Self::VerifierUnavailable => crate::access::AuthResult::Denied(self.code()),
+            Self::VerifierUnavailable => {
+                crate::access::AuthResult::Denied(crate::access::AuthReason::VerifierUnavailable)
+            }
             _ => crate::access::AuthResult::Failed(self.code()),
         }
     }

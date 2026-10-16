@@ -13,9 +13,9 @@
 //! disconnect endpoint (`/api/nip-fi/disconnect`), the workflow webhook
 //! secret, and the git server's internal signed callback.
 
-use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use buzz_core::CommunityId;
@@ -39,17 +39,19 @@ macro_rules! emit {
     };
 }
 
-/// What a REQ or COUNT asked for, merged across its filters. `kinds` is the
-/// full de-duplicated union. Identifier lists hold the first [`LIST_CAP`]
-/// distinct values; their `*_count` fields sum the per-filter set sizes, so a
-/// value repeated in two filters counts twice. `since`/`until`/`limit` take the
-/// widest bound and are absent when any filter leaves them open. Only
-/// well-formed channel ids and pubkeys are listed, so client-chosen tag text
-/// never reaches the log.
+/// What a REQ or COUNT asked for, merged across its filters. List fields hold
+/// the first [`LIST_CAP`] distinct values; their `*_count` fields sum the
+/// per-filter set sizes, so a value repeated in two filters counts twice. A
+/// list field is `*` when any filter leaves that dimension open, because that
+/// filter reads every value; `since`/`until`/`limit` likewise take the widest
+/// bound and are absent when any filter leaves them open. No field understates
+/// what the read covered. Only well-formed channel ids and pubkeys are listed,
+/// so client-chosen tag text never reaches the log.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct FilterSummary {
     filters: usize,
     kinds: Option<String>,
+    kind_count: usize,
     channel_ids: Option<String>,
     channel_count: usize,
     authors: Option<String>,
@@ -63,52 +65,59 @@ pub(crate) struct FilterSummary {
     search: bool,
 }
 
+/// The value logged for a list dimension that some filter leaves open.
+const OPEN: &str = "*";
+
 impl FilterSummary {
     pub(crate) fn new(filters: &[Filter]) -> Self {
         let h = SingleLetterTag::lowercase(Alphabet::H);
         let p = SingleLetterTag::lowercase(Alphabet::P);
-        let mut kinds = BTreeSet::new();
-        let (mut channels, mut authors, mut p_tags) =
-            (Listed::default(), Listed::default(), Listed::default());
-        let (mut channel_count, mut author_count, mut p_count, mut ids) = (0, 0, 0, 0);
+        let (mut kinds, mut channels, mut authors, mut p_tags) = (
+            Listed::default(),
+            Listed::default(),
+            Listed::default(),
+            Listed::default(),
+        );
+        let mut ids = 0;
         for filter in filters {
-            kinds.extend(filter.kinds.iter().flatten().map(|k| k.as_u16()));
+            for k in filter.kinds.iter().flatten() {
+                kinds.offer(k.as_u16());
+            }
             for c in filter.generic_tags.get(&h).into_iter().flatten() {
-                channel_count += 1;
-                if Uuid::parse_str(c).is_ok() {
-                    channels.offer(c);
-                }
+                channels.count(Uuid::parse_str(c).is_ok().then_some(c));
             }
             for a in filter.authors.iter().flatten() {
-                author_count += 1;
-                authors.offer(a);
+                authors.offer(*a);
             }
             for v in filter.generic_tags.get(&p).into_iter().flatten() {
-                p_count += 1;
-                if PublicKey::from_hex(v).is_ok() {
-                    p_tags.offer(v);
-                }
+                p_tags.count(PublicKey::from_hex(v).is_ok().then_some(v));
             }
             ids += filter.ids.as_ref().map_or(0, |s| s.len());
         }
+        let open = |bounded: &dyn Fn(&Filter) -> bool| filters.iter().any(|f| !bounded(f));
         let bound = |pick: fn(&Filter) -> Option<u64>, widest: fn(u64, u64) -> u64| {
             let values: Option<Vec<u64>> = filters.iter().map(pick).collect();
             values?.into_iter().reduce(widest)
         };
+        let (kind_count, kinds) = kinds.finish(open(&|f| f.kinds.is_some()), u16::to_string);
+        let (channel_count, channel_ids) = channels
+            .finish(open(&|f| f.generic_tags.contains_key(&h)), |c| {
+                c.to_string()
+            });
+        let (author_count, authors) =
+            authors.finish(open(&|f| f.authors.is_some()), PublicKey::to_hex);
+        let (p_count, p_tags) = p_tags.finish(open(&|f| f.generic_tags.contains_key(&p)), |v| {
+            v.to_string()
+        });
         Self {
             filters: filters.len(),
-            kinds: (!kinds.is_empty()).then(|| {
-                kinds
-                    .iter()
-                    .map(u16::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            }),
-            channel_ids: channels.finish(|c| c.to_string()),
+            kinds,
+            kind_count,
+            channel_ids,
             channel_count,
-            authors: authors.finish(PublicKey::to_hex),
+            authors,
             author_count,
-            p_tags: p_tags.finish(|v| v.to_string()),
+            p_tags,
             p_count,
             ids,
             since: bound(|f| f.since.map(|t| t.as_secs()), u64::min),
@@ -119,26 +128,78 @@ impl FilterSummary {
     }
 }
 
-/// The first [`LIST_CAP`] distinct values offered, in order. Working state
-/// never exceeds the cap, however long the filter lists are.
-struct Listed<'a, T: ?Sized>(Vec<&'a T>);
+/// The first [`LIST_CAP`] distinct values offered, in order, and how many
+/// values were seen. Working state never exceeds the cap, however long the
+/// filter lists are.
+struct Listed<T> {
+    listed: Vec<T>,
+    seen: usize,
+}
 
-impl<T: ?Sized> Default for Listed<'_, T> {
+impl<T> Default for Listed<T> {
     fn default() -> Self {
-        Self(Vec::new())
+        Self {
+            listed: Vec::new(),
+            seen: 0,
+        }
     }
 }
 
-impl<'a, T: ?Sized + PartialEq> Listed<'a, T> {
-    fn offer(&mut self, value: &'a T) {
-        if self.0.len() < LIST_CAP && !self.0.contains(&value) {
-            self.0.push(value);
+impl<T: PartialEq> Listed<T> {
+    fn offer(&mut self, value: T) {
+        self.count(Some(value));
+    }
+
+    /// Count one value, listing it when it is `Some` (well-formed).
+    fn count(&mut self, value: Option<T>) {
+        self.seen += 1;
+        if let Some(value) = value {
+            if self.listed.len() < LIST_CAP && !self.listed.contains(&value) {
+                self.listed.push(value);
+            }
         }
     }
 
-    /// Comma-joined, or `None` when nothing was listed.
-    fn finish(self, show: impl Fn(&T) -> String) -> Option<String> {
-        (!self.0.is_empty()).then(|| self.0.iter().map(|v| show(v)).collect::<Vec<_>>().join(","))
+    /// The count, and the comma-joined list: [`OPEN`] when a filter leaves
+    /// the dimension open, `None` when nothing was listed.
+    fn finish(self, open: bool, show: impl Fn(&T) -> String) -> (usize, Option<String>) {
+        let shown = if open {
+            Some(OPEN.to_owned())
+        } else {
+            (!self.listed.is_empty())
+                .then(|| self.listed.iter().map(show).collect::<Vec<_>>().join(","))
+        };
+        (self.seen, shown)
+    }
+}
+
+/// Lines a connection may write for client-repeatable refusals before the
+/// rest are only counted.
+const REFUSAL_LINES: u64 = 16;
+
+/// Per-connection bound on the access lines a client can trigger without
+/// being served: reads refused or denied, and AUTH frames after the login was
+/// decided. The first [`REFUSAL_LINES`] of each are logged; the rest are
+/// counted and reported on the close line. Served reads are never capped.
+#[derive(Debug, Default)]
+pub(crate) struct RefusalBudget {
+    reads: AtomicU64,
+    auths: AtomicU64,
+}
+
+impl RefusalBudget {
+    /// Whether this refused read may write its line.
+    pub(crate) fn read(&self) -> bool {
+        self.reads.fetch_add(1, Ordering::Relaxed) < REFUSAL_LINES
+    }
+
+    /// Whether this post-decision AUTH frame may write its line.
+    pub(crate) fn auth(&self) -> bool {
+        self.auths.fetch_add(1, Ordering::Relaxed) < REFUSAL_LINES
+    }
+
+    fn suppressed(seen: &AtomicU64) -> u64 {
+        seen.load(Ordering::Relaxed).saturating_sub(REFUSAL_LINES)
     }
 }
 
@@ -165,6 +226,8 @@ pub(crate) struct ReadLog {
     /// REQ: stored events handed to the connection's writer so far.
     /// COUNT: the total returned.
     results: u64,
+    /// Charged if the read ends denied; `None` once already charged.
+    budget: Option<Arc<RefusalBudget>>,
 }
 
 impl ReadLog {
@@ -198,10 +261,7 @@ impl ReadLog {
             M::Count { sub_id, filters } => {
                 Self::refused_read("count", conn, sub_id, filters, reason)
             }
-            // The signature is unchecked here, so the key is only claimed.
-            M::Auth(event) => {
-                AuthAttempt::nip42(conn, event.pubkey, false).log(AuthResult::Denied(reason))
-            }
+            // Admission refuses only reads and EVENTs.
             _ => {}
         }
     }
@@ -214,7 +274,11 @@ impl ReadLog {
         filters: &[Filter],
         reason: &'static str,
     ) {
-        Self::new(event, conn, sub_id, filters).deny(reason);
+        if conn.refusal_budget.read() {
+            let mut log = Self::new(event, conn, sub_id, filters);
+            log.budget = None;
+            log.deny(reason);
+        }
     }
 
     fn new(
@@ -233,9 +297,15 @@ impl ReadLog {
             community: conn.tenant.community(),
             pubkey,
             sub_id: sub_id.to_owned(),
-            summary: FilterSummary::new(filters),
+            // The summary is the costly part; skip it when the line is off.
+            summary: if tracing::enabled!(target: TARGET, Level::INFO) {
+                FilterSummary::new(filters)
+            } else {
+                FilterSummary::default()
+            },
             outcome: ReadOutcome::Aborted,
             results: 0,
+            budget: Some(Arc::clone(&conn.refusal_budget)),
         }
     }
 
@@ -247,6 +317,15 @@ impl ReadLog {
     /// Ended by a server-side failure.
     pub(crate) fn error(&mut self, reason: &'static str) {
         self.outcome = ReadOutcome::Error(reason);
+    }
+
+    /// Ended by a failed database read.
+    pub(crate) fn db_failed(&mut self, e: &buzz_db::DbError) {
+        self.error(if e.is_statement_cancelled() {
+            "query_timed_out"
+        } else {
+            "database_error"
+        });
     }
 
     /// One stored event was handed to the writer. Counted as it happens, so
@@ -269,6 +348,11 @@ impl ReadLog {
 
 impl Drop for ReadLog {
     fn drop(&mut self) {
+        if let (ReadOutcome::Denied(_), Some(budget)) = (self.outcome, &self.budget) {
+            if !budget.read() {
+                return;
+            }
+        }
         let (outcome, reason) = match self.outcome {
             ReadOutcome::Aborted => ("aborted", None),
             ReadOutcome::Served => ("served", None),
@@ -276,8 +360,9 @@ impl Drop for ReadLog {
             ReadOutcome::Error(r) => ("error", Some(r)),
         };
         let s = &self.summary;
-        let (events_queued, count) = match self.event {
-            "count" => (None, Some(self.results)),
+        let (events_queued, count) = match (self.event, self.outcome) {
+            ("count", ReadOutcome::Served) => (None, Some(self.results)),
+            ("count", _) => (None, None),
             _ => (Some(self.results), None),
         };
         emit!(
@@ -289,6 +374,7 @@ impl Drop for ReadLog {
             sub_id = self.sub_id.as_str(),
             filters = s.filters,
             kinds = s.kinds.as_deref(),
+            kind_count = s.kind_count,
             channel_ids = s.channel_ids.as_deref(),
             channel_count = s.channel_count,
             authors = s.authors.as_deref(),
@@ -320,6 +406,8 @@ pub(crate) enum AuthMethod {
     NipFi,
     /// Blossom upload authorization (kind 24242).
     Blossom,
+    /// Dev-mode `X-Pubkey` header: a claimed key that nothing signed.
+    XPubkey,
 }
 
 impl AuthMethod {
@@ -329,17 +417,92 @@ impl AuthMethod {
             Self::Nip98 => "nip98",
             Self::NipFi => "nip_fi",
             Self::Blossom => "blossom",
+            Self::XPubkey => "x_pubkey",
+        }
+    }
+}
+
+/// Why a proven identity was refused. One code per meaning on every
+/// transport (WebSocket, HTTP, git, audio), so a single filter finds them all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthReason {
+    NotRelayMember,
+    MembershipUnavailable,
+    Banned,
+    BanCheckUnavailable,
+    AllowlistDenied,
+    AllowlistUnavailable,
+    QuotaExceeded,
+    AdmissionUnavailable,
+    ConcurrencyLimit,
+    ReplayCheckUnavailable,
+    AuthorizationUnavailable,
+    VerifierUnavailable,
+    KeyMismatch,
+    DenySet,
+    SessionExpired,
+    RosterUnavailable,
+    OriginMismatch,
+    AdminHostMismatch,
+    NotStaff,
+    NotOperator,
+    NotOperatorListener,
+    NotModerator,
+    NipOaOwnerUnlinked,
+    ChannelMembershipDenied,
+    AlreadyAuthenticated,
+    AlreadyFailed,
+    Timeout,
+    Disconnect,
+    Shutdown,
+}
+
+impl AuthReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRelayMember => "not_relay_member",
+            Self::MembershipUnavailable => "membership_unavailable",
+            Self::Banned => "banned",
+            Self::BanCheckUnavailable => "ban_check_unavailable",
+            Self::AllowlistDenied => "allowlist_denied",
+            Self::AllowlistUnavailable => "allowlist_unavailable",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::AdmissionUnavailable => "admission_unavailable",
+            Self::ConcurrencyLimit => "concurrency_limit",
+            Self::ReplayCheckUnavailable => "replay_check_unavailable",
+            Self::AuthorizationUnavailable => "authorization_unavailable",
+            Self::VerifierUnavailable => "verifier_unavailable",
+            Self::KeyMismatch => "key_mismatch",
+            Self::DenySet => "deny_set",
+            Self::SessionExpired => "session_expired",
+            Self::RosterUnavailable => "roster_unavailable",
+            Self::OriginMismatch => "origin_mismatch",
+            Self::AdminHostMismatch => "admin_host_mismatch",
+            Self::NotStaff => "not_staff",
+            Self::NotOperator => "not_operator",
+            Self::NotOperatorListener => "not_operator_listener",
+            Self::NotModerator => "not_moderator",
+            Self::NipOaOwnerUnlinked => "nip_oa_owner_unlinked",
+            Self::ChannelMembershipDenied => "channel_membership_denied",
+            Self::AlreadyAuthenticated => "already_authenticated",
+            Self::AlreadyFailed => "already_failed",
+            Self::Timeout => "timeout",
+            Self::Disconnect => "disconnect",
+            Self::Shutdown => "shutdown",
         }
     }
 }
 
 /// How an auth attempt ended. `Denied` means the identity was proven but not
-/// admitted; `Failed` means the proof itself was rejected. Reasons are fixed
-/// codes, never raw error text.
+/// admitted; `Failed` means the proof itself was rejected, with the code of
+/// that proof type's single mapper. `Challenged` is a request that carried no
+/// credentials and was answered with a challenge, the normal first step of a
+/// git exchange. Reasons are fixed codes, never raw error text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthResult {
     Success,
-    Denied(&'static str),
+    Denied(AuthReason),
+    Challenged,
     Failed(&'static str),
     /// Cut off before a decision (connection cancelled or session expired).
     Aborted(&'static str),
@@ -351,11 +514,20 @@ impl AuthResult {
     /// is `Denied` with the metric's stable label as its reason.
     pub(crate) fn from_outcome(outcome: crate::metrics::AuthOutcome) -> Self {
         use crate::metrics::AuthOutcome as O;
-        match outcome {
-            O::Success => Self::Success,
-            O::Invalid => Self::Failed(outcome.as_str()),
-            _ => Self::Denied(outcome.as_str()),
-        }
+        Self::Denied(match outcome {
+            O::Success => return Self::Success,
+            O::Invalid => return Self::Failed(outcome.as_str()),
+            O::Banned => AuthReason::Banned,
+            O::BanCheckError => AuthReason::BanCheckUnavailable,
+            O::AllowlistCheckError => AuthReason::AllowlistUnavailable,
+            O::AllowlistDenied => AuthReason::AllowlistDenied,
+            O::RelayMembershipCheckError => AuthReason::MembershipUnavailable,
+            O::NotRelayMember => AuthReason::NotRelayMember,
+            O::PairingMismatch => AuthReason::KeyMismatch,
+            O::Timeout => AuthReason::Timeout,
+            O::Disconnect => AuthReason::Disconnect,
+            O::Shutdown => AuthReason::Shutdown,
+        })
     }
 }
 
@@ -382,6 +554,16 @@ impl<'a> AuthLine<'a> {
     pub(crate) fn proven(&mut self, pubkey: PublicKey) {
         self.attempt.pubkey = Some(pubkey);
         self.attempt.pubkey_verified = true;
+    }
+
+    /// Bind the line to `community`.
+    pub(crate) fn in_community(&mut self, community: CommunityId) {
+        self.attempt.community = Some(community);
+    }
+
+    /// Replace the undecided attempt, keeping its line.
+    pub(crate) fn retarget(&mut self, attempt: AuthAttempt<'a>) {
+        self.attempt = attempt;
     }
 
     /// The `aborted` reason logged if the line is dropped undecided.
@@ -437,12 +619,12 @@ pub(crate) fn auth_error_code(e: &buzz_auth::AuthError) -> &'static str {
 /// One auth attempt. `pubkey_verified` is false when the key is only what
 /// the client claimed (a failed signature, or a key never checked).
 pub(crate) struct AuthAttempt<'a> {
-    pub(crate) method: AuthMethod,
-    pub(crate) community: Option<CommunityId>,
-    pub(crate) conn_id: Option<Uuid>,
-    pub(crate) route: Option<&'a str>,
-    pub(crate) pubkey: Option<PublicKey>,
-    pub(crate) pubkey_verified: bool,
+    method: AuthMethod,
+    community: Option<CommunityId>,
+    conn_id: Option<Uuid>,
+    route: Option<&'a str>,
+    pubkey: Option<PublicKey>,
+    pubkey_verified: bool,
 }
 
 impl AuthAttempt<'_> {
@@ -514,11 +696,27 @@ impl AuthAttempt<'_> {
         won
     }
 
+    /// Log an AUTH frame that arrived after the connection's login was
+    /// decided, within the connection's [`RefusalBudget`]. A frame over
+    /// budget is only counted, but still settles its frame's line.
+    pub(crate) fn log_after_decision(
+        &self,
+        conn: &crate::connection::ConnectionState,
+        result: AuthResult,
+    ) {
+        if conn.refusal_budget.auth() {
+            self.log(result);
+        } else {
+            crate::connection::note_auth_line_written();
+        }
+    }
+
     pub(crate) fn log(&self, result: AuthResult) {
         crate::connection::note_auth_line_written();
         let (level, outcome, reason) = match result {
             AuthResult::Success => (Level::INFO, "success", None),
-            AuthResult::Denied(r) => (Level::WARN, "denied", Some(r)),
+            AuthResult::Denied(r) => (Level::WARN, "denied", Some(r.as_str())),
+            AuthResult::Challenged => (Level::INFO, "challenged", None),
             AuthResult::Failed(r) => (Level::WARN, "failed", Some(r)),
             AuthResult::Aborted(r) => (Level::WARN, "aborted", Some(r)),
         };
@@ -661,6 +859,7 @@ pub(crate) fn log_close(
     pubkey: Option<&PublicKey>,
     duration: Duration,
     queued: &QueuedTotals,
+    refusals: &RefusalBudget,
 ) {
     let pubkey = pubkey.map(PublicKey::to_hex);
     emit!(
@@ -673,43 +872,10 @@ pub(crate) fn log_close(
         duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         events_queued = queued.events(),
         bytes_queued = queued.bytes(),
+        reads_suppressed = RefusalBudget::suppressed(&refusals.reads),
+        auth_suppressed = RefusalBudget::suppressed(&refusals.auths),
         "access"
     );
-}
-
-/// A fixed description of a driver error for log lines. Postgres primary
-/// messages can repeat a bound value (`invalid input syntax for type uuid:
-/// "<value>"`), so only the SQLSTATE code is kept.
-pub(crate) fn sqlx_error_kind(e: &sqlx::Error) -> String {
-    let kind = match e {
-        sqlx::Error::Database(db) => {
-            return format!("database:{}", db.code().as_deref().unwrap_or("unknown"))
-        }
-        sqlx::Error::RowNotFound => "row_not_found",
-        sqlx::Error::PoolTimedOut => "pool_timed_out",
-        sqlx::Error::PoolClosed => "pool_closed",
-        sqlx::Error::Io(_) => "io",
-        sqlx::Error::Tls(_) => "tls",
-        sqlx::Error::Protocol(_) => "protocol",
-        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
-        sqlx::Error::Encode(_) => "encode",
-        _ => "other",
-    };
-    kind.to_owned()
-}
-
-/// [`sqlx_error_kind`] for the relay's database error type.
-pub(crate) fn db_error_kind(e: &buzz_db::DbError) -> String {
-    use buzz_db::DbError as E;
-    let kind = match e {
-        E::Sqlx(e) => return sqlx_error_kind(e),
-        E::Serde(_) => "serde",
-        E::InvalidData(_) => "invalid_data",
-        E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
-        E::AccessDenied(_) => "access_denied",
-        _ => "other",
-    };
-    kind.to_owned()
 }
 
 /// The path of a request URL, without scheme, host, or query string. The
@@ -723,6 +889,7 @@ pub(crate) fn url_path(url: &str) -> &str {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::prelude::*;
 
@@ -840,7 +1007,7 @@ pub(crate) mod tests {
             filter(serde_json::json!({"kinds": [7, 5], "since": 50, "until": 300, "limit": 50})),
         ]);
         assert_eq!(s.filters, 2);
-        assert_eq!(s.kinds.as_deref(), Some("5,7,9"));
+        assert_eq!((s.kinds.as_deref(), s.kind_count), (Some("7,9,5"), 4));
         assert_eq!((s.since, s.until, s.limit), (Some(50), Some(300), Some(50)));
         assert!(!s.search);
     }
@@ -887,15 +1054,38 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn summary_lists_every_kind_past_the_identifier_cap() {
-        let kinds: Vec<u16> = (1..=25).collect();
+    fn summary_caps_kinds_like_the_identifier_lists() {
+        let kinds: Vec<u16> = (0..=u16::MAX).collect();
+        let s = FilterSummary::new(&[filter(serde_json::json!({"kinds": kinds}))]);
+        assert_eq!(s.kinds.unwrap().split(',').count(), LIST_CAP);
+        assert_eq!(s.kind_count, 65_536);
+    }
+
+    #[test]
+    fn summary_marks_a_dimension_any_filter_leaves_open() {
         let s = FilterSummary::new(&[
-            filter(serde_json::json!({"kinds": kinds})),
-            filter(serde_json::json!({"kinds": [40_000, 1]})),
+            filter(
+                serde_json::json!({"kinds": [9], "authors": [PK_A], "#h": [Uuid::nil().to_string()]}),
+            ),
+            filter(serde_json::json!({"#p": [PK_A]})),
         ]);
-        let listed = s.kinds.unwrap();
-        assert_eq!(listed.split(',').count(), 26);
-        assert!(listed.ends_with(",25,40000"));
+        assert_eq!(s.kinds.as_deref(), Some("*"));
+        assert_eq!(s.authors.as_deref(), Some("*"));
+        assert_eq!(s.channel_ids.as_deref(), Some("*"));
+        assert_eq!(s.p_tags.as_deref(), Some("*"));
+        assert_eq!(
+            (s.kind_count, s.author_count, s.channel_count, s.p_count),
+            (1, 1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn refusal_budget_logs_sixteen_then_counts_the_rest() {
+        let budget = RefusalBudget::default();
+        let logged = (0..20).filter(|_| budget.read()).count();
+        assert_eq!(logged, 16);
+        assert_eq!(RefusalBudget::suppressed(&budget.reads), 4);
+        assert_eq!(RefusalBudget::suppressed(&budget.auths), 0);
     }
 
     #[test]
@@ -921,6 +1111,7 @@ pub(crate) mod tests {
                 summary: FilterSummary::new(&filters),
                 outcome: ReadOutcome::Aborted,
                 results: 0,
+                budget: None,
             };
             for _ in 0..3 {
                 log.queued_one();
@@ -954,6 +1145,7 @@ pub(crate) mod tests {
                 summary: FilterSummary::default(),
                 outcome: ReadOutcome::Aborted,
                 results: 0,
+                budget: None,
             };
         });
         let line = &out.lines()[0];
@@ -961,7 +1153,10 @@ pub(crate) mod tests {
             (&line["event"], &line["outcome"]),
             (&"count".into(), &"aborted".into())
         );
-        assert_eq!(line["count"], 0);
+        assert!(
+            line.get("count").is_none(),
+            "an uncounted COUNT has no count"
+        );
         assert!(line.get("pubkey").is_none());
     }
 
@@ -1017,7 +1212,7 @@ pub(crate) mod tests {
         let attempt = || AuthAttempt::http(AuthMethod::Nip42, "audio", None, false);
         let ((), out) = capture(|| {
             let mut line = AuthLine::new(attempt());
-            line.finish(AuthResult::Denied("deny_set"));
+            line.finish(AuthResult::Denied(crate::access::AuthReason::DenySet));
             line.finish(AuthResult::Success);
             drop(AuthLine::new(attempt()));
         });

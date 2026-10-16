@@ -8,7 +8,7 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
-use crate::access::{auth_error_code, AuthAttempt, AuthLine, AuthMethod, AuthResult};
+use crate::access::{auth_error_code, AuthAttempt, AuthMethod, AuthResult};
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -106,7 +106,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let route = parts.uri.path().to_owned();
         if !mode.restricts() {
             if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
-                git_failed(&route, header_failure_code(&parts.headers));
+                git_header_rejected(&route, &parts.headers);
                 // Off returns `rejection` as is; shadow also records the
                 // enforce verdict for the failed proof, still with no DB work.
                 crate::nip_fi_http::observe_failed_proof(state, &parts.headers);
@@ -156,22 +156,18 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let headers_clone = parts.headers.clone();
         let method_str = method.to_owned();
         let closure_route = route.clone();
-        let admission =
-            crate::nip_fi_http::admit_nip_fi_http_on_state(state, &parts.headers, move || {
-                verify_git_proof(&headers_clone, &method_str, &expected_url, &closure_route)
-            })?;
+        let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
+            state,
+            &parts.headers,
+            &route,
+            move || verify_git_proof(&headers_clone, &method_str, &expected_url, &closure_route),
+        )?;
 
         let pubkey = *admission.proven_pubkey();
         // Git reuses one signed token per session, so there is no replay
         // step: the membership and ban gates below make the final decision.
         // `aborted` if the request is dropped during a membership or ban wait.
-        let mut line = AuthLine::new(
-            admission
-                .auth_attempt(&route)
-                .in_community(tenant.community()),
-        );
-        line.abort_reason("request_ended");
-        let (event, signed_auth_created_at) = admission.into_extra();
+        let (mut line, (event, signed_auth_created_at)) = admission.into_line(tenant.community());
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
         // x-auth-tag header through the credential-helper protocol, so agents
@@ -202,7 +198,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         {
             Ok(crate::api::relay_members::MembershipDecision::Denied) => {
                 warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-                line.finish(AuthResult::Denied("not_relay_member"));
+                line.finish(AuthResult::Denied(
+                    crate::access::AuthReason::NotRelayMember,
+                ));
                 return Err(
                     (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response()
                 );
@@ -210,7 +208,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             Ok(_) => {}
             Err(e) => {
                 warn!(pubkey = %pubkey.to_hex(), error = %e, "git: relay membership lookup failed");
-                line.finish(AuthResult::Denied("membership_unavailable"));
+                line.finish(AuthResult::Denied(
+                    crate::access::AuthReason::MembershipUnavailable,
+                ));
                 return Err(unavailable(
                     (
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -231,10 +231,12 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         .await
         .map_err(|denial| {
             if denial.status() == StatusCode::SERVICE_UNAVAILABLE {
-                line.finish(AuthResult::Denied("ban_check_unavailable"));
+                line.finish(AuthResult::Denied(
+                    crate::access::AuthReason::BanCheckUnavailable,
+                ));
                 unavailable(denial)
             } else {
-                line.finish(AuthResult::Denied("banned"));
+                line.finish(AuthResult::Denied(crate::access::AuthReason::Banned));
                 denial
             }
         })?;
@@ -350,7 +352,7 @@ fn verify_git_proof(
     // In Enforce mode it runs for the first time inside this closure
     // (on the auth-rejection path the NIP-FI layer maps the error).
     let (event_json, method_for_verify) = parse_git_auth_header_full(headers, method)
-        .inspect_err(|_| git_failed(route, header_failure_code(headers)))?;
+        .inspect_err(|_| git_header_rejected(route, headers))?;
 
     // SECURITY: method intentionally not verified for git routes. The tautological
     // check (event.method == event.method) is deliberate — see comment block above.
@@ -385,11 +387,15 @@ fn verify_git_proof(
 }
 
 /// The access-log code for a git `Authorization` header that failed to parse.
-fn header_failure_code(headers: &axum::http::HeaderMap) -> &'static str {
+/// Log a request whose `Authorization` header was refused. A missing header
+/// is git's credential-less first request, answered with the 401 challenge
+/// it asks for, so it is `challenged`; a header that is present but bad is a
+/// failed proof.
+fn git_header_rejected(route: &str, headers: &axum::http::HeaderMap) {
     if headers.contains_key(header::AUTHORIZATION) {
-        "nip98_invalid"
+        git_failed(route, "nip98_invalid");
     } else {
-        "nip98_missing"
+        AuthAttempt::http(AuthMethod::Nip98, route, None, false).log(AuthResult::Challenged);
     }
 }
 

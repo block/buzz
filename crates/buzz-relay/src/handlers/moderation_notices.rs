@@ -210,12 +210,7 @@ async fn publish_moderation_profile(
         .db
         .replace_addressable_event(tenant.community(), &event, None)
         .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "moderation notice write failed: {}",
-                crate::access::db_error_kind(&e)
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("moderation notice write failed: {}", e.kind()))?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
         dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;

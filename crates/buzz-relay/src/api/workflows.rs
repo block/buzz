@@ -71,6 +71,7 @@ async fn authorize_workflow_read(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
+        path,
         bridge::make_nip98_closure_for_admission(
             headers.clone(),
             "GET",
@@ -80,7 +81,7 @@ async fn authorize_workflow_read(
             false,
         ),
     )?;
-    let mut caller = bridge::ProvenCaller::new(admission, path, &tenant);
+    let mut caller = bridge::ProvenCaller::new(admission, &tenant);
     caller
         .rate_limit_and_replay(state, &tenant)
         .await

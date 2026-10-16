@@ -93,7 +93,7 @@ pub async fn handle_count(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(sub_id = %sub_id, error_kind = %crate::access::db_error_kind(&e), "Failed to get accessible channels");
+            warn!(sub_id = %sub_id, error_kind = %e.kind(), "Failed to get accessible channels");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
             access.error("database_error");
             return;
@@ -121,7 +121,7 @@ pub async fn handle_count(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(sub_id = %sub_id, error_kind = %crate::access::db_error_kind(&e), "Failed to get readable system channels");
+            warn!(sub_id = %sub_id, error_kind = %e.kind(), "Failed to get readable system channels");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
             access.error("database_error");
             return;
@@ -185,7 +185,7 @@ pub async fn handle_count(
             )
             .await
             {
-                warn!(sub_id = %sub_id, error_kind = %crate::access::db_error_kind(&e), "Channel membership confirmation failed");
+                warn!(sub_id = %sub_id, error_kind = %e.kind(), "Channel membership confirmation failed");
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
                 access.error("database_error");
                 return;
@@ -199,7 +199,7 @@ pub async fn handle_count(
             )
             .await
             {
-                warn!(sub_id = %sub_id, error_kind = %crate::access::db_error_kind(&e), "Failed to classify repaired channels");
+                warn!(sub_id = %sub_id, error_kind = %e.kind(), "Failed to classify repaired channels");
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
                 access.error("database_error");
                 return;
@@ -255,11 +255,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
-                        access.error(if e.is_statement_cancelled() {
-                            "query_timed_out"
-                        } else {
-                            "database_error"
-                        });
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -298,11 +294,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
-                        access.error(if e.is_statement_cancelled() {
-                            "query_timed_out"
-                        } else {
-                            "database_error"
-                        });
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -353,11 +345,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
-                        access.error(if e.is_statement_cancelled() {
-                            "query_timed_out"
-                        } else {
-                            "database_error"
-                        });
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -395,11 +383,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
-                        access.error(if e.is_statement_cancelled() {
-                            "query_timed_out"
-                        } else {
-                            "database_error"
-                        });
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -457,6 +441,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),

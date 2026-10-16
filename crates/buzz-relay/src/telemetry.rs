@@ -179,9 +179,13 @@ where
 ///
 /// This is intentionally independent from `RUST_LOG`: changing stdout log
 /// verbosity must not remove parent spans from exported traces. Set
-/// `BUZZ_OTEL_FILTER` to override the default targets.
+/// `BUZZ_OTEL_FILTER` to override the default targets. Access lines
+/// (`buzz_relay::access`) are off by default: they already reach stdout, and
+/// exporting them again as span events would duplicate every pubkey.
 pub fn otel_env_filter(configured: Option<&str>) -> EnvFilter {
-    EnvFilter::new(configured.unwrap_or("buzz_relay=info,buzz_datastore=info"))
+    EnvFilter::new(
+        configured.unwrap_or("buzz_relay=info,buzz_relay::access=off,buzz_datastore=info"),
+    )
 }
 
 /// Build the OTEL [`Resource`] used by the trace provider.

@@ -83,11 +83,15 @@ impl WorkflowError {
     }
 
     /// Text safe for logs. A condition error can quote message text through
-    /// the expression context, so it logs as its code; other errors keep
-    /// their diagnostics. The run record still stores the full `Display`.
+    /// the expression context, a webhook error can carry a secret webhook
+    /// URL, and a database error can repeat bound values, so those log as
+    /// their code; other errors keep their diagnostics. The run record still
+    /// stores the full `Display`.
     pub fn log_text(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            Self::ConditionError(_) => self.code().into(),
+            Self::ConditionError(_) | Self::WebhookError(_) | Self::Database(_) => {
+                self.code().into()
+            }
             other => other.to_string().into(),
         }
     }
@@ -115,6 +119,11 @@ mod tests {
         let webhook = WorkflowError::WebhookError("secret-bearing detail".to_owned());
         assert_eq!(webhook.code(), "webhook_failed");
         assert!(!webhook.code().contains("secret-bearing detail"));
+        assert_eq!(webhook.log_text(), "webhook_failed");
+        assert_eq!(
+            WorkflowError::Database("value \"secret\"".to_owned()).log_text(),
+            "database_error"
+        );
 
         assert_eq!(
             WorkflowError::NotImplemented("SendDm".to_owned()).code(),
