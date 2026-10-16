@@ -8,7 +8,10 @@
 //!
 //! `event=auth` lines cover every Nostr-key login: WebSocket AUTH (root and
 //! audio), NIP-98 signed HTTP requests, enterprise assertions, and Blossom
-//! uploads. Each attempt writes exactly one line. Three machine-to-machine
+//! uploads. Each attempt writes exactly one line, except a successful root
+//! WebSocket login, which the connection's `close` line carries instead. On
+//! the HTTP bridge (`/query`, `/count`, `/events`) the `auth` line is the
+//! request's only line and also records what the request did. Three machine-to-machine
 //! checks are not Nostr-key logins and write no auth line: the command-token
 //! disconnect endpoint (`/api/nip-fi/disconnect`), the workflow webhook
 //! secret, and the git server's internal signed callback.
@@ -509,6 +512,17 @@ pub(crate) enum AuthResult {
 }
 
 impl AuthResult {
+    /// The line's level, `outcome`, and `reason`.
+    fn parts(self) -> (Level, &'static str, Option<&'static str>) {
+        match self {
+            Self::Success => (Level::INFO, "success", None),
+            Self::Denied(r) => (Level::WARN, "denied", Some(r.as_str())),
+            Self::Challenged => (Level::INFO, "challenged", None),
+            Self::Failed(r) => (Level::WARN, "failed", Some(r)),
+            Self::Aborted(r) => (Level::WARN, "aborted", Some(r)),
+        }
+    }
+
     /// The access result for a WebSocket auth terminal. Only a bad proof is
     /// `Failed`; every policy refusal, including a fail-closed lookup error,
     /// is `Denied` with the metric's stable label as its reason.
@@ -539,6 +553,44 @@ pub(crate) struct AuthLine<'a> {
     attempt: AuthAttempt<'a>,
     abort_reason: &'static str,
     done: bool,
+    /// Set for an HTTP request's line ([`AuthLine::for_request`]): the
+    /// decision waits for the request's outcome, and both are written as one
+    /// line when the line drops.
+    request: Option<HeldRequest>,
+}
+
+/// A request line's decision, held until the request ends.
+struct HeldRequest {
+    decision: Option<AuthResult>,
+    fields: RequestFields,
+    summary: Option<FilterSummary>,
+}
+
+/// What an admitted HTTP request did, written on the request's access line.
+#[derive(Debug, Default)]
+pub(crate) struct RequestFields {
+    pub(crate) status: Option<u16>,
+    pub(crate) result_count: Option<u64>,
+    pub(crate) accepted: Option<bool>,
+    pub(crate) kind: Option<u32>,
+    /// The id of the event a write stored or rejected.
+    pub(crate) event_id: Option<String>,
+    /// A body that failed to parse: its error category and position.
+    pub(crate) category: Option<&'static str>,
+    pub(crate) line: Option<usize>,
+    pub(crate) column: Option<usize>,
+    /// An ingest rejection's message, truncated by the caller.
+    pub(crate) reject_reason: Option<String>,
+}
+
+impl RequestFields {
+    /// The response status alone.
+    pub(crate) fn status(status: u16) -> Self {
+        Self {
+            status: Some(status),
+            ..Self::default()
+        }
+    }
 }
 
 impl<'a> AuthLine<'a> {
@@ -547,6 +599,35 @@ impl<'a> AuthLine<'a> {
             attempt,
             abort_reason: "connection_closed",
             done: false,
+            request: None,
+        }
+    }
+
+    /// This line, written once when the request ends, carrying both the auth
+    /// decision and what [`AuthLine::complete`] and [`AuthLine::read`]
+    /// recorded about the request.
+    pub(crate) fn for_request(mut self) -> Self {
+        self.request = Some(HeldRequest {
+            decision: None,
+            fields: RequestFields::default(),
+            summary: None,
+        });
+        self
+    }
+
+    /// Record what the request read, for a request line.
+    pub(crate) fn read(&mut self, filters: &[Filter]) {
+        if let Some(held) = &mut self.request {
+            if tracing::enabled!(target: TARGET, Level::INFO) {
+                held.summary = Some(FilterSummary::new(filters));
+            }
+        }
+    }
+
+    /// Record how the request ended, for a request line.
+    pub(crate) fn complete(&mut self, fields: RequestFields) {
+        if let Some(held) = &mut self.request {
+            held.fields = fields;
         }
     }
 
@@ -573,7 +654,9 @@ impl<'a> AuthLine<'a> {
 
     /// Log the final decision; later calls are no-ops.
     pub(crate) fn finish(&mut self, result: AuthResult) {
-        if !std::mem::replace(&mut self.done, true) {
+        if let Some(held) = &mut self.request {
+            held.decision.get_or_insert(result);
+        } else if !std::mem::replace(&mut self.done, true) {
             self.attempt.log(result);
         }
     }
@@ -594,7 +677,15 @@ impl<'a> AuthLine<'a> {
 
 impl Drop for AuthLine<'_> {
     fn drop(&mut self) {
-        self.finish(AuthResult::Aborted(self.abort_reason));
+        let aborted = AuthResult::Aborted(self.abort_reason);
+        match self.request.take() {
+            Some(held) => self.attempt.log_request(
+                held.decision.unwrap_or(aborted),
+                &held.fields,
+                held.summary.as_ref(),
+            ),
+            None => self.finish(aborted),
+        }
     }
 }
 
@@ -713,13 +804,7 @@ impl AuthAttempt<'_> {
 
     pub(crate) fn log(&self, result: AuthResult) {
         crate::connection::note_auth_line_written();
-        let (level, outcome, reason) = match result {
-            AuthResult::Success => (Level::INFO, "success", None),
-            AuthResult::Denied(r) => (Level::WARN, "denied", Some(r.as_str())),
-            AuthResult::Challenged => (Level::INFO, "challenged", None),
-            AuthResult::Failed(r) => (Level::WARN, "failed", Some(r)),
-            AuthResult::Aborted(r) => (Level::WARN, "aborted", Some(r)),
-        };
+        let (level, outcome, reason) = result.parts();
         let pubkey = self.pubkey.as_ref().map(PublicKey::to_hex);
         emit!(
             level,
@@ -732,6 +817,53 @@ impl AuthAttempt<'_> {
             pubkey_verified = pubkey.is_some().then_some(self.pubkey_verified),
             outcome,
             reason,
+            "access"
+        );
+    }
+
+    /// The single line of an HTTP request: its auth decision and, once
+    /// admitted, what the request did. WARN on a refusal or an error status.
+    fn log_request(&self, result: AuthResult, req: &RequestFields, s: Option<&FilterSummary>) {
+        let (level, outcome, reason) = result.parts();
+        let level = if req.status.is_some_and(|s| s >= 400) {
+            Level::WARN
+        } else {
+            level
+        };
+        let pubkey = self.pubkey.as_ref().map(PublicKey::to_hex);
+        emit!(
+            level,
+            event = "auth",
+            method = self.method.as_str(),
+            community = self.community.map(tracing::field::display),
+            route = self.route,
+            pubkey = pubkey.as_deref(),
+            pubkey_verified = pubkey.is_some().then_some(self.pubkey_verified),
+            outcome,
+            reason,
+            status = req.status,
+            result_count = req.result_count,
+            accepted = req.accepted,
+            kind = req.kind,
+            event_id = req.event_id.as_deref(),
+            category = req.category,
+            line = req.line,
+            column = req.column,
+            reject_reason = req.reject_reason.as_deref(),
+            filters = s.map(|s| s.filters),
+            kinds = s.and_then(|s| s.kinds.as_deref()),
+            kind_count = s.map(|s| s.kind_count),
+            channel_ids = s.and_then(|s| s.channel_ids.as_deref()),
+            channel_count = s.map(|s| s.channel_count),
+            authors = s.and_then(|s| s.authors.as_deref()),
+            author_count = s.map(|s| s.author_count),
+            p_tags = s.and_then(|s| s.p_tags.as_deref()),
+            p_count = s.map(|s| s.p_count),
+            ids = s.map(|s| s.ids),
+            since = s.and_then(|s| s.since),
+            until = s.and_then(|s| s.until),
+            limit = s.and_then(|s| s.limit),
+            search = s.map(|s| s.search),
             "access"
         );
     }
@@ -839,19 +971,9 @@ where
     }
 }
 
-/// The connection opened.
-pub(crate) fn log_connect(conn_id: Uuid, community: CommunityId, peer_addr: SocketAddr) {
-    emit!(
-        Level::INFO,
-        event = "connect",
-        conn_id = %conn_id,
-        community = %community,
-        peer_addr = %peer_addr,
-        "access"
-    );
-}
-
-/// The connection closed. `pubkey` is the identity it authenticated as, if any.
+/// The connection's one line, written when it closes. `pubkey` is the
+/// identity it logged in as, if any; a successful login writes no line of
+/// its own, so its `method` and `pubkey_verified` appear here.
 pub(crate) fn log_close(
     conn_id: Uuid,
     community: CommunityId,
@@ -869,6 +991,8 @@ pub(crate) fn log_close(
         community = %community,
         peer_addr = %peer_addr,
         pubkey = pubkey.as_deref(),
+        method = pubkey.is_some().then_some(AuthMethod::Nip42.as_str()),
+        pubkey_verified = pubkey.is_some().then_some(true),
         duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         events_queued = queued.events(),
         bytes_queued = queued.bytes(),

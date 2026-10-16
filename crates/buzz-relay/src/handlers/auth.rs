@@ -756,7 +756,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if conn.cancel.is_cancelled() {
                 return;
             }
-            attempt.log(AuthResult::Success);
+            // A successful login writes no line of its own: the connection's
+            // close line carries its pubkey, method, and verification.
+            crate::connection::note_auth_line_written();
             state.conn_manager.mark_admitted(conn_id);
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
             // _auth_permit drops here — expiry's write guard may proceed.

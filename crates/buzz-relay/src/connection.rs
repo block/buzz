@@ -622,7 +622,6 @@ async fn handle_active_connection(
         community_control: control.clone(),
     });
 
-    crate::access::log_connect(conn_id, conn.tenant.community(), addr);
     metrics::counter!(
         "buzz_ws_connections_total",
         "community" => conn.tenant.host().to_owned()
@@ -2319,7 +2318,8 @@ pub(crate) mod tests {
         use super::*;
 
         /// Each decided AUTH frame, sent through the production dispatcher,
-        /// writes exactly one line: its decision, never also an `aborted`.
+        /// writes its decision's lines exactly once, never also an `aborted`:
+        /// a success none (the close line carries it), a failure one WARN.
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn decided_auth_frames_log_exactly_one_line_each() {
@@ -2331,7 +2331,7 @@ pub(crate) mod tests {
             let state = Arc::new(state);
             let keys = Keys::generate();
             let other = Keys::generate();
-            for (good, outcome) in [(true, "success"), (false, "failed")] {
+            for (good, outcome) in [(true, None), (false, Some("failed"))] {
                 let (conn, _rx) = test_conn_with_auth(pending_state());
                 let relay_url: RelayUrl = crate::api::bridge::nip42_expected_relay_url(
                     &state.config.relay_url,
@@ -2358,9 +2358,129 @@ pub(crate) mod tests {
                     .into_iter()
                     .filter(|l| l["event"] == "auth")
                     .collect();
-                assert_eq!(lines.len(), 1, "{outcome}: {lines:?}");
-                assert_eq!(lines[0]["outcome"], outcome, "{lines:?}");
+                let outcomes: Vec<_> = lines.iter().map(|l| l["outcome"].clone()).collect();
+                assert_eq!(outcomes, Vec::from_iter(outcome), "{lines:?}");
+                if outcome.is_some() {
+                    assert_eq!(lines[0]["level"], "WARN", "{lines:?}");
+                }
             }
+        }
+
+        /// A connection that logs in, reads, and closes writes its REQ line
+        /// and one close line carrying the login, and no `connect` or
+        /// success `auth` line.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn logged_in_connection_writes_its_read_and_one_close_line() {
+            use futures_util::{SinkExt as _, StreamExt as _};
+
+            let mut state = (*crate::api::bridge::postgres_tests::bridge_handler_test_state()
+                .await
+                .expect("local Postgres"))
+            .clone();
+            Arc::make_mut(&mut state.config).require_relay_membership = false;
+            let state = Arc::new(state);
+            let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+            let tenant = TenantContext::resolved(community, "test.local".to_string());
+            let relay_url =
+                crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
+            let keys = Keys::generate();
+
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                let upgrade = move |ws: WebSocketUpgrade| {
+                    let (state, tenant) = (Arc::clone(&state), tenant.clone());
+                    async move {
+                        ws.on_upgrade(move |socket| async move {
+                            let cancel = CancellationToken::new();
+                            handle_active_connection(
+                                socket,
+                                state,
+                                "127.0.0.1:9999".parse().unwrap(),
+                                tenant,
+                                Uuid::new_v4(),
+                                crate::state::CommunityConnectionControl::new(cancel),
+                                None,
+                                chrono::Utc::now(),
+                                None,
+                            )
+                            .await
+                        })
+                    }
+                };
+                let app = Router::new().route("/", get(upgrade));
+                axum::serve(listener, app).await.expect("test server");
+            });
+
+            let (mut client, _) = connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect");
+            async fn wait_for<S>(client: &mut S, tag: &str) -> serde_json::Value
+            where
+                S: futures_util::Stream<
+                        Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+                    > + Unpin,
+            {
+                loop {
+                    let text = match client.next().await {
+                        Some(Ok(Message::Text(text))) => text,
+                        Some(Ok(_)) => continue,
+                        other => panic!("socket ended before {tag}: {other:?}"),
+                    };
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame[0] == tag {
+                        return frame;
+                    }
+                }
+            }
+            let challenge = wait_for(&mut client, "AUTH").await[1]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let event = EventBuilder::new(Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", &relay_url]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&keys)
+                .expect("sign auth");
+            client
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", event]).to_string().into(),
+                ))
+                .await
+                .expect("send AUTH");
+            let ok = wait_for(&mut client, "OK").await;
+            assert_eq!(ok[2], true, "login must succeed: {ok}");
+            client
+                .send(Message::Text(
+                    r#"["REQ","s",{"kinds":[9],"limit":1}]"#.into(),
+                ))
+                .await
+                .expect("send REQ");
+            let _ = wait_for(&mut client, "EOSE").await;
+            client.close(None).await.expect("close");
+
+            let closed = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if out.lines().iter().any(|l| l["event"] == "close") {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            drop(guard);
+            server.abort();
+            closed.expect("connection must log its close");
+            let lines = out.lines();
+            let events: Vec<_> = lines.iter().map(|l| l["event"].clone()).collect();
+            assert_eq!(events, ["req", "close"], "{lines:?}");
+            let close = &lines[1];
+            assert_eq!(close["pubkey"], keys.public_key().to_hex(), "{close}");
+            assert_eq!(close["method"], "nip42", "{close}");
+            assert_eq!(close["pubkey_verified"], true, "{close}");
+            assert_eq!(lines[0]["outcome"], "served", "{lines:?}");
         }
 
         /// Drive a real upgraded root connection (watcher, timeout and expiry

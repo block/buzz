@@ -114,6 +114,27 @@ impl<'a> ProvenCaller<'a> {
         }
     }
 
+    /// [`Self::new`] for a bridge route whose access line also records what
+    /// the request did: one line per request, written when the caller drops.
+    pub(crate) fn for_request(
+        admitted: crate::nip_fi_http::AdmittedRequest<'a, ([u8; 32], Option<u64>)>,
+        tenant: &TenantContext,
+    ) -> Self {
+        let mut caller = Self::new(admitted, tenant);
+        caller.line = caller.line.for_request();
+        caller
+    }
+
+    /// Record the filters the request reads.
+    pub(crate) fn read(&mut self, filters: &[nostr::Filter]) {
+        self.line.read(filters);
+    }
+
+    /// Record how the request ended.
+    pub(crate) fn complete(&mut self, fields: crate::access::RequestFields) {
+        self.line.complete(fields);
+    }
+
     /// The shared API rate limit, then the replay guard. A refusal is logged.
     pub(crate) async fn rate_limit_and_replay(
         &mut self,
@@ -1215,69 +1236,13 @@ pub async fn submit_event(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let caller = ProvenCaller::new(admission, &tenant);
-    let pubkey_hex = caller.pubkey.to_hex();
+    let mut caller = ProvenCaller::for_request(admission, &tenant);
 
     // Everything after auth — admission, replay, membership, parse, ingest —
-    // runs inside the helper.  The thin wrapper here owns the single terminal
-    // attribution line so it fires for every outcome, including admission/
-    // replay/membership failures that previously returned before any log fired.
-    let outcome = submit_event_authed(&state, &tenant, &headers, &body, caller).await;
-
-    match &outcome {
-        SubmitOutcome::Ok { accepted, kind, .. } => {
-            tracing::info!(
-                pubkey = %pubkey_hex,
-                route = "/events",
-                status = 200u16,
-                accepted,
-                kind,
-                "HTTP bridge request"
-            );
-        }
-        SubmitOutcome::ParseFail {
-            category,
-            line,
-            column,
-            ..
-        } => {
-            tracing::warn!(
-                pubkey = %pubkey_hex,
-                route = "/events",
-                status = 400u16,
-                accepted = false,
-                category,
-                line,
-                column,
-                "HTTP bridge request"
-            );
-        }
-        SubmitOutcome::Rejected {
-            kind,
-            reason,
-            response,
-        } => {
-            tracing::warn!(
-                pubkey = %pubkey_hex,
-                route = "/events",
-                status = response.0.as_u16(),
-                accepted = false,
-                kind,
-                reason = %reason,
-                "HTTP bridge request"
-            );
-        }
-        SubmitOutcome::Err { status, .. } => {
-            tracing::warn!(
-                pubkey = %pubkey_hex,
-                route = "/events",
-                status = status.as_u16(),
-                accepted = false,
-                "HTTP bridge request"
-            );
-        }
-    }
-
+    // runs inside the helper; the caller's access line is the request's one
+    // line, covering every outcome including a refused login.
+    let outcome = submit_event_authed(&state, &tenant, &headers, &body, &mut caller).await;
+    caller.complete(outcome.fields());
     Ok(outcome.into_response().into_response())
 }
 
@@ -1290,6 +1255,7 @@ enum SubmitOutcome {
     Ok {
         accepted: bool,
         kind: u32,
+        event_id: String,
         response: Json<Value>,
     },
     /// JSON parse failure before ingest — log category/line/column, not msg.
@@ -1317,6 +1283,50 @@ enum SubmitOutcome {
 }
 
 impl SubmitOutcome {
+    /// What the request's access line records about this outcome.
+    fn fields(&self) -> crate::access::RequestFields {
+        use crate::access::RequestFields;
+        match self {
+            SubmitOutcome::Ok {
+                accepted,
+                kind,
+                event_id,
+                ..
+            } => RequestFields {
+                accepted: Some(*accepted),
+                kind: Some(*kind),
+                event_id: Some(event_id.clone()),
+                ..RequestFields::status(200)
+            },
+            SubmitOutcome::ParseFail {
+                category,
+                line,
+                column,
+                ..
+            } => RequestFields {
+                accepted: Some(false),
+                category: Some(category),
+                line: Some(*line),
+                column: Some(*column),
+                ..RequestFields::status(400)
+            },
+            SubmitOutcome::Rejected {
+                kind,
+                reason,
+                response,
+            } => RequestFields {
+                accepted: Some(false),
+                kind: Some(*kind),
+                reject_reason: Some(reason.clone()),
+                ..RequestFields::status(response.0.as_u16())
+            },
+            SubmitOutcome::Err { status, .. } => RequestFields {
+                accepted: Some(false),
+                ..RequestFields::status(status.as_u16())
+            },
+        }
+    }
+
     fn into_response(self) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         match self {
             SubmitOutcome::Ok { response, .. } => Ok(response),
@@ -1336,7 +1346,7 @@ async fn submit_event_authed(
     tenant: &TenantContext,
     headers: &HeaderMap,
     body: &[u8],
-    mut caller: ProvenCaller<'_>,
+    caller: &mut ProvenCaller<'_>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -1445,13 +1455,14 @@ async fn submit_event_authed(
     match result {
         Ok(result) => {
             let response = Json(serde_json::json!({
-                "event_id": result.event_id,
+                "event_id": &result.event_id,
                 "accepted": result.accepted,
                 "message": result.message,
             }));
             SubmitOutcome::Ok {
                 accepted: result.accepted,
                 kind: kind_u32,
+                event_id: result.event_id,
                 response,
             }
         }
@@ -1550,36 +1561,20 @@ pub async fn query_events(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let caller = ProvenCaller::new(admission, &tenant);
-    let pubkey_hex = caller.pubkey.to_hex();
+    let mut caller = ProvenCaller::for_request(admission, &tenant);
 
     // Admission, replay, membership, and filter execution all run inside the
-    // helper.  The single terminal attribution line fires here from the Result
-    // so every outcome — including admission/replay/membership failures that
-    // previously returned before any log — is attributed.
-    let result = query_events_authed(&state, &tenant, &headers, &body, caller).await;
-    match &result {
-        Ok(Json(Value::Array(events))) => {
-            tracing::info!(
-                pubkey = %pubkey_hex,
-                route = "/query",
-                status = 200u16,
-                result_count = events.len(),
-                "HTTP bridge request"
-            );
-        }
-        Ok(_) => {
-            tracing::info!(pubkey = %pubkey_hex, route = "/query", status = 200u16, "HTTP bridge request");
-        }
-        Err((status, _)) => {
-            tracing::warn!(
-                pubkey = %pubkey_hex,
-                route = "/query",
-                status = status.as_u16(),
-                "HTTP bridge request"
-            );
-        }
-    }
+    // helper; the caller's access line is the request's one line, covering
+    // every outcome including a refused login.
+    let result = query_events_authed(&state, &tenant, &headers, &body, &mut caller).await;
+    caller.complete(match &result {
+        Ok(Json(Value::Array(events))) => crate::access::RequestFields {
+            result_count: Some(events.len() as u64),
+            ..crate::access::RequestFields::status(200)
+        },
+        Ok(_) => crate::access::RequestFields::status(200),
+        Err((status, _)) => crate::access::RequestFields::status(status.as_u16()),
+    });
     Ok(result.into_response())
 }
 
@@ -1591,7 +1586,7 @@ async fn query_events_authed(
     tenant: &TenantContext,
     headers: &HeaderMap,
     body: &[u8],
-    mut caller: ProvenCaller<'_>,
+    caller: &mut ProvenCaller<'_>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     caller.rate_limit_and_replay(state, tenant).await?;
     let pubkey = caller.pubkey;
@@ -1622,6 +1617,7 @@ async fn query_events_authed(
         .map(|v| serde_json::from_value(v.clone()))
         .collect::<Result<_, _>>()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    caller.read(&filters);
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
@@ -2214,34 +2210,19 @@ pub async fn count_events(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let caller = ProvenCaller::new(admission, &tenant);
-    let pubkey_hex = caller.pubkey.to_hex();
+    let mut caller = ProvenCaller::for_request(admission, &tenant);
 
     // Admission, replay, membership, and count execution all run inside the
-    // helper.  The single terminal attribution line fires here from the Result
-    // so every outcome — including admission/replay/membership failures that
-    // previously returned before any log — is attributed.
-    let result = count_events_authed(&state, &tenant, &headers, &body, caller).await;
-    match &result {
-        Ok(Json(value)) => {
-            let count = value.get("count").and_then(Value::as_u64);
-            tracing::info!(
-                pubkey = %pubkey_hex,
-                route = "/count",
-                status = 200u16,
-                result_count = count,
-                "HTTP bridge request"
-            );
-        }
-        Err((status, _)) => {
-            tracing::warn!(
-                pubkey = %pubkey_hex,
-                route = "/count",
-                status = status.as_u16(),
-                "HTTP bridge request"
-            );
-        }
-    }
+    // helper; the caller's access line is the request's one line, covering
+    // every outcome including a refused login.
+    let result = count_events_authed(&state, &tenant, &headers, &body, &mut caller).await;
+    caller.complete(match &result {
+        Ok(Json(value)) => crate::access::RequestFields {
+            result_count: value.get("count").and_then(Value::as_u64),
+            ..crate::access::RequestFields::status(200)
+        },
+        Err((status, _)) => crate::access::RequestFields::status(status.as_u16()),
+    });
     Ok(result.into_response())
 }
 
@@ -2253,7 +2234,7 @@ async fn count_events_authed(
     tenant: &TenantContext,
     headers: &HeaderMap,
     body: &[u8],
-    mut caller: ProvenCaller<'_>,
+    caller: &mut ProvenCaller<'_>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     caller.rate_limit_and_replay(state, tenant).await?;
     let pubkey = caller.pubkey;
@@ -2277,6 +2258,7 @@ async fn count_events_authed(
     }
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    caller.read(&filters);
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
@@ -5295,9 +5277,8 @@ pub(crate) mod postgres_tests {
     // ──────────────────────────────────────────────────────────────────────────
     // Log-capture helpers and attribution-invariant tests
     //
-    // These tests assert that exactly ONE "HTTP bridge request" log line
-    // appears per authed request, pinning the W1 single-terminal-log invariant
-    // and the E1 no-double-log rule.
+    // These tests assert that exactly ONE access line, carrying both the
+    // login and the request's outcome, appears per authed request.
     //
     // Infrastructure: same `#[ignore = "requires Postgres"]` + current_thread
     // runtime discipline as the HTTP-counter tests above.
@@ -5358,21 +5339,28 @@ pub(crate) mod postgres_tests {
         (status, captured)
     }
 
-    /// Count lines that contain the terminal attribution marker.
+    /// The access lines in `log`; each must carry the login and a status.
     fn count_attribution_lines(log: &str) -> usize {
-        log.lines()
-            .filter(|l| l.contains("HTTP bridge request"))
-            .count()
+        let lines: Vec<_> = log
+            .lines()
+            .filter(|l| l.contains(crate::access::TARGET))
+            .collect();
+        for line in &lines {
+            assert!(
+                line.contains("event=\"auth\"") && line.contains("status="),
+                "the request's one line carries its login and status: {line}"
+            );
+        }
+        lines.len()
     }
 
     /// T3a — exactly-once invariant, pre-parse 400 arm (invalid JSON).
     ///
     /// An authenticated client that submits a non-JSON body must produce
-    /// exactly ONE "HTTP bridge request" log line.  This pins W1 (early exits
-    /// are attributed) and E1 (no double line even for the parse-fail arm).
+    /// exactly ONE access line, carrying its login and its 400 status.
     ///
-    /// Discriminating: if the attribution log is removed from the ParseFail
-    /// arm in submit_event, this test fails.
+    /// Discriminating: if `submit_event` stops completing the caller's line
+    /// with the outcome, or logs the login separately, this test fails.
     #[test]
     #[ignore = "requires Postgres"]
     fn submit_event_invalid_json_emits_exactly_one_attribution_line() {
@@ -5410,6 +5398,7 @@ pub(crate) mod postgres_tests {
             n, 1,
             "expected exactly 1 attribution line for invalid-JSON arm, got {n};\nlog:\n{log}"
         );
+        assert!(log.contains("status=400"), "log:\n{log}");
         assert!(
             log.contains(&pubkey_hex[..16]),
             "attribution line must carry the pubkey;\nlog:\n{log}"
@@ -5419,8 +5408,8 @@ pub(crate) mod postgres_tests {
     /// T3b — exactly-once invariant, post-parse IngestError::Rejected arm (relay-only kind).
     ///
     /// An authenticated client that submits a relay-only-kind event (kind 13534)
-    /// must produce exactly ONE "HTTP bridge request" log line — not two
-    /// (the old code emitted both an info! attribution and a warn! reason line).
+    /// must produce exactly ONE access line, carrying its login and its 400
+    /// status, not a separate login line and request line.
     ///
     /// Discriminating: if two log lines are emitted (old double-log bug), this
     /// test fails.
@@ -5470,6 +5459,7 @@ pub(crate) mod postgres_tests {
             n, 1,
             "expected exactly 1 attribution line for IngestError::Rejected arm, got {n};\nlog:\n{log}"
         );
+        assert!(log.contains("status=400"), "log:\n{log}");
         assert!(
             log.contains(&pubkey_hex[..16]),
             "attribution line must carry the pubkey;\nlog:\n{log}"
@@ -6020,6 +6010,45 @@ pub(crate) mod postgres_tests {
         assert_eq!(lines.len(), 2, "one line per request: {lines:?}");
         assert_eq!(lines[0]["outcome"], "success", "{lines:?}");
         assert_one_auth_line(&lines[1..], "failed", Some("nip98_replay"));
+        assert_eq!(
+            lines[1]["status"], 401,
+            "a refused login keeps its status: {lines:?}"
+        );
+    }
+
+    /// A served `/query` writes one access line: the login, the route's
+    /// status and result count, and the filter summary, and no separate
+    /// bridge line.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn query_writes_one_line_with_login_outcome_and_filters() {
+        let state = nip_fi_off_test_state().await.expect("local Postgres");
+        let host = with_community(&state).await;
+        let keys = Keys::generate();
+        let headers =
+            make_nip98_headers(&keys, &format!("https://{host}/query"), "POST", QUERY_BODY);
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let status = oneshot_request(state, "POST", "/query", &host, headers, QUERY_BODY).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(!out.raw().contains("HTTP bridge request"), "{}", out.raw());
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "one line per request: {lines:?}");
+        let line = &lines[0];
+        assert_eq!(line["level"], "INFO", "{line}");
+        assert_eq!(line["event"], "auth", "{line}");
+        assert_eq!(line["outcome"], "success", "{line}");
+        assert_eq!(line["method"], "nip98", "{line}");
+        assert_eq!(line["pubkey"], keys.public_key().to_hex(), "{line}");
+        assert_eq!(line["pubkey_verified"], true, "{line}");
+        assert_eq!(line["route"], "/query", "{line}");
+        assert_eq!(line["status"], 200, "{line}");
+        assert_eq!(line["result_count"], 0, "{line}");
+        assert_eq!(
+            (&line["kinds"], &line["limit"]),
+            (&"1".into(), &1.into()),
+            "{line}"
+        );
+        assert_eq!(line["authors"], "*", "an open dimension is `*`: {line}");
     }
 
     /// A valid proof from a banned identity is refused by the ban check
@@ -9367,7 +9396,7 @@ pub(crate) mod postgres_tests {
                 &tenant,
                 &headers,
                 serde_json::to_vec(&event).expect("event json").as_slice(),
-                ProvenCaller {
+                &mut ProvenCaller {
                     pubkey: agent.public_key(),
                     event_id_bytes: fresh_nip98_event_id_bytes(),
                     signed_at: Some(nostr::Timestamp::now().as_secs()),

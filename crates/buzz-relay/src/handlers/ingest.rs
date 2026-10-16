@@ -3388,7 +3388,6 @@ async fn ingest_event_inner(
         )
         .await;
 
-        info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -3585,8 +3584,6 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
-
-    info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 
     Ok(IngestResult {
         event_id: event_id_hex,
