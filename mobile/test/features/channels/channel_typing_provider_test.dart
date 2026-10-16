@@ -1,5 +1,6 @@
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../helpers/thread_ids.dart';
@@ -33,34 +34,41 @@ class _Relay extends RelaySessionNotifier {
   }
 }
 
+/// Lets the container rebuild and the notifier's microtasks run under fake
+/// time, so retry backoff is driven by [FakeAsync.elapse] instead of sleeps.
+void _settle(ProviderContainer container, FakeAsync async) {
+  container.pump();
+  async.flushMicrotasks();
+}
+
 void main() {
   test(
     'initial rejection retries with a bound and no uncaught error',
-    () async {
+    () => fakeAsync((async) {
       final relay = _Relay()..reject = true;
       final container = ProviderContainer(
         overrides: [relaySessionProvider.overrideWith(() => relay)],
       );
       container.listen(channelTypingProvider('chat'), (_, _) {});
-      await container.pump();
+      _settle(container, async);
       expect(relay.calls, 1);
       for (final seconds in [1, 2, 4, 8]) {
-        await Future<void>.delayed(Duration(milliseconds: seconds * 1000 + 20));
+        async.elapse(Duration(milliseconds: seconds * 1000 + 20));
       }
       expect(relay.calls, 4);
       container.dispose();
-    },
+    }),
   );
   test(
     'terminal close clears typing and retries; disposal cancels recovery',
-    () async {
+    () => fakeAsync((async) {
       final relay = _Relay();
       final container = ProviderContainer(
         overrides: [relaySessionProvider.overrideWith(() => relay)],
       );
       final provider = channelTypingProvider('chat');
       container.listen(provider, (_, _) {});
-      await container.pump();
+      _settle(container, async);
       relay.receive(
         NostrEvent(
           id: 'typing',
@@ -76,62 +84,62 @@ void main() {
       );
       expect(container.read(provider), hasLength(1));
       relay.close!('terminal');
-      await container.pump();
+      _settle(container, async);
       expect(container.read(provider), isEmpty);
       expect(relay.active, 0);
-      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      async.elapse(const Duration(milliseconds: 1100));
       expect(relay.active, 1);
       expect(relay.calls, 2);
       relay.close!('terminal again');
-      await container.pump();
+      _settle(container, async);
       container.dispose();
-      await Future<void>.delayed(const Duration(milliseconds: 2100));
+      async.elapse(const Duration(milliseconds: 2100));
       expect(relay.calls, 2);
       expect(relay.active, 0);
-    },
+    }),
   );
   test(
     'terminal closure loops stay bounded until sustained recovery',
-    () async {
+    () => fakeAsync((async) {
       final relay = _Relay();
       final container = ProviderContainer(
         overrides: [relaySessionProvider.overrideWith(() => relay)],
       );
       addTearDown(container.dispose);
       container.listen(channelTypingProvider('chat'), (_, _) {});
-      await container.pump();
+      _settle(container, async);
       for (final delay in [1, 2, 4]) {
         final calls = relay.calls;
         relay.close!('rejected after admission');
-        await container.pump();
+        _settle(container, async);
         if (delay > 1) {
-          await Future<void>.delayed(const Duration(milliseconds: 1100));
+          async.elapse(const Duration(milliseconds: 1100));
           expect(relay.calls, calls);
         }
-        await Future<void>.delayed(
+        async.elapse(
           Duration(milliseconds: delay * 1000 + 50 - (delay > 1 ? 1100 : 0)),
         );
         expect(relay.calls, calls + 1);
       }
       relay.close!('fourth rejection');
-      await container.pump();
-      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      _settle(container, async);
+      async.elapse(const Duration(milliseconds: 1100));
       expect(relay.calls, 4);
       relay.setStatus(SessionStatus.disconnected);
-      await container.pump();
+      _settle(container, async);
       relay.setStatus(SessionStatus.connected);
-      await container.pump();
+      _settle(container, async);
       relay.close!('first rejection after reconnect');
-      await container.pump();
-      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      _settle(container, async);
+      async.elapse(const Duration(milliseconds: 1100));
       final recoveredCalls = relay.calls;
-      await Future<void>.delayed(const Duration(milliseconds: 8100));
+      async.elapse(const Duration(milliseconds: 8100));
       relay.close!('closure after sustained health');
-      await container.pump();
-      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      _settle(container, async);
+      async.elapse(const Duration(milliseconds: 1100));
       expect(relay.calls, recoveredCalls + 1);
       expect(relay.active, 1);
-    },
+    }),
   );
   test('transport rebuilds release each typing subscription', () async {
     final relay = _Relay();

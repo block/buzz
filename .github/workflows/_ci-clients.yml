@@ -150,9 +150,20 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/pubspec.lock') }}
           restore-keys: gradle-${{ runner.os }}-
+      # SDK component and plugin downloads intermittently fail on hosted
+      # runners; retry once only for those, so real build failures still fail.
       - name: Build Android debug APK
         if: matrix.lane == 'android'
-        run: just mobile-build-android
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/android-build.log"
+          if ! just mobile-build-android 2>&1 | tee "$log"; then
+            grep -qE 'InstallFailedException|Could not (resolve|GET|download)' "$log"
+            just mobile-build-android
+          fi
+      - name: Test Android JVM units
+        if: matrix.lane == 'android'
+        run: cd mobile/android && ./gradlew :app:testDebugUnitTest --console=plain
       - name: Save Gradle cache
         if: matrix.lane == 'android' && github.event_name == 'push'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -198,7 +209,7 @@ jobs:
       - name: Build complete iOS simulator app
         if: matrix.lane == 'native'
         run: cd mobile && flutter build ios --simulator --debug --no-pub
-      - name: Test native controls and push navigation bridge
+      - name: Test native controls and Runner unit tests
         if: matrix.lane == 'native'
         run: |
           device=$(xcrun simctl create "Pagination accessibility" "iPhone 16")
@@ -208,10 +219,11 @@ jobs:
           /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
           /bin/bash scripts/test-mobile-carousel.sh "$device"
           /bin/bash scripts/test-mobile-member-picker.sh "$device"
+          /bin/bash scripts/test-mobile-me-agent-accessibility.sh "$device"
           xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner \
             -configuration Debug -destination "platform=iOS Simulator,id=$device" \
             -parallel-testing-enabled NO \
-            -only-testing:RunnerTests/BuzzPushNavigationBridgeTests \
+            -only-testing:RunnerTests \
             CODE_SIGNING_ALLOWED=NO test
       - name: Build complete unsigned iOS release
         if: matrix.lane == 'release'
