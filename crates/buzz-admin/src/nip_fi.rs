@@ -90,21 +90,22 @@ pub(crate) struct BackfillReport {
 }
 
 impl BackfillReport {
-    /// Count every host in `unbound`, listing at most `MAX_REPORTED_HOSTS`.
-    fn new(rows_bound: u64, unbound: impl IntoIterator<Item = String>) -> Self {
-        let mut count = 0;
-        let mut unbound_hosts = Vec::new();
-        for host in unbound {
-            count += 1;
-            if unbound_hosts.len() < MAX_REPORTED_HOSTS {
-                unbound_hosts.push(host);
-            }
-        }
+    fn new(rows_bound: u64) -> Self {
         Self {
             rows_bound,
-            unbound: count,
-            truncated: count > unbound_hosts.len(),
-            unbound_hosts,
+            unbound: 0,
+            unbound_hosts: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    /// Count every unbound host, listing at most `MAX_REPORTED_HOSTS`.
+    fn add_unbound(&mut self, host: String) {
+        self.unbound += 1;
+        if self.unbound_hosts.len() < MAX_REPORTED_HOSTS {
+            self.unbound_hosts.push(host);
+        } else {
+            self.truncated = true;
         }
     }
 
@@ -136,7 +137,7 @@ pub(crate) async fn backfill(db: &Db, policy: &ProvisionBindingPolicy) -> Result
             .await?;
     }
 
-    let mut unbound = Vec::new();
+    let mut report = BackfillReport::new(rows_bound);
     let mut after = String::new();
     loop {
         let page = db
@@ -144,13 +145,13 @@ pub(crate) async fn backfill(db: &Db, policy: &ProvisionBindingPolicy) -> Result
             .await?;
         let Some(last) = page.last() else { break };
         after.clone_from(&last.host);
-        unbound.extend(
-            page.into_iter()
-                .filter(|c| policy.is_bindable(&c.host))
-                .map(|c| c.host),
-        );
+        for community in page {
+            if policy.is_bindable(&community.host) {
+                report.add_unbound(community.host);
+            }
+        }
     }
-    Ok(BackfillReport::new(rows_bound, unbound))
+    Ok(report)
 }
 
 async fn bind(db: &Db, policy: &ProvisionBindingPolicy, host: &str, issuer: &str) -> Result<Value> {
@@ -227,16 +228,22 @@ mod tests {
 
     // Exit 1 whenever a bindable host stays unbound; the host list stops at
     // `MAX_REPORTED_HOSTS` and says so; stdout is the report's JSON.
+    fn report(rows_bound: u64, hosts: impl IntoIterator<Item = String>) -> BackfillReport {
+        let mut report = BackfillReport::new(rows_bound);
+        hosts.into_iter().for_each(|host| report.add_unbound(host));
+        report
+    }
+
     #[test]
     fn backfill_report_exits_one_caps_its_host_list_and_prints_json() {
-        let clean = BackfillReport::new(3, Vec::new());
+        let clean = report(3, Vec::new());
         assert_eq!(clean.exit_code(), 0);
         assert_eq!(
             json!(clean).to_string(),
             r#"{"rows_bound":3,"truncated":false,"unbound":0,"unbound_hosts":[]}"#
         );
 
-        let some = BackfillReport::new(0, ["a.example".to_owned()]);
+        let some = report(0, ["a.example".to_owned()]);
         assert_eq!(some.exit_code(), 1);
         assert_eq!(
             json!(some).to_string(),
@@ -244,7 +251,7 @@ mod tests {
         );
 
         let hosts = (0..=MAX_REPORTED_HOSTS).map(|i| format!("h{i}.example"));
-        let many = BackfillReport::new(0, hosts);
+        let many = report(0, hosts);
         assert_eq!(many.exit_code(), 1);
         assert_eq!(many.unbound, MAX_REPORTED_HOSTS + 1);
         assert_eq!(many.unbound_hosts.len(), MAX_REPORTED_HOSTS);
@@ -253,7 +260,7 @@ mod tests {
             &format!("h{}.example", MAX_REPORTED_HOSTS - 1)
         );
         assert!(many.truncated);
-        let exact = BackfillReport::new(0, (0..MAX_REPORTED_HOSTS).map(|i| format!("h{i}")));
+        let exact = report(0, (0..MAX_REPORTED_HOSTS).map(|i| format!("h{i}")));
         assert!(!exact.truncated, "a full list is not truncated");
     }
 }
