@@ -122,9 +122,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
 const EXCLUDED_SCOPED_TABLES: &[&str] = &[
     "community_deletion_requests",
     "community_deletion_approvals",
-    "community_deletion_checkpoints",
     "community_serving_write_leases",
-    "community_deletion_executor_heartbeats",
     "product_feedback",
     "rate_limit_violations",
     "operator_listener_outbox",
@@ -4539,10 +4537,8 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn excluded_scoped_tables_are_live_control_plane_tables() {
-        const CONTROL_PLANE_TABLES: [&str; 8] = [
+        const CONTROL_PLANE_TABLES: [&str; 6] = [
             "community_deletion_approvals",
-            "community_deletion_checkpoints",
-            "community_deletion_executor_heartbeats",
             "community_deletion_requests",
             "community_serving_write_leases",
             "operator_listener_outbox",
