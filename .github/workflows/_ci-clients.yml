@@ -58,8 +58,7 @@ jobs:
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
   # Mobile lanes run in parallel; the required check reads the combined
-  # matrix result. `flutter test` shards split tests, not files, so every test
-  # shard still compiles the whole suite.
+  # matrix result. Test shards split files, so each compiles only its own.
   mobile:
     name: Mobile (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -134,7 +133,7 @@ jobs:
         run: cd mobile && flutter analyze
       - name: Test
         if: matrix.lane == 'test'
-        run: cd mobile && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example --total-shards=3 --shard-index=${{ matrix.shard }}
+        run: /bin/bash scripts/mobile-test-shard.sh ${{ matrix.shard }} 3 --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
       - name: Test mobile without push configuration
         if: matrix.lane == 'checks'
         run: cd mobile && flutter test test/shared/push/push_unconfigured_build_test.dart

@@ -194,7 +194,7 @@ final class NativeMessageLayoutTests: XCTestCase {
 
   @MainActor func testOversizedMenuStaysInsideShortViewportAndScrollsToLastAction() {
     let controller = NativeMessageMenuViewController(data: [
-      "actions": (0..<12).map { ["id": "action\($0)", "title": "Action \($0)", "symbol": "star"] },
+      "actions": (0..<12).map { ["id": "action\($0)", "title": "Action \($0)", "symbol": "heart"] },
       "reactions": [["emoji": "❤️", "label": "Heart"]],
     ], sourceRect: CGRect(x: 16, y: 180, width: 288, height: 80), preview: UIView())
     controller.onPreviewReady = { _ in }
