@@ -478,6 +478,29 @@ fn verify_hunks_at_declared_position(
     Ok(())
 }
 
+/// Refuse patches whose result is byte-identical to the current value.
+///
+/// A no-op patch would publish a fresh head event carrying identical
+/// content: the command would echo the input diff, print `wrote …` with a
+/// sha256 equal to the base-hash (by construction), and exit 0 — while the
+/// stored value never changes and the event chain still advances. Neither
+/// `wrote` nor a new event id is mutation evidence; the only evidence is
+/// post-write hash inequality, which a no-op can never produce. Refusing
+/// here keeps the failure loud and prevents the new head event from being
+/// published at all.
+fn ensure_patch_changes_value(current: &str, new_value: &str) -> Result<(), String> {
+    if current == new_value {
+        return Err(
+            "patch is a no-op: the result is byte-identical to the current value. \
+             Nothing was written and no event was published. If the edit was expected \
+             to change the value, the patch was likely generated against a value that \
+             already contains it — re-fetch (`buzz mem get`) and re-diff."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Extract the current slug value as a `String` (or return `NotFound`).
 /// Used by `mem hash` and `mem patch` — they both need "the value or fail".
 /// Returns `(head_event, value)` so the caller can preserve monotonic ordering.
@@ -647,6 +670,13 @@ pub async fn cmd_patch(
              Context must match the current value verbatim — no fuzz, no offset."
         ))
     })?;
+
+    // No-op refusal: a byte-identical result must never publish a new head
+    // event (it would advance the event chain while changing nothing, and
+    // report `wrote` + a sha256 equal to the base-hash). Checked before the
+    // dry-run branch so a no-op is refused in both modes.
+    ensure_patch_changes_value(&current, &new_value)
+        .map_err(|msg| CliError::Usage(format!("patch did not change slug `{slug}`: {msg}")))?;
 
     if new_value.len() > engram::NIP44_PLAINTEXT_MAX {
         return Err(CliError::Usage(format!(
@@ -1041,5 +1071,85 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+
+    // No-op refusal: `mem patch` must refuse any patch whose result is
+    // byte-identical to the current value. Left unchecked, a no-op patch
+    // publishes a fresh head event with identical content, echoes the input
+    // diff, prints `wrote …` with a sha256 equal to the base-hash (by
+    // construction), and exits 0 — the exact silent-no-op failure observed
+    // in the wild (context-only hunks after a prior identical edit landed).
+    // These tests pin the three shapes that produce a byte-identical result:
+    // context-only hunks, delete-then-reinsert pairs, and self-canceling edits.
+
+    #[test]
+    fn noop_refusal_context_only_hunks() {
+        let current = "alpha\nbeta\ngamma\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+ beta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        let err = ensure_patch_changes_value(current, &new_value).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
+    }
+
+    #[test]
+    fn noop_refusal_delete_reinsert_pair() {
+        let current = "alpha\nbeta\ngamma\n";
+        // Deletes beta and reinserts the identical line.
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++beta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        assert_eq!(new_value, current);
+        let err = ensure_patch_changes_value(current, &new_value).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
+    }
+
+    #[test]
+    fn noop_refusal_empty_diff_applies_to_nothing() {
+        let current = "alpha\nbeta\ngamma\n";
+        // `diff -u current current` emits only the file headers, no hunks.
+        // diffy accepts this as a valid zero-hunk patch, and `apply` returns
+        // the input unchanged — the third no-op shape the guard must catch
+        // (and the one `diff -u` naturally produces when a re-diff finds
+        // nothing left to change).
+        let patch_text = "--- a/x\n+++ b/x\n";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        assert_eq!(new_value, current);
+        let err = ensure_patch_changes_value(current, &new_value).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
+    }
+
+    #[test]
+    fn noop_refusal_allows_real_change() {
+        let current = "alpha\nbeta\ngamma\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++delta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        assert_ne!(new_value, current);
+        assert!(ensure_patch_changes_value(current, &new_value).is_ok());
     }
 }
