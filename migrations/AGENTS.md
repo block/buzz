@@ -17,9 +17,10 @@ Before changing anything in this directory, read
 - Never edit a merged migration. Fix forward.
 - Adding a `community_id` table has its own checklist in that document. A
   tenant-owned one is blocked until deletion's catalog checks accept
-  application-fenced tables (BUZZ-314/BUZZ-315).
+  application-fenced tables.
 - Keep every migration safe for the relay that is currently deployed, whether
   migrations run at startup or out of band. Ship in
   this order: new schema, then new code, then backfill, then constraints and
-  cleanup. A contract migration fails closed if its backfill has not run.
+  cleanup. A contract migration fails closed if its backfill has not run, and
+  its release notes name the writer release that upgrades must not skip.
 - Bound every lock (`SET LOCAL lock_timeout`).
