@@ -142,6 +142,54 @@ where
     result.unwrap().expect("sweep task")
 }
 
+/// Seed historical read fixtures through raw SQL on an unarmed test pool.
+/// Supported serving APIs reject these old timestamps; this represents data
+/// already in storage, while retaining admission, mentions and event follow-ups.
+#[cfg(test)] // Keep raw fixture SQL visibly test-only to the source-policy scan.
+pub(crate) async fn insert_historical_event(
+    pool: &sqlx::PgPool,
+    community: buzz_core::CommunityId,
+    event: &nostr::Event,
+    channel: uuid::Uuid,
+) {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await
+    .expect("admit historical fixture");
+    sqlx::query(
+        "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,channel_id,d_tag) \
+         VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(community.as_uuid())
+    .bind(event.id.as_bytes().as_slice())
+    .bind(event.pubkey.to_bytes().as_slice())
+    .bind(event.created_at.as_secs() as f64)
+    .bind(i32::from(event.kind.as_u16()))
+    .bind(serde_json::to_value(&event.tags).expect("fixture tags"))
+    .bind(&event.content)
+    .bind(event.sig.serialize().as_slice())
+    .bind(channel)
+    .bind(crate::event::extract_d_tag(event))
+    .execute(tx.conn())
+    .await
+    .expect("insert historical fixture");
+    crate::store::event_follow_up::after_admitted_insert(
+        &mut tx,
+        event.id.as_bytes(),
+        i32::from(event.kind.as_u16()),
+        Some(channel),
+    )
+    .await
+    .expect("fixture follow-ups");
+    crate::insert_mentions_in_transaction(&mut tx, event, Some(channel))
+        .await
+        .expect("fixture mentions");
+    tx.commit().await.expect("commit historical fixture");
+}
+
 /// Move a community fixture into a deletion lifecycle state the way the
 /// executor does: the tombstone trigger only accepts lifecycle changes from a
 /// transaction carrying the executor GUCs for that community, including its

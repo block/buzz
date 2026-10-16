@@ -10,7 +10,6 @@ use buzz_core::StoredEvent;
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
-use uuid::Uuid;
 
 use crate::error::{DbError, Result};
 use crate::{observability, replaceable, CommunityId, Db, RouteDecision, RoutePredicate};
@@ -1372,7 +1371,7 @@ impl Db {
 
         let insert_result = sqlx::query(
             "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10) \
              ON CONFLICT DO NOTHING",
         )
         .bind(community_id.as_uuid())
@@ -1384,7 +1383,6 @@ impl Db {
         .bind(&event.content)
         .bind(sig_bytes.as_slice())
         .bind(received_at)
-        .bind::<Option<Uuid>>(None)
         .bind(d_tag.as_deref())
         .execute(tx.conn())
         .await?;

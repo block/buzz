@@ -3,12 +3,12 @@
 //! A read replica may serve a cursor page only when every row the page could
 //! contain is provably present on the replica. The proof rests on two parts:
 //!
-//! 1. **Commit-time floor** (migration 0021): a deferred constraint trigger
-//!    aborts, at COMMIT, any transaction inserting a channel-bearing `events`
-//!    row with `created_at` more than `floor` seconds before commit time
-//!    (`clock_timestamp()`, evaluated inside commit processing). Enforcement
-//!    is armed per session via the `buzz.created_at_floor` GUC, which the
-//!    relay's writer pool sets on every connection.
+//! 1. **Insert-time floor**: supported channel-event writers check `created_at`
+//!    against database `clock_timestamp()` on their admitted transaction for
+//!    each new row. Duplicate INSERTs need no floor check. This is the primary
+//!    guard. Migration 0021's deferred trigger and the writer-pool
+//!    `buzz.created_at_floor` GUC remain the mixed-version backstop until phase 2;
+//!    they also reject rows that age below the floor before COMMIT.
 //! 2. **Ordered heartbeat handshake** (this module): on one pinned writer
 //!    connection, one transaction first takes the exclusive replica-floor
 //!    advisory lock (draining compliant shared-lock channel writers), then
@@ -25,7 +25,7 @@
 //!    commit, so the replica session has replayed it;
 //!    (b) open at the activity scan — represented by `xact_start`, so it is
 //!    bounded by the `oldest_xact_start` term;
-//!    (c) started after the activity scan — its deferred floor guard runs
+//!    (c) started after the activity scan — its insert-time app guard runs
 //!    after `S`, so it cannot commit a row with
 //!    `created_at < S - floor`.
 //!    There is no fourth bucket. Each committed token `M` therefore proves a
@@ -53,9 +53,9 @@
 //! mismatch, or an observed token below every retained entry all route the
 //! request back to the writer — degraded capacity, never holes.
 //!
-//! Operational bypasses (sessions without the GUC, `session_replication_role
-//! = replica` restores) are outside the proof by design and require holding
-//! the fence closed for their duration; see `migrations/0021`.
+//! Raw SQL without the armed GUC and `session_replication_role = replica`
+//! restores bypass the supported app writers. These operational bypasses are
+//! outside the proof and require holding the fence closed; see `migrations/0021`.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -67,13 +67,44 @@ use uuid::Uuid;
 
 use buzz_datastore_tracing::datastore_span;
 
-/// Seconds of `created_at` history the commit-time floor guard tolerates.
+/// Seconds of `created_at` history the app and mixed-version trigger tolerate.
 ///
 /// Must exceed the relay's ingest envelope (±900 s) by enough slack that a
 /// legitimately accepted event still commits within the floor even under
 /// slow validation/lock waits. The writer pool arms the guard with this value
 /// and the fence subtracts it; the two uses must never diverge.
 pub const CREATED_AT_FLOOR_SECS: i64 = 960;
+
+/// Enforce the channel-event floor on the admitted INSERT connection.
+///
+/// One SELECT keeps the five existing INSERT shapes intact. Ordinary/thread
+/// writers check after INSERT only when it inserted a row, before follow-ups;
+/// replacements check after replay exits, before superseding the old head.
+/// The caller must propagate failure and roll back the write transaction. Its
+/// database clock is sampled after BEGIN: transactions open at the probe scan
+/// are bounded by xact_start; transactions starting later sample after S. No
+/// commit hook, candidate tracking or ordering against TTL refresh is needed.
+/// NULL-channel rows never enter covered channel windows and need no query.
+pub(crate) async fn guard_event_created_at_floor(
+    tx: &mut crate::AdmittedTx,
+    created_at: DateTime<Utc>,
+    channel_id: Option<Uuid>,
+) -> crate::Result<()> {
+    if channel_id.is_none() {
+        return Ok(());
+    }
+    let below_floor: bool = sqlx::query_scalar(
+        "SELECT $1::timestamptz < clock_timestamp() - make_interval(secs => $2::double precision)",
+    )
+    .bind(created_at)
+    .bind(CREATED_AT_FLOOR_SECS as f64)
+    .fetch_one(tx.conn())
+    .await?;
+    if below_floor {
+        return Err(crate::DbError::CreatedAtFloorRejected);
+    }
+    Ok(())
+}
 
 /// Deployment-global advisory-lock key ordering compliant channel-event write
 /// transactions against the writer probe handshake.
@@ -608,7 +639,10 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
     //    prepared they have left `pg_stat_activity` but can still commit
     //    after the token. Their deferred floor guard already ran at PREPARE,
     //    so `pg_prepared_xacts.prepared` bounds their rows exactly like
-    //    `xact_start`; fold it into the same minimum.
+    //    `xact_start`; fold it into the same minimum. Only the retained
+    //    deferred trigger provides that PREPARE-time check: the insert-time
+    //    app guard runs earlier, and no app writer issues PREPARE TRANSACTION.
+    //    Dropping the trigger must keep this case covered.
     let row = sqlx::query(
         r#"
         SELECT

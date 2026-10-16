@@ -948,27 +948,27 @@ fn signed_event_at(keys: &nostr::Keys, content: &str, secs: u64) -> nostr::Event
         .expect("sign event")
 }
 
+// Routing tests intentionally model stored history and divergent replicas.
+// Raw fixture SQL keeps them independent of serving-time floor admission.
 async fn insert_top_level(pool: &PgPool, community: Uuid, channel: Uuid, ev: &nostr::Event) {
-    let ts = chrono::DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).expect("valid ts");
-    event::insert_event_with_thread_metadata(
+    crate::test_support::insert_historical_event(
         pool,
         CommunityId::from_uuid(community),
         ev,
-        Some(channel),
-        Some(event::ThreadMetadataParams {
-            event_id: ev.id.as_bytes(),
-            event_created_at: ts,
-            channel_id: channel,
-            parent_event_id: None,
-            parent_event_created_at: None,
-            root_event_id: None,
-            root_event_created_at: None,
-            depth: 0,
-            broadcast: true,
-        }),
+        channel,
     )
+    .await;
+    sqlx::query(
+        "INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,depth,broadcast) \
+         VALUES ($1,$2,to_timestamp($3),$4,0,true)",
+    )
+    .bind(community)
+    .bind(ev.id.as_bytes().as_slice())
+    .bind(ev.created_at.as_secs() as f64)
+    .bind(channel)
+    .execute(pool)
     .await
-    .expect("insert top-level event");
+    .expect("seed top-level metadata");
 }
 
 async fn insert_thread_reply(
@@ -978,29 +978,37 @@ async fn insert_thread_reply(
     root: &nostr::Event,
     reply: &nostr::Event,
 ) {
-    let reply_ts =
-        chrono::DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0).expect("valid ts");
-    let root_ts =
-        chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0).expect("valid ts");
-    event::insert_event_with_thread_metadata(
+    crate::test_support::insert_historical_event(
         pool,
         CommunityId::from_uuid(community),
         reply,
-        Some(channel),
-        Some(event::ThreadMetadataParams {
-            event_id: reply.id.as_bytes(),
-            event_created_at: reply_ts,
-            channel_id: channel,
-            parent_event_id: Some(root.id.as_bytes()),
-            parent_event_created_at: Some(root_ts),
-            root_event_id: Some(root.id.as_bytes()),
-            root_event_created_at: Some(root_ts),
-            depth: 1,
-            broadcast: false,
-        }),
+        channel,
     )
+    .await;
+    sqlx::query(
+        "INSERT INTO thread_metadata \
+         (community_id,event_id,event_created_at,channel_id,parent_event_id,parent_event_created_at, \
+          root_event_id,root_event_created_at,depth,broadcast) \
+         VALUES ($1,$2,to_timestamp($3),$4,$5,to_timestamp($6),$5,to_timestamp($6),1,false)",
+    )
+    .bind(community)
+    .bind(reply.id.as_bytes().as_slice())
+    .bind(reply.created_at.as_secs() as f64)
+    .bind(channel)
+    .bind(root.id.as_bytes().as_slice())
+    .bind(root.created_at.as_secs() as f64)
+    .execute(pool)
     .await
-    .expect("insert reply");
+    .expect("seed reply metadata");
+    sqlx::query(
+        "UPDATE thread_metadata SET reply_count=reply_count+1,descendant_count=descendant_count+1, \
+         last_reply_at=now() WHERE community_id=$1 AND event_id=$2",
+    )
+    .bind(community)
+    .bind(root.id.as_bytes().as_slice())
+    .execute(pool)
+    .await
+    .expect("seed root counters");
 }
 
 /// Composite thread cursor: 8-byte BE seconds + raw event id.

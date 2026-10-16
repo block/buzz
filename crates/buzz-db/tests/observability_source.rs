@@ -1626,14 +1626,19 @@ fn masker_blanks_every_literal_form_and_keeps_code() {
     }
 }
 
-/// Whether `source` inserts into `events` itself (not `event_mentions` or any
-/// other `events_*` table), in any letter case, across line breaks and string
-/// continuations, `\n`/`\t`/`\r` escapes, and with or without a `public.`
-/// schema prefix.
-fn inserts_events_row(source: &str) -> bool {
+/// Normalize SQL case, quoted identifiers, whitespace and Rust string escapes for
+/// the event INSERT and UPDATE policies.
+fn normalized_sql_source(source: &str) -> String {
     let mut normalized = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
+        if ch == '"' {
+            continue;
+        }
+        if ch == '\\' && chars.peek() == Some(&'"') {
+            chars.next();
+            continue;
+        }
         if ch.is_whitespace() || ch == '\\' {
             if ch == '\\' && matches!(chars.peek(), Some('n' | 't' | 'r')) {
                 chars.next();
@@ -1645,6 +1650,13 @@ fn inserts_events_row(source: &str) -> bool {
             normalized.push(ch.to_ascii_lowercase());
         }
     }
+    normalized
+}
+
+/// Whether `source` inserts into `events` itself (not `event_mentions` or any
+/// other `events_*` table), with or without a `public.` schema prefix.
+fn inserts_events_row(source: &str) -> bool {
+    let normalized = normalized_sql_source(source);
     ["insert into events", "insert into public.events"]
         .iter()
         .any(|marker| {
@@ -1692,6 +1704,9 @@ pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
+}
+pub(crate) async fn quoted_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO \"public\".\"events\" (id) VALUES ($1)");
 }
 pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events \
@@ -1857,6 +1872,7 @@ mod tests {
         event_insert_follow_up_violations(&strip_cfg_test_items(source)),
         [
             "pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn quoted_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {",
@@ -2059,4 +2075,353 @@ fn every_production_event_insert_runs_the_roster_guard() {
         checked_writers >= 9,
         "expected at least nine event writers, found {checked_writers}"
     );
+}
+
+// These startup probes always roll back; they deliberately exercise the DB
+// backstops rather than the app check. The two serving writers are exempt only
+// while their INSERT remains structurally channel-NULL (checked below).
+const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 2] = [
+    "pub async fn verify_floor_guard_behavior(",
+    "pub async fn verify_channel_roster_fence_behavior(",
+];
+
+fn is_channel_null_event_writer(function: &str) -> bool {
+    let header = function_header(function);
+    let sql = normalized_sql_source(function).replace(' ', "");
+    if header.starts_with("pub async fn publish_nip43_membership_locked(") {
+        // Kind 13534: channel_id is the tenth value, a literal NULL.
+        return sql.contains("values($1,$2,$3,$4,$5,$6,$7,$8,$9,null,$10)");
+    }
+    if header.starts_with("pub async fn accept_lease_event(") {
+        // Kind 30350: channel_id is the literal NULL after received_at.
+        return sql.contains("now(),null,$8)");
+    }
+    false
+}
+
+fn updates_event_floor_columns(function: &str) -> bool {
+    let normalized = normalized_sql_source(function);
+    normalized.match_indices("update ").any(|(index, marker)| {
+        let Some((target, assignments)) = normalized[index + marker.len()..].split_once(" set ")
+        else {
+            return false;
+        };
+        let mut target = target.split_whitespace();
+        let mut table = target.next();
+        if table == Some("only") {
+            table = target.next();
+        }
+        if !matches!(table, Some("events" | "public.events")) {
+            return false;
+        }
+        // The target may have an alias, with or without AS.
+        let alias = target.collect::<Vec<_>>();
+        if !matches!(alias.as_slice(), [] | [_] | ["as", _]) {
+            return false;
+        }
+        let assignments = assignments.split(" where ").next().expect("first part");
+        let mut depth = 0usize;
+        assignments
+            .split(|ch| {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                ch == ',' && depth == 0
+            })
+            .any(|assignment| {
+                assignment.split_once('=').is_some_and(|(columns, _)| {
+                    columns
+                        .trim()
+                        .trim_start_matches('(')
+                        .trim_end_matches(')')
+                        .split(',')
+                        .any(|column| matches!(column.trim(), "created_at" | "channel_id"))
+                })
+            })
+    })
+}
+
+fn event_floor_policy_violations(production: &str) -> Vec<String> {
+    function_slices(production)
+        .into_iter()
+        .filter(|function| {
+            let header = function_header(function);
+            if EVENT_FLOOR_PROBE_EXCEPTIONS
+                .iter()
+                .any(|exception| header.starts_with(exception))
+            {
+                return false;
+            }
+            updates_event_floor_columns(function)
+                || (inserts_events_row(function)
+                    && !is_channel_null_event_writer(function)
+                    && !mask_comments_and_literals(function)
+                        .contains("replica_fence::guard_event_created_at_floor("))
+        })
+        .map(|function| function_header(function).to_owned())
+        .collect()
+}
+
+#[test]
+fn event_floor_policy_rejects_unguarded_inserts_and_floor_column_updates() {
+    let source = r#"
+async fn missing_guard(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (id) VALUES ($1)");
+    // replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+}
+async fn guarded(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO public.events (id) VALUES ($1)");
+}
+async fn rewrite_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET tags = $1, created_at = $2 WHERE id = $3");
+}
+async fn attach_channel(tx: &mut AdmittedTx) {
+    sqlx::query("uPdAtE public.events\nSET channel_id=$1 WHERE id=$2");
+}
+async fn alias_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events e SET created_at = $1 WHERE e.id = $2");
+}
+async fn as_alias_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events AS e SET created_at = $1 WHERE e.id = $2");
+}
+async fn only_channel(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE ONLY events SET channel_id = $1 WHERE id = $2");
+}
+async fn only_public_alias(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE ONLY public.events AS e SET channel_id = $1 WHERE e.id = $2");
+}
+async fn row_time(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET (created_at, kind) = ($1, 1) WHERE id = $2");
+}
+async fn row_channel(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET (kind, channel_id) = (1, $1) WHERE id = $2");
+}
+async fn quoted_insert(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO \"events\" (id) VALUES ($1)");
+}
+async fn quoted_schema_insert(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO \"public\".\"events\" (id) VALUES ($1)");
+}
+async fn quoted_update(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE \"events\" SET created_at = $1 WHERE id = $2");
+}
+async fn quoted_schema_update(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE \"public\".\"events\" SET channel_id = $1 WHERE id = $2");
+}
+async fn delete_only(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET deleted_at=now() WHERE channel_id=$1 AND created_at<$2");
+}
+"#;
+    assert_eq!(
+        event_floor_policy_violations(source),
+        [
+            "async fn missing_guard(tx: &mut AdmittedTx) {",
+            "async fn rewrite_time(tx: &mut AdmittedTx) {",
+            "async fn attach_channel(tx: &mut AdmittedTx) {",
+            "async fn alias_time(tx: &mut AdmittedTx) {",
+            "async fn as_alias_time(tx: &mut AdmittedTx) {",
+            "async fn only_channel(tx: &mut AdmittedTx) {",
+            "async fn only_public_alias(tx: &mut AdmittedTx) {",
+            "async fn row_time(tx: &mut AdmittedTx) {",
+            "async fn row_channel(tx: &mut AdmittedTx) {",
+            "async fn quoted_insert(tx: &mut AdmittedTx) {",
+            "async fn quoted_schema_insert(tx: &mut AdmittedTx) {",
+            "async fn quoted_update(tx: &mut AdmittedTx) {",
+            "async fn quoted_schema_update(tx: &mut AdmittedTx) {",
+        ]
+    );
+}
+
+#[test]
+fn event_floor_policy_requires_nip43_channel_null_at_its_insert_position() {
+    let literal_null = r#"
+pub async fn publish_nip43_membership_locked(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id,id,pubkey,kind,content,tags,sig,created_at,received_at,channel_id,d_tag) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10)");
+}
+"#;
+    assert!(event_floor_policy_violations(literal_null).is_empty());
+    let unrelated_null_bind = literal_null.replace("$9,NULL,$10", "$9,$10,$11").replace(
+        "sqlx::query(",
+        "let unrelated = query.bind::<Option<Uuid>>(None); sqlx::query(",
+    );
+    assert_eq!(
+        event_floor_policy_violations(&unrelated_null_bind).len(),
+        1,
+        "an unrelated NULL bind must not exempt a channel-bearing INSERT"
+    );
+}
+
+#[test]
+fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it() {
+    let files = production_event_writer_source_files();
+    let crates_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates root");
+    assert!(
+        files.contains(&crates_root.join("buzz-relay/src/state.rs")),
+        "floor policy must scan the workspace, including relay writers"
+    );
+    let mut guarded_writers = 0;
+    let mut violations = Vec::new();
+    for path in files {
+        let production = strip_cfg_test_items(&std::fs::read_to_string(&path).expect("source"));
+        guarded_writers += function_slices(&production)
+            .into_iter()
+            .filter(|function| {
+                inserts_events_row(function)
+                    && mask_comments_and_literals(function)
+                        .contains("replica_fence::guard_event_created_at_floor(")
+            })
+            .count();
+        violations.extend(
+            event_floor_policy_violations(&production)
+                .into_iter()
+                .map(|header| format!("{}: {header}", path.display())),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "event floor policy violations: {violations:?}"
+    );
+    assert!(
+        guarded_writers >= 5,
+        "expected five channel-bearing event writers, found {guarded_writers}"
+    );
+}
+
+#[test]
+fn event_floor_guard_uses_the_database_statement_clock_and_shared_floor() {
+    let source = strip_cfg_test_items(include_str!("../src/runtime/replica_fence.rs"));
+    let guard = function_slices(&source)
+        .into_iter()
+        .find(|function| function_header(function).contains("fn guard_event_created_at_floor("))
+        .expect("app floor guard");
+    assert!(
+        guard.contains("SELECT $1::timestamptz < clock_timestamp()"),
+        "the guard must sample the database statement clock, after BEGIN"
+    );
+    assert!(
+        guard.contains(".bind(CREATED_AT_FLOOR_SECS as f64)"),
+        "app check, GUC and fence wall must share the same floor constant"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn admin_seed_refuses_remote_database_before_invoking_psql() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("buzz-seed-policy-{}", uuid::Uuid::new_v4()));
+    let scripts = root.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scratch scripts directory");
+    let script = scripts.join("seed-admin-dashboard.sh");
+    std::fs::write(
+        &script,
+        include_str!("../../../scripts/seed-admin-dashboard.sh"),
+    )
+    .expect("copy script without developer .env");
+    let psql = root.join("psql");
+    std::fs::write(
+        &psql,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SEED_PSQL_WITNESS\"\nexit 1\n",
+    )
+    .expect("stub psql");
+    std::fs::set_permissions(&psql, std::fs::Permissions::from_mode(0o755))
+        .expect("executable stub");
+    let witness = root.join("psql-was-invoked");
+    let run = |host: &str, address: &str, service: &str, database: &str| {
+        let output = std::process::Command::new("/bin/bash")
+            .arg(&script)
+            .env("PGHOST", host)
+            .env("PGHOSTADDR", address)
+            .env("PGSERVICE", service)
+            .env("PGDATABASE", database)
+            .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+            .env("SEED_PSQL_WITNESS", &witness)
+            .output()
+            .expect("run local seed guard");
+        let args = std::fs::read_to_string(&witness).ok();
+        if args.is_some() {
+            std::fs::remove_file(&witness).expect("clear witness");
+        }
+        (output, args)
+    };
+    // Control: a local host with a plain database name reaches psql, so the
+    // refusals below come from the guard rather than an unrunnable fixture.
+    // It must also pass -X so a psqlrc cannot \connect after the guard.
+    let (_, control_args) = run("localhost", "", "", "buzz");
+    let cases = [
+        ("remote host", "shared-db.example.invalid", "", "", ""),
+        ("address override", "localhost", "192.0.2.1", "", ""),
+        ("service override", "localhost", "", "production", ""),
+        (
+            "socket-prefixed host list",
+            "/tmp,shared-db.example.invalid",
+            "",
+            "",
+            "",
+        ),
+        (
+            "host list",
+            "localhost,shared-db.example.invalid",
+            "",
+            "",
+            "",
+        ),
+        (
+            "database URI",
+            "localhost",
+            "",
+            "",
+            "postgresql://buzz@shared-db.example.invalid/buzz",
+        ),
+        (
+            "short database URI",
+            "localhost",
+            "",
+            "",
+            "postgres://shared-db.example.invalid/buzz",
+        ),
+        (
+            "database key/value host",
+            "localhost",
+            "",
+            "",
+            "host=shared-db.example.invalid dbname=buzz",
+        ),
+        (
+            "database key/value hostaddr",
+            "localhost",
+            "",
+            "",
+            "hostaddr=192.0.2.1 dbname=buzz",
+        ),
+        (
+            "database key/value service",
+            "localhost",
+            "",
+            "",
+            "service=production",
+        ),
+    ];
+    let results = cases.map(|(name, host, address, service, database)| {
+        let (output, args) = run(host, address, service, database);
+        (name, output, args.is_some())
+    });
+    std::fs::remove_dir_all(root).expect("remove scratch fixture");
+    let control_args = control_args.expect("plain local target did not reach psql");
+    assert!(
+        control_args.lines().any(|arg| arg == "-X"),
+        "psql invoked without -X: {control_args:?}"
+    );
+    for (name, output, invoked) in results {
+        assert!(!invoked, "{name} reached psql");
+        assert!(!output.status.success(), "{name} accepted");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("requires a local PostgreSQL target"),
+            "{name}: missing refusal"
+        );
+    }
 }
