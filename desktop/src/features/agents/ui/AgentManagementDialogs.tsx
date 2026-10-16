@@ -32,6 +32,7 @@ export function AgentManagementDialogs() {
           initialValues={management.editInitialValues}
           isPending={management.isPending}
           mode="definition-edit"
+          notice={management.reviewNote}
           onOpenChange={(open) => {
             if (!open) management.dismiss();
           }}
