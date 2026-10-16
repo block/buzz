@@ -142,5 +142,5 @@ pre-push:
       # Run analysis and tests serially so parallel pre-push hooks do not
       # contend for shared Flutter state (.dart_tool, shader bundle).
       files: git diff --name-only origin/main...HEAD
-      glob: ["mobile/**"]
+      glob: ["mobile/**", "Justfile", "scripts/test-mobile-gateway-recipes.sh"]
       run: ./scripts/without-git-env.sh sh -c 'just mobile-check && just mobile-test'
