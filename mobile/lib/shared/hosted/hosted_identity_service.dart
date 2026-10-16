@@ -112,8 +112,14 @@ class HostedIdentityService {
         await deviceIdentities?.choices() ?? const <DeviceIdentityChoice>[];
     _sameAccount(subject);
     checkCurrent();
-    if (statusKeys.isEmpty &&
-        (bound == null || device.any((item) => item.pubkey == bound))) {
+    // A bound key already on this device needs no remote decryption. Other
+    // listed identities still require reconciliation before adopting a key.
+    final matchingDevice =
+        bound != null && device.any((item) => item.pubkey == bound);
+    if (matchingDevice && statusKeys.any((key) => key != bound)) {
+      return const HostedIdentityResult(HostedIdentityState.mismatch);
+    }
+    if ((statusKeys.isEmpty && bound == null) || matchingDevice) {
       final eligible = device
           .where((item) => bound == null || item.pubkey == bound)
           .toList();

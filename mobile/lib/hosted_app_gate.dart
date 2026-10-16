@@ -52,15 +52,23 @@ class CommunityEntryCompletion extends Notifier<int> {
   }
 }
 
-final hostedFlowProvider = Provider<HostedFlow>((ref) {
+final hostedFlowProvider = Provider<HostedFlow>((ref) => createHostedFlow(ref));
+
+/// Shared orchestration with injectable browser and relay network boundaries.
+HostedFlow createHostedFlow(
+  Ref ref, {
+  BrowserAuth? browserAuth,
+  Future<void> Function(Community)? probe,
+}) {
   final account = BuilderlabAccountClient();
-  final browser = BrowserAuth();
+  final browser = browserAuth ?? BrowserAuth();
   final store = AccountIdentityStore();
   late final HostedFlow flow;
   final admission = HostedAdmission(
     account: account,
     store: store,
     confirmPolicy: (policy) => flow.confirmJoinPolicy(policy),
+    probe: probe,
   );
   flow = HostedFlow(
     account: account,
@@ -113,7 +121,7 @@ final hostedFlowProvider = Provider<HostedFlow>((ref) {
     admission.dispose();
   });
   return flow;
-});
+}
 
 /// Optional and scoped to the first activated community. A failed read is not
 /// proof that no profile exists; leave it to Settings in that case.

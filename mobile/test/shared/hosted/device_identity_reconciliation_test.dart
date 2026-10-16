@@ -61,19 +61,41 @@ void main() {
   });
   tearDown(() => account.dispose());
 
-  test(
-    'single legacy key is reused without migrating or deleting any device record',
-    () async {
+  for (final scenario in [
+    (
+      name: 'unbound',
+      bound: false,
+      backups: <String>[],
+      state: HostedIdentityState.needsBinding,
+    ),
+    (
+      name: 'bound with matching backup',
+      bound: true,
+      backups: [first.public],
+      state: HostedIdentityState.needsBackup,
+    ),
+    (
+      name: 'bound with other backup',
+      bound: true,
+      backups: [first.public, second.public],
+      state: HostedIdentityState.mismatch,
+    ),
+  ]) {
+    test('device key reconciliation: ${scenario.name}', () async {
       final raw = jsonEncode([record(first, 'Old community')]);
       await secure.write(key: 'buzz_workspaces', value: raw);
+      account.bound = scenario.bound ? first.public : null;
+      account.backups = scenario.backups;
       final result = await service.resolve();
-      expect(result.pubkey, first.public);
-      expect(result.state, HostedIdentityState.needsBinding);
+      expect(result.state, scenario.state);
+      final rejected = scenario.state == HostedIdentityState.mismatch;
+      expect(result.pubkey, rejected ? isNull : first.public);
+      expect((await store.read())?.pubkey, rejected ? isNull : first.public);
       expect(await secure.read(key: 'buzz_workspaces'), raw);
       expect(await secure.read(key: 'buzz_communities'), isNull);
       expect(account.calls, ['/v1/buzz/nsec-backups/status']);
-    },
-  );
+    });
+  }
 
   test(
     'multiple current and hidden legacy keys require choice; no writes before choice',

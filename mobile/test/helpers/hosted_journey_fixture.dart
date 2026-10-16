@@ -13,11 +13,7 @@ import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
-import 'package:buzz/shared/hosted/device_identity_source.dart';
-import 'package:buzz/shared/hosted/hosted_admission.dart';
-import 'package:buzz/shared/hosted/hosted_community_connection.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
-import 'package:buzz/shared/hosted/hosted_identity_service.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
@@ -30,10 +26,8 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import 'widget_helpers.dart';
 
-/// Synthetic REST/relay boundaries, real account, identity, admission, auth and
-/// storage. The flow factory mirrors the app factory only to inject the relay
-/// probe: production HostedAdmission otherwise opens a raw WebSocket that
-/// http.runWithClient cannot intercept. No admission/persistence is simulated.
+/// Synthetic REST/relay boundaries with the production flow factory, account,
+/// identity, admission, auth and storage. No admission/persistence is simulated.
 class HostedJourneyFixture {
   final keys = nostr.Keys('1'.padLeft(64, '0'));
   final secondKeys = nostr.Keys('2'.padLeft(64, '0'));
@@ -188,64 +182,17 @@ class HostedJourneyFixture {
     );
   });
 
-  HostedFlow createFlow(Ref ref) {
-    final account = BuilderlabAccountClient();
-    final browser = _Browser(() => browserStarts++);
-    final admission = HostedAdmission(
-      account: account,
-      store: store,
-      confirmPolicy: (policy) => flow.confirmJoinPolicy(policy),
-      probe: (community) async {
-        probes.add(community);
-        if (Uri.parse(community.relayUrl).host.startsWith('two.') &&
-            secondRelayFailures-- > 0) {
-          throw AccountFailure.unavailable;
-        }
-      },
-    );
-    flow = HostedFlow(
-      account: account,
-      browser: browser,
-      store: store,
-      identity: HostedIdentityService(
-        account: account,
-        store: store,
-        deviceIdentities: DeviceIdentitySource(),
-      ),
-      enterCommunity: (link, subject, pubkey, isCurrent) async {
-        bool current() => isCurrent() && account.account?.subject == subject;
-        await connectHostedCommunity(
-          link: link,
-          subject: subject,
-          pubkey: pubkey,
-          isCurrent: current,
-          storage: ref.read(communityStorageProvider),
-          admission: admission,
-          persist: (community, valid) => ref
-              .read(authProvider.notifier)
-              .authenticateWithCommunity(
-                community,
-                shouldContinue: valid,
-                activate:
-                    community.starterSetupIncomplete ||
-                    flow.addedCommunityCount == 0,
-              ),
-          recoverStarterChannels: (community, valid) =>
-              finishHostedStarterSetup(ref, community, valid),
-        );
-        if (flow.addedCommunityCount == 0 && isCurrent()) {
-          await offerHostedProfile(ref, flow, link, pubkey, current);
-        }
-      },
-    );
-    ref.onDispose(() {
-      flow.dispose();
-      browser.dispose();
-      account.dispose();
-      admission.dispose();
-    });
-    return flow;
-  }
+  HostedFlow createFlow(Ref ref) => flow = createHostedFlow(
+    ref,
+    browserAuth: _Browser(() => browserStarts++),
+    probe: (community) async {
+      probes.add(community);
+      if (Uri.parse(community.relayUrl).host.startsWith('two.') &&
+          secondRelayFailures-- > 0) {
+        throw AccountFailure.unavailable;
+      }
+    },
+  );
 
   Future<void> mount(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(440, 1100));
