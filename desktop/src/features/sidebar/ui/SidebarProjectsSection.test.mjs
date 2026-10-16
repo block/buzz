@@ -55,12 +55,12 @@ function makeProject(overrides = {}) {
   return {
     createdAt: 0,
     description: "",
-    dtag: "sprout",
-    id: `30621:${OWNER}:sprout`,
-    name: "sprout",
+    dtag: "buzz",
+    id: `30621:${OWNER}:buzz`,
+    name: "buzz",
     owner: OWNER,
     primaryRepositoryAddress: null,
-    projectAddress: `30621:${OWNER}:sprout`,
+    projectAddress: `30621:${OWNER}:buzz`,
     projectChannelId: null,
     repositories: [],
     repositoryAddresses: [],
@@ -74,12 +74,12 @@ test("selectedProjectRouteId reads the project id from the detail route", () => 
   assert.equal(selectedProjectRouteId("/projects/"), undefined);
   assert.equal(selectedProjectRouteId("/agents"), undefined);
   assert.equal(
-    selectedProjectRouteId("/projects/30621:abc:sprout"),
-    "30621:abc:sprout",
+    selectedProjectRouteId("/projects/30621:abc:buzz"),
+    "30621:abc:buzz",
   );
   assert.equal(
-    selectedProjectRouteId("/projects/30621%3Aabc%3Asprout"),
-    "30621:abc:sprout",
+    selectedProjectRouteId("/projects/30621%3Aabc%3Abuzz"),
+    "30621:abc:buzz",
   );
 });
 
