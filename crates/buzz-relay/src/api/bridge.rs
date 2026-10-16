@@ -1965,30 +1965,24 @@ pub(crate) async fn repair_requested_channel_access(
     readable_system: &mut Vec<uuid::Uuid>,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let repaired_from = accessible_channels.len();
-    for filter in filters {
-        let Some(requested) =
+    let requested: Vec<uuid::Uuid> = filters
+        .iter()
+        .filter_map(|filter| {
             crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
-        else {
-            continue;
-        };
-        for channel_id in requested {
-            // A readable system channel stays out of the request-wide set.
-            if accessible_channels.contains(&channel_id) || readable_system.contains(&channel_id) {
-                continue;
-            }
-            let is_member = state
-                .db
-                .is_member(tenant.community(), channel_id, pubkey_bytes)
-                .await
-                .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
-            crate::handlers::req::resolve_request_local_access(
-                accessible_channels,
-                channel_id,
-                true,
-                Some(is_member),
-            );
-        }
-    }
+        })
+        .flatten()
+        .collect();
+    crate::handlers::req::confirm_requested_channel_access(
+        state,
+        tenant.community(),
+        pubkey_bytes,
+        &requested,
+        None,
+        accessible_channels,
+        readable_system,
+    )
+    .await
+    .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
     crate::handlers::system_channels::keep_repaired_system_channels_named(
         state,
         tenant.community(),
@@ -2209,9 +2203,10 @@ async fn count_events_authed(
                 std::slice::from_ref(filter),
             )
             .unwrap_or_default();
+            let accessible: std::collections::HashSet<_> = accessible_channels.iter().collect();
             if !requested
                 .iter()
-                .any(|channel_id| accessible_channels.contains(channel_id))
+                .any(|channel_id| accessible.contains(channel_id))
             {
                 continue;
             }

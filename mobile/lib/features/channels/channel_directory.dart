@@ -257,14 +257,44 @@ Future<List<NostrEvent>> _fetchHuddleStarts(
   if (parentChannelIds.isEmpty) return const [];
   try {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    return await session.fetchHistory(
-      NostrFilter(
-        kinds: const [EventKind.huddleStarted],
-        tags: {'#h': parentChannelIds},
-        since: now - const Duration(hours: 2).inSeconds,
-        limit: 500,
-      ),
-    );
+    // Each REQ stays within the relay's aggregate explicit-channel cap, with
+    // the same bounded concurrency as channel history.
+    final filters = [
+      for (
+        var start = 0;
+        start < parentChannelIds.length;
+        start += kMaxExplicitChannelValues
+      )
+        NostrFilter(
+          kinds: const [EventKind.huddleStarted],
+          tags: {
+            '#h': parentChannelIds.sublist(
+              start,
+              min(start + kMaxExplicitChannelValues, parentChannelIds.length),
+            ),
+          },
+          since: now - const Duration(hours: 2).inSeconds,
+          limit: 500,
+        ),
+    ];
+    final results = <List<NostrEvent>>[];
+    for (
+      var start = 0;
+      start < filters.length;
+      start += _historyRequestConcurrency
+    ) {
+      results.addAll(
+        await Future.wait(
+          filters
+              .sublist(
+                start,
+                min(start + _historyRequestConcurrency, filters.length),
+              )
+              .map(session.fetchHistory),
+        ),
+      );
+    }
+    return [for (final events in results) ...events];
   } catch (error) {
     debugPrint(
       '[ChannelsNotifier] Huddle backing-channel query failed: $error',

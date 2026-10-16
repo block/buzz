@@ -25,6 +25,19 @@ use crate::state::AppState;
 
 const MAX_SUBSCRIPTIONS: usize = 1024;
 
+/// Maximum aggregate number of explicit `#h` values accepted in one REQ,
+/// COUNT, HTTP `/query`, or HTTP `/count` request.
+///
+/// Cache-missed channels are confirmed in one membership query, so the DB cost
+/// does not grow with the count. A live WS subscription still gives each
+/// authorized channel a fan-out index entry and a Redis topic retain; the
+/// reader's real membership bounds that part.
+pub(crate) const MAX_EXPLICIT_CHANNEL_VALUES: usize = 2048;
+
+/// Maximum huddle sessions one liveness REQ looks up. Each linked session
+/// costs a sequential mesh-directory lookup.
+const MAX_HUDDLE_LIVENESS_SESSIONS: usize = 128;
+
 /// Maximum `query_events` calls in flight per multi-filter REQ / bridge query.
 ///
 /// NIP-01 gives each filter its own DB query (OR semantics — see the comment at
@@ -33,14 +46,6 @@ const MAX_SUBSCRIPTIONS: usize = 1024;
 /// pool. Post-processing stays strictly in filter order (`buffered`, not
 /// `buffer_unordered`), so dedupe/trace/error semantics are unchanged.
 pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
-
-/// Maximum aggregate number of explicit `#h` values accepted in one REQ,
-/// COUNT, HTTP `/query`, or HTTP `/count` request.
-///
-/// Explicit channels may each require an uncached membership lookup and, for a
-/// live WS subscription, a registry entry plus Redis topic retain. Bound the
-/// values before any of that request-amplified work begins.
-pub(crate) const MAX_EXPLICIT_CHANNEL_VALUES: usize = 128;
 
 // Guard: keep the bound a small fraction of any sane Postgres pool size.
 // Raising it past this range requires re-running the relay bench and
@@ -161,54 +166,33 @@ pub async fn handle_req(
     // on the pod that processed the write, before the 10s TTL expires or the
     // cross-pod invalidation lands), so on a miss we confirm uncached against
     // the DB; a verified positive repairs the vector request-locally (see
-    // `resolve_request_local_access`). Running this ahead of the search branch
+    // `confirm_requested_channel_access`). Running this ahead of the search branch
     // is what fixes the search false-miss: a `#h=<just-added>` search would
     // otherwise be scoped against the stale vector and return empty.
     if let Some(requested) = requested_channel_ids.as_ref() {
         let repaired_from = accessible_channels.len();
-        for &ch_id in requested {
-            let token_allows = token_channel_ids
-                .as_deref()
-                .is_none_or(|allowed| allowed.contains(&ch_id));
-            // A readable system channel is authorized for the filters that
-            // name it; it must not enter the request-wide vector.
-            let db_is_member = if !token_allows
-                || accessible_channels.contains(&ch_id)
-                || readable_system.contains(&ch_id)
-            {
-                None
-            } else {
-                match state
-                    .db
-                    .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
-                    .await
-                {
-                    Ok(member) => {
-                        if let Some(state_snap) = trace_state.as_ref() {
-                            crate::conformance::record_req_authcheck(
-                                &state.tracer,
-                                state_snap,
-                                ch_id,
-                                member,
-                            );
-                        }
-                        Some(member)
-                    }
-                    Err(e) => {
-                        warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                        conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-                        return;
-                    }
-                }
-            };
-            // An OR filter may include inaccessible channels; retain every
-            // authorized requested channel and silently omit the others.
-            resolve_request_local_access(
-                &mut accessible_channels,
-                ch_id,
-                token_allows,
-                db_is_member,
-            );
+        let confirmed = match confirm_requested_channel_access(
+            &state,
+            conn.tenant.community(),
+            &pubkey_bytes,
+            requested,
+            token_channel_ids.as_deref(),
+            &mut accessible_channels,
+            &readable_system,
+        )
+        .await
+        {
+            Ok(confirmed) => confirmed,
+            Err(e) => {
+                warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        };
+        if let Some(state_snap) = trace_state.as_ref() {
+            for (ch_id, member) in confirmed {
+                crate::conformance::record_req_authcheck(&state.tracer, state_snap, ch_id, member);
+            }
         }
         if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
             &state,
@@ -226,12 +210,15 @@ pub async fn handle_req(
     }
 
     let authorized_requested_channels = requested_channel_ids.as_ref().map(|requested| {
+        let authorized: HashSet<_> = accessible_channels
+            .iter()
+            .chain(&readable_system)
+            .copied()
+            .collect();
         requested
             .iter()
             .copied()
-            .filter(|channel_id| {
-                accessible_channels.contains(channel_id) || readable_system.contains(channel_id)
-            })
+            .filter(|channel_id| authorized.contains(channel_id))
             .collect::<Vec<_>>()
     });
     // Partial authorization preserves NIP-01 OR semantics by omitting only
@@ -647,50 +634,91 @@ const SEARCH_PAGE_SIZE: u32 = 100;
 /// the response.
 const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(SEARCH_PAGE_SIZE);
 
-/// Resolve request-local channel access, repairing a stale cache-negative.
+/// Requested channels whose access needs a DB membership check: not already
+/// in the cached `accessible_channels` or `readable_system` sets, and inside
+/// the scoped-auth `token_channel_ids` bound when one is present. Deduplicated,
+/// in request order.
+///
+/// The token bound is an upper bound on the repair: a channel outside it is
+/// never checked, so a DB positive cannot push it back in. Otherwise a token
+/// scoped to channel A could reach channel B merely because the user is a DB
+/// member of B.
+pub(crate) fn channels_needing_membership_check(
+    requested: &[uuid::Uuid],
+    accessible_channels: &[uuid::Uuid],
+    readable_system: &[uuid::Uuid],
+    token_channel_ids: Option<&[uuid::Uuid]>,
+) -> Vec<uuid::Uuid> {
+    let mut known: HashSet<uuid::Uuid> = accessible_channels
+        .iter()
+        .chain(readable_system)
+        .copied()
+        .collect();
+    let token: Option<HashSet<uuid::Uuid>> =
+        token_channel_ids.map(|allowed| allowed.iter().copied().collect());
+    requested
+        .iter()
+        .copied()
+        .filter(|channel_id| {
+            token
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(channel_id))
+        })
+        .filter(|channel_id| known.insert(*channel_id))
+        .collect()
+}
+
+/// Confirm requested channels against the DB, repairing stale cache-negatives
+/// request-locally. Returns each checked channel with its membership answer.
 ///
 /// `accessible_channels` is the per-request membership vector — built once from
 /// the 10s cache (and already narrowed by any scoped-auth `token_channel_ids`
 /// via `retain`) and reused for subscription registration, historical delivery,
 /// search scope, and COUNT. On a multi-pod relay it can be stale on a non-writer
 /// pod (a member just added on another pod, before the TTL expires or the
-/// cross-pod invalidation lands), so the cache-negative branch confirms against
-/// the DB uncached and passes the result here.
+/// cross-pod invalidation lands), so every requested channel the cache does not
+/// grant is confirmed uncached. All of them go to the DB in one statement, so a
+/// request costs one round trip however many channels it names.
 ///
-/// `token_allows` is the scoped-auth upper bound: `false` when a scoped token is
-/// present and does NOT cover `ch_id`. The DB-positive repair must never push a
-/// channel back in past that bound, or a token scoped to channel A could reach
-/// channel B merely because the user is a DB member of B.
-///
-/// Truth table:
-/// - token denies `ch_id`               → denied, no DB needed, no repair
-/// - cached contains `ch_id`            → allowed, no repair, no DB needed
-/// - cache-miss + DB says member        → allowed, `ch_id` pushed once (repair)
-/// - cache-miss + DB says not a member  → denied, vector unchanged
-///
-/// The push is what makes the confirmation request-local-authoritative: every
-/// downstream consumer reads the same repaired vector, so a stale negative
-/// cannot stay sticky for the rest of the request. `db_is_member` is `None` when
-/// the cache hit or the token bound denied (DB was never consulted).
-pub(crate) fn resolve_request_local_access(
+/// A confirmed member is pushed onto `accessible_channels`. The push is what
+/// makes the confirmation request-local-authoritative: every downstream
+/// consumer reads the same repaired vector, so a stale negative cannot stay
+/// sticky for the rest of the request.
+pub(crate) async fn confirm_requested_channel_access(
+    state: &AppState,
+    community: buzz_core::tenant::CommunityId,
+    pubkey: &[u8],
+    requested: &[uuid::Uuid],
+    token_channel_ids: Option<&[uuid::Uuid]>,
     accessible_channels: &mut Vec<uuid::Uuid>,
-    ch_id: uuid::Uuid,
-    token_allows: bool,
-    db_is_member: Option<bool>,
-) -> bool {
-    if !token_allows {
-        return false;
+    readable_system: &[uuid::Uuid],
+) -> buzz_db::Result<Vec<(uuid::Uuid, bool)>> {
+    let unconfirmed = channels_needing_membership_check(
+        requested,
+        accessible_channels,
+        readable_system,
+        token_channel_ids,
+    );
+    if unconfirmed.is_empty() {
+        return Ok(Vec::new());
     }
-    if accessible_channels.contains(&ch_id) {
-        return true;
-    }
-    match db_is_member {
-        Some(true) => {
-            accessible_channels.push(ch_id);
-            true
-        }
-        _ => false,
-    }
+    let members: HashSet<uuid::Uuid> = state
+        .db
+        .membership_pairs(community, &unconfirmed, &[pubkey.to_vec()])
+        .await?
+        .into_iter()
+        .map(|(channel_id, _)| channel_id)
+        .collect();
+    Ok(unconfirmed
+        .into_iter()
+        .map(|channel_id| {
+            let member = members.contains(&channel_id);
+            if member {
+                accessible_channels.push(channel_id);
+            }
+            (channel_id, member)
+        })
+        .collect())
 }
 
 /// Map the legacy `(accessible_channels, include_global)` pair onto the
@@ -1295,11 +1323,12 @@ pub(crate) fn apply_channel_scope_to_query(
 
     let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
     if let Some(values) = filter.generic_tags.get(&h_tag) {
+        let accessible: HashSet<_> = accessible_channels.iter().collect();
         query.channel_ids = Some(
             values
                 .iter()
                 .filter_map(|value| value.parse::<uuid::Uuid>().ok())
-                .filter(|requested| accessible_channels.contains(requested))
+                .filter(|requested| accessible.contains(requested))
                 .collect(),
         );
         query.channel_ids_include_global = false;
@@ -1336,12 +1365,13 @@ pub(crate) fn extract_channel_ids_from_filters_limited(
 /// [`extract_channel_ids_from_filters_limited`].
 pub(crate) fn extract_channel_ids_from_filters(filters: &[Filter]) -> Option<Vec<uuid::Uuid>> {
     let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let mut seen = HashSet::new();
     let mut channel_ids = Vec::new();
     for filter in filters {
         let values = filter.generic_tags.get(&h_tag)?;
         for value in values {
             if let Ok(channel_id) = value.parse::<uuid::Uuid>() {
-                if !channel_ids.contains(&channel_id) {
+                if seen.insert(channel_id) {
                     channel_ids.push(channel_id);
                 }
             }
@@ -1376,7 +1406,7 @@ fn huddle_liveness_session_ids(filters: &[Filter]) -> Vec<uuid::Uuid> {
             }
         }
     }
-    session_ids.truncate(MAX_EXPLICIT_CHANNEL_VALUES);
+    session_ids.truncate(MAX_HUDDLE_LIVENESS_SESSIONS);
     session_ids
 }
 
@@ -2373,7 +2403,7 @@ mod tests {
     #[test]
     fn huddle_liveness_session_ids_are_deduplicated_and_bounded() {
         let d_tag = SingleLetterTag::lowercase(Alphabet::D);
-        let input = (0..MAX_EXPLICIT_CHANNEL_VALUES + 16)
+        let input = (0..MAX_HUDDLE_LIVENESS_SESSIONS + 16)
             .map(|_| uuid::Uuid::new_v4())
             .collect::<Vec<_>>();
         let first = input.iter().fold(Filter::new(), |filter, session_id| {
@@ -2387,7 +2417,7 @@ mod tests {
         let extracted_set = extracted.iter().copied().collect::<HashSet<_>>();
         let input_set = input.iter().copied().collect::<HashSet<_>>();
 
-        assert_eq!(extracted.len(), MAX_EXPLICIT_CHANNEL_VALUES);
+        assert_eq!(extracted.len(), MAX_HUDDLE_LIVENESS_SESSIONS);
         assert_eq!(extracted_set.len(), extracted.len());
         assert!(extracted_set.is_subset(&input_set));
     }
@@ -2454,71 +2484,46 @@ mod tests {
     }
 
     #[test]
-    fn request_local_access_cache_positive_no_db_no_repair() {
-        let ch = uuid::Uuid::new_v4();
-        let mut accessible = vec![ch];
-        // Cache hit: DB was never consulted (None), allowed, vector unchanged.
-        assert!(resolve_request_local_access(
-            &mut accessible,
-            ch,
-            true,
-            None
-        ));
-        assert_eq!(accessible, vec![ch], "no repair, no duplicate on cache hit");
-    }
-
-    #[test]
-    fn request_local_access_cache_negative_db_member_repairs() {
-        let ch = uuid::Uuid::new_v4();
-        let mut accessible: Vec<uuid::Uuid> = vec![];
-        // Stale cache-miss but DB confirms membership: allowed AND repaired.
-        assert!(resolve_request_local_access(
-            &mut accessible,
-            ch,
-            true,
-            Some(true)
-        ));
-        assert!(
-            accessible.contains(&ch),
-            "verified positive must push ch_id so the rest of the request sees it"
+    fn membership_check_skips_cached_and_readable_system_channels() {
+        let cached = uuid::Uuid::new_v4();
+        let system = uuid::Uuid::new_v4();
+        let missed = uuid::Uuid::new_v4();
+        assert_eq!(
+            channels_needing_membership_check(
+                &[cached, system, missed],
+                &[cached],
+                &[system],
+                None
+            ),
+            vec![missed],
+            "only the cache-miss needs the DB"
         );
     }
 
     #[test]
-    fn request_local_access_cache_negative_db_nonmember_denied() {
-        let ch = uuid::Uuid::new_v4();
-        let mut accessible: Vec<uuid::Uuid> = vec![];
-        // Cache-miss and DB confirms non-membership: denied, vector unchanged.
-        assert!(!resolve_request_local_access(
-            &mut accessible,
-            ch,
-            true,
-            Some(false)
-        ));
-        assert!(
-            accessible.is_empty(),
-            "denied access must not mutate the request-local vector"
+    fn membership_check_asks_once_per_channel_in_request_order() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        assert_eq!(
+            channels_needing_membership_check(&[b, a, b, a], &[], &[], None),
+            vec![b, a]
         );
     }
 
     #[test]
-    fn request_local_access_token_denies_never_repairs() {
-        let ch = uuid::Uuid::new_v4();
-        let mut accessible: Vec<uuid::Uuid> = vec![];
-        // Scoped token does NOT cover ch_id: denied even though the DB confirms
-        // membership. The token scope is an upper bound on the repair — a DB
-        // positive must never push a channel back in past a narrower token, or
-        // a token scoped to channel A could reach channel B merely because the
-        // user is a DB member of B.
-        assert!(!resolve_request_local_access(
-            &mut accessible,
-            ch,
-            false,
-            Some(true)
-        ));
-        assert!(
-            accessible.is_empty(),
-            "token-denied access must not be repaired into the vector"
+    fn membership_check_never_asks_past_the_token_bound() {
+        let in_scope = uuid::Uuid::new_v4();
+        let out_of_scope = uuid::Uuid::new_v4();
+        // A scoped token is an upper bound on the repair: a channel outside it
+        // is never checked, so a DB positive cannot push it back in.
+        assert_eq!(
+            channels_needing_membership_check(
+                &[in_scope, out_of_scope],
+                &[],
+                &[],
+                Some(&[in_scope]),
+            ),
+            vec![in_scope]
         );
     }
 

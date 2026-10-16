@@ -25,6 +25,9 @@ part 'channels_provider_lifecycle.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
+
+/// Relay requests one channel-history batch keeps in flight at most.
+const _historyRequestConcurrency = 4;
 const _participatedRootIdsPrefix = 'buzz-thread-participation.v1';
 const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 
@@ -478,35 +481,92 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   /// Returns null when the batch is unavailable: it hit a relay deadline.
+  ///
+  /// The relay rejects a request whose filters name more than
+  /// [kMaxExplicitChannelValues] channels in aggregate, so larger batches are
+  /// split into requests within that cap.
   Future<List<NostrEvent>?> _fetchChannelHistoryBatch(
     RelaySessionNotifier session,
     List<NostrFilter> filters, {
     required String operation,
   }) async {
-    if (filters.isEmpty) return const [];
-
-    try {
-      return await session.queryRelay(filters);
-    } catch (error) {
-      // Per-filter fallback would re-run the timed-out work another way.
-      if (isRelayDeadlineError(error)) {
+    final requests = <List<NostrFilter>>[];
+    var channelValues = 0;
+    for (final filter in filters) {
+      final values = filter.tags['#h']?.length ?? 0;
+      if (requests.isEmpty ||
+          channelValues + values > kMaxExplicitChannelValues) {
+        requests.add([]);
+        channelValues = 0;
+      }
+      requests.last.add(filter);
+      channelValues += values;
+    }
+    final events = <NostrEvent>[];
+    final fallback = <NostrFilter>[];
+    var deadline = false;
+    for (
+      var start = 0;
+      start < requests.length;
+      start += _historyRequestConcurrency
+    ) {
+      final wave = requests.sublist(
+        start,
+        min(start + _historyRequestConcurrency, requests.length),
+      );
+      final results = await Future.wait(
+        wave.map((request) async {
+          try {
+            return await session.queryRelay(request);
+          } catch (error) {
+            // Per-filter fallback would re-run the timed-out work another way.
+            if (isRelayDeadlineError(error)) {
+              deadline = true;
+            } else {
+              debugPrint(
+                '[ChannelsNotifier] batched $operation failed; '
+                'using bounded websocket fallback: $error',
+              );
+            }
+            return null;
+          }
+        }),
+      );
+      // A request that hit the deadline makes the whole batch unavailable.
+      if (deadline) {
         debugPrint('[ChannelsNotifier] batched $operation hit the deadline');
         return null;
       }
-      debugPrint(
-        '[ChannelsNotifier] batched $operation failed; '
-        'using bounded websocket fallback: $error',
-      );
+      for (final (index, result) in results.indexed) {
+        result == null ? fallback.addAll(wave[index]) : events.addAll(result);
+      }
     }
+    if (fallback.isEmpty) return events;
 
-    const fallbackConcurrency = 4;
+    // Fallback starts once every request has settled, so the batch never has
+    // more than the request concurrency in flight.
+    final fallbackEvents = await _fetchChannelHistoryFallback(
+      session,
+      fallback,
+    );
+    return fallbackEvents == null ? null : [...events, ...fallbackEvents];
+  }
+
+  Future<List<NostrEvent>?> _fetchChannelHistoryFallback(
+    RelaySessionNotifier session,
+    List<NostrFilter> filters,
+  ) async {
     final events = <NostrEvent>[];
     var deadline = false;
-    for (var start = 0; start < filters.length; start += fallbackConcurrency) {
+    for (
+      var start = 0;
+      start < filters.length;
+      start += _historyRequestConcurrency
+    ) {
       // Stop sending once a filter hit the deadline; partial events are not
       // a result.
       if (deadline) return null;
-      final end = min(start + fallbackConcurrency, filters.length);
+      final end = min(start + _historyRequestConcurrency, filters.length);
       final results = await Future.wait(
         filters.sublist(start, end).map((filter) async {
           try {

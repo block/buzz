@@ -132,6 +132,8 @@ Success response (`200`, `Cache-Control: no-store`):
 
 Adapters MUST issue dedicated [NIP-FI](NIP-FI.md) assertions whose protected `typ` is exactly `nip-fi+jwt` and that carry the NIP-FI required claims; as NIP-FI requires, `sub` is never an email address. The assertion's `aud` MUST be `https://` followed by the authority of the canonical `relay_url`, unchanged: `wss://community.example.com` maps to `https://community.example.com`, `wss://c.example.com:8443` to `https://c.example.com:8443`, and `wss://[2001:db8::1]:8443` to `https://[2001:db8::1]:8443`. This is the canonical host URI of the community the relay resolves from the connection's `Host`. The assertion's `nostr_pubkey` MUST be the key that signs the NIP-42 relay login; the relay rejects any other key. Clients MUST reject a response whose `nostr_pubkey` differs from the key sent in the request.
 
+An adapter MUST NOT issue an assertion for an agent key through a user's own authentication. It MUST issue agent-key assertions only under an owner-authorized grant: a durable record, created through the owner's own authentication, that binds the agent key to the owner. A grant MAY be held by the agent as a credential or kept by the adapter for agents it operates. The adapter MUST issue only while the owner authorization recorded in the grant remains valid. Revoking the owner MUST invalidate every grant the owner authorized before the revocation, and a later authentication by the owner MUST NOT revalidate them. Agent-key assertions follow NIP-FI "Agent keys".
+
 A client that rejects a `200` response, including one it cannot parse, MUST treat it as a refusal: keep the session, show it as refused, and not retry automatically.
 
 ### Denials
@@ -180,6 +182,5 @@ NIP-FI defines no public identity projection. Adapter responses are private logi
 
 ## Out of scope
 
-- Assertions for agent keys. This NIP covers assertions for keys a user authenticates with directly; issuing assertions for agent keys requires a separate design.
 - Discovery of which relays require enterprise identity and which adapter serves them.
 - The upstream identity protocol between the adapter and its identity provider.

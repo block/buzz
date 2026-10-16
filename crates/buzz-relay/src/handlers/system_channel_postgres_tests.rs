@@ -388,6 +388,46 @@ async fn a_system_channel_joined_mid_request_stays_in_its_named_filter() {
     assert_eq!(scope(&filters[1]), [ordinary], "sibling filter");
 }
 
+/// A request that names channels the cached access set lacks confirms them
+/// all in one membership query. Members join the request-local set in request
+/// order, each once; a channel the reader is not in stays out.
+/// Mutation: push every unconfirmed channel in
+/// `confirm_requested_channel_access` → RED (the stranger's channel gets in);
+/// skip the push → RED (the reader's channels stay out).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn named_channels_missing_from_the_cache_are_confirmed_together() {
+    let f = fixture().await;
+    let reader = Keys::generate();
+    let stranger = Keys::generate();
+    let first = create_channel(&f.state, &f.tenant, &reader, &[]).await;
+    let second = create_channel(&f.state, &f.tenant, &reader, &[]).await;
+    let foreign = create_channel(&f.state, &f.tenant, &stranger, &[]).await;
+
+    let filters: Vec<nostr::Filter> = serde_json::from_value(json!([
+        {"kinds": [9], "#h": [second.to_string(), foreign.to_string()]},
+        {"kinds": [9], "#h": [first.to_string(), second.to_string()]},
+    ]))
+    .expect("filters");
+    // The request's cached lookup ran before the reader joined either channel.
+    let mut implicit = Vec::new();
+    let mut readable_system = Vec::new();
+
+    crate::api::bridge::repair_requested_channel_access(
+        &f.state,
+        &f.tenant,
+        &filters,
+        &reader.public_key().to_bytes(),
+        &mut implicit,
+        &mut readable_system,
+    )
+    .await
+    .expect("repair");
+
+    assert_eq!(implicit, [second, first]);
+    assert!(readable_system.is_empty());
+}
+
 /// Adding a member to a system channel sends no kind:44100 notification,
 /// which an existing client would show as a new channel. An ordinary
 /// channel still sends one, so the check is not vacuous.

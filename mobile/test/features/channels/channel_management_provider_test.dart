@@ -723,6 +723,27 @@ void main() {
       expect(session.searchQueryCount, 2);
     });
 
+    test('search results keep the relay ranking', () async {
+      // The relay ranks the exact name first; alphabetizing would move
+      // "Abe Wes" above "Wes".
+      final session = _DirectoryFakeRelaySession(
+        profileEvents: [profile('wes', 'Wes'), profile('abe', 'Abe Wes')],
+      );
+      final container = buildContainer(session);
+      addTearDown(container.dispose);
+
+      final results = await container.read(
+        relayDirectorySearchProvider('wes').future,
+      );
+      expect(results.map((user) => user.label), ['Wes', 'Abe Wes']);
+      final found = await container
+          .read(channelActionsProvider)
+          .searchUsers('wes');
+      expect(found.map((user) => user.label), ['Wes', 'Abe Wes']);
+      final browsed = await container.read(relayDirectoryUsersProvider.future);
+      expect(browsed.map((user) => user.label), ['Abe Wes', 'Wes']);
+    });
+
     test('cached search families are released once unlistened', () async {
       final session = _DirectoryFakeRelaySession(
         profileEvents: [profile('alice', 'Alice')],
@@ -850,10 +871,19 @@ class _DirectoryFakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (filters.any((filter) => filter.search != null)) {
-      searchQueryCount++;
-    } else {
-      directoryQueryCount++;
+      throw StateError('name search must use searchProfiles');
     }
+    directoryQueryCount++;
+    return profileEvents;
+  }
+
+  @override
+  Future<List<NostrEvent>> searchProfiles(
+    String query, {
+    int limit = 50,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    searchQueryCount++;
     return profileEvents;
   }
 
