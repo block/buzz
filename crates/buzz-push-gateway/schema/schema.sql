@@ -4,8 +4,11 @@
 -- dedicated database, outside relay community tenancy. This directory declares
 -- its end state; `../migrations/` remains the incremental path the gateway
 -- binary applies at startup.
--- `src/postgres/desired_schema_postgres_tests.rs` proves the two produce the
--- same catalog.
+-- `src/postgres/desired_schema_postgres_tests.rs` proves that, applied through
+-- `pgschema`, the two produce the same `public` tables, columns, table options,
+-- constraints, and indexes. That is not full SchemaBot support: the inline FK
+-- in `push_gateway_delegations.sql` must be revisited before SchemaBot adopts
+-- this schema.
 --
 -- `tables/public/<table>.sql` declares one table per file: its CREATE TABLE
 -- and the CREATE INDEX statements on it, the one-table-per-file shape SchemaBot

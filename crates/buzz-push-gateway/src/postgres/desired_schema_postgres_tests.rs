@@ -2,6 +2,7 @@
 //! shape SchemaBot reads; `migrations/` is the incremental path the binary
 //! applies at startup. These tests keep the two from drifting apart.
 use super::*;
+use sqlx::postgres::PgConnectOptions;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -116,8 +117,13 @@ fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
 /// nullability, identity, generation, collation; keyed by name, since
 /// migrations drop and append columns), table options, constraints, and index
 /// shapes including per-key `indoption`. Neither side may hold functions,
-/// triggers, policies, views, sequences, or user types. The whole catalog is
-/// compared, so a new migration that is not mirrored in `schema/` fails here.
+/// triggers, policies, views, sequences, or user types. So an unmirrored
+/// migration that changes `public` tables, columns, table options,
+/// constraints, or indexes fails here. Data-only migrations and objects
+/// outside `public` (other schemas, roles, database settings) are not
+/// compared. This proves equivalence under `pgschema`, not full SchemaBot
+/// support: the inline FK in `push_gateway_delegations.sql` must be revisited
+/// before SchemaBot adopts this schema.
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
 async fn desired_state_schema_matches_migrations() {
@@ -183,123 +189,178 @@ async fn desired_state_schema_matches_migrations() {
             WHERE n.nspname = 'public' AND ty.typtype IN ('d', 'e', 'r', 'm') \
         ORDER BY 1, 2";
 
+    // pgschema takes discrete connection flags. `PgConnectOptions` decodes the
+    // URL the way the gateway does, including a Unix-socket host, which
+    // pgschema accepts as a socket directory in `--host` like libpq does.
     let base_url = std::env::var("BUZZ_TEST_DATABASE_URL").expect("test database URL");
-    let url = url::Url::parse(&base_url).expect("parse test database URL");
-    let host = url.host_str().expect("database host").to_owned();
-    let port = url.port().unwrap_or(5432).to_string();
-    let user = url.username().to_owned();
-    let password = url
+    let options: PgConnectOptions = base_url.parse().expect("parse test database URL");
+    let host = match options.get_socket() {
+        Some(dir) => dir.to_str().expect("socket directory utf-8").to_owned(),
+        None => options.get_host().to_owned(),
+    };
+    let password = url::Url::parse(&base_url)
+        .expect("parse test database URL")
         .password()
-        .map(str::to_owned)
+        .map(|encoded| {
+            percent_encoding::percent_decode_str(encoded)
+                .decode_utf8()
+                .expect("database password utf-8")
+                .into_owned()
+        })
         .or_else(|| std::env::var("PGPASSWORD").ok())
         .unwrap_or_default();
-    let admin = PgPool::connect(&base_url)
+    let connection = PgschemaConnection {
+        host,
+        port: options.get_port().to_string(),
+        user: options.get_username().to_owned(),
+        password,
+    };
+    let admin = PgPool::connect_with(options.clone())
         .await
         .expect("connect admin database");
-    let probe_url = |db: &str| {
-        let mut probe = url.clone();
-        probe.set_path(db);
-        probe.to_string()
-    };
 
     let suffix = Uuid::new_v4().simple();
-    let desired_db = format!("push_gateway_desired_{suffix}");
-    let migrated_db = format!("push_gateway_migrated_{suffix}");
-    for db in [&desired_db, &migrated_db] {
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {db}")))
+    let probes = [
+        format!("push_gateway_desired_{suffix}"),
+        format!("push_gateway_migrated_{suffix}"),
+    ];
+    // Run the comparison in its own task so a failed assertion, pgschema run
+    // or probe setup still reaches the cleanup below; the task's panic is
+    // re-raised unchanged afterwards.
+    let outcome = tokio::spawn(compare_probes(
+        admin.clone(),
+        options,
+        connection,
+        probes.clone(),
+    ))
+    .await;
+    for db in &probes {
+        let dropped = sqlx::query(AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {db} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
+        match (dropped, &outcome) {
+            (Ok(_), _) => {}
+            (Err(error), Ok(())) => panic!("drop probe database {db}: {error}"),
+            (Err(error), Err(_)) => eprintln!("could not drop probe database {db}: {error}"),
+        }
+    }
+    if let Err(failure) = outcome {
+        std::panic::resume_unwind(failure.into_panic());
+    }
+
+    struct PgschemaConnection {
+        host: String,
+        port: String,
+        user: String,
+        password: String,
+    }
+
+    async fn compare_probes(
+        admin: PgPool,
+        options: PgConnectOptions,
+        connection: PgschemaConnection,
+        [desired_db, migrated_db]: [String; 2],
+    ) {
+        // `template0` so neither probe inherits objects from `template1`.
+        for db in [&desired_db, &migrated_db] {
+            sqlx::query(AssertSqlSafe(format!(
+                "CREATE DATABASE {db} TEMPLATE template0"
+            )))
             .execute(&admin)
             .await
             .expect("create probe database");
-    }
+        }
 
-    let pgschema = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/pgschema");
-    let schema_file = schema_dir().join("schema.sql");
-    let apply = std::process::Command::new(&pgschema)
-        .args([
-            "apply",
-            "--auto-approve",
-            "--file",
-            schema_file.to_str().expect("schema path utf-8"),
-            "--host",
-            &host,
-            "--port",
-            &port,
-            "--user",
-            &user,
-            "--password",
-            &password,
-            "--db",
-            &desired_db,
-            "--plan-host",
-            &host,
-            "--plan-port",
-            &port,
-            "--plan-user",
-            &user,
-            "--plan-password",
-            &password,
-            "--plan-db",
-            &desired_db,
-        ])
-        .output()
-        .expect("run bin/pgschema apply (hermit env required)");
-    assert!(
-        apply.status.success(),
-        "pgschema apply failed: {}\n{}",
-        String::from_utf8_lossy(&apply.stdout),
-        String::from_utf8_lossy(&apply.stderr),
-    );
-
-    let desired = PgPool::connect(&probe_url(&desired_db))
-        .await
-        .expect("connect desired-state probe");
-    let migrated = PgPool::connect(&probe_url(&migrated_db))
-        .await
-        .expect("connect migrated probe");
-    GATEWAY_MIGRATOR
-        .run(&migrated)
-        .await
-        .expect("apply gateway migrations");
-
-    let declared: BTreeSet<String> = catalog(&desired, TABLES)
-        .await
-        .into_iter()
-        .filter_map(|row| row.into_iter().next().flatten())
-        .collect();
-    let served: BTreeSet<String> = GATEWAY_TABLES.iter().map(|t| t.to_string()).collect();
-    assert_eq!(
-        declared, served,
-        "schema/ must declare exactly GATEWAY_TABLES, the set readiness probes and \
-         runtime grants cover"
-    );
-    for pool in [&desired, &migrated] {
-        assert_eq!(
-            catalog(pool, NON_TABLE_OBJECTS).await,
-            Rows::new(),
-            "the gateway schema holds only tables and indexes"
+        let PgschemaConnection {
+            host,
+            port,
+            user,
+            password,
+        } = &connection;
+        let pgschema = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/pgschema");
+        let schema_file = schema_dir().join("schema.sql");
+        let apply = std::process::Command::new(&pgschema)
+            .args([
+                "apply",
+                "--auto-approve",
+                "--file",
+                schema_file.to_str().expect("schema path utf-8"),
+                "--host",
+                host,
+                "--port",
+                port,
+                "--user",
+                user,
+                "--password",
+                password,
+                "--db",
+                &desired_db,
+                "--plan-host",
+                host,
+                "--plan-port",
+                port,
+                "--plan-user",
+                user,
+                "--plan-password",
+                password,
+                "--plan-db",
+                &desired_db,
+            ])
+            .output()
+            .expect("run bin/pgschema apply (hermit env required)");
+        assert!(
+            apply.status.success(),
+            "pgschema apply failed: {}\n{}",
+            String::from_utf8_lossy(&apply.stdout),
+            String::from_utf8_lossy(&apply.stderr),
         );
-    }
-    for (what, sql) in [
-        ("table set", TABLES),
-        ("column", COLUMNS),
-        ("table option", TABLE_OPTIONS),
-        ("constraint", CONSTRAINTS),
-        ("index", INDEXES),
-    ] {
-        assert_eq!(
-            catalog(&desired, sql).await,
-            catalog(&migrated, sql).await,
-            "{what} parity mismatch: crates/buzz-push-gateway/schema/ has drifted from \
-             migrations/; update the table file to the post-migration end state"
-        );
-    }
 
-    desired.close().await;
-    migrated.close().await;
-    for db in [desired_db, migrated_db] {
-        sqlx::query(AssertSqlSafe(format!("DROP DATABASE {db} WITH (FORCE)")))
-            .execute(&admin)
+        let desired = PgPool::connect_with(options.clone().database(&desired_db))
             .await
-            .expect("drop probe database");
+            .expect("connect desired-state probe");
+        let migrated = PgPool::connect_with(options.database(&migrated_db))
+            .await
+            .expect("connect migrated probe");
+        GATEWAY_MIGRATOR
+            .run(&migrated)
+            .await
+            .expect("apply gateway migrations");
+
+        let declared: BTreeSet<String> = catalog(&desired, TABLES)
+            .await
+            .into_iter()
+            .filter_map(|row| row.into_iter().next().flatten())
+            .collect();
+        let served: BTreeSet<String> = GATEWAY_TABLES.iter().map(|t| t.to_string()).collect();
+        assert_eq!(
+            declared, served,
+            "schema/ must declare exactly GATEWAY_TABLES, the set readiness probes and \
+             runtime grants cover"
+        );
+        for pool in [&desired, &migrated] {
+            assert_eq!(
+                catalog(pool, NON_TABLE_OBJECTS).await,
+                Rows::new(),
+                "the gateway schema holds only tables and indexes"
+            );
+        }
+        for (what, sql) in [
+            ("table set", TABLES),
+            ("column", COLUMNS),
+            ("table option", TABLE_OPTIONS),
+            ("constraint", CONSTRAINTS),
+            ("index", INDEXES),
+        ] {
+            assert_eq!(
+                catalog(&desired, sql).await,
+                catalog(&migrated, sql).await,
+                "{what} parity mismatch: crates/buzz-push-gateway/schema/ has drifted from \
+                 migrations/; update the table file to the post-migration end state"
+            );
+        }
+        desired.close().await;
+        migrated.close().await;
     }
 }
