@@ -309,23 +309,22 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     echo "All compiled states and the accepted/rejected demo-name boundary verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
-# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
+# Builds real release sidecars and stages them via bundle-sidecars.sh, which
+# owns the sidecar list and rejects missing or empty binaries.
+# Target defaults to the host triple (previously aarch64-apple-darwin).
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
-desktop-release-build target="aarch64-apple-darwin":
+desktop-release-build target="":
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET={{target}}
-    mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    if [[ "$TARGET" != *windows* ]]; then
-        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
+    TARGET="{{target}}"
+    if [[ -z "$TARGET" ]]; then
+        TARGET=$(rustc -vV | sed -n 's|host: ||p')
     fi
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    read -ra CARGO_PACKAGE_ARGS <<< "$(./scripts/bundle-sidecars.sh --print-cargo-packages "$TARGET")"
+    cargo build --release --target "$TARGET" "${CARGO_PACKAGE_ARGS[@]}"
+    ./scripts/bundle-sidecars.sh "$TARGET"
     pnpm install
-    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target "$TARGET"
 
 # Build an unsigned named macOS demo DMG with isolated app and runtime identities.
 desktop-demo-build demo_name target="aarch64-apple-darwin":
@@ -359,8 +358,12 @@ desktop-demo-build demo_name target="aarch64-apple-darwin":
     codesign --force --deep --sign - "$APP_PATH"
     VOL_NAME="$DMG_VOLUME_NAME" ./desktop/scripts/package-macos-dmg.sh "$APP_PATH" "desktop/src-tauri/target/$TARGET/release/bundle/dmg/${DMG_FILE_STEM}_${VERSION}_${DMG_ARCH}.dmg"
 
+# Run sidecar bundling fail-closed contract test
+desktop-sidecars-test:
+    ./scripts/test-bundle-sidecars.sh
+
 # Run desktop checks suitable for CI / pre-push
-desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
+desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test desktop-sidecars-test
 
 # Seed deterministic channel data for desktop Playwright tests
 desktop-e2e-seed: _ensure-migrations
