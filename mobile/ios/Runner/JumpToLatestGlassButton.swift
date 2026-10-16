@@ -170,6 +170,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let button = NavigationGlassButton(type: .system)
   private let activityIndicator = UIActivityIndicatorView(style: .medium)
   private let swatchView = UIView()
+  private var labelForegroundColor: UIColor?
   private var buttonLabel: String?
   private var buttonIconName = "chevron.backward"
   private var contentIcon = "back"
@@ -357,6 +358,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
     button.isSelected = selected
+    // Resolve label contrast explicitly on the first selected frame as well as
+    // later selections; UIKit may retain the initial glass title foreground.
+    labelForegroundColor = selected
+      ? (interfaceStyle == .dark ? .black : .white)
+      : foregroundColor
     isBusy = busy
     if selected {
       button.accessibilityTraits.insert(.selected)
@@ -421,8 +427,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       )
       button.configuration?.titleLineBreakMode = .byClipping
       button.configuration?.titleTextAttributesTransformer =
-        UIConfigurationTextAttributesTransformer { incoming in
+        UIConfigurationTextAttributesTransformer { [weak self] incoming in
           var outgoing = incoming
+          if let foreground = self?.labelForegroundColor {
+            outgoing.foregroundColor = foreground
+          }
           let preferred = UIFont.preferredFont(forTextStyle: .subheadline)
           outgoing.font = UIFont.systemFont(
             ofSize: preferred.pointSize,

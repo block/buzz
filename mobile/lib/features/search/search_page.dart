@@ -181,7 +181,7 @@ class SearchPage extends HookConsumerWidget {
                         child: BuzzSearchField(
                           controller: textController,
                           focusNode: focusNode,
-                          hintText: 'Search messages, channels, and people',
+                          hintText: 'Search',
                           iconColor: searchPrimaryColor,
                           inputColor: searchPrimaryColor,
                           placeholderColor: searchPlaceholderColor,
@@ -281,7 +281,7 @@ class _SearchBody extends ConsumerWidget {
               ),
               const SizedBox(height: Grid.xs),
               Text(
-                'Search messages, channels, and people',
+                'Search',
                 textAlign: TextAlign.center,
                 style: context.textTheme.bodyMedium?.copyWith(
                   color: context.colors.onSurfaceVariant,

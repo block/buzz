@@ -549,6 +549,14 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Create channel'), findsOneWidget);
     expect(newChats, 1);
+    await tester.tap(find.byTooltip('Solo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Home'));
+    await tester.pumpAndSettle();
+    expect(find.text('Create channel').hitTestable(), findsNothing);
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pumpAndSettle();
+    expect(find.text('Create channel').hitTestable(), findsOneWidget);
   });
 }
 

@@ -70,7 +70,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
         navigationBarRight - launcherRight - _kQuickActionsHiddenOverlap;
 
     useEffect(() {
-      if (!visible && !newChatMode && quickActionsOpen.value) {
+      if ((!visible || newChatMode) && quickActionsOpen.value) {
         quickActionsOpen.value = false;
       }
       return null;
