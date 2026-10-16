@@ -4537,7 +4537,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn excluded_scoped_tables_are_live_control_plane_tables() {
-        const CONTROL_PLANE_TABLES: [&str; 6] = [
+        const COMMUNITY_SCOPED_CONTROL_PLANE_TABLES: [&str; 6] = [
             "community_deletion_approvals",
             "community_deletion_requests",
             "community_serving_write_leases",
@@ -4545,7 +4545,7 @@ mod postgres_tests {
             "product_feedback",
             "rate_limit_violations",
         ];
-        let control_plane = BTreeSet::from(CONTROL_PLANE_TABLES);
+        let control_plane = BTreeSet::from(COMMUNITY_SCOPED_CONTROL_PLANE_TABLES);
         let excluded = EXCLUDED_SCOPED_TABLES
             .iter()
             .copied()
@@ -4572,12 +4572,12 @@ mod postgres_tests {
         .expect("community provenance tables")
         .into_iter()
         .collect();
-        for table in CONTROL_PLANE_TABLES {
+        for table in COMMUNITY_SCOPED_CONTROL_PLANE_TABLES {
             assert!(live.contains(table), "stale exclusion {table}");
         }
         let accounted = EXPECTED_SCOPED_TABLES
             .iter()
-            .chain(CONTROL_PLANE_TABLES.iter())
+            .chain(COMMUNITY_SCOPED_CONTROL_PLANE_TABLES.iter())
             .map(|table| (*table).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(live, accounted);
