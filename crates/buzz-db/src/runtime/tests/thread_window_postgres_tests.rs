@@ -224,7 +224,7 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
         .unwrap();
 
     // Model an ingestion transaction already holding the table's writer lock.
-    // It stays held through every control: releasing it would hide the convoy.
+    // It stays held through the 0049 index controls that this test exercises.
     let mut writer = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE thread_metadata IN ROW EXCLUSIVE MODE")
         .execute(&mut *writer)
@@ -270,8 +270,10 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
         .await
         .unwrap();
 
-    // Also bind the public migrator: the advisory schema/destruction lock,
-    // ledger write and post-migration catalog checks must work with ingestion.
+    // Later migrations include table DDL such as the universal-fence trigger
+    // retirement, which correctly waits for writers. Release this writer after
+    // proving 0049 does not queue, then validate the full public migrator.
+    writer.rollback().await.unwrap();
     let production_result = migration::run_migrations(&pool).await;
     sqlx::query(insert)
         .bind(community)
@@ -296,7 +298,6 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
             .await
             .unwrap();
     drop(witness);
-    writer.rollback().await.unwrap();
     drop_scratch_db(&admin, pool, &name).await;
 
     assert!(

@@ -1971,8 +1971,8 @@ async fn finalize_push_inner(
     }
 
     // An already-running receive-pack may cross the durable fence after
-    // request admission. Revalidate immediately before object-store CAS; DB
-    // trigger fencing alone cannot roll back an S3 pointer mutation.
+    // request admission. Revalidate immediately before object-store CAS;
+    // database admission alone cannot roll back an S3 pointer mutation.
     let serving_write = match buzz_deletion::acquire_serving_write(
         &state.db,
         ctx.tenant.community(),

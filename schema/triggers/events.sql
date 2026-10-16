@@ -17,4 +17,3 @@ CREATE CONSTRAINT TRIGGER events_created_at_floor
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION events_created_at_floor_guard();
-SELECT attach_community_write_fence('events');

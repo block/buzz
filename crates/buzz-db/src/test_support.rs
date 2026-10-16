@@ -8,8 +8,9 @@ pub(crate) fn database_url() -> String {
         .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned())
 }
 
-/// One-session fixture that bypasses ordinary write-fence triggers while
-/// retaining application admission. Communities are active, quiescing, fenced.
+/// One-session fixture with ordinary triggers disabled, so application
+/// admission is the only community write fence it exercises (as it is in
+/// production after migration 0066). Communities are active, quiescing, fenced.
 pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 3]) {
     use buzz_core::CommunityId;
     use uuid::Uuid;
@@ -46,13 +47,6 @@ pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 
         .await
         .expect("read replication role");
     assert_eq!(role, "replica");
-    // A raw write to the fenced tenant proves the DB backstop is bypassed.
-    sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
-        .bind(communities[2].as_uuid())
-        .bind(vec![0xfe_u8; 32])
-        .execute(pool)
-        .await
-        .expect("raw fenced insert succeeds with triggers disabled");
     (db, communities)
 }
 
@@ -189,7 +183,7 @@ pub(crate) async fn quiesce_community_for_tests(
 }
 
 /// Whether `error` is the community-admission rejection taken at transaction
-/// entry, as opposed to a later commit-time trigger rejection.
+/// entry, as opposed to a later database constraint rejection.
 pub(crate) fn is_admission_rejection(error: &crate::DbError) -> bool {
     matches!(error, crate::DbError::AccessDenied(message) if message.contains("write-fenced (quiescing)"))
 }

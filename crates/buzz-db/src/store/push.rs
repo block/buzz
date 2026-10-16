@@ -2660,10 +2660,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn matcher_claim_skips_quiescing_tenant_while_active_bystanders_progress() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue")
-            .execute(&pool)
-            .await
-            .expect("drain active matcher queue");
         let active_a = make_community(&pool).await;
         let target = make_community(&pool).await;
         let active_x = make_community(&pool).await;
@@ -2690,10 +2686,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn exhausted_match_reaper_skips_quiescing_tenant_and_reaps_active_bystanders() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue")
-            .execute(&pool)
-            .await
-            .expect("drain active matcher queue");
         let active_a = make_community(&pool).await;
         let target = make_community(&pool).await;
         let active_x = make_community(&pool).await;

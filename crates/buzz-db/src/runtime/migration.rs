@@ -709,7 +709,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 64);
+        assert_eq!(migrations.len(), 65);
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[59].version, 60);
@@ -729,6 +729,7 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE FUNCTION profile_name_fields"));
+        assert_eq!(migrations[64].version, 66);
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -1181,6 +1182,32 @@ mod postgres_tests {
         assert!(deletion.contains("CREATE FUNCTION attach_community_write_fence"));
         assert!(deletion.contains("community_write_fence_excluded_table"));
         assert!(deletion.contains("CREATE FUNCTION enforce_community_tombstone"));
+        let retirement = migrations
+            .iter()
+            .find(|migration| migration.version == 66)
+            .expect("retirement migration 0066")
+            .sql
+            .as_str();
+        assert!(retirement.starts_with("SET LOCAL lock_timeout = '5s';"));
+        for table in crate::deletion::EXPECTED_SCOPED_TABLES {
+            assert!(
+                retirement.contains(&format!(
+                    "DROP TRIGGER IF EXISTS community_write_fence_{table} ON {table};"
+                )),
+                "0066 must retire the universal fence on {table}"
+            );
+        }
+        for signature in [
+            "attach_community_write_fence(REGCLASS)",
+            "enforce_community_write_fence()",
+            "assert_community_write_allowed(UUID)",
+            "community_write_allowed(UUID)",
+            "community_write_fence_excluded_table(NAME)",
+        ] {
+            assert!(retirement.contains(&format!("DROP FUNCTION {signature};")));
+        }
+        assert!(!retirement.contains("DROP FUNCTION community_deletion_lock_key"));
+        assert!(!retirement.contains("DROP FUNCTION enforce_community_tombstone"));
         assert!(deletion.contains("community tombstones are permanent"));
         assert!(deletion.contains("SET LOCAL lock_timeout = '5s'"));
         assert!(deletion.contains("'active', 'quiescing', 'fenced', 'tombstone'"));
@@ -1423,13 +1450,6 @@ mod postgres_tests {
                 "schema.sql must declare {index_shape}"
             );
         }
-        // schema.sql keeps the restored (pre-0041) deletion exclusions and also
-        // leaves the deployment-global listener outbox outside tenant fencing.
-        assert!(
-            desired_schema
-                .contains("'rate_limit_violations', 'operator_listener_outbox'\n    ]::TEXT[])"),
-            "schema.sql must exclude the deployment-global listener outbox from tenant fencing"
-        );
         assert_eq!(migrations[51].version, 52);
         assert!(migrations[51]
             .sql
@@ -1993,8 +2013,7 @@ mod postgres_tests {
     /// Compares parsed statements, not substrings: every deletion control-
     /// plane table, function, trigger, and index 0028 creates must exist in
     /// schema.sql with an identical normalized definition; every operator-
-    /// global registry row 0028 inserts must be inserted by schema.sql; the
-    /// write-fence attachment target sets must be equal; and every column
+    /// global registry row 0028 inserts must be inserted by schema.sql; every column
     /// 0028 adds to `communities` must exist in the desired-state
     /// `communities` table. A desired-state bootstrap that passes this test
     /// cannot silently omit part of the deletion surface the way the
@@ -2013,7 +2032,6 @@ mod postgres_tests {
             triggers: BTreeMap<String, String>,
             indexes: BTreeSet<String>,
             registry_rows: BTreeSet<(String, String)>,
-            fence_attachments: BTreeSet<String>,
             communities_added_columns: BTreeSet<String>,
         }
 
@@ -2082,14 +2100,6 @@ mod postgres_tests {
                         surface.communities_added_columns.insert(column);
                     }
                 }
-                if let Some(position) = normalized.find("attach_community_write_fence('") {
-                    let target = normalized[position + "attach_community_write_fence('".len()..]
-                        .split('\'')
-                        .next()
-                        .expect("fence attachment target")
-                        .to_owned();
-                    surface.fence_attachments.insert(target);
-                }
             }
             surface
         }
@@ -2118,7 +2128,6 @@ mod postgres_tests {
             "0029 deletion control plane must define exactly the known tables: {:?}",
             migration.tables.keys().collect::<Vec<_>>()
         );
-        assert!(!migration.fence_attachments.is_empty());
         assert!(!migration.registry_rows.is_empty());
 
         for (table, definition) in &migration.tables {
@@ -2171,13 +2180,23 @@ mod postgres_tests {
             );
         }
         for (function, definition) in &migration.functions {
+            if [
+                "community_write_fence_excluded_table",
+                "community_write_allowed",
+                "assert_community_write_allowed",
+                "enforce_community_write_fence",
+                "attach_community_write_fence",
+            ]
+            .contains(&function.as_str())
+            {
+                assert!(!schema.functions.contains_key(function));
+                continue;
+            }
             let in_schema = schema
                 .functions
                 .get(function)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion function {function}"));
-            if function != "community_write_fence_excluded_table"
-                && function != "prevent_community_deletion_request_retargeting"
-            {
+            if function != "prevent_community_deletion_request_retargeting" {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {function}() drifted from migration 0029"
@@ -2233,9 +2252,6 @@ mod postgres_tests {
                 "schema.sql is missing operator-global registry row {row:?}"
             );
         }
-        let mut expected_fences = migration.fence_attachments.clone();
-        expected_fences.remove("product_feedback");
-        expected_fences.remove("rate_limit_violations");
         let personal = surface(
             MIGRATOR
                 .iter()
@@ -2289,12 +2305,6 @@ mod postgres_tests {
                 "personal read table {table} differs"
             );
         }
-        expected_fences.extend(personal.fence_attachments);
-        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
-        assert_eq!(
-            expected_fences, schema.fence_attachments,
-            "write-fence attachment targets differ after recovery policy"
-        );
 
         // 0029's ALTER TABLE additions are expressed inline by the
         // desired-state `communities` definition; require the columns to
@@ -2990,164 +3000,70 @@ mod postgres_tests {
             search_expression.contains("ELSE NULL::tsvector"),
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
+    }
 
-        let active_a = uuid::Uuid::new_v4();
-        let active_b = uuid::Uuid::new_v4();
-        let to_fence = uuid::Uuid::new_v4();
-        for (community, label) in [
-            (active_a, "active-a"),
-            (active_b, "active-b"),
-            (to_fence, "to-fence"),
-        ] {
-            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-                .bind(community)
-                .bind(format!("late-fence-{label}-{}.example", community.simple()))
-                .execute(&pool)
-                .await
-                .expect("insert late-table test community");
-        }
-        sqlx::query(
-            "CREATE TABLE late_created_scoped (\
-                 community_id UUID NOT NULL, id BIGINT PRIMARY KEY, value TEXT NOT NULL\
-             )",
-        )
-        .execute(&pool)
-        .await
-        .expect("create late scoped table");
-        sqlx::query("SELECT attach_community_write_fence('late_created_scoped'::regclass)")
-            .execute(&pool)
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrated_catalog_retires_universal_fences_but_keeps_deletion_guards() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        let retirement = MIGRATOR
+            .iter()
+            .find(|m| m.description == "retire community write fence")
+            .expect("fence retirement migration is embedded")
+            .version;
+        MIGRATOR
+            .run_to(retirement - 1, &pool)
             .await
-            .expect("attach late create fence");
-        sqlx::query("CREATE TABLE late_altered_scoped (id BIGINT PRIMARY KEY)")
-            .execute(&pool)
+            .expect("apply pre-retirement migrations");
+        let store = crate::deletion::DeletionStore::new(pool.clone());
+        store
+            .validate_serving_catalog()
             .await
-            .expect("create table before late alter");
-        sqlx::query("ALTER TABLE late_altered_scoped ADD COLUMN community_id UUID NOT NULL")
-            .execute(&pool)
+            .expect("new runtime must accept pre-retirement catalog");
+        store
+            .validate_catalog()
             .await
-            .expect("add late community id");
-        sqlx::query("SELECT attach_community_write_fence('late_altered_scoped'::regclass)")
-            .execute(&pool)
-            .await
-            .expect("attach late alter fence");
-        let attached: Vec<String> = sqlx::query_scalar(
-            "SELECT c.relname FROM pg_trigger trigger \
-             JOIN pg_class c ON c.oid = trigger.tgrelid \
-             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
-             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
-               AND procedure.proname = 'enforce_community_write_fence' \
-               AND NOT trigger.tgisinternal ORDER BY c.relname",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read late trigger catalog");
-        assert_eq!(attached, vec!["late_altered_scoped", "late_created_scoped"]);
-        let malformed_fence_triggers: i64 = sqlx::query_scalar(
-            "SELECT count(*)::BIGINT FROM pg_trigger trigger \
-             JOIN pg_class c ON c.oid = trigger.tgrelid \
-             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
-             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
-               AND procedure.proname = 'enforce_community_write_fence' \
-               AND NOT trigger.tgisinternal \
-               AND (trigger.tgenabled <> 'O' OR (trigger.tgtype & 31) <> 31)",
+            .expect("deletion must accept pre-retirement catalog");
+        run_migrations(&pool).await.expect("apply all migrations");
+        let fence_triggers: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",
         )
         .fetch_one(&pool)
         .await
-        .expect("validate late trigger mode and operations");
-        assert_eq!(malformed_fence_triggers, 0);
-
-        sqlx::query(
-            "INSERT INTO late_created_scoped (community_id, id, value) \
-             VALUES ($1, 1, 'same'), ($2, 2, 'source-fenced'), \
-                    ($1, 3, 'destination-fenced'), ($1, 4, 'opposite-a'), \
-                    ($3, 5, 'opposite-b')",
-        )
-        .bind(active_a)
-        .bind(to_fence)
-        .bind(active_b)
-        .execute(&pool)
-        .await
-        .expect("seed late table while communities active");
-        sqlx::query("UPDATE late_created_scoped SET value = 'same-ok' WHERE id = 1")
-            .execute(&pool)
-            .await
-            .expect("same-tenant active update");
-        sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 1")
-            .bind(active_b)
-            .execute(&pool)
-            .await
-            .expect("active-to-active update");
-
-        let mut fence_connection = pool.acquire().await.expect("fence connection");
-        sqlx::query("BEGIN")
-            .execute(&mut *fence_connection)
-            .await
-            .expect("begin direct fence");
-        sqlx::query(
-            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
-                    set_config('buzz.deletion_fence_generation', '1', true)",
-        )
-        .bind(to_fence.to_string())
-        .execute(&mut *fence_connection)
-        .await
-        .expect("authorize direct fence");
-        sqlx::query(
-            "UPDATE communities SET deletion_state = 'fenced', \
-                    deletion_fence_generation = 1, archived_at = now() WHERE id = $1",
-        )
-        .bind(to_fence)
-        .execute(&mut *fence_connection)
-        .await
-        .expect("fence test destination");
-        sqlx::query("COMMIT")
-            .execute(&mut *fence_connection)
-            .await
-            .expect("commit direct fence");
-
-        let active_to_fenced =
-            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 3")
-                .bind(to_fence)
-                .execute(&pool)
+        .expect("count retired triggers");
+        assert_eq!(fence_triggers, 0);
+        let fence_functions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_proc WHERE proname = ANY($1)")
+                .bind(
+                    &[
+                        "attach_community_write_fence",
+                        "enforce_community_write_fence",
+                        "assert_community_write_allowed",
+                        "community_write_allowed",
+                        "community_write_fence_excluded_table",
+                    ][..],
+                )
+                .fetch_one(&pool)
                 .await
-                .expect_err("active to fenced destination must fail");
-        assert!(active_to_fenced
-            .to_string()
-            .contains("community write fenced"));
-        let fenced_to_active =
-            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 2")
-                .bind(active_a)
-                .execute(&pool)
-                .await
-                .expect_err("fenced source to active destination must fail");
-        assert!(fenced_to_active
-            .to_string()
-            .contains("community write fenced"));
-        let row_locations: Vec<(i64, uuid::Uuid)> = sqlx::query_as(
-            "SELECT id, community_id FROM late_created_scoped WHERE id IN (2, 3) ORDER BY id",
+                .expect("count retired functions");
+        assert_eq!(fence_functions, 0);
+        let retained: (bool, bool) = sqlx::query_as(
+            "SELECT to_regprocedure('community_deletion_lock_key(uuid)') IS NOT NULL, \
+             EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = 'communities_deletion_tombstone')",
         )
-        .fetch_all(&pool)
+        .fetch_one(&pool)
         .await
-        .expect("failed moves preserve row location");
-        assert_eq!(row_locations, vec![(2, to_fence), (3, active_a)]);
-
-        let move_a = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 4")
-            .bind(active_b)
-            .execute(&pool);
-        let move_b = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 5")
-            .bind(active_a)
-            .execute(&pool);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            let (a, b) = tokio::join!(move_a, move_b);
-            a.expect("opposite active move A");
-            b.expect("opposite active move B");
-        })
-        .await
-        .expect("opposite cross-tenant updates must not deadlock");
-
-        sqlx::query("DROP TABLE late_created_scoped, late_altered_scoped")
-            .execute(&pool)
+        .expect("read retained guards");
+        assert_eq!(retained, (true, true));
+        store
+            .validate_serving_catalog()
             .await
-            .expect("drop late-table fixtures");
+            .expect("new code must boot against migrated catalog");
+        store
+            .validate_catalog()
+            .await
+            .expect("deletion catalog must accept post-retirement catalog");
     }
 
     /// Verify migration 0044 applies cleanly against a DB that has rows in

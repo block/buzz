@@ -489,21 +489,17 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 - Approval tokens: `create_approval` receives the raw token and hashes it internally with SHA-256.
 - DDL injection protection in partition manager: allowlist of table names + strict suffix/date validators.
 
-### Supported Writer Contract (transition state)
+### Supported Writer Contract
 
-The repository is moving toward a **supported-writer contract** where relay-owned
-write APIs provide the only supported mutation path for tenant data. The current
-shape is an explicit transition, not a flag day:
+Relay-owned write APIs provide the supported mutation path for tenant data:
 
-- **Trajectory:** converge from trigger/function/FK-enforced fencing toward
-  application-owned transaction protocols, while keeping existing DB backstops
-  in place until coverage and fleet gates are proven.
-- **Community fence (transition foundation):** runtime admission APIs now offer
-  one shared community deletion lock per transaction, while deletion lifecycle
-  transitions take the matching exclusive lock. A supported serving transaction
-  never spans communities. Serving leases use the same application admission.
-  Startup and deletion catalog validation tolerate the universal fence objects
-  being absent; inventories still record live fences for older executors.
+- **Community fence:** supported serving writers admit each tenant transaction
+  through the runtime API, which takes one shared community deletion lock and
+  checks active, undeleted state. Deletion lifecycle transitions take the
+  matching exclusive lock. A serving transaction never spans communities.
+  The universal per-table write-fence triggers and their functions have been
+  retired after writer coverage and fleet gates; the community tombstone guard
+  remains.
 - **Replica floor (transition foundation):** runtime now provides a shared
   replica-floor lock helper for compliant channel-event writers, and the writer
   probe handshake takes the exclusive counterpart before sampling `S`, scanning
@@ -511,19 +507,14 @@ shape is an explicit transition, not a flag day:
   sole token/fence-wall publication path; there is no separately persisted active
   floor cutoff. Commit-time trigger+GUC enforcement remains authoritative for all
   paths.
-- **Dual enforcement (current):** application-owned lock+precheck paths run in
-  front of the existing trigger/function enforcement; commit-time trigger checks
-  remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, after every pod tolerates their absence and no rollback below
-  that version is expected.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
 - **Unsupported shape:** direct owner SQL that bypasses supported transaction and
   lock protocols is not a supported write path.
-- **Fleet gates and reconciliation:** startup/fence probes verify guard catalog +
-  behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
-  the operational evidence path for rollout safety.
+- **Fleet gates and reconciliation:** startup probes verify the remaining guard
+  catalog and behavior, pgschema bootstraps run reconciliation, and lock/pool
+  metrics remain the operational evidence path for rollout safety.
 
 **Does NOT:** cache queries, implement connection pooling logic (delegated to sqlx), or make network calls outside Postgres.
 

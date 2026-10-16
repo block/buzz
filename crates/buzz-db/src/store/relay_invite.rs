@@ -114,9 +114,9 @@ pub async fn mint_relay_invite(
     let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
 
     // Mint a v2 opaque invite inside the same lifecycle gate as every other
-    // community-scoped database write. The trigger remains the final backstop,
-    // but this typed guard keeps a quiescing community from surfacing as an
-    // opaque SQLSTATE/HTTP 500 at the API boundary.
+    // community-scoped database write. The app-side guard is the community
+    // fence: it holds the shared deletion lock and refuses quiescing writes
+    // before the insert.
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
