@@ -119,9 +119,9 @@ class FakeRelay {
         reqs.add(message);
         final subId = message[1] as String;
         final filters = message.skip(2).cast<Map<String, dynamic>>().toList();
-        socket._live[subId] = filters;
         final history = _query(filters);
         if (history == null) return;
+        socket._live[subId] = filters;
         scheduleMicrotask(() {
           for (final event in history) {
             socket._reply(['EVENT', subId, event.toJson()]);
@@ -168,7 +168,7 @@ class FakeRelay {
   void _fanOut(NostrEvent event) {
     for (final socket in sockets) {
       for (final MapEntry(key: subId, value: filters) in socket._live.entries) {
-        if (filters.any((f) => _matches(f, event, live: true) ?? false)) {
+        if (filters.any((f) => _matches(f, event, live: true))) {
           socket._reply(['EVENT', subId, event.toJson()]);
         }
       }
@@ -179,16 +179,12 @@ class FakeRelay {
   /// answer. Each filter applies its own limit before the union, as the
   /// relay does.
   List<NostrEvent>? _query(List<Map<String, dynamic>> filters) {
+    if (!_answerable(filters)) return null;
     final result = <String, NostrEvent>{};
     for (final filter in filters) {
       final limit = filter['limit'] as int?;
-      final matches = <NostrEvent>[];
-      for (final event in stored) {
-        final match = _matches(filter, event);
-        if (match == null) return null;
-        if (match) matches.add(event);
-      }
-      matches.sort(_newestFirst);
+      final matches = stored.where((e) => _matches(filter, e)).toList()
+        ..sort(_newestFirst);
       for (final event in limit == null ? matches : matches.take(limit)) {
         result[event.id] = event;
       }
@@ -196,19 +192,26 @@ class FakeRelay {
     return result.values.toList()..sort(_newestFirst);
   }
 
-  /// NIP-01 matching; null (recorded) for a filter key it does not implement.
-  bool? _matches(
+  /// Whether [_matches] implements every key in [filters]; records why not.
+  /// Checked before matching, so an empty store cannot hide it.
+  bool _answerable(List<Map<String, dynamic>> filters) {
+    final unknown = {
+      for (final filter in filters)
+        ...filter.keys.where(
+          (key) => !_filterKeys.contains(key) && !key.startsWith('#'),
+        ),
+    };
+    if (unknown.isEmpty) return true;
+    unanswerable.add('filter keys ${unknown.toList()}');
+    return false;
+  }
+
+  /// NIP-01 matching for a filter [_answerable] accepted.
+  bool _matches(
     Map<String, dynamic> filter,
     NostrEvent event, {
     bool live = false,
   }) {
-    final unknown = filter.keys.where(
-      (key) => !_filterKeys.contains(key) && !key.startsWith('#'),
-    );
-    if (unknown.isNotEmpty) {
-      unanswerable.add('filter keys ${unknown.toList()}');
-      return null;
-    }
     if (!live && filter['limit'] == 0) return false;
     bool allows(String key, Object value) =>
         (filter[key] as List?)?.contains(value) ?? true;
@@ -263,11 +266,12 @@ class FakeRelay {
       for (final MapEntry(:key, :value) in filter.entries)
         if (!_windowKeys.contains(key)) key: value,
     };
+    if (!_answerable([base])) return null;
     final rows = <NostrEvent>[];
     for (final event in stored) {
-      final match = _matches(base, event);
-      if (match == null) return null;
-      if (!match || event.threadReference.parentId != null) continue;
+      if (!_matches(base, event) || event.threadReference.parentId != null) {
+        continue;
+      }
       // Rows strictly after the cursor in `created_at DESC, id ASC` order.
       if (until != null &&
           beforeId != null &&
