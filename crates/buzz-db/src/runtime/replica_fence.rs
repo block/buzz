@@ -866,7 +866,10 @@ async fn sample_writer(
         //    prepared they have left `pg_stat_activity` but can still commit
         //    after the token. Their deferred floor guard already ran at PREPARE,
         //    so `pg_prepared_xacts.prepared` bounds their rows exactly like
-        //    `xact_start`; fold it into the same minimum.
+        //    `xact_start`; fold it into the same minimum. Only the retained
+        //    deferred trigger provides that PREPARE-time check: the insert-time
+        //    app guard runs earlier, and no app writer issues PREPARE TRANSACTION.
+        //    Dropping the trigger must keep this case covered.
         let row = sqlx::query(
             r#"
             SELECT

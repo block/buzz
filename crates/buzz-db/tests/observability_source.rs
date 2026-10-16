@@ -2492,24 +2492,13 @@ fn admin_seed_refuses_remote_database_before_invoking_psql() {
     std::fs::set_permissions(&psql, std::fs::Permissions::from_mode(0o755))
         .expect("executable stub");
     let witness = root.join("psql-was-invoked");
-    let cases = [
-        ("remote host", "shared-db.example.invalid", "", ""),
-        ("address override", "localhost", "192.0.2.1", ""),
-        ("service override", "localhost", "", "production"),
-        (
-            "socket-prefixed host list",
-            "/tmp,shared-db.example.invalid",
-            "",
-            "",
-        ),
-        ("host list", "localhost,shared-db.example.invalid", "", ""),
-    ];
-    let results = cases.map(|(name, host, address, service)| {
+    let run = |host: &str, address: &str, service: &str, database: &str| {
         let output = std::process::Command::new("/bin/bash")
             .arg(&script)
             .env("PGHOST", host)
             .env("PGHOSTADDR", address)
             .env("PGSERVICE", service)
+            .env("PGDATABASE", database)
             .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
             .env("SEED_PSQL_WITNESS", &witness)
             .output()
@@ -2518,9 +2507,71 @@ fn admin_seed_refuses_remote_database_before_invoking_psql() {
         if invoked {
             std::fs::remove_file(&witness).expect("clear witness");
         }
+        (output, invoked)
+    };
+    // Control: a local host with a plain database name reaches psql, so the
+    // refusals below come from the guard rather than an unrunnable fixture.
+    let (_, control_invoked) = run("localhost", "", "", "buzz");
+    let cases = [
+        ("remote host", "shared-db.example.invalid", "", "", ""),
+        ("address override", "localhost", "192.0.2.1", "", ""),
+        ("service override", "localhost", "", "production", ""),
+        (
+            "socket-prefixed host list",
+            "/tmp,shared-db.example.invalid",
+            "",
+            "",
+            "",
+        ),
+        (
+            "host list",
+            "localhost,shared-db.example.invalid",
+            "",
+            "",
+            "",
+        ),
+        (
+            "database URI",
+            "localhost",
+            "",
+            "",
+            "postgresql://buzz@shared-db.example.invalid/buzz",
+        ),
+        (
+            "short database URI",
+            "localhost",
+            "",
+            "",
+            "postgres://shared-db.example.invalid/buzz",
+        ),
+        (
+            "database key/value host",
+            "localhost",
+            "",
+            "",
+            "host=shared-db.example.invalid dbname=buzz",
+        ),
+        (
+            "database key/value hostaddr",
+            "localhost",
+            "",
+            "",
+            "hostaddr=192.0.2.1 dbname=buzz",
+        ),
+        (
+            "database key/value service",
+            "localhost",
+            "",
+            "",
+            "service=production",
+        ),
+    ];
+    let results = cases.map(|(name, host, address, service, database)| {
+        let (output, invoked) = run(host, address, service, database);
         (name, output, invoked)
     });
     std::fs::remove_dir_all(root).expect("remove scratch fixture");
+    assert!(control_invoked, "plain local target did not reach psql");
     for (name, output, invoked) in results {
         assert!(!invoked, "{name} reached psql");
         assert!(!output.status.success(), "{name} accepted");

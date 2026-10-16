@@ -31,6 +31,12 @@ case "${PGHOST}" in
     exit 1
     ;;
 esac
+# psql -d treats URI and key=value values as full connection strings that
+# override -h, so accept only a plain database name.
+if [[ ! "${PGDATABASE}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "error: admin seed requires a local PostgreSQL target with a plain PGDATABASE name" >&2
+  exit 1
+fi
 
 if command -v psql >/dev/null 2>&1; then
   run_psql() {
