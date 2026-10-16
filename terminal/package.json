@@ -1,0 +1,23 @@
+{
+  "name": "@buzz/terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "demo": "node src/main.ts --demo",
+    "check": "tsc --noEmit && biome check .",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "0.87.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "@xterm/headless": "5.5.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -2,6 +2,7 @@ packages:
   - "desktop"
   - "web"
   - "admin-web"
+  - "terminal"
 allowBuilds:
   esbuild: true
 overrides:

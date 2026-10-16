@@ -1,0 +1,32 @@
+name: Terminal
+on:
+  pull_request:
+    paths:
+      - 'terminal/**'
+      - 'crates/buzz-terminal-host/**'
+      - 'crates/buzz-cli/**'
+      - 'crates/buzz-core/**'
+      - 'crates/buzz-sdk/**'
+      - 'crates/buzz-ws-client/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'Justfile'
+      - '.github/workflows/terminal.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  terminal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: just terminal-check terminal-test
