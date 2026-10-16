@@ -42,8 +42,7 @@ class _MeEmptyState extends StatelessWidget {
             ConcentricSheetSurface(
               enabled: true,
               usesGlass: true,
-              glassTintColor: context.controlSurface,
-              color: context.controlSurface,
+              color: Colors.transparent,
               providesSheetSurface: false,
               padding: EdgeInsets.zero,
               minimumRadius: Radii.full,

@@ -52,6 +52,31 @@ void main() {
     await tester.pumpWidget(app(true));
     await tester.pumpAndSettle();
     expect(find.byIcon(BuzzIcons.edit), findsOneWidget);
+    final settled = tester.widget<Transform>(
+      find
+          .descendant(
+            of: find.byType(ComposeMorphIcon),
+            matching: find.byType(Transform),
+          )
+          .first,
+    );
+    expect(settled.transform.entry(1, 0), closeTo(1, 0.001));
+    expect(settled.transform.entry(0, 0), closeTo(0, 0.001));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(
+      tester
+          .widget<Transform>(
+            find
+                .descendant(
+                  of: find.byType(ComposeMorphIcon),
+                  matching: find.byType(Transform),
+                )
+                .first,
+          )
+          .transform
+          .entry(1, 0),
+      closeTo(1, 0.001),
+    );
     await tester.pumpWidget(app(false));
     await tester.pump(const Duration(milliseconds: 100));
     final reverse = tester.widget<Transform>(
@@ -62,7 +87,7 @@ void main() {
           )
           .first,
     );
-    expect(reverse.transform.entry(1, 0), lessThan(0));
+    expect(reverse.transform.entry(1, 0), inExclusiveRange(0, 1));
     await tester.pumpWidget(app(false, reduced: true));
     await tester.pump();
     expect(find.byIcon(BuzzIcons.plus), findsOneWidget);

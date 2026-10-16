@@ -13,7 +13,7 @@ class ComposeMorphIcon extends StatelessWidget {
   final bool compose;
   final Color color;
 
-  /// Includes the button surface in the same tilt and scale as its icon.
+  /// Includes the button surface in the same rotation and scale as its icon.
   final Widget Function(Widget icon)? surfaceBuilder;
 
   @override
@@ -27,24 +27,23 @@ class ComposeMorphIcon extends StatelessWidget {
         final progress = reduced ? (compose ? 1.0 : 0.0) : animatedProgress;
         final lift = math.sin(progress * math.pi);
         final Widget icon = progress == 0 || progress == 1
-            ? Icon(
-                progress == 0 ? BuzzIcons.plus : BuzzIcons.edit,
-                size: 24,
-                color: color,
+            ? Transform.rotate(
+                angle: -progress * math.pi / 2,
+                child: Icon(
+                  progress == 0 ? BuzzIcons.plus : BuzzIcons.edit,
+                  size: 24,
+                  color: color,
+                ),
               )
             : CustomPaint(
                 size: const Size.square(24),
                 painter: _ComposePainter(progress, color),
               );
-        return TweenAnimationBuilder<double>(
-          tween: Tween(end: compose ? 1 : -1),
-          duration: reduced ? Duration.zero : const Duration(milliseconds: 80),
-          builder: (context, direction, _) => Transform.rotate(
-            angle: direction * lift * math.pi / 2,
-            child: Transform.scale(
-              scale: 1 + 0.08 * lift,
-              child: surfaceBuilder?.call(icon) ?? icon,
-            ),
+        return Transform.rotate(
+          angle: progress * math.pi / 2,
+          child: Transform.scale(
+            scale: 1 + 0.08 * lift,
+            child: surfaceBuilder?.call(icon) ?? icon,
           ),
         );
       },
@@ -99,7 +98,7 @@ class _ComposePainter extends CustomPainter {
     canvas.save();
     canvas.scale(size.width / 24, size.height / 24);
     canvas.translate(12, 12);
-    canvas.rotate(progress * math.pi / 2);
+    // The whole button supplies the quarter-turn.
     final paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
