@@ -2,8 +2,9 @@
 //!
 //! A deployment that provisions communities under one host suffix (for
 //! example `<name>.communities.buzz.xyz`) binds each new community to a fixed
-//! issuer allowlist at creation time. This is a write-time rule only: runtime
-//! authorization reads the stored per-community rows, never this suffix.
+//! issuer allowlist at creation time. Runtime authorization reads the stored
+//! per-community rows, filtered by the same [`ProvisionBindingPolicy::is_bindable`]
+//! rule, so a row outside the suffix or on a reserved host never authorizes.
 //!
 //! Hosts whose `https://<host>` equals a configured issuer's command audience
 //! are *reserved*. Their community row may exist, but they never hold an
@@ -18,6 +19,10 @@ use buzz_core::tenant::normalize_host;
 pub const PROVISION_BINDING_ENV: &str = "BUZZ_NIP_FI_PROVISION_BINDING";
 /// Environment variable carrying the relay's issuer configs.
 pub const ISSUERS_ENV: &str = "BUZZ_NIP_FI_ISSUERS";
+/// Environment variable carrying the static enterprise community map.
+pub const COMMUNITIES_ENV: &str = "BUZZ_NIP_FI_COMMUNITIES";
+/// Longest issuer accepted, matching the binding table's `CHECK`.
+const MAX_ISSUER_BYTES: usize = 2_048;
 
 /// Invalid provisioning binding configuration. The message never echoes
 /// configured values.
@@ -40,13 +45,43 @@ struct IssuerJson {
     command_audiences: Vec<String>,
 }
 
+/// The field of one `BUZZ_NIP_FI_COMMUNITIES` entry this module needs.
+#[derive(serde::Deserialize)]
+struct CommunityJson {
+    canonical_uri: String,
+}
+
 /// Why a host cannot be bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BindRefusal {
     /// The host's audience equals a configured command audience.
+    #[error("host is reserved: it is a NIP-FI command audience")]
     ReservedHost,
+    /// The host is not exactly one label under the provisioning suffix.
+    #[error("host is not one label under the NIP-FI provisioning host suffix")]
+    OutsideSuffix,
     /// The issuer is not configured in `BUZZ_NIP_FI_ISSUERS`.
+    #[error("issuer is not configured in BUZZ_NIP_FI_ISSUERS")]
     UnknownIssuer,
+}
+
+/// The authority of a canonical community URI, or `None` unless the URI is
+/// exactly `https://<authority>` and the URL parser reserializes that authority
+/// byte-for-byte. The round trip rejects anything the parser would repair:
+/// whitespace, control characters, backslashes, uppercase, userinfo, path,
+/// query, fragment, a redundant default `:443`, and non-canonical IPv6.
+/// The authority must also already be in `normalize_host()` form, which
+/// rejects a final trailing dot and `:80`, so the Host map key equals the
+/// `aud` authority exactly and is never empty.
+pub fn canonical_authority(uri: &str) -> Option<&str> {
+    let authority = uri.strip_prefix("https://")?;
+    let parsed = url::Url::parse(uri).ok()?;
+    let host = parsed.host_str()?;
+    let reserialized = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    (reserialized == authority && normalize_host(authority) == authority).then_some(authority)
 }
 
 /// Parsed provisioning binding: host suffix, issuers bound to new communities
@@ -62,14 +97,41 @@ pub struct ProvisionBindingPolicy {
 impl ProvisionBindingPolicy {
     /// Read the policy from the environment. `Ok(None)` when
     /// `BUZZ_NIP_FI_PROVISION_BINDING` is unset or empty: no community gets a
-    /// binding at creation.
+    /// binding at creation. Whatever the NIP-FI mode, the suffix must not
+    /// cover a `BUZZ_NIP_FI_COMMUNITIES` host.
     pub fn from_env() -> Result<Option<Self>, ProvisionBindingError> {
         let binding = std::env::var(PROVISION_BINDING_ENV).unwrap_or_default();
         if binding.trim().is_empty() {
             return Ok(None);
         }
         let issuers = std::env::var(ISSUERS_ENV).unwrap_or_default();
-        Self::parse(&binding, &issuers).map(Some)
+        let policy = Self::parse(&binding, &issuers)?;
+        policy.reject_overlap(&std::env::var(COMMUNITIES_ENV).unwrap_or_default())?;
+        Ok(Some(policy))
+    }
+
+    /// Refuse a suffix that covers any host in the `BUZZ_NIP_FI_COMMUNITIES`
+    /// JSON, so the static enterprise map and database-bound communities
+    /// never overlap. Only each entry's `canonical_uri` is read; an unreadable
+    /// declaration fails closed because the check could not be trusted.
+    pub fn reject_overlap(&self, communities_json: &str) -> Result<(), ProvisionBindingError> {
+        if communities_json.trim().is_empty() {
+            return Ok(());
+        }
+        let fail =
+            |message: &str| ProvisionBindingError(format!("{PROVISION_BINDING_ENV}: {message}"));
+        let unreadable = || fail(&format!("{COMMUNITIES_ENV} hosts are unreadable"));
+        let entries: Vec<CommunityJson> =
+            serde_json::from_str(communities_json).map_err(|_| unreadable())?;
+        for entry in entries {
+            let host = canonical_authority(&entry.canonical_uri).ok_or_else(unreadable)?;
+            if host == self.host_suffix || host.ends_with(&format!(".{}", self.host_suffix)) {
+                return Err(fail(&format!(
+                    "host_suffix covers a {COMMUNITIES_ENV} host"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Parse the binding JSON against the issuer config JSON.
@@ -100,6 +162,16 @@ impl ProvisionBindingPolicy {
         }
         let configured_issuers: BTreeSet<String> =
             issuers.iter().map(|entry| entry.issuer.clone()).collect();
+        if binding
+            .authorized_issuers
+            .iter()
+            .chain(&configured_issuers)
+            .any(|issuer| issuer.is_empty() || issuer.len() > MAX_ISSUER_BYTES)
+        {
+            return Err(fail(&format!(
+                "every issuer must be 1 to {MAX_ISSUER_BYTES} bytes"
+            )));
+        }
         let command_audiences: BTreeSet<String> = issuers
             .into_iter()
             .flat_map(|entry| entry.command_audiences)
@@ -124,6 +196,11 @@ impl ProvisionBindingPolicy {
             configured_issuers,
             command_audiences,
         })
+    }
+
+    /// Issuers bound to every bindable new community.
+    pub fn authorized_issuers(&self) -> &[String] {
+        &self.authorized_issuers
     }
 
     /// The configured host suffix.
@@ -152,20 +229,40 @@ impl ProvisionBindingPolicy {
             .is_some_and(|label| !label.is_empty() && !label.contains('.') && !label.contains(':'))
     }
 
+    /// Whether `host` may hold an issuer binding: one label under the suffix
+    /// and not reserved. Creation, operator binds and the runtime read all
+    /// apply this one rule.
+    pub fn is_bindable(&self, host: &str) -> bool {
+        self.is_suffix_host(host) && !self.is_reserved(host)
+    }
+
     /// Issuers to bind to a newly created community at `host`: the authorized
-    /// issuers for a non-reserved one-label suffix host, otherwise none.
+    /// issuers for a bindable host, otherwise none.
     pub fn issuers_for_new_host(&self, host: &str) -> &[String] {
-        if self.is_suffix_host(host) && !self.is_reserved(host) {
+        if self.is_bindable(host) {
             &self.authorized_issuers
         } else {
             &[]
         }
     }
 
+    /// The stored `issuers` of `host` that may authorize: none unless the host
+    /// is bindable, and only issuers configured in `BUZZ_NIP_FI_ISSUERS`.
+    pub fn effective_issuers(&self, host: &str, mut issuers: Vec<String>) -> Vec<String> {
+        if !self.is_bindable(host) {
+            return Vec::new();
+        }
+        issuers.retain(|issuer| self.configured_issuers.contains(issuer));
+        issuers
+    }
+
     /// Check an explicit operator bind of `issuer` to `host`.
     pub fn check_bind(&self, host: &str, issuer: &str) -> Result<(), BindRefusal> {
         if self.is_reserved(host) {
             return Err(BindRefusal::ReservedHost);
+        }
+        if !self.is_suffix_host(host) {
+            return Err(BindRefusal::OutsideSuffix);
         }
         if !self.configured_issuers.contains(issuer) {
             return Err(BindRefusal::UnknownIssuer);
@@ -239,6 +336,53 @@ mod tests {
             policy.check_bind("acme.communities.buzz.xyz", OTHER),
             Ok(())
         );
+        for host in ["a.b.communities.buzz.xyz", "acme.example"] {
+            assert_eq!(
+                policy.check_bind(host, ISS),
+                Err(BindRefusal::OutsideSuffix),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn provision_binding_effective_issuers_need_a_bindable_host_and_configured_issuer() {
+        let policy = policy();
+        let stored = vec![ISS.to_string(), "https://unconfigured.example".to_string()];
+        assert_eq!(
+            policy.effective_issuers("acme.communities.buzz.xyz", stored.clone()),
+            [ISS]
+        );
+        for host in [
+            "communities.buzz.xyz",
+            "a.b.communities.buzz.xyz",
+            "acme.example",
+        ] {
+            assert!(
+                policy.effective_issuers(host, stored.clone()).is_empty(),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn provision_binding_rejects_a_suffix_covering_an_enterprise_host() {
+        let policy = policy();
+        let communities = |uri: &str| {
+            serde_json::json!([{"canonical_uri": uri, "authorized_issuers": [ISS]}]).to_string()
+        };
+        assert!(policy.reject_overlap("").is_ok());
+        assert!(policy
+            .reject_overlap(&communities("https://acme.example"))
+            .is_ok());
+        for json in [
+            communities("https://communities.buzz.xyz"),
+            communities("https://a.b.communities.buzz.xyz"),
+            communities("https://Acme.example"),
+            "not json".to_string(),
+        ] {
+            assert!(policy.reject_overlap(&json).is_err(), "{json}");
+        }
     }
 
     #[test]
@@ -257,6 +401,11 @@ mod tests {
             (binding("communities..xyz", &[ISS]), issuers()),
             (binding("", &[ISS]), issuers()),
             (binding("communities.buzz.xyz", &[ISS]), String::new()),
+            (binding("communities.buzz.xyz", &[""]), issuers()),
+            (
+                binding("communities.buzz.xyz", &[ISS]),
+                serde_json::json!([{"issuer": ISS}, {"issuer": "x".repeat(2049)}]).to_string(),
+            ),
             ("{\"host_suffix\": \"x\"}".to_string(), issuers()),
         ] {
             assert!(

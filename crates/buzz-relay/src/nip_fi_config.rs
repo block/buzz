@@ -13,6 +13,7 @@
 //! | `BUZZ_NIP_FI_ISSUERS` | If enforce | JSON array of issuer configs (see [`IssuerEnvConfig`]). |
 //! | `BUZZ_NIP_FI_COMMUNITIES` | If enforce | JSON array mapping each community's canonical URI to its authorized issuers (see [`CommunityEnvConfig`]). |
 //! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition limit on session lifetime. |
+//! | `BUZZ_NIP_FI_PROVISION_BINDING` | No | JSON `{"host_suffix", "authorized_issuers"}` binding communities created one label under the suffix; read in every mode (see [`buzz_auth::ProvisionBindingPolicy`]). |
 //!
 //! Each `BUZZ_NIP_FI_ISSUERS` entry also carries the S4 command-API fields.
 //! Enforce-mode startup fails if any issuer lacks the required ones:
@@ -33,6 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use buzz_auth::nip_fi::provision::canonical_authority;
 use buzz_auth::{
     validate_nip_fi_config, CommunityBinding, FreshnessClass, IssuerJwksConfig, IssuerPolicy,
     IssuerPolicyError, IssuerRegistry, JwksSourceContract, NipFiMode, NipFiStartupError,
@@ -219,69 +221,11 @@ impl NipFiCommunities {
 }
 
 /// Parse `BUZZ_NIP_FI_PROVISION_BINDING`, independent of `BUZZ_NIP_FI_MODE`.
-///
-/// Rejects a suffix that covers any `BUZZ_NIP_FI_COMMUNITIES` host, so the
-/// static enterprise map and database-bound communities never overlap. The
-/// hosts are read here rather than from [`NipFiRelayConfig`], whose map is
-/// empty when the mode does not evaluate.
+/// [`buzz_auth::ProvisionBindingPolicy::from_env`] also refuses a suffix that
+/// covers a `BUZZ_NIP_FI_COMMUNITIES` host, for `buzz-admin` too.
 pub fn parse_provision_binding() -> Result<Option<buzz_auth::ProvisionBindingPolicy>, ConfigError> {
-    let Some(policy) = buzz_auth::ProvisionBindingPolicy::from_env()
-        .map_err(|e| ConfigError::InvalidValue(e.to_string()))?
-    else {
-        return Ok(None);
-    };
-    let suffix = policy.host_suffix();
-    if enterprise_community_hosts()?
-        .iter()
-        .any(|host| host == suffix || host.ends_with(&format!(".{suffix}")))
-    {
-        return Err(ConfigError::InvalidValue(
-            "BUZZ_NIP_FI_PROVISION_BINDING: host_suffix covers a BUZZ_NIP_FI_COMMUNITIES host"
-                .to_string(),
-        ));
-    }
-    Ok(Some(policy))
-}
-
-/// The hosts declared in `BUZZ_NIP_FI_COMMUNITIES`, in any mode. Only the
-/// `canonical_uri` of each entry is checked; an unreadable declaration fails
-/// closed because the overlap check could not be trusted.
-fn enterprise_community_hosts() -> Result<Vec<String>, ConfigError> {
-    let raw = std::env::var("BUZZ_NIP_FI_COMMUNITIES").unwrap_or_default();
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let unreadable = || {
-        ConfigError::InvalidValue(
-            "BUZZ_NIP_FI_PROVISION_BINDING: BUZZ_NIP_FI_COMMUNITIES hosts are unreadable"
-                .to_string(),
-        )
-    };
-    let entries: Vec<CommunityEnvConfig> = serde_json::from_str(&raw).map_err(|_| unreadable())?;
-    entries
-        .iter()
-        .map(|entry| canonical_authority(&entry.canonical_uri).map(str::to_owned))
-        .collect::<Option<_>>()
-        .ok_or_else(unreadable)
-}
-
-/// The authority of a canonical community URI, or `None` unless the URI is
-/// exactly `https://<authority>` and the URL parser reserializes that authority
-/// byte-for-byte. The round trip rejects anything the parser would repair:
-/// whitespace, control characters, backslashes, uppercase, userinfo, path,
-/// query, fragment, a redundant default `:443`, and non-canonical IPv6.
-/// The authority must also already be in `normalize_host()` form, which
-/// rejects a final trailing dot and `:80`, so the Host map key equals the
-/// `aud` authority exactly and is never empty.
-fn canonical_authority(uri: &str) -> Option<&str> {
-    let authority = uri.strip_prefix("https://")?;
-    let parsed = url::Url::parse(uri).ok()?;
-    let host = parsed.host_str()?;
-    let reserialized = match parsed.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_owned(),
-    };
-    (reserialized == authority && normalize_host(authority) == authority).then_some(authority)
+    buzz_auth::ProvisionBindingPolicy::from_env()
+        .map_err(|e| ConfigError::InvalidValue(e.to_string()))
 }
 
 // ── Relay-level NIP-FI config ─────────────────────────────────────────────────
@@ -1459,6 +1403,34 @@ mod tests {
             );
             startup_with_provision_suffix(mode, "communities.buzz.xyz")
                 .unwrap_or_else(|e| panic!("{mode}: disjoint suffix must start: {e}"));
+        }
+    }
+
+    #[test]
+    fn provision_binding_off_mode_refuses_unreadable_enterprise_hosts() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let _binding = EnvGuard::new(&[buzz_auth::nip_fi::provision::PROVISION_BINDING_ENV]);
+        startup_with_provision_suffix("off", "communities.buzz.xyz").expect("valid start");
+        for communities in [
+            "not json".to_string(),
+            serde_json::json!([community_entry(
+                "https://A.relay.test",
+                &["https://issuer.test"]
+            )])
+            .to_string(),
+        ] {
+            std::env::set_var("BUZZ_NIP_FI_COMMUNITIES", &communities);
+            let err = crate::config::Config::from_env()
+                .map(|_| ())
+                .expect_err("unreadable enterprise hosts");
+            assert!(
+                err.to_string()
+                    .contains("BUZZ_NIP_FI_COMMUNITIES hosts are unreadable"),
+                "{communities}: {err}"
+            );
         }
     }
 

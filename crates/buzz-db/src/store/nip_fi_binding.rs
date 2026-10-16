@@ -10,6 +10,17 @@ use sqlx::{Postgres, Row, Transaction};
 
 use crate::{CommunityRecord, Db, Result};
 
+/// Outcome of [`Db::unbind_nip_fi_issuer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NipFiUnbind {
+    /// The issuer was removed.
+    Removed,
+    /// The issuer was not bound to the community.
+    NotBound,
+    /// The issuer is the community's last one and was kept.
+    LastIssuer,
+}
+
 /// A community's stored NIP-FI binding, as returned to the operator route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NipFiBindingRecord {
@@ -71,9 +82,20 @@ impl Db {
         Ok(inserted)
     }
 
-    /// Remove one issuer from a community. Returns whether a row was removed.
+    /// Remove one issuer from a community, refusing to remove its last one
+    /// unless `allow_last`.
+    ///
+    /// The bound rows are locked first, so two concurrent unbinds of a
+    /// community's two issuers cannot both succeed and leave it empty. An
+    /// empty community looks never-provisioned and the next backfill would
+    /// rebind it; archive or delete the community to stop it logging in.
     #[datastore_span(name = "unbind_nip_fi_issuer", system = "postgresql")]
-    pub async fn unbind_nip_fi_issuer(&self, community: CommunityId, issuer: &str) -> Result<bool> {
+    pub async fn unbind_nip_fi_issuer(
+        &self,
+        community: CommunityId,
+        issuer: &str,
+        allow_last: bool,
+    ) -> Result<NipFiUnbind> {
         let connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
@@ -83,16 +105,28 @@ impl Db {
         self.deletion_store()
             .guard_transaction(&mut tx, community)
             .await?;
-        let removed = sqlx::query(
-            "DELETE FROM community_nip_fi_issuers WHERE community_id = $1 AND issuer = $2",
+        let bound: Vec<String> = sqlx::query_scalar(
+            "SELECT issuer FROM community_nip_fi_issuers WHERE community_id = $1 FOR UPDATE",
         )
         .bind(community.as_uuid())
-        .bind(issuer)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        .fetch_all(&mut *tx)
+        .await?;
+        let outcome = if !bound.iter().any(|bound| bound == issuer) {
+            NipFiUnbind::NotBound
+        } else if bound.len() == 1 && !allow_last {
+            NipFiUnbind::LastIssuer
+        } else {
+            sqlx::query(
+                "DELETE FROM community_nip_fi_issuers WHERE community_id = $1 AND issuer = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(issuer)
+            .execute(&mut *tx)
+            .await?;
+            NipFiUnbind::Removed
+        };
         tx.commit().await?;
-        Ok(removed > 0)
+        Ok(outcome)
     }
 
     /// Read a community's binding by host, regardless of lifecycle state.
@@ -137,12 +171,16 @@ impl Db {
         .transpose()
     }
 
-    /// Non-deleted communities with no binding whose host ends in
-    /// `.<host_suffix>`. Callers apply the exact one-label rule.
+    /// Up to `limit` active communities with no binding whose host ends in
+    /// `.<host_suffix>` and sorts after `after`, in host order. Callers apply
+    /// the exact one-label rule. Archived communities are included on purpose:
+    /// unarchiving must not leave a community that cannot log in.
     #[datastore_span(name = "list_unbound_nip_fi_communities", system = "postgresql")]
     pub async fn list_unbound_nip_fi_communities(
         &self,
         host_suffix: &str,
+        after: &str,
+        limit: i64,
     ) -> Result<Vec<CommunityRecord>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
@@ -153,16 +191,20 @@ impl Db {
             r#"
             SELECT c.id, c.host
             FROM communities c
-            WHERE right(lower(c.host), length($1) + 1) = '.' || lower($1)
+            WHERE c.host COLLATE "C" > $2
+              AND right(lower(c.host), length($1) + 1) = '.' || lower($1)
               AND c.deletion_state = 'active'
               AND c.deleted_at IS NULL
               AND NOT EXISTS (
                   SELECT 1 FROM community_nip_fi_issuers b WHERE b.community_id = c.id
               )
-            ORDER BY c.host
+            ORDER BY c.host COLLATE "C"
+            LIMIT $3
             "#,
         )
         .bind(host_suffix)
+        .bind(after)
+        .bind(limit)
         .fetch_all(&mut *connection)
         .await?;
         rows.into_iter()
@@ -173,6 +215,53 @@ impl Db {
                 })
             })
             .collect()
+    }
+
+    /// Bind `issuers` to each of `communities` that is still active, in one
+    /// statement. Takes each community's shared deletion lock first, so a
+    /// community whose deletion has started is skipped rather than aborting
+    /// the batch. Returns the number of new rows.
+    #[datastore_span(name = "bind_nip_fi_issuers_to_active", system = "postgresql")]
+    pub async fn bind_nip_fi_issuers_to_active(
+        &self,
+        communities: &[CommunityId],
+        issuers: &[String],
+    ) -> Result<u64> {
+        if communities.is_empty() || issuers.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<uuid::Uuid> = communities.iter().map(|id| *id.as_uuid()).collect();
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = Transaction::begin(connection, None).await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock_shared(community_deletion_lock_key(id)) \
+             FROM unnest($1::uuid[]) AS id ORDER BY id",
+        )
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO community_nip_fi_issuers (community_id, issuer)
+            SELECT c.id, issuer
+            FROM communities c CROSS JOIN unnest($2::text[]) AS issuer
+            WHERE c.id = ANY($1)
+              AND c.deletion_state = 'active'
+              AND c.deleted_at IS NULL
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(&ids)
+        .bind(issuers)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(inserted)
     }
 
     /// The subset of `hosts` whose community holds at least one binding.
@@ -238,6 +327,73 @@ mod postgres_tests {
             .await
             .expect("lookup community")
             .is_some()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bind_to_active_skips_a_community_whose_deletion_started() {
+        let db = setup_db().await;
+        let deleting = db
+            .ensure_configured_community(&unique_host("deleting"))
+            .await
+            .expect("seed")
+            .id;
+        let control_host = unique_host("control");
+        let control = db
+            .ensure_configured_community(&control_host)
+            .await
+            .expect("seed")
+            .id;
+        crate::test_support::quiesce_community_for_tests(&db.pool, deleting).await;
+        assert_eq!(
+            db.bind_nip_fi_issuers_to_active(&[deleting, control], &issuers())
+                .await
+                .expect("a deleting community is skipped, not an error"),
+            1
+        );
+        assert_eq!(bound(&db, &control_host).await, Some(issuers()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unbind_refuses_the_last_issuer() {
+        let db = setup_db().await;
+        let host = unique_host("unbind");
+        let other = "https://other.example".to_string();
+        let community = db
+            .ensure_configured_community_with_nip_fi_issuers(
+                &host,
+                &[ISS.to_string(), other.clone()],
+            )
+            .await
+            .expect("seed")
+            .id;
+        assert_eq!(
+            db.unbind_nip_fi_issuer(community, "https://unbound.example", false)
+                .await
+                .expect("unbind unknown"),
+            NipFiUnbind::NotBound
+        );
+        assert_eq!(
+            db.unbind_nip_fi_issuer(community, &other, false)
+                .await
+                .expect("unbind"),
+            NipFiUnbind::Removed
+        );
+        assert_eq!(
+            db.unbind_nip_fi_issuer(community, ISS, false)
+                .await
+                .expect("unbind last"),
+            NipFiUnbind::LastIssuer
+        );
+        assert_eq!(bound(&db, &host).await, Some(issuers()));
+        assert_eq!(
+            db.unbind_nip_fi_issuer(community, ISS, true)
+                .await
+                .expect("unbind last when allowed"),
+            NipFiUnbind::Removed
+        );
+        assert_eq!(bound(&db, &host).await, Some(Vec::new()));
     }
 
     #[tokio::test]
@@ -348,27 +504,33 @@ mod postgres_tests {
         }
 
         let found = db
-            .list_unbound_nip_fi_communities(&suffix)
+            .list_unbound_nip_fi_communities(&suffix, "", 1000)
             .await
             .expect("list unbound");
         assert_eq!(
             found.iter().map(|c| c.host.as_str()).collect::<Vec<_>>(),
             [unbound.as_str()]
         );
+        assert!(db
+            .list_unbound_nip_fi_communities(&suffix, &unbound, 1000)
+            .await
+            .expect("page after the last host")
+            .is_empty());
+        let ids = [found[0].id];
         assert_eq!(
-            db.bind_nip_fi_issuers(found[0].id, &issuers())
+            db.bind_nip_fi_issuers_to_active(&ids, &issuers())
                 .await
                 .expect("bind"),
             1
         );
         assert_eq!(
-            db.bind_nip_fi_issuers(found[0].id, &issuers())
+            db.bind_nip_fi_issuers_to_active(&ids, &issuers())
                 .await
                 .expect("rebind"),
             0
         );
         assert!(db
-            .list_unbound_nip_fi_communities(&suffix)
+            .list_unbound_nip_fi_communities(&suffix, "", 1000)
             .await
             .expect("relist")
             .is_empty());
@@ -379,11 +541,6 @@ mod postgres_tests {
                 .expect("bound hosts"),
             std::slice::from_ref(&unbound)
         );
-        assert!(db
-            .unbind_nip_fi_issuer(found[0].id, ISS)
-            .await
-            .expect("unbind"));
-        assert_eq!(bound(&db, &unbound).await, Some(Vec::new()));
         assert_eq!(bound(&db, &unique_host("missing")).await, None);
     }
 }

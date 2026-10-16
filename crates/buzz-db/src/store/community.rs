@@ -537,6 +537,7 @@ impl Db {
     /// Holds a per-owner advisory lock while enforcing the ownership limit.
     /// Identical create retries return the original record; host collisions and
     /// limit failures remain distinguishable to the operator API.
+    #[datastore_span(name = "create_community_with_owner", system = "postgresql")]
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
@@ -549,7 +550,10 @@ impl Db {
     /// Like [`Db::create_community_with_owner`], binding `nip_fi_issuers` to
     /// the new community in the same transaction. Identical retries return the
     /// original record without touching its bindings.
-    #[datastore_span(name = "create_community_with_owner", system = "postgresql")]
+    #[datastore_span(
+        name = "create_community_with_owner_and_nip_fi_issuers",
+        system = "postgresql"
+    )]
     pub async fn create_community_with_owner_and_nip_fi_issuers(
         &self,
         normalized_host: &str,

@@ -892,22 +892,40 @@ pub async fn community_availability(
         .lookup_community_by_host_for_management(&normalized_host)
         .await
         .map_err(|e| internal_error(&format!("check community availability: {e}")))?;
+    // A reserved host (a NIP-FI command audience) is refused by create.
+    let reserved = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .is_some_and(|policy| policy.is_reserved(&normalized_host));
 
-    Ok(Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "host": query.host,
         "normalized_host": normalized_host,
-        "available": existing.is_none(),
+        "available": existing.is_none() && !reserved,
         "community_id": existing.map(|record| record.id.to_string()),
-    })))
+    });
+    if reserved {
+        body["error"] = "reserved_host".into();
+    }
+    Ok(Json(body))
 }
 
-/// Read a community's NIP-FI issuer binding from the database. Reserved hosts
-/// (NIP-FI command audiences) always report no issuers.
+/// Query parameters for `GET /operator/communities/nip-fi-binding`.
+#[derive(Debug, Deserialize)]
+pub struct CommunityNipFiBindingQuery {
+    host: String,
+}
+
+/// Read a community's NIP-FI issuer binding from the database. Only issuers
+/// that could authorize are reported: none unless the host is bindable under
+/// the provisioning policy (one label under the suffix, not reserved), and
+/// only issuers configured in `BUZZ_NIP_FI_ISSUERS`.
 pub async fn community_nip_fi_binding(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
-    Query(query): Query<CommunityAvailabilityQuery>,
+    Query(query): Query<CommunityNipFiBindingQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
@@ -927,12 +945,13 @@ pub async fn community_nip_fi_binding(
         .await
         .map_err(|e| internal_error(&format!("look up NIP-FI binding: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
-    let reserved = state
+    let issuers = state
         .config
         .nip_fi_provision_binding
         .as_ref()
-        .is_some_and(|policy| policy.is_reserved(&normalized_host));
-    let issuers = if reserved { Vec::new() } else { record.issuers };
+        .map_or_else(Vec::new, |policy| {
+            policy.effective_issuers(&record.host, record.issuers)
+        });
 
     Ok(Json(serde_json::json!({
         "host": record.host,
@@ -2624,14 +2643,19 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn nip_fi_binding_route_reads_bound_issuers_and_404s_unknown_hosts() {
         let operator = Keys::generate();
-        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+        let (policy, _, host) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
             return;
         };
-        let host = format!("community-{}.example", Uuid::new_v4().simple());
-        let issuer = "https://issuer.example/api/goose".to_string();
+        let issuer = NIP_FI_ISSUER.to_string();
         state
             .db
-            .ensure_configured_community_with_nip_fi_issuers(&host, std::slice::from_ref(&issuer))
+            .ensure_configured_community_with_nip_fi_issuers(
+                &host,
+                &[issuer.clone(), "https://unconfigured.example".to_string()],
+            )
             .await
             .expect("seed bound community");
         let router = build_router(state);
@@ -2660,8 +2684,59 @@ mod postgres_tests {
                 let json = read_json(response).await;
                 assert_eq!(json["host"], host);
                 assert_eq!(json["active"], true);
+                // The unconfigured issuer is stored but never reported.
                 assert_eq!(json["issuers"], serde_json::json!([issuer]));
             }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_binding_route_reports_no_issuers_outside_the_suffix() {
+        let operator = Keys::generate();
+        let (policy, _, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        let nested = format!("a.{control}");
+        let elsewhere = format!("community-{}.example", Uuid::new_v4().simple());
+        for host in [&nested, &elsewhere] {
+            state
+                .db
+                .ensure_configured_community_with_nip_fi_issuers(host, &[NIP_FI_ISSUER.to_string()])
+                .await
+                .expect("seed raw binding");
+            let lookup = nip_fi_lookup(Arc::clone(&state), &operator, host).await;
+            assert_eq!(lookup["issuers"], serde_json::json!([]), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn availability_reports_a_reserved_host_unavailable() {
+        let operator = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        for (host, available) in [(&reserved, false), (&control, true)] {
+            let response = signed_operator_request(
+                Arc::clone(&state),
+                &operator,
+                "GET",
+                &format!("/operator/communities/availability?host={host}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{host}");
+            let json = read_json(response).await;
+            assert_eq!(json["available"], available, "{host}");
+            let error = (!available).then_some("reserved_host");
+            assert_eq!(json["error"].as_str(), error, "{host}");
         }
     }
 
@@ -2701,7 +2776,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_fi_provisioning_refuses_reserved_host_on_both_branches() {
+    async fn nip_fi_provisioning_never_binds_a_reserved_host() {
         let operator = Keys::generate();
         let owner = Keys::generate();
         let (policy, reserved, control) = reserved_host_policy();
@@ -2713,7 +2788,10 @@ mod postgres_tests {
 
         for create_only in [true, false] {
             let control = control.replacen("acme.", &format!("acme-{create_only}."), 1);
-            for (host, allowed) in [(reserved.as_str(), false), (control.as_str(), true)] {
+            // create_only refuses a reserved host; the legacy branch creates
+            // its row but binds nothing.
+            for (host, bindable) in [(reserved.as_str(), false), (control.as_str(), true)] {
+                let created = bindable || !create_only;
                 let body = serde_json::json!({
                     "host": host,
                     "initial_owner_pubkey": owner.public_key().to_hex(),
@@ -2730,7 +2808,7 @@ mod postgres_tests {
                 .await;
                 assert_eq!(
                     response.status().is_success(),
-                    allowed,
+                    created,
                     "create_only={create_only} {host}"
                 );
                 let row = state
@@ -2738,7 +2816,7 @@ mod postgres_tests {
                     .lookup_community_by_host(host)
                     .await
                     .expect("lookup");
-                assert_eq!(row.is_some(), allowed, "create_only={create_only} {host}");
+                assert_eq!(row.is_some(), created, "create_only={create_only} {host}");
                 let bound = state
                     .db
                     .nip_fi_bound_hosts(&[host.to_string()])
@@ -2746,7 +2824,7 @@ mod postgres_tests {
                     .expect("bound hosts");
                 assert_eq!(
                     !bound.is_empty(),
-                    allowed,
+                    bindable,
                     "create_only={create_only} {host}"
                 );
             }
@@ -2793,12 +2871,15 @@ mod postgres_tests {
             return;
         };
         let startup = || {
-            crate::handlers::community_provisioning::ensure_deployment_community(
-                &state.db,
-                Some(&policy),
-                &control,
+            crate::handlers::community_provisioning::verify_reserved_hosts_unbound(
+                &state.db, &policy,
             )
         };
+        state
+            .db
+            .ensure_configured_community_with_nip_fi_issuers(&control, &[NIP_FI_ISSUER.to_string()])
+            .await
+            .expect("bound control community");
         startup()
             .await
             .expect("control: startup with no reserved binding");
@@ -2822,14 +2903,20 @@ mod postgres_tests {
         .await
         .expect("raw reserved binding");
 
+        let refusal = startup()
+            .await
+            .expect_err("reserved binding refuses startup");
         assert!(matches!(
-            startup().await,
-            Err(
-                crate::handlers::community_provisioning::DeploymentCommunityError::ReservedBinding(
-                    _
-                )
-            )
+            refusal,
+            crate::handlers::community_provisioning::ReservedHostsError::Bound(ref hosts)
+                if hosts == std::slice::from_ref(&reserved)
         ));
+        assert!(
+            refusal
+                .to_string()
+                .contains("buzz-admin nip-fi unbind --host"),
+            "{refusal}"
+        );
         let lookup = nip_fi_lookup(Arc::clone(&state), &operator, &reserved).await;
         assert_eq!(lookup["issuers"], serde_json::json!([]));
         let lookup = nip_fi_lookup(Arc::clone(&state), &operator, &control).await;

@@ -612,8 +612,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     let mut step = StepTimer::start(StartupStep::MembershipBootstrap);
     let deployment_community = {
         use buzz_relay::handlers::community_provisioning::{
-            ensure_deployment_community, DeploymentCommunityError,
+            ensure_deployment_community, verify_reserved_hosts_unbound,
         };
+        if let Some(policy) = config.nip_fi_provision_binding.as_ref() {
+            verify_reserved_hosts_unbound(&db, policy).await?;
+        }
         let host = buzz_relay::tenant::relay_url_authority(&config.relay_url);
         if host.is_empty() && config.require_relay_membership {
             return Err(anyhow::anyhow!(
@@ -636,8 +639,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 );
                 None
             }
-            Err(DeploymentCommunityError::ReservedBinding(e)) => return Err(anyhow::anyhow!(e)),
-            Err(DeploymentCommunityError::Ensure(e)) => {
+            Err(e) => {
                 if config.require_relay_membership {
                     error!("Fatal: failed to ensure deployment community with membership enforcement enabled: {e}");
                     return Err(anyhow::anyhow!(
