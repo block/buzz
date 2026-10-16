@@ -3,6 +3,7 @@
 //! applies at startup. These tests keep the two from drifting apart.
 use super::*;
 use sqlx::postgres::PgConnectOptions;
+use sqlx::ConnectOptions;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -192,23 +193,22 @@ async fn desired_state_schema_matches_migrations() {
     // pgschema takes discrete connection flags. `PgConnectOptions` decodes the
     // URL the way the gateway does, including a Unix-socket host, which
     // pgschema accepts as a socket directory in `--host` like libpq does.
+    // The password comes from the resolved options, so the userinfo,
+    // `?password=`, `PGPASSWORD` and `.pgpass` precedence matches SQLx's.
+    // pgschema 1.7.4 joins these flags into an unquoted keyword DSN, so a
+    // password or socket path containing whitespace, a quote, `=` or a
+    // backslash is not supported here.
     let base_url = std::env::var("BUZZ_TEST_DATABASE_URL").expect("test database URL");
     let options: PgConnectOptions = base_url.parse().expect("parse test database URL");
     let host = match options.get_socket() {
         Some(dir) => dir.to_str().expect("socket directory utf-8").to_owned(),
         None => options.get_host().to_owned(),
     };
-    let password = url::Url::parse(&base_url)
-        .expect("parse test database URL")
-        .password()
-        .map(|encoded| {
-            percent_encoding::percent_decode_str(encoded)
-                .decode_utf8()
-                .expect("database password utf-8")
-                .into_owned()
-        })
-        .or_else(|| std::env::var("PGPASSWORD").ok())
-        .unwrap_or_default();
+    let password =
+        percent_encoding::percent_decode_str(options.to_url_lossy().password().unwrap_or_default())
+            .decode_utf8()
+            .expect("database password utf-8")
+            .into_owned();
     let connection = PgschemaConnection {
         host,
         port: options.get_port().to_string(),
