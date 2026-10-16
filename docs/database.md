@@ -1,7 +1,5 @@
 # Database: target architecture and schema-change rules
 
-`draft`
-
 This document states where the Buzz PostgreSQL database is going and the rules
 every schema or data change must follow on the way there. Read it before
 changing anything under `migrations/`, `schema/`,
@@ -17,26 +15,26 @@ PostgreSQL stores data. The application owns behavior.
 
 | Concern | Today | Target |
 |---|---|---|
-| Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. Deployments that apply schema out of band plan each change from it; Block's hosted deployment uses SchemaBot for this, but the source does not depend on any one tool. `migrations/` stays, because auto-migration stays supported (next row). Each app owns its own migrations and declarative schema: the relay's copies of the push gateway's tables are debt to remove (Rule 4). |
-| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation moves out of the relay under BUZZ-178. Changes to partitioned tables (`events`, `delivery_log`) are outside SchemaBot's envelope: it refuses `CREATE TABLE ... PARTITION OF` on a live parent and concurrent index builds on partitioned parents. |
+| Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. Deployments that apply schema out of band plan each change from it, with the tool of their choice. `migrations/` stays, because auto-migration stays supported (next row). Each app owns its own migrations and declarative schema: the relay's copies of the push gateway's tables are debt to remove (Rule 4). |
+| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation is planned to move out of the relay. Changes to partitioned tables (`events`, `delivery_log`) are outside the out-of-band envelope (Rule 6): attaching a partition to a live parent and building an index on a partitioned parent need their own reviewed procedure. |
 | Integrity between tables | Some foreign keys, including `ON DELETE CASCADE` and `ON DELETE SET NULL` | None in the database. The owning application transaction checks references and performs deletes explicitly. |
 | Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
 | Rollout | Effectively schema and code together | Expand, then deploy, then backfill, then contract. Each step is applied and verified on its own. |
 
-The directories in `schema/` other than `tables/` hold objects SchemaBot cannot
-apply. They are expected to shrink toward zero. A change that adds to them
-moves away from the target.
+The directories in `schema/` other than `tables/` hold objects that out-of-band
+apply cannot manage. They are expected to shrink toward zero. A change that
+adds to them moves away from the target.
 
 ### Why
 
-- **SchemaBot cannot manage what the target forbids.** SchemaBot's declarative
-  PostgreSQL format has no foreign keys. It refuses to pull tables that carry
-  triggers, comments, non-default relation options, or partitioning. It never
-  executes `DROP TABLE`, and its native apply path admits only `CREATE TABLE`,
-  `CREATE INDEX`, and bounded `ALTER TABLE` statements. Every new trigger,
-  function, or foreign key is another object that must be removed before
-  adoption.
+- **Out-of-band apply needs plain tables.** Applying changes online from a
+  declarative source works only for plain tables and indexes: no foreign keys,
+  and no triggers, comments, non-default relation options, or partitioning on
+  the tables it manages. It does not drop tables, and it applies only
+  `CREATE TABLE`, `CREATE INDEX`, and bounded `ALTER TABLE` statements. Every
+  new trigger, function, or foreign key is another object that must be removed
+  before the schema can be applied this way.
 - **At scale, startup should not change the schema.** A relay that migrates at
   boot can hold locks on hot tables during a rolling deploy. A relay that
   starts against an already-compatible schema cannot. Auto-migration stays
@@ -49,7 +47,7 @@ moves away from the target.
   unbounded, in one transaction, while holding locks, with no checkpoint, pause,
   or recovery. The backfill framework exists to provide those properties.
 
-The work is tracked as the safe-startup and SchemaBot adoption effort. Until it
+The move to declarative, out-of-band schema changes is in progress. Until it
 finishes, existing triggers, functions, and foreign keys stay in place as
 backstops. They are removed one at a time, after their application replacement
 has shipped and been verified. They are not removed early, and new ones are not
@@ -69,9 +67,7 @@ than dropping or narrowing it, as widening. Put the behavior in the Rust
 transaction that owns the write:
 
 - **Validation or guards:** check inside the writer's transaction before
-  committing. Use the existing community-write and replica-floor lock helpers
-  described under the supported-writer contract in
-  [ARCHITECTURE.md](../ARCHITECTURE.md).
+  committing. Tenant writes go through community admission, described below.
 - **Follow-up writes** (counters, queues, materialized state): write them in the
   same transaction, or record a durable work item atomically with the
   originating write and process it idempotently.
@@ -83,19 +79,19 @@ retirement sequence below.
 **No exception for the community write fence.** A new table MUST NOT get a
 fence trigger, including by calling the existing helper
 `attach_community_write_fence`. Writers of a new tenant-owned table MUST be
-fenced in the application instead, by community admission. Today
-`AdmittedTx` (`crates/buzz-db/src/runtime/admitted_tx.rs`) wraps event-write
-transactions: event ingestion and the writes it makes in the same
-transaction. It is constructed by `DeletionStore::guard_transaction`, which
-takes the shared community deletion lock and refuses a community that is not
-`active`. Helpers that take `&mut AdmittedTx` reject a raw transaction at
-compile time, but crate code can still bypass the type, so the fence triggers
-remain the authoritative backstop (ARCHITECTURE.md § *Supported Writer
-Contract*). A table without a trigger has no database backstop. The design
-that extends admission to every fenced table and names a chokepoint for each
-writer is BUZZ-314; the implementation, which ends by dropping the fence
-triggers and functions, is BUZZ-315. That work MUST also update
-ARCHITECTURE.md § *Dual enforcement*.
+fenced in the application instead, by community admission. Serving writers,
+including fleet sweeps (one community at a time), open their transaction with
+`begin_community_write_transaction` or one of its variants
+(`crates/buzz-db/src/runtime/mod.rs`). It returns an `AdmittedTx`
+(`crates/buzz-db/src/runtime/admitted_tx.rs`), built by
+`DeletionStore::guard_transaction`, which takes the shared community deletion
+lock and refuses a community that is not `active`. Helpers that take
+`&mut AdmittedTx` reject a raw transaction at compile time, but crate code can
+still bypass the type, so the fence triggers remain the authoritative backstop
+(ARCHITECTURE.md § *Supported Writer Contract*). A table without a trigger has
+no database backstop. The remaining fence-retirement work makes every writer of
+every fenced table go through admission, then drops the fence triggers and
+functions. That work MUST also update ARCHITECTURE.md § *Dual enforcement*.
 
 **Today this blocks new tenant-owned tables.** Community deletion's catalog
 checks still assume that every tenant-scoped table carries a trigger fence:
@@ -113,7 +109,7 @@ checks still assume that every tenant-scoped table carries a trigger fence:
 
 So before a feature can add a tenant-owned `community_id` table, these checks
 must recognise application-fenced tables, and the desired-state loop must stop
-attaching triggers to them. That change belongs to the BUZZ-314/BUZZ-315 work.
+attaching triggers to them. That change belongs to the fence-retirement work.
 Land it before the feature, or as the feature's first PR. Do not work around
 it with a trigger, or with an entry in `community_write_fence_excluded_table`
 for a table the community owns.
@@ -123,8 +119,8 @@ for a table the community owns.
 After the catalog change above has landed, all in the same PR:
 
 - [ ] Every writer of the table goes through community admission
-      (`AdmittedTx`, or the chokepoint BUZZ-314 defines for its writer).
-      Nothing writes the table outside it.
+      (`begin_community_write_transaction` or another constructor that returns
+      `AdmittedTx`). Nothing writes the table outside it.
 - [ ] No fence trigger: no `attach_community_write_fence` call in the
       migration and no `schema/triggers/` file.
 - [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`),
@@ -228,9 +224,14 @@ write-blocking lock. Scans that do not block writes, such as
   transaction, it MUST read the community's state and touch only rows whose
   community has `deletion_state = 'active'` and `deleted_at IS NULL`, as
   `DeletionStore::guard_transaction` does. Selecting active communities
-  before taking the lock races with deletion. Otherwise the PR MUST document a
-  reviewed procedure that keeps the routing fences closed. A script MUST NOT
-  disable triggers or set `session_replication_role`.
+  before taking the lock races with deletion.
+- A repair script that inserts channel-bearing `events` rows, or moves an
+  event's `created_at` backward, is outside the replica-floor proof: an
+  operator session does not set `buzz.created_at_floor`, so the commit-time
+  floor guard lets it through (`migrations/0021`). Its PR MUST document a
+  reviewed procedure that keeps replica routing closed from before the first
+  batch until its WAL has replayed on every replica.
+- A script MUST NOT disable triggers or set `session_replication_role`.
 - The normal write path that maintains the new invariant MUST be fully rolled
   out, with old writers drained, before the backfill starts. The backfill spec
   explains why and what breaks otherwise.
@@ -257,11 +258,11 @@ apply:
 | `crates/buzz-push-gateway/migrations/` **and** the relay copies | The six `push_gateway_*` tables have two homes. The gateway applies its own migration history to its own database, through a pre-install/pre-upgrade Helm Job ([push-gateway-deployment.md](push-gateway-deployment.md)). The relay schema also defines them: `migrations/` (`0015`, `0043`, `0045`, `0060`), `schema/tables/public/push_gateway_*.sql`, and `schema/seeds/push_gateway_*.sql`. Until the duplication is removed, a gateway schema change goes in both, as relay `0060` mirrors gateway `0006`. Every rule here applies to both. The target is for the gateway to own its tables alone, in its own migrations and declarative schema; do not add new gateway tables to the relay schema. |
 
 A fresh desired-state database and a migrated database MUST converge on the
-same live catalog. The layout test
-(`desired_state_schema_layout_is_complete_and_schemabot_shaped`) checks file
-structure only. Parity tests cover selected surfaces, and the full drift gate
-does not exist yet. For tables and indexes you touch, add or extend a parity
-assertion that compares the live catalog from both bootstrap paths, following
+same live catalog. The desired-state layout test in
+`crates/buzz-db/src/runtime/migration.rs` checks file structure only. Parity
+tests cover selected surfaces, and the full drift gate does not exist yet. For
+tables and indexes you touch, add or extend a parity assertion that compares
+the live catalog from both bootstrap paths, following
 `admin_schema_parity_between_desired_state_and_migrations`. A string match
 against `schema.sql` does not count.
 
@@ -321,23 +322,30 @@ historical data needs no backfill.
 pending migration at one boot, before the new code serves and before any
 backfill or repair script runs. An operator who upgrades across several
 releases therefore applies expand and contract together. How auto-migration
-should order such an upgrade is unresolved. Until it is, a contract migration
-MUST fail closed when the step it depends on has not run:
+should order such an upgrade is unresolved. Until it is, a contract depends on
+one or both of these, and each is handled differently:
 
-- `VALIDATE CONSTRAINT` and `SET NOT NULL` already fail on unrepaired rows.
-- A contract that drops a column or table, or otherwise loses data, MUST first
-  check that the backfill or repair has completed, and `RAISE` from a
-  top-level `DO` block when unrepaired rows remain.
-- The PR MUST add a Postgres-gated test that applies the expand and contract
-  migrations in one run against unrepaired rows and asserts the migration
-  errors without dropping data.
+- **Data (a backfill or repair has run).** The contract migration MUST fail
+  closed when it has not. `VALIDATE CONSTRAINT` and `SET NOT NULL` already
+  fail on unrepaired rows. A contract that drops a column or table, or
+  otherwise loses data, MUST first check that the backfill or repair has
+  completed, and `RAISE` from a top-level `DO` block when unrepaired rows
+  remain. The PR MUST add a Postgres-gated test that applies the expand and
+  contract migrations in one run against unrepaired rows and asserts the
+  migration errors without dropping data.
+- **Writers (a release that changes how the app writes is fully deployed).**
+  Dropping a trigger, function, or foreign key whose work moved into the app,
+  and adding a constraint that old writers could violate, depend on a release,
+  not on rows. No row check can prove it: the data may already be valid, or
+  there may be nothing to backfill, while old writers still serve.
+  Auto-migration does not protect this case.
 
-A failed contract stops the relay from starting. That is an outage, not data
-loss, but recovery is not clean: the expand migrations before the contract
-have already committed, so an old pod that restarts hits `VersionMissing`.
-Because a repair needs the new writer fully rolled out (Rule 3), the release
-notes MUST name the release to stop at (the one that ships the writer) and the
-repair to run there before upgrading past the contract release.
+For either kind, the release notes MUST name the release to stop at (the one
+that ships the writer) and any repair to run there, before upgrading past the
+contract release. A failed data check stops the relay from starting. That is
+an outage, not data loss, but recovery is not clean: the expand migrations
+before the contract have already committed, so an old pod that restarts hits
+`VersionMissing`.
 
 #### What breaks the old relay
 
@@ -349,13 +357,15 @@ repair to run there before upgrading past the contract release.
 | Add `CHECK`, `UNIQUE`, or a narrower index | Old writes violate it, or an old `ON CONFLICT` target no longer matches an index | Deploy writers that satisfy it, backfill, then add it. Add a `CHECK` as `NOT VALID`, then `VALIDATE CONSTRAINT` in a later step. Keep every index an old `ON CONFLICT` names until no deployed code uses it |
 | Add an enum value that new code writes | Old code fails to decode the unknown variant | Deploy readers that accept the value, then deploy writers that produce it |
 | Drop a column, table, index, trigger, function, or FK | Old code reads it or relies on its side effect | Contract step only, after the release that stops relying on it is fully deployed |
-| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed until the new release deploys. Serving is unaffected. | Expected and safe. Keep the gap between expand and deploy short, and do not run community deletion during it |
+| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed until the new release deploys. Serving is unaffected, apart from the auto-migration restart case in Rule 5 | Allowed, after Rule 1's catalog change for a tenant-owned table. Keep the gap between expand and deploy short, and do not run community deletion during it |
 | `SELECT *` or `RETURNING *` decoded by position | Column order differs between desired-state and migrated databases and changes when columns are added | Select named columns |
 
 #### Adding `NOT NULL` to a populated table
 
 `ALTER TABLE ... SET NOT NULL` scans the whole table under `ACCESS EXCLUSIVE`.
-Instead:
+Instead, ship three migration files, each its own step. sqlx runs each file in
+a transaction, which `SET LOCAL` needs; pasted into autocommit `psql`,
+`SET LOCAL` only warns and has no effect.
 
 ```sql
 -- contract migration A
@@ -384,7 +394,8 @@ parity assertion on the table for that window.
    check and cascade, while the database object is still in place. The two
    paths MUST be idempotent with each other, so the duplicate work is harmless.
 2. After that release is fully deployed, drop the database object in a
-   separate migration. Remove it from `schema/` in the same PR.
+   separate migration. Remove it from `schema/` in the same PR. The release
+   notes name the step-1 release as a required stop (Rule 5).
 3. Removing a guard requires a falsifiable test showing that the application
    path enforces what the guard enforced.
 
@@ -403,18 +414,17 @@ parity assertion on the table for that window.
   `ON ONLY` parent index.
 - The declarative schema source declares indexes with plain `CREATE INDEX`.
   The tool that applies it out of band decides how to build them online, so
-  `schema/` files MUST NOT add `CONCURRENTLY`. SchemaBot refuses it, and
-  `desired_state_schema_layout_is_complete_and_schemabot_shaped` enforces
-  plain `CREATE INDEX`.
+  `schema/` files MUST NOT add `CONCURRENTLY`. The desired-state layout test
+  rejects it.
 - A change MUST NOT rewrite or fully scan a large table under a
   write-blocking lock. That includes column type changes, volatile defaults,
   `SET NOT NULL` without a validated check, and changes to the generated
   `events.search_tsv` column. Use the expand/contract forms above.
-- Write changes that SchemaBot can apply. Its native path admits
-  `CREATE TABLE`, `CREATE INDEX`, and bounded `ALTER TABLE` on tables up to its
-  configured size ceiling (1 GiB by default), with short lock and statement
-  budgets. A multi-statement plan is not atomic. A change outside that envelope
-  needs a separately reviewed operational procedure, and the PR MUST say so.
+- Write changes that out-of-band apply can make online: `CREATE TABLE`,
+  `CREATE INDEX`, and bounded `ALTER TABLE` on tables below a size ceiling,
+  with short lock and statement budgets. Do not rely on a multi-statement
+  change applying atomically. A change outside that envelope needs a
+  separately reviewed operational procedure, and the PR MUST say so.
 
 ### 7. Old and new relays coexist during rollout
 
@@ -435,8 +445,8 @@ description:
 - [ ] That no migration mutates existing rows, and the backfill ID (or,
       until the framework ships, the `scripts/maintenance/` script and how it
       takes the community deletion lock) for any repair.
-- [ ] For a contract migration, how it fails closed when the step it depends
-      on has not run.
+- [ ] For a contract migration, how it fails closed when its backfill has not
+      run, and which writer release the release notes name as a required stop.
 - [ ] That every location in Rule 4 is updated, with a catalog-level parity
       test for each changed table and index.
 - [ ] That the currently deployed relay works against the new schema, and how
@@ -456,5 +466,3 @@ description:
 - [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md): desired-state
   and migration-mode tests.
 - `schema/schema.sql` header: the desired-state layout.
-- [SchemaBot PostgreSQL support](https://github.com/block/schemabot/blob/main/docs/postgresql.md):
-  what SchemaBot can plan and apply.
