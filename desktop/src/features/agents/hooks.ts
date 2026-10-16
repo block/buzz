@@ -1,4 +1,6 @@
 import * as React from "react";
+import { managedAgentActivityFrom } from "@/features/agents/lib/managedAgentControlActions";
+import { fetchAgentsAvailability } from "@/features/agents/lib/useAgentAvailability";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -840,12 +842,20 @@ export function useProvisionChannelManagedAgentMutation(
           ? listPersonas()
           : Promise.resolve([]),
       ]);
+      // One presence read, only when a deployed provider instance could be
+      // a reuse candidate: its receipt alone must not outrank a live sibling.
+      const availability = await fetchAgentsAvailability(
+        managedAgents
+          .filter((agent) => agent.status === "deployed")
+          .map((agent) => agent.pubkey),
+      );
       return provisionChannelManagedAgent(rest, {
         managedAgents,
         personas,
         channelMemberPubkeys: new Set(
           members.map((member) => normalizePubkey(member.pubkey)),
         ),
+        isActive: managedAgentActivityFrom(availability),
       });
     },
     onSuccess: (result) => {

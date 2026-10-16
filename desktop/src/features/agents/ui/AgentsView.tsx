@@ -98,7 +98,7 @@ export function AgentsView() {
     teamActions.updateTeamMutation.isPending ||
     teamActions.deleteTeamMutation.isPending;
   const runningAgentCount = agents.managedAgents.filter((agent) =>
-    isManagedAgentActive(agent),
+    isManagedAgentActive(agent, agents.getAvailability(agent.pubkey)),
   ).length;
   const hasSavedAgentDefaults = Boolean(
     globalConfig.preferred_runtime?.trim() ||

@@ -36,12 +36,22 @@ export function parseTimestamp(value: string | null | undefined) {
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
-export function pickPreferredManagedAgent(agents: ManagedAgent[]) {
+/** Whether an instance counts as live when choosing among candidates. */
+export type ManagedAgentActivity = (agent: ManagedAgent) => boolean;
+
+/** Lifecycle status alone. A provider's `deployed` receipt outlives a shut-down
+ * or reaped body, so callers holding presence should pass a presence-aware
+ * predicate instead. */
+const isStatusActive: ManagedAgentActivity = (agent) =>
+  agent.status === "running" || agent.status === "deployed";
+
+export function pickPreferredManagedAgent(
+  agents: ManagedAgent[],
+  isActive: ManagedAgentActivity = isStatusActive,
+) {
   return [...agents].sort((left, right) => {
-    const leftRunningScore =
-      left.status === "running" || left.status === "deployed" ? 1 : 0;
-    const rightRunningScore =
-      right.status === "running" || right.status === "deployed" ? 1 : 0;
+    const leftRunningScore = isActive(left) ? 1 : 0;
+    const rightRunningScore = isActive(right) ? 1 : 0;
     if (leftRunningScore !== rightRunningScore) {
       return rightRunningScore - leftRunningScore;
     }
@@ -54,19 +64,21 @@ export function findReusablePersonaAgent(
   agents: ManagedAgent[],
   personaId: string,
   channelMemberPubkeys: ReadonlySet<string>,
+  isActive?: ManagedAgentActivity,
 ): ManagedAgent | undefined {
   const candidates = agents.filter(
     (agent) =>
       agent.personaId === personaId &&
       !channelMemberPubkeys.has(normalizePubkey(agent.pubkey)),
   );
-  return pickPreferredManagedAgent(candidates);
+  return pickPreferredManagedAgent(candidates, isActive);
 }
 
 export function findReusableGenericAgent(
   agents: ManagedAgent[],
   command: string,
   channelMemberPubkeys: ReadonlySet<string>,
+  isActive?: ManagedAgentActivity,
 ): ManagedAgent | undefined {
   const candidates = agents.filter(
     (agent) =>
@@ -75,7 +87,7 @@ export function findReusableGenericAgent(
       commandsMatch(agent.agentCommand, command) &&
       !channelMemberPubkeys.has(normalizePubkey(agent.pubkey)),
   );
-  return pickPreferredManagedAgent(candidates);
+  return pickPreferredManagedAgent(candidates, isActive);
 }
 
 /**

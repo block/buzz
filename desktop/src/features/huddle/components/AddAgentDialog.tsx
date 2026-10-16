@@ -2,15 +2,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderCircle } from "lucide-react";
 import * as React from "react";
 
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { fetchAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { Dialog } from "@/shared/ui/dialog";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
-import type { ManagedAgentBackend } from "@/shared/api/types";
+import type { ManagedAgent, ManagedAgentBackend } from "@/shared/api/types";
 
 type ManagedAgentSummary = {
   pubkey: string;
   name: string;
-  status: string;
+  status: ManagedAgent["status"];
   avatar_url: string | null;
   backend: ManagedAgentBackend;
 };
@@ -82,9 +84,13 @@ export function AddAgentDialog({
     let startedForAdd = false;
     try {
       const isLocal = agent.backend.type === "local";
-      const needsStart = isLocal
-        ? agent.status !== "running"
-        : agent.status !== "deployed";
+      // A provider's `deployed` receipt outlives a shut-down or reaped body;
+      // established offline presence means the add must redeploy it.
+      const availability =
+        !isLocal && agent.status === "deployed"
+          ? await fetchAgentAvailability(agent.pubkey)
+          : undefined;
+      const needsStart = !isManagedAgentActive(agent, availability);
       if (needsStart && isLocal) {
         await invoke("start_managed_agent", { pubkey: agent.pubkey });
         startedForAdd = true;

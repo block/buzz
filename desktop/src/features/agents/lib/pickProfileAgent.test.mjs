@@ -65,3 +65,29 @@ test("a fail-open predicate keeps every instance eligible while loading", () => 
   // Fail-open (all false) during the archive-snapshot window: normal ranking.
   assert.equal(pickProfileAgent([stopped, running], NONE_ARCHIVED), running);
 });
+
+test("a deployment presence shows offline does not outrank a running sibling", () => {
+  const reaped = agent({
+    name: "A reaped deployment",
+    pubkey: "a".repeat(64),
+    status: "deployed",
+  });
+  const running = agent({
+    name: "B running instance",
+    pubkey: "b".repeat(64),
+    status: "running",
+  });
+  const presence = (status) => (pubkey) =>
+    pubkey === reaped.pubkey ? status : undefined;
+
+  // Both rank active without presence, so the name tiebreak picks the reaped one.
+  assert.equal(pickProfileAgent([running, reaped], NONE_ARCHIVED), reaped);
+  assert.equal(
+    pickProfileAgent([running, reaped], NONE_ARCHIVED, presence("offline")),
+    running,
+  );
+  assert.equal(
+    pickProfileAgent([running, reaped], NONE_ARCHIVED, presence("online")),
+    reaped,
+  );
+});

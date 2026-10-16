@@ -140,7 +140,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               onClick={onOpenCatalog}
             />
             {groups.map((group) => {
-              const profileAgent = pickProfileAgent(group.agents, isArchived);
+              const profileAgent = pickProfileAgent(
+                group.agents,
+                isArchived,
+                getAvailability,
+              );
               return (
                 <AgentPersonaCard
                   actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (

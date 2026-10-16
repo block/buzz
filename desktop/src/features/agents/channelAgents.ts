@@ -2,6 +2,7 @@ import {
   commandsMatch,
   findReusableGenericAgent,
   findReusablePersonaAgent,
+  type ManagedAgentActivity,
   pickPreferredManagedAgent,
   resolveReusableAgentAccessPolicy,
 } from "@/features/agents/agentReuse";
@@ -134,6 +135,9 @@ export type CreateChannelManagedAgentsResult = {
 type ChannelAgentReuseContext = {
   managedAgents: ManagedAgent[];
   channelMemberPubkeys: ReadonlySet<string>;
+  /** Presence-aware liveness for ranking reuse candidates; without it a
+   * provider's stale `deployed` receipt outranks a running local sibling. */
+  isActive?: ManagedAgentActivity;
   personas: readonly Pick<
     AgentPersona,
     "id" | "respondTo" | "respondToAllowlist"
@@ -341,6 +345,7 @@ export async function provisionChannelManagedAgent(
       context.managedAgents,
       input.personaId,
       context.channelMemberPubkeys,
+      context.isActive,
     );
     if (reusable) {
       const definition = context.personas.find(
@@ -373,6 +378,7 @@ export async function provisionChannelManagedAgent(
       context.managedAgents,
       input.runtime.command,
       context.channelMemberPubkeys,
+      context.isActive,
     );
     if (reusable) {
       const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(
