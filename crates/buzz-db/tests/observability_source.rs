@@ -2299,7 +2299,8 @@ fn is_channel_null_event_writer(function: &str) -> bool {
 }
 
 /// Whether a `SET` list assigns `created_at` or `channel_id`, including the
-/// row form `(a, b) = (...)`. Stops at the first `WHERE`.
+/// row form `(a, b) = (...)`, or a column it cannot read (a `{…}`
+/// placeholder). Stops at the first `WHERE`.
 fn assigns_event_floor_column(assignments: &str) -> bool {
     let assignments = assignments.split(" where ").next().expect("first part");
     let mut depth = 0usize;
@@ -2319,36 +2320,62 @@ fn assigns_event_floor_column(assignments: &str) -> bool {
                     .trim_start_matches('(')
                     .trim_end_matches(')')
                     .split(',')
-                    .any(|column| matches!(column.trim(), "created_at" | "channel_id"))
+                    .map(str::trim)
+                    .any(|column| {
+                        matches!(column, "created_at" | "channel_id") || column.starts_with('{')
+                    })
             })
         })
 }
 
-fn updates_event_floor_columns(function: &str) -> bool {
+/// The table a write targets, without its schema (a literal or a `{…}`
+/// placeholder; any schema may hold an `events` table).
+fn unqualified_table(target: &str) -> &str {
+    target.rsplit_once('.').map_or(target, |(_, table)| table)
+}
+
+/// Whether one SQL literal (normalized) assigns a floor column through a
+/// direct `UPDATE` of `events`, or of a target it does not spell: a
+/// placeholder, or a `SET` list whose `UPDATE` lies in another literal.
+fn literal_updates_event_floor_columns(sql: &str) -> bool {
     // `SET(` with no space is still a row assignment.
-    let normalized = normalized_sql(function).replace(" set(", " set (");
-    let direct_update = normalized.match_indices("update ").any(|(index, marker)| {
-        let Some((target, assignments)) = normalized[index + marker.len()..].split_once(" set ")
-        else {
+    let sql = format!(" {} ", sql.trim()).replace(" set(", " set (");
+    sql.match_indices(" set ").any(|(index, marker)| {
+        if !assigns_event_floor_column(&sql[index + marker.len()..]) {
             return false;
+        }
+        let before = &sql[..index];
+        if before.ends_with(" do update") {
+            // The upsert check resolves the INSERT, which may be in another
+            // literal of the same builder.
+            return false;
+        }
+        let Some(update) = before.rfind(" update ") else {
+            return true;
         };
-        let mut target = target.split_whitespace();
+        let mut target = before[update + " update ".len()..].split_whitespace();
         let mut table = target.next();
         if table == Some("only") {
             table = target.next();
         }
-        if !matches!(table, Some("events" | "public.events")) {
-            return false;
-        }
         // The target may have an alias, with or without AS.
         let alias = target.collect::<Vec<_>>();
-        if !matches!(alias.as_slice(), [] | [_] | ["as", _]) {
-            return false;
-        }
-        assigns_event_floor_column(assignments)
-    });
+        let (Some(table), [] | [_] | ["as", _]) = (table, alias.as_slice()) else {
+            return true;
+        };
+        let table = unqualified_table(table);
+        table == "events" || table.contains('{')
+    })
+}
+
+fn updates_event_floor_columns(function: &str) -> bool {
+    let direct_update = source_spans(function)
+        .iter()
+        .filter_map(|span| span.string_body(function))
+        .any(|body| literal_updates_event_floor_columns(&normalized_sql(body)));
     // `ON CONFLICT ... DO UPDATE SET` names no table: it updates the target of
     // the INSERT it belongs to, so an events upsert can re-home an existing row.
+    let normalized = normalized_sql(function).replace(" set(", " set (");
     let events_upsert = normalized
         .match_indices("do update set ")
         .any(|(index, marker)| {
@@ -2363,6 +2390,43 @@ fn updates_event_floor_columns(function: &str) -> bool {
                 && assigns_event_floor_column(&normalized[index + marker.len()..])
         });
     direct_update || events_upsert
+}
+
+/// Writes one SQL literal (normalized) hides from the per-function checks:
+/// an INSERT whose target or tail is not literal, `events` written by a
+/// statement other than INSERT, or a PREPARE.
+fn literal_sql_violations(sql: &str) -> Vec<&'static str> {
+    let sql = format!(" {} ", sql.trim());
+    let mut violations = Vec::new();
+    for (index, _) in sql.match_indices(" into ") {
+        let rest = &sql[index + " into ".len()..];
+        let target = rest.split([' ', '(']).next().expect("first part");
+        let table = unqualified_table(target);
+        if sql[..index].ends_with(" insert") {
+            if target.is_empty() || table.contains('{') {
+                violations.push("INSERT target is not a literal table");
+            } else if table == "events" && rest.contains('{') {
+                violations.push("events INSERT with a non-literal part");
+            }
+        } else if table == "events" {
+            violations.push("events written by a statement other than INSERT");
+        }
+    }
+    if sql.match_indices(" copy ").any(|(index, marker)| {
+        let target = sql[index + marker.len()..].split([' ', '(']).next();
+        target.is_some_and(|target| unqualified_table(target) == "events")
+    }) {
+        violations.push("events written by a statement other than INSERT");
+    }
+    let words = sql.split_whitespace().collect::<Vec<_>>();
+    if words
+        .windows(2)
+        .any(|pair| pair[0] == "prepare" && (pair[1] == "transaction" || pair[1].starts_with('{')))
+        || words.last() == Some(&"prepare")
+    {
+        violations.push("PREPARE TRANSACTION in a production writer");
+    }
+    violations
 }
 
 /// The offset of the delimiter that closes the bracket opened at `open` in
@@ -2386,7 +2450,22 @@ fn matching_close(masked: &str, open: usize) -> Option<usize> {
 
 /// `text` as a plain Rust string literal.
 fn plain_literal(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", plain_body(text))
+}
+
+/// Raw `text` escaped as the body of a plain string literal.
+fn plain_body(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A string literal's body, as written in a plain (escaped) literal.
+fn plain_string_body(span: &SourceSpan, source: &str) -> Option<String> {
+    let body = span.string_body(source)?;
+    Some(if matches!(span.kind, SpanKind::Str) {
+        body.to_owned()
+    } else {
+        plain_body(body)
+    })
 }
 
 /// The string literal that is the whole of `arg`, if it is one.
@@ -2406,43 +2485,48 @@ fn sole_string_literal(arg: &str) -> Option<SourceSpan> {
     })
 }
 
-/// Whether literal text spells event-write SQL the floor policy must see.
-fn spells_event_write_sql(text: &str) -> bool {
-    let normalized = normalized_sql_source(text);
-    normalized.contains("insert into") || normalized.contains("update ")
+/// The opening delimiter of each `name!` macro call in `masked` (comments
+/// and literals blanked), last first, with any path prefix (`::core::`) and
+/// any of `(`, `[` or `{`: `(start of name, delimiter offset)`.
+fn macro_calls(masked: &str, name: &str) -> Vec<(usize, usize)> {
+    let mut calls = masked
+        .match_indices(name)
+        .filter_map(|(at, _)| {
+            let starts_token = !masked[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let after = masked[at + name.len()..].strip_prefix('!')?;
+            let open = at + name.len() + 1 + (after.len() - after.trim_start().len());
+            (starts_token && matches!(masked.as_bytes().get(open), Some(b'(' | b'[' | b'{')))
+                .then_some((at, open))
+        })
+        .collect::<Vec<_>>();
+    calls.reverse();
+    calls
 }
 
 /// Bring SQL that per-function literal scans cannot see into view, so the
 /// floor policy fails closed on it now that no trigger backs it up: each
 /// `include_str!("…")` becomes one literal holding the included file
-/// (resolved against `path`), and the literal arguments of each `concat!` are
-/// joined into one literal. Forms that stay opaque are violations: an
-/// `include_str!` whose path is not one literal or cannot be read, and a
-/// `concat!` that spells SQL around a non-literal argument.
+/// (resolved against `path`), and each `concat!` becomes one literal of its
+/// arguments, with `{opaque}` standing in for any non-literal argument. The
+/// SQL checks treat a placeholder in a write target or a `SET` column as
+/// unattributable. An `include_str!` whose path is not one literal or
+/// cannot be read is a violation, as is any `query_file` macro.
 fn sql_visible_source(path: &std::path::Path, source: &str) -> (String, Vec<String>) {
     let mut violations = Vec::new();
     let mut text = source.to_owned();
-    for (macro_name, expand_include) in [("include_str!(", true), ("concat!(", false)] {
+    for (macro_name, expand_include) in [("include_str", true), ("concat", false)] {
         // Last occurrence first: a rewrite never moves an earlier offset, and
         // an inner `concat!` is joined before the one around it.
         loop {
             let masked = mask_comments_and_literals(&text);
-            let Some(at) = masked
-                .match_indices(macro_name)
-                .map(|(at, _)| at)
-                .filter(|at| {
-                    !masked[..*at]
-                        .chars()
-                        .next_back()
-                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-                })
-                .last()
-            else {
+            let Some(&(at, open)) = macro_calls(&masked, macro_name).first() else {
                 break;
             };
-            let open = at + macro_name.len() - 1;
             let Some(close) = matching_close(&masked, open) else {
-                violations.push(format!("{macro_name}…) is unterminated"));
+                violations.push(format!("{macro_name}!…) is unterminated"));
                 break;
             };
             let args = &text[open + 1..close];
@@ -2462,9 +2546,7 @@ fn sql_visible_source(path: &std::path::Path, source: &str) -> (String, Vec<Stri
                 }
             } else {
                 let masked_args = &masked[open + 1..close];
-                let mut pieces = Vec::new();
                 let mut joined = String::new();
-                let mut opaque = false;
                 let mut depth = 0usize;
                 let mut arg_start = 0usize;
                 for (index, byte) in masked_args.bytes().chain(std::iter::once(b',')).enumerate() {
@@ -2477,47 +2559,37 @@ fn sql_visible_source(path: &std::path::Path, source: &str) -> (String, Vec<Stri
                             if arg.trim().is_empty() {
                                 continue;
                             }
-                            match sole_string_literal(arg) {
-                                Some(span) => {
-                                    let body = span.string_body(arg).unwrap_or_default();
-                                    let body = if matches!(span.kind, SpanKind::Str) {
-                                        body.to_owned()
-                                    } else {
-                                        body.replace('\\', "\\\\").replace('"', "\\\"")
-                                    };
-                                    joined.push_str(&body);
-                                }
-                                None => {
-                                    opaque = true;
-                                    if !joined.is_empty() {
-                                        pieces.push(format!("\"{joined}\""));
-                                    }
-                                    joined.clear();
-                                    pieces.push(arg.trim().to_owned());
-                                }
+                            match sole_string_literal(arg)
+                                .and_then(|span| plain_string_body(&span, arg))
+                            {
+                                Some(body) => joined.push_str(&body),
+                                None => joined.push_str("{opaque}"),
                             }
                         }
                         _ => {}
                     }
                 }
-                if !joined.is_empty() {
-                    pieces.push(format!("\"{joined}\""));
-                }
-                if opaque && spells_event_write_sql(args) {
-                    violations.push(format!(
-                        "concat!({}) spells SQL around a non-literal argument",
-                        args.trim()
-                    ));
-                }
-                if opaque {
-                    // Keep the opaque form visible to the per-function scan but
-                    // drop the macro name so this loop terminates.
-                    format!("concat_opaque!({})", pieces.join(", "))
-                } else {
-                    pieces.pop().unwrap_or_else(|| plain_literal(""))
-                }
+                format!("\"{joined}\"")
             };
             text.replace_range(at..=close, &replacement);
+        }
+    }
+    // sqlx's `query_file*!` macros load SQL from a file at compile time;
+    // nothing uses them, so ban them rather than resolve them.
+    let masked = mask_comments_and_literals(&text);
+    for (at, _) in masked.match_indices("query_file") {
+        let starts_token = !masked[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+        let name_len = masked[at..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(masked.len() - at);
+        if starts_token && masked[at + name_len..].trim_start().starts_with('!') {
+            violations.push(format!(
+                "{}! loads SQL from a file",
+                &masked[at..at + name_len]
+            ));
         }
     }
     (text, violations)
@@ -2554,8 +2626,9 @@ fn function_items(production: &str) -> Vec<&str> {
         .collect()
 }
 
-/// String literal bodies outside every function body: consts, statics and
-/// macro bodies. A function's floor guard cannot be attributed to SQL there.
+/// String literals outside every function body (consts, statics and macro
+/// bodies), as plain literals one per line. A function's floor guard cannot
+/// be attributed to SQL there.
 fn item_level_literals(production: &str) -> String {
     let base = production.as_ptr() as usize;
     let functions: Vec<(usize, usize)> = function_items(production)
@@ -2573,9 +2646,8 @@ fn item_level_literals(production: &str) -> String {
         {
             continue;
         }
-        if let Some(body) = span.string_body(production) {
-            literals.push_str(body);
-            literals.push('\n');
+        if let Some(body) = plain_string_body(&span, production) {
+            literals.push_str(&format!("\"{body}\"\n"));
         }
     }
     literals
@@ -2585,20 +2657,21 @@ fn item_level_literals(production: &str) -> String {
 /// [`sql_visible_source`] has exposed included and concatenated SQL.
 fn file_event_floor_policy_violations(path: &std::path::Path, source: &str) -> Vec<String> {
     let (production, mut violations) = sql_visible_source(path, &strip_cfg_test_items(source));
-    let item_level = item_level_literals(&production);
-    if inserts_events_row(&item_level) || updates_event_floor_columns(&item_level) {
-        violations.push("event-write SQL outside any function body".to_owned());
-    }
     // The fence cannot bound a prepared transaction's rows without the
     // retired trigger (see `replica_fence::sample_writer`), so no supported
     // writer may prepare one.
-    let literals: String = source_spans(&production)
-        .iter()
-        .filter_map(|span| span.string_body(&production))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if normalized_sql_source(&literals).contains("prepare transaction") {
-        violations.push("PREPARE TRANSACTION in a production writer".to_owned());
+    for span in source_spans(&production) {
+        if let Some(body) = span.string_body(&production) {
+            for violation in literal_sql_violations(&normalized_sql(body)) {
+                if !violations.iter().any(|seen| seen == violation) {
+                    violations.push(violation.to_owned());
+                }
+            }
+        }
+    }
+    let item_level = item_level_literals(&production);
+    if inserts_events_row(&item_level) || updates_event_floor_columns(&item_level) {
+        violations.push("event-write SQL outside any function body".to_owned());
     }
     violations.extend(event_floor_policy_violations(&production));
     violations
@@ -2787,37 +2860,127 @@ async fn two_phase(tx: &mut AdmittedTx) {
 }
 "##;
     let violations = file_event_floor_policy_violations(&path, source);
+
+    // One writer per shape: the SQL is split, assembled, loaded or spelled so
+    // the per-literal checks cannot read it whole.
+    const WRITER: &str = "async fn writer(tx: &mut AdmittedTx) {";
+    const OPAQUE_INSERT: &str = "INSERT target is not a literal table";
+    let shapes: [(&str, &[&str]); 19] = [
+        // Controls: an opaque WHERE predicate (the retention deletes), a
+        // placeholder table with no floor column (tenant severing), and a
+        // builder whose upsert continues in another literal.
+        (
+            r#"sqlx::query(concat!("UPDATE events SET deleted_at = NOW() WHERE NOT ", pred!(), ""))"#,
+            &[],
+        ),
+        (
+            r#"format!("UPDATE {table} SET community_id = NULL WHERE community_id = $1")"#,
+            &[],
+        ),
+        (
+            r#"QueryBuilder::new("INSERT INTO listeners (a) ").push(" ON CONFLICT (a) DO UPDATE SET created_at = EXCLUDED.created_at")"#,
+            &[],
+        ),
+        // A non-literal `concat!` argument as the target or a SET column.
+        (
+            r#"concat!("UPDATE ", table!(), " SET created_at = $1")"#,
+            &[WRITER],
+        ),
+        (
+            r#"concat!("UPDATE events SET ", cols!(), " = $1")"#,
+            &[WRITER],
+        ),
+        // Every macro delimiter.
+        (
+            r#"concat!["INSERT INTO ", "events (id) VALUES ($1)"]"#,
+            &[WRITER],
+        ),
+        (
+            r#"::core::concat!{"INSERT INTO ", "events (id) VALUES ($1)"}"#,
+            &[WRITER],
+        ),
+        (r#"include_str!["insert_event.sql"]"#, &[WRITER]),
+        (r#"include_str! {"insert_event.sql"}"#, &[WRITER]),
+        // Compile-time file SQL is banned outright.
+        (
+            r#"sqlx::query_file!("insert_event.sql")"#,
+            &["query_file! loads SQL from a file"],
+        ),
+        (
+            r#"sqlx::query_file_as!(Row, "insert_event.sql")"#,
+            &["query_file_as! loads SQL from a file"],
+        ),
+        // SQL assembled at runtime.
+        (
+            r#"format!("{}{}", "INSERT INTO ", "events (id) VALUES ($1)")"#,
+            &[OPAQUE_INSERT],
+        ),
+        (
+            r#"format!("INSERT INTO {t} (id) VALUES ($1)")"#,
+            &[OPAQUE_INSERT],
+        ),
+        (
+            r#"["INSERT INTO ", "events (id) VALUES ($1)"].concat()"#,
+            &[OPAQUE_INSERT],
+        ),
+        (
+            r#"format!("INSERT INTO events (id) VALUES ($1) {suffix}")"#,
+            &["events INSERT with a non-literal part", WRITER],
+        ),
+        (
+            r#"format!("{}{}", "UPDATE ", "events SET created_at = $1")"#,
+            &[WRITER],
+        ),
+        (
+            r#"format!("UPDATE public.events SET {column} = $1")"#,
+            &[WRITER],
+        ),
+        (
+            r#"sqlx::query("MERGE INTO events e USING src ON e.id = src.id WHEN MATCHED THEN DO NOTHING")"#,
+            &["events written by a statement other than INSERT"],
+        ),
+        (
+            r#"format!("{} TRANSACTION 'x'", "PREPARE")"#,
+            &["PREPARE TRANSACTION in a production writer"],
+        ),
+    ];
+    let shape_violations = shapes.map(|(shape, _)| {
+        file_event_floor_policy_violations(&path, &format!("{WRITER}\n    {shape};\n}}\n"))
+    });
+
+    // Each item-level form is caught on its own, wherever it sits.
+    std::fs::write(
+        dir.join("insert_event.sql"),
+        "insert into events (id) values ($1)",
+    )
+    .expect("sql fixture");
+    let items = [
+        "const LEADING: &str = \"INSERT INTO events (id) VALUES ($1)\";\nfn f() {}\n",
+        "fn f() {}\nconst TRAILING: &str = \"UPDATE events SET channel_id = $1\";\nfn g() {}\n",
+        "fn f() {}\nstatic INCLUDED: &str = include_str!(\"insert_event.sql\");\n",
+    ];
+    let item_violations = items.map(|item| file_event_floor_policy_violations(&path, item));
     std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+
     assert_eq!(
         violations,
         [
             r#"include_str!(concat!(env!("OUT_DIR"), "/insert.sql")) is opaque"#,
-            r#"concat!("INSERT INTO ", env!("EVENTS_TABLE")) spells SQL around a non-literal argument"#,
-            "event-write SQL outside any function body",
+            OPAQUE_INSERT,
             "PREPARE TRANSACTION in a production writer",
+            "event-write SQL outside any function body",
             "async fn joined_insert(tx: &mut AdmittedTx) {",
             "async fn joined_rewrite(tx: &mut AdmittedTx) {",
             "async fn included_insert(tx: &mut AdmittedTx) {",
         ]
     );
-
-    // Each item-level form is caught on its own, wherever it sits.
-    for item in [
-        "const LEADING: &str = \"INSERT INTO events (id) VALUES ($1)\";\nfn f() {}\n",
-        "fn f() {}\nconst TRAILING: &str = \"UPDATE events SET channel_id = $1\";\nfn g() {}\n",
-        "fn f() {}\nstatic INCLUDED: &str = include_str!(\"insert_event.sql\");\n",
-    ] {
-        std::fs::create_dir_all(&dir).expect("fixture dir");
-        std::fs::write(
-            dir.join("insert_event.sql"),
-            "insert into events (id) values ($1)",
-        )
-        .expect("sql fixture");
-        let found = file_event_floor_policy_violations(&path, item);
-        std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+    for ((shape, expected), found) in shapes.iter().zip(&shape_violations) {
+        assert_eq!(found, expected, "shape `{shape}`");
+    }
+    for (item, found) in items.iter().zip(&item_violations) {
         assert_eq!(
             found,
-            ["event-write SQL outside any function body"],
+            &["event-write SQL outside any function body"],
             "item-level SQL in `{item}`"
         );
     }
