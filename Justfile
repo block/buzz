@@ -1026,8 +1026,9 @@ mobile-build-android:
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! pgrep -x Simulator &>/dev/null; then
-        open -a Simulator
+    # Xcode 27 replaced Simulator.app with DeviceHub.app.
+    if ! pgrep -x Simulator &>/dev/null && ! pgrep -x DeviceHub &>/dev/null; then
+        open -a Simulator 2>/dev/null || open -a DeviceHub
         sleep 3
     fi
     ./scripts/mobile-worktree-overrides.sh

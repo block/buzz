@@ -17,15 +17,26 @@ printf '%s\n' "$@" > "$CALL_LOG"
 STUB
 cat > "$fixture/bin/pgrep" <<'STUB'
 #!/bin/bash
+[[ "$*" == "-x $RUNNING_APP" ]]
+STUB
+cat > "$fixture/bin/open" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$OPEN_LOG"
+[[ "$*" == "-a $AVAILABLE_APP" ]]
+STUB
+cat > "$fixture/bin/sleep" <<'STUB'
+#!/bin/bash
 exit 0
 STUB
 cat > "$fixture/scripts/mobile-worktree-overrides.sh" <<'STUB'
 #!/bin/bash
 exit 0
 STUB
-chmod +x "$fixture/bin/flutter" "$fixture/bin/pgrep" "$fixture/scripts/mobile-worktree-overrides.sh"
+chmod +x "$fixture/bin/flutter" "$fixture/bin/pgrep" "$fixture/bin/open" "$fixture/bin/sleep" "$fixture/scripts/mobile-worktree-overrides.sh"
 export PATH="$fixture/bin:$PATH"
 export CALL_LOG="$fixture/arguments"
+export OPEN_LOG="$fixture/open-calls"
+export RUNNING_APP=DeviceHub AVAILABLE_APP=none
 unset BUZZ_PUSH_GATEWAY_URL
 
 for recipe in mobile-dev mobile-build-android; do
@@ -56,3 +67,30 @@ printf '%s\n' 'BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example' > "$fixture/mobi
 printf '%s\n' run '--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example' > "$fixture/expected"
 diff -u "$fixture/expected" "$CALL_LOG"
 printf 'PASS mobile-dev Xcode override\n'
+
+# Cover both supported Xcode app names, including launching a stopped app.
+for scenario in running-simulator running-devicehub launch-simulator launch-devicehub missing-app; do
+  export RUNNING_APP=none AVAILABLE_APP=none
+  case "$scenario" in
+    running-simulator) RUNNING_APP=Simulator ;;
+    running-devicehub) RUNNING_APP=DeviceHub ;;
+    launch-simulator) AVAILABLE_APP=Simulator ;;
+    launch-devicehub) AVAILABLE_APP=DeviceHub ;;
+  esac
+  rm -f "$CALL_LOG"
+  : > "$OPEN_LOG"
+  : > "$fixture/expected-open"
+  case "$scenario" in
+    launch-simulator) printf '%s\n' '-a Simulator' > "$fixture/expected-open" ;;
+    launch-devicehub|missing-app) printf '%s\n' '-a Simulator' '-a DeviceHub' > "$fixture/expected-open" ;;
+  esac
+  if (cd "$fixture" && /bin/bash "$fixture/mobile-dev"); then
+    [[ "$scenario" != missing-app ]]
+    diff -u "$fixture/expected" "$CALL_LOG"
+  else
+    [[ "$scenario" == missing-app ]]
+    [[ ! -e "$CALL_LOG" ]]
+  fi
+  diff -u "$fixture/expected-open" "$OPEN_LOG"
+  printf 'PASS mobile-dev %s\n' "$scenario"
+done
