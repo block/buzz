@@ -127,7 +127,7 @@ class ComposeNotePage extends HookConsumerWidget {
                     AvatarImage(
                       imageUrl: profile?.avatarUrl,
                       radius: 18,
-                      backgroundColor: context.colors.primaryContainer,
+                      backgroundColor: context.controlSurface,
                       fallback: Text(
                         profile?.initial ?? '?',
                         style: context.textTheme.labelMedium?.copyWith(
@@ -213,7 +213,7 @@ class _ReplyContext extends ConsumerWidget {
               AvatarImage(
                 imageUrl: profile?.avatarUrl,
                 radius: 18,
-                backgroundColor: context.colors.primaryContainer,
+                backgroundColor: context.controlSurface,
                 fallback: Text(
                   // Name-derived when the profile is cached; keyed to the
                   // hex public key when it isn't, so the compact-npub

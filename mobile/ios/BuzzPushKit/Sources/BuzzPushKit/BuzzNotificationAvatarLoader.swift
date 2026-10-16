@@ -1,7 +1,6 @@
 import CryptoKit
 import Foundation
 import ImageIO
-import P256K
 import UniformTypeIdentifiers
 
 /// Fetches an avatar with the extension's private HTTP cache and bounded native decoding.
@@ -205,8 +204,8 @@ public final class BuzzNotificationAvatarLoader {
     guard let bytes = VerifiedNostrEvent.hexBytes(key), bytes.count == 32 else {
       throw NostrHTTPAuthError.invalidHex
     }
-    let signingKey = try P256K.Schnorr.PrivateKey(dataRepresentation: bytes)
-    let pubkey = VerifiedNostrEvent.hex(signingKey.xonly.bytes)
+    let signingKey = bytes
+    let pubkey = VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: signingKey))
     guard pubkey == account else { throw BuzzNotificationCacheError.revoked }
     let timestamp = Int(Date().timeIntervalSince1970)
     // URLComponents preserves the brackets required around IPv6 authorities.
@@ -216,13 +215,13 @@ public final class BuzzNotificationAvatarLoader {
     let content = "Get buzz-media"
     let serialization = try VerifiedNostrEvent.canonicalSerialization(
       pubkey: pubkey, createdAt: timestamp, kind: 24242, tags: tags, content: content)
-    var digest = Array(SHA256.hash(data: serialization))
+    let digest = Array(SHA256.hash(data: serialization))
     let id = VerifiedNostrEvent.hex(digest)
-    let signature = try signingKey.signature(message: &digest, auxiliaryRand: nil)
+    let signature = try NostrSchnorr.sign(message: digest, secret: signingKey)
     let event = VerifiedNostrEvent(
       id: id, pubkey: pubkey, createdAt: timestamp,
       kind: 24242, tags: tags, content: content,
-      sig: VerifiedNostrEvent.hex(signature.dataRepresentation))
+      sig: VerifiedNostrEvent.hex(signature))
     return "Nostr " + (try JSONEncoder().encode(event)).base64EncodedString()
   }
 }

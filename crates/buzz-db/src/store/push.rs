@@ -48,6 +48,10 @@ async fn acquire_push_gate_lock(tx: &mut sqlx::PgConnection, community: Communit
 /// Maximum claims for a malformed matcher job before it is discarded.
 pub const MAX_MATCH_ATTEMPTS: i32 = 8;
 
+/// Bound tenant admission attempts when a due community fences after the
+/// candidate read. A later tick can continue beyond this page if needed.
+const MATCH_CLAIM_COMMUNITY_CANDIDATES: i64 = 16;
+
 /// Common signed-event ordering fields for a lease replacement.
 #[derive(Debug, Clone, Copy)]
 pub struct LeaseVersion<'a> {
@@ -861,26 +865,47 @@ where
     Fut: std::future::Future<Output = Result<Vec<buzz_core::StoredEvent>>>,
 {
     let claim_id = Uuid::new_v4();
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
-    let rows = sqlx::query(
-        r#"
-        WITH target AS (
-            SELECT community_id
-            FROM push_match_queue
-            WHERE attempts < $3
-              AND next_attempt_at <= now()
-              AND (state = 'pending' OR (state = 'matching' AND lease_until < now()))
-              AND community_write_allowed(community_id)
-            ORDER BY next_attempt_at, created_at
-            LIMIT 1
-        ),
-        candidates AS (
+    let mut refused = Vec::<Uuid>::new();
+    let mut claimed = None;
+    for _ in 0..MATCH_CLAIM_COMMUNITY_CANDIDATES {
+        let mut connection =
+            acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
+                .await?;
+        // Exclude fenced tenants so they cannot occupy the queue head.
+        let candidate: Option<Uuid> = sqlx::query_scalar(
+            "SELECT q.community_id FROM push_match_queue q \
+             JOIN communities c ON c.id = q.community_id \
+             WHERE q.attempts < $1 AND q.next_attempt_at <= now() \
+               AND (q.state = 'pending' OR (q.state = 'matching' AND q.lease_until < now())) \
+               AND c.deletion_state = 'active' AND c.deleted_at IS NULL \
+               AND q.community_id <> ALL($2) \
+             ORDER BY q.next_attempt_at, q.created_at LIMIT 1",
+        )
+        .bind(MAX_MATCH_ATTEMPTS)
+        .bind(&refused)
+        .fetch_optional(&mut *connection)
+        .await?;
+        drop(connection);
+        let Some(id) = candidate else {
+            break;
+        };
+        let community = CommunityId::from_uuid(id);
+        let Some(mut tx) = crate::begin_community_sweep_transaction(
+            pool,
+            community,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?
+        else {
+            refused.push(id);
+            continue;
+        };
+        let rows = sqlx::query(
+            r#"
+        WITH candidates AS (
             SELECT q.community_id, q.event_id
             FROM push_match_queue q
-            JOIN target t ON q.community_id = t.community_id
-            WHERE q.attempts < $3
+            WHERE q.community_id = $5 AND q.attempts < $3
               AND q.next_attempt_at <= now()
               AND (q.state = 'pending' OR (q.state = 'matching' AND q.lease_until < now()))
             ORDER BY q.next_attempt_at, q.created_at
@@ -893,22 +918,26 @@ where
         WHERE q.community_id=c.community_id AND q.event_id=c.event_id
         RETURNING q.community_id, q.event_id, q.attempts
         "#,
-    )
-    .bind(claim_id)
-    .bind(lease_until)
-    .bind(MAX_MATCH_ATTEMPTS)
-    .bind(limit)
-    .fetch_all(&mut *connection)
-    .await?;
+        )
+        .bind(claim_id)
+        .bind(lease_until)
+        .bind(MAX_MATCH_ATTEMPTS)
+        .bind(limit)
+        .bind(community.as_uuid())
+        .fetch_all(tx.conn())
+        .await?;
+        tx.commit().await?;
+        claimed = Some((community, rows));
+        break;
+    }
+    let Some((community, rows)) = claimed else {
+        return Ok(None);
+    };
     if rows.is_empty() {
         return Ok(None);
     }
-    // The claim query is a single autocommitted statement. Release its pool
-    // slot before loading source events, because the production loader owns a
-    // separately attributed acquisition. Holding this connection across the
-    // load would self-starve a supported size-one writer pool.
-    drop(connection);
-    let community = CommunityId::from_uuid(rows[0].try_get("community_id")?);
+    // The admitted transaction committed above, so no connection is held
+    // across the loader (size-one pools must work).
     let mut attempts = std::collections::HashMap::with_capacity(rows.len());
     for row in &rows {
         let event_id: Vec<u8> = row.try_get("event_id")?;
@@ -967,15 +996,34 @@ pub async fn reap_exhausted_matches(pool: &PgPool) -> Result<u64> {
     let mut connection =
         acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
             .await?;
-    Ok(sqlx::query(
-        "DELETE FROM push_match_queue WHERE attempts >= $1 \
-         AND (state='pending' OR (state='matching' AND lease_until < now())) \
-         AND community_write_allowed(community_id)",
+    let communities: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT community_id FROM push_match_queue WHERE attempts >= $1 \
+         AND (state='pending' OR (state='matching' AND lease_until < now()))",
     )
     .bind(MAX_MATCH_ATTEMPTS)
-    .execute(&mut *connection)
-    .await?
-    .rows_affected())
+    .fetch_all(&mut *connection)
+    .await?;
+    drop(connection);
+    let deleted = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "exhausted_match_reap",
+        |id, mut tx| async move {
+            let result = sqlx::query(
+                "DELETE FROM push_match_queue WHERE community_id = $1 AND attempts >= $2 \
+                 AND (state='pending' OR (state='matching' AND lease_until < now()))",
+            )
+            .bind(id)
+            .bind(MAX_MATCH_ATTEMPTS)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        },
+    )
+    .await;
+    Ok(deleted.into_iter().sum())
 }
 
 /// Load active endpoint-enabled leases for one tenant.
@@ -2601,7 +2649,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn matcher_claim_skips_quiescing_tenant_while_active_bystanders_progress() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue WHERE community_write_allowed(community_id)")
+        sqlx::query("DELETE FROM push_match_queue")
             .execute(&pool)
             .await
             .expect("drain active matcher queue");
@@ -2631,7 +2679,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn exhausted_match_reaper_skips_quiescing_tenant_and_reaps_active_bystanders() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue WHERE community_write_allowed(community_id)")
+        sqlx::query("DELETE FROM push_match_queue")
             .execute(&pool)
             .await
             .expect("drain active matcher queue");

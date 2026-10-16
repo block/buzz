@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'accent_colors.dart';
 import 'app_colors.dart';
+import 'theme_extensions.dart';
 
 /// Name of the first-party Buzz theme. Buzz reuses the GitHub Light palette for
 /// every base color; the one thing that sets it apart is a branded gradient
@@ -55,9 +56,7 @@ Color navigationSectionForeground(BuildContext context) {
 
 /// Search-field surface for the mobile top navigation.
 Color navigationSearchSurface(BuildContext context) {
-  final scheme = Theme.of(context).colorScheme;
-  if (!isBuzzThemeContext(context)) return scheme.surfaceContainerHighest;
-  return navigationPrimaryForeground(context).withValues(alpha: 0.04);
+  return context.controlSurface;
 }
 
 /// A low-contrast navigation divider derived from the active theme foreground.

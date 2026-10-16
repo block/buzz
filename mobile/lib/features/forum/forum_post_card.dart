@@ -347,7 +347,7 @@ class _PostAvatar extends StatelessWidget {
     return AvatarImage(
       imageUrl: avatarUrl,
       radius: 14,
-      backgroundColor: context.colors.primaryContainer,
+      backgroundColor: context.controlSurface,
       fallback: Text(
         initial,
         style: context.textTheme.labelSmall?.copyWith(

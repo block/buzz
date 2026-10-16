@@ -501,8 +501,9 @@ shape is an explicit transition, not a flag day:
 - **Community fence (transition foundation):** runtime admission APIs now offer
   one shared community deletion lock per transaction, while deletion lifecycle
   transitions take the matching exclusive lock. A supported serving transaction
-  never spans communities; unmigrated paths still rely on trigger/function
-  backstops.
+  never spans communities. Serving leases use the same application admission.
+  Startup and deletion catalog validation tolerate the universal fence objects
+  being absent; inventories still record live fences for older executors.
 - **Replica floor (transition foundation):** runtime now provides a shared
   replica-floor lock helper for compliant channel-event writers, and the writer
   probe handshake takes the exclusive counterpart before sampling `S`, scanning
@@ -513,7 +514,8 @@ shape is an explicit transition, not a flag day:
 - **Dual enforcement (current):** application-owned lock+precheck paths run in
   front of the existing trigger/function enforcement; commit-time trigger checks
   remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, not part of the lock foundation.
+  gated migration, after every pod tolerates their absence and no rollback below
+  that version is expected.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
@@ -872,6 +874,18 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 
 Applied in: `buzz-auth` (JWKS boundary), `buzz-workflow` (CallWebhook action),
 desktop `link_preview` (SSRF check).
+
+JWKS uses `public_https` by default and applies this public-address check to
+every resolved answer before pinning the first permitted address. Explicit
+`mesh` mode accepts HTTP only for a DNS hostname (not an IP literal) without
+userinfo, query, fragment, or backslash. It checks every DNS answer against the
+positive address allow-list in the
+[NIP-FI JWKS snapshot contract](docs/nips/NIP-FI.md#jwks-snapshot), rejects
+empty or mixed answers, and pins the first checked address. Mesh selection is
+an operator assertion, not a transport property the Rust relay verifies.
+Operators must enforce mutual TLS peer authentication and integrity
+protection, authorize the JWKS endpoint, and restrict egress. Unauthenticated
+HTTP permits key substitution and issuer impersonation.
 
 ### Audit Integrity
 

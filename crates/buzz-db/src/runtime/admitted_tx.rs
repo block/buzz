@@ -24,8 +24,9 @@ use crate::Result;
 /// are the only ways it can end the transaction. Inside the crate, the
 /// `conn()` accessor hands statements the connection; the type can't stop
 /// crate code from issuing a raw `COMMIT` through it, so the database
-/// community write fences remain the backstop. Dropping the value without
-/// committing rolls back, as with [`sqlx::Transaction`].
+/// community write fences remain the backstop while deployed. Internal writers
+/// must preserve this boundary and use `commit()` for staged follow-up work.
+/// Dropping the value without committing rolls back, as with [`sqlx::Transaction`].
 ///
 /// These are live regressions for the guarantee. Event-write helpers accept an
 /// admitted transaction:

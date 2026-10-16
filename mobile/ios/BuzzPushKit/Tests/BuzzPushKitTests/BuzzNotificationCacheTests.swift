@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import P256K
 import Testing
 
 @testable import BuzzPushKit
@@ -310,8 +309,8 @@ struct BuzzNotificationCacheTests {
     content: String = ""
   ) throws -> VerifiedNostrEvent {
     let privateKeyBytes = try #require(VerifiedNostrEvent.hexBytes(privateKey))
-    let key = try P256K.Schnorr.PrivateKey(dataRepresentation: privateKeyBytes)
-    let pubkey = VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = privateKeyBytes
+    let pubkey = VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
     let serialization = try VerifiedNostrEvent.canonicalSerialization(
       pubkey: pubkey,
       createdAt: createdAt,
@@ -320,9 +319,9 @@ struct BuzzNotificationCacheTests {
       content: content
     )
     let digest = Array(SHA256.hash(data: serialization))
-    var message = digest
-    var randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
-    let signature = try key.signature(message: &message, auxiliaryRand: &randomness)
+    let message = digest
+    let randomness = [UInt8](repeating: UInt8(truncatingIfNeeded: createdAt), count: 32)
+    let signature = try NostrSchnorr.sign(message: message, secret: key, auxiliaryRandomness: randomness)
     return VerifiedNostrEvent(
       id: VerifiedNostrEvent.hex(digest),
       pubkey: pubkey,
@@ -330,7 +329,7 @@ struct BuzzNotificationCacheTests {
       kind: kind,
       tags: tags,
       content: content,
-      sig: VerifiedNostrEvent.hex(signature.dataRepresentation)
+      sig: VerifiedNostrEvent.hex(signature)
     )
   }
 }

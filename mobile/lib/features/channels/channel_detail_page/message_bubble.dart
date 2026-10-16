@@ -460,7 +460,7 @@ class _UserAvatar extends StatelessWidget {
     return AvatarImage(
       imageUrl: avatarUrl,
       radius: size / 2,
-      backgroundColor: context.colors.primaryContainer,
+      backgroundColor: context.controlSurface,
       fallback: Text(
         initial,
         style:

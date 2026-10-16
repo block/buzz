@@ -634,18 +634,31 @@ pub async fn prune_scheduled_workflow_fires_before(
     pool: &PgPool,
     older_than: DateTime<Utc>,
 ) -> Result<u64> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM scheduled_workflow_fires
-        WHERE claimed_at < $1
-          AND community_write_allowed(community_id)
-        "#,
+    let communities: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT community_id FROM scheduled_workflow_fires WHERE claimed_at < $1",
     )
     .bind(older_than)
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
-
-    Ok(result.rows_affected())
+    let deleted = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "scheduled_workflow_fire_prune",
+        |id, mut tx| async move {
+            let result = sqlx::query(
+                "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND claimed_at < $2",
+            )
+            .bind(id)
+            .bind(older_than)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        },
+    )
+    .await;
+    Ok(deleted.into_iter().sum())
 }
 
 /// Update a workflow's name, definition, and definition_hash.

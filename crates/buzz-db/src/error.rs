@@ -99,6 +99,17 @@ impl DbError {
             DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
         )
     }
+
+    /// Whether the failure is about reaching the database at all (pool
+    /// acquire timeout, closed pool, or socket I/O) rather than about the
+    /// statement or its tenant. Every later query on the pool is expected to
+    /// fail the same way.
+    pub fn is_connection_unavailable(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_))
+        )
+    }
 }
 
 /// Convenience alias for `Result<T, DbError>`.
@@ -139,5 +150,29 @@ impl DbError {
             _ => "other",
         };
         kind.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DbError;
+
+    #[test]
+    fn connection_unavailable_covers_only_pool_and_io_failures() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert!(DbError::Sqlx(error).is_connection_unavailable());
+        }
+        for error in [
+            DbError::Sqlx(sqlx::Error::RowNotFound),
+            DbError::Sqlx(sqlx::Error::Protocol("bad frame".into())),
+            DbError::AccessDenied("write-fenced".into()),
+            DbError::InvalidData("bad row".into()),
+        ] {
+            assert!(!error.is_connection_unavailable(), "{error:?}");
+        }
     }
 }

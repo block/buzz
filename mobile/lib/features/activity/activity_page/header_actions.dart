@@ -33,7 +33,7 @@ class _ActivityActionsPill extends StatelessWidget {
     borderRadius: BorderRadius.circular(Radii.full),
     child: DecoratedBox(
       decoration: BoxDecoration(
-        color: context.colors.primaryContainer,
+        color: context.controlSurface,
         borderRadius: BorderRadius.circular(Radii.full),
       ),
       child: Padding(
@@ -161,7 +161,7 @@ class _InboxOptionsButton extends StatelessWidget {
     return Builder(
       builder: (buttonContext) => IconButton(
         key: const ValueKey('activity-options-menu'),
-        tooltip: 'Activity options',
+        tooltip: 'Inbox options',
         color: navigationPrimaryForeground(context),
         padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
         constraints: const BoxConstraints.tightFor(

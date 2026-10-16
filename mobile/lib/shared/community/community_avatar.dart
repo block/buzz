@@ -31,7 +31,7 @@ class CommunityAvatar extends ConsumerWidget {
     return ClipRSuperellipse(
       borderRadius: BorderRadius.circular(Radii.card * size / 40),
       child: ColoredBox(
-        color: context.colors.primaryContainer,
+        color: context.controlSurface,
         child: SizedBox.square(
           dimension: size,
           child: AvatarImageContent(

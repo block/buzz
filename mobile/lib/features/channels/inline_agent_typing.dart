@@ -44,7 +44,7 @@ class InlineAgentTyping extends ConsumerWidget {
                               ?.avatarUrl,
                       radius: messageAvatarSize / 2,
                       isAgent: true,
-                      backgroundColor: context.colors.primaryContainer,
+                      backgroundColor: context.controlSurface,
                       fallback: Text(
                         profiles[key]?.initial ??
                             key.substring(0, 1).toUpperCase(),

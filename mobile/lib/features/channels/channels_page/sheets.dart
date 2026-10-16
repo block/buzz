@@ -261,7 +261,7 @@ class _CreateChannelFieldShell extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: context.colors.primaryContainer.withValues(alpha: 0.55),
+        color: context.controlSurface.withValues(alpha: 0.55),
         border: Border.all(color: context.colors.outlineVariant),
         borderRadius: BorderRadius.circular(Radii.container),
       ),
@@ -748,7 +748,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                           leading: AvatarImage(
                             imageUrl: user.avatarUrl,
                             radius: 20,
-                            backgroundColor: context.colors.primaryContainer,
+                            backgroundColor: context.controlSurface,
                             fallback: Text(
                               user.initial,
                               style: context.textTheme.labelLarge?.copyWith(
@@ -854,7 +854,7 @@ class _SelectedDmRecipientChip extends StatelessWidget {
                     AvatarImage(
                       imageUrl: user.avatarUrl,
                       radius: 16,
-                      backgroundColor: context.colors.primaryContainer,
+                      backgroundColor: context.controlSurface,
                       fallback: Text(
                         user.initial,
                         style: context.textTheme.labelMedium?.copyWith(

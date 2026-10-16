@@ -60,7 +60,7 @@ class _NewMeChat extends HookConsumerWidget {
                     imageUrl: profile?.avatarUrl,
                     radius: 20,
                     isAgent: true,
-                    backgroundColor: context.colors.primaryContainer,
+                    backgroundColor: context.controlSurface,
                     fallback: Text(
                       profile?.initial ??
                           (chosen.displayName?.isNotEmpty == true

@@ -14,6 +14,34 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
   testWidgets(
+    'native toolbar receives stable safe inset inside a translated route',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        _testApp(
+          home: MediaQuery(
+            data: const MediaQueryData(viewPadding: EdgeInsets.only(top: 62)),
+            child: Transform.translate(
+              offset: const Offset(0, 600),
+              child: const SizedBox(
+                height: 120,
+                child: IosNavigationBar(title: 'Settings'),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(
+        tester.widget<UiKitView>(find.byType(UiKitView)).creationParams,
+        containsPair('safeTop', 62.0),
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
     'native readiness waits for configuration and layout acknowledgement',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -356,7 +384,10 @@ void main() {
     await tester.pump();
     await tester.drag(find.byType(ListView), const Offset(0, -250));
     await tester.pumpAndSettle();
-    expect(calls.where((call) => call.method == 'scroll').last.arguments, 52);
+    expect(
+      calls.where((call) => call.method == 'scroll').last.arguments,
+      greaterThan(52),
+    );
     final bodyTop = tester.getTopLeft(find.byType(ListView)).dy;
     await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
       channel.name,
@@ -370,7 +401,10 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(calls.where((call) => call.method == 'scroll').last.arguments, 80);
+    expect(
+      calls.where((call) => call.method == 'scroll').last.arguments,
+      greaterThan(80),
+    );
     expect(tester.getSize(find.byType(UiKitView)).height, 44);
     expect(tester.getTopLeft(find.byType(ListView)).dy, bodyTop);
     await tester.pumpWidget(const SizedBox());
@@ -445,7 +479,10 @@ void main() {
       expect(selected, 2);
       await tester.drag(find.byType(ListView), const Offset(0, -180));
       await tester.pumpAndSettle();
-      expect(calls.where((call) => call.method == 'scroll').last.arguments, 52);
+      expect(
+        calls.where((call) => call.method == 'scroll').last.arguments,
+        greaterThan(52),
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;

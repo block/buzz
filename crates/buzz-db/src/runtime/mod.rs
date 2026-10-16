@@ -202,6 +202,60 @@ pub(crate) async fn begin_community_write_transaction(
     .await
 }
 
+/// Begin a fleet sweep's tenant-local mutation, skipping communities whose
+/// deletion lifecycle no longer admits writes. All other failures propagate.
+pub(crate) async fn begin_community_sweep_transaction(
+    pool: &PgPool,
+    community: CommunityId,
+    operation: observability::WriterOperation,
+) -> Result<Option<AdmittedTx>> {
+    match begin_community_write_transaction(pool, community, operation).await {
+        Ok(tx) => Ok(Some(tx)),
+        Err(DbError::AccessDenied(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Run one admitted mutation per community for a periodic fleet sweep and
+/// return the committed results in order. Fenced communities are skipped.
+/// A tenant-local failure is logged and the sweep moves on; that tenant's
+/// rows retry next tick. A connection-level failure stops the sweep instead,
+/// because every remaining tenant would wait out the same acquire timeout.
+pub(crate) async fn sweep_admitted_communities<T, F, Fut>(
+    pool: &PgPool,
+    communities: impl IntoIterator<Item = Uuid>,
+    operation: observability::WriterOperation,
+    sweep: &'static str,
+    mut mutate: F,
+) -> Vec<T>
+where
+    F: FnMut(Uuid, AdmittedTx) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut committed = Vec::new();
+    for id in communities {
+        let result =
+            match begin_community_sweep_transaction(pool, CommunityId::from_uuid(id), operation)
+                .await
+            {
+                Ok(None) => continue,
+                Ok(Some(tx)) => mutate(id, tx).await,
+                Err(error) => Err(error),
+            };
+        match result {
+            Ok(value) => committed.push(value),
+            Err(error) if error.is_connection_unavailable() => {
+                tracing::warn!(sweep, community_id = %id, error = %error,
+                    "Fleet sweep stopped: database unavailable; remaining tenants retry next tick");
+                break;
+            }
+            Err(error) => tracing::warn!(sweep, community_id = %id, error = %error,
+                "Fleet sweep tenant failed; retained rows retry next tick"),
+        }
+    }
+    committed
+}
+
 /// Database handle. Clone is cheap (Arc-backed pool).
 #[derive(Clone, Debug)]
 pub struct Db {

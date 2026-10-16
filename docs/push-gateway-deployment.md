@@ -236,13 +236,16 @@ migration disabled during the transition. Resolve overlapping retirement
 migrations and verify the published migration ledger before execution. Migration
 0063's lock timeout bounds acquisition waits, not lock-hold or statement duration.
 
-After migration, verify that `events_enqueue_push_match` is absent from the
-parent and every partition, `enqueue_push_match_job()` is absent, and the
-channel-TTL trigger/function remain intact. Verify application enqueueing and
-flag-only rollback on the exact deployed candidate. Legacy images and raw SQL
+After migration 0063, verify that `events_enqueue_push_match` is absent from
+the parent and every partition and `enqueue_push_match_job()` is absent.
+Migration 0065 then retires `events_refresh_channel_ttl` and
+`refresh_channel_ttl_after_event_insert()` the same way; after it, raw SQL
+writers no longer refresh ephemeral-channel deadlines. Verify application
+enqueueing and flag-only rollback on the exact deployed candidate. Legacy images and raw SQL
 writers without the application producer are unsupported after this point:
-their messages may commit without producing notifications. Do not restore the
-trigger or downgrade an image as an urgent rollback step. Reintroducing legacy
+their messages may commit without producing notifications or extending
+ephemeral-channel deadlines (so those channels can expire early). Do not restore
+either trigger or downgrade an image as an urgent rollback step. Reintroducing legacy
 writer support requires a separate reviewed forward migration and compatibility
 plan; never edit published migrations or their checksums.
 

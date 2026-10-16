@@ -88,6 +88,8 @@ jobs:
               - 'pnpm-lock.yaml'
             mobile:
               - 'mobile/**'
+              - 'Justfile'
+              - 'scripts/test-mobile-gateway-recipes.sh'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'

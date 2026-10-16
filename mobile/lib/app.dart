@@ -416,7 +416,7 @@ class App extends HookConsumerWidget {
         data: (state) => switch (state.status) {
           AuthStatus.authenticated => DeepLinkDispatcher(
             child: HomePage(
-              mePageBuilder: (_) => const MePage(),
+              mePageBuilder: (_, action) => MePage(newChatAction: action),
               settingsPageBuilder: _buildSettingsPage,
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),

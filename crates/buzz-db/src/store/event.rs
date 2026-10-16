@@ -482,6 +482,8 @@ async fn insert_event_on(
     let received_at = Utc::now();
     let d_tag = extract_d_tag(event);
     let not_before = extract_not_before(event);
+    crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
+        .await?;
     let result = sqlx::query(
         r#"
         INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
@@ -1784,6 +1786,9 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let d_tag = extract_d_tag(event);
     let not_before = extract_not_before(event);
 
+    crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
+        .await?;
+
     let result = sqlx::query(
         r#"
         INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
@@ -2717,7 +2722,7 @@ impl Db {
     /// Backfill `d_tag` for existing NIP-33 events (kind 30000–39999) that have `d_tag IS NULL`.
     ///
     /// Idempotent — safe to call on every startup. No-ops when all rows are already populated.
-    /// Runs a single UPDATE touching only NIP-33 rows with NULL d_tag.
+    /// Admits each community before updating its NIP-33 rows with NULL d_tag.
     #[datastore_span(name = "backfill_d_tags", system = "postgresql")]
     pub async fn backfill_d_tags(&self) -> Result<u64> {
         let mut connection = crate::observability::acquire_writer(
@@ -2725,19 +2730,40 @@ impl Db {
             crate::observability::WriterOperation::Bootstrap,
         )
         .await?;
-        let result = sqlx::query(
-            "UPDATE events \
+        let communities: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT community_id FROM events \
+             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        drop(connection);
+        let mut updated = 0;
+        for id in communities {
+            let Some(mut tx) = crate::begin_community_sweep_transaction(
+                &self.pool,
+                CommunityId::from_uuid(id),
+                crate::observability::WriterOperation::Bootstrap,
+            )
+            .await?
+            else {
+                continue;
+            };
+            let result = sqlx::query(
+                "UPDATE events \
              SET d_tag = COALESCE( \
                  (SELECT elem->>1 FROM jsonb_array_elements(tags) AS elem \
                   WHERE elem->>0 = 'd' LIMIT 1), \
                  '' \
              ) \
-             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL \
-               AND community_write_allowed(community_id)",
-        )
-        .execute(&mut *connection)
-        .await?;
-        Ok(result.rows_affected())
+             WHERE community_id = $1 AND kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
+            )
+            .bind(id)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            updated += result.rows_affected();
+        }
+        Ok(updated)
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
@@ -3259,7 +3285,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn event_insert_ttl_trigger_handles_permanent_ephemeral_duplicate_and_activation_race() {
+    async fn event_insert_ttl_refresh_handles_permanent_ephemeral_duplicate_and_activation_race() {
         let pool = setup_pool().await;
         let community_uuid = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_uuid);
@@ -3326,8 +3352,8 @@ mod postgres_tests {
 
         // Reproduce the blocked stale-prefetch ordering: ingest has already
         // observed a permanent channel, then TTL activation locks/updates the
-        // row before the event INSERT reaches its trigger. The trigger must
-        // wait and refresh from the later event after activation commits.
+        // row before the event INSERT reaches its pre-commit TTL refresh. The
+        // refresh must wait, then use the later event once activation commits.
         let racing = make_test_channel(&pool, community_uuid, None).await;
         let stale_ttl: Option<i32> = sqlx::query_scalar(
             "SELECT ttl_seconds FROM channels WHERE community_id = $1 AND id = $2",
@@ -3342,7 +3368,7 @@ mod postgres_tests {
         let mut activation = pool.begin().await.expect("begin TTL activation");
         // Model the repaired update_channel protocol (migration 0024): the
         // TTL transition holds the per-channel advisory key EXCLUSIVE, which
-        // is what the event trigger's shared acquisition now waits on.
+        // is what the event TTL refresh's shared acquisition waits on.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("buzz_channel_ttl:{community_uuid}:{racing}"))
             .execute(&mut *activation)
@@ -3367,7 +3393,7 @@ mod postgres_tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(
             !insert.is_finished(),
-            "event trigger must wait on TTL activation"
+            "event TTL refresh must wait on TTL activation"
         );
         activation.commit().await.expect("commit TTL activation");
         assert!(
@@ -3392,53 +3418,59 @@ mod postgres_tests {
         );
     }
 
-    /// T1a repair regression test (migration 0024): permanent-channel event
-    /// commits must not serialize on the channel row. The 0022 trigger took
-    /// `FOR UPDATE` on the channel tuple before testing `ttl_seconds`, so
-    /// concurrent commits into one hot permanent channel queued at commit
-    /// time (deferred trigger) — invisible to any single-connection test.
-    /// This holds N insert transactions at a barrier past their INSERTs,
-    /// then proves (a) while all N sit pre-commit, no transaction holds a
-    /// row-level lock on the channel tuple, and (b) all N commits succeed
-    /// with the channel row untouched (permanent ⇒ no deadline write).
+    /// T1a repair regression test (migration 0024, now app-side): commits of
+    /// permanent-channel events must not lock the channel row. The 0022
+    /// trigger took `FOR UPDATE` on the channel tuple before testing
+    /// `ttl_seconds`, so concurrent commits into one hot permanent channel
+    /// queued at commit time, which no single-connection test can see. The
+    /// refresh now runs in [`AdmittedTx::commit`] as the last statement before
+    /// COMMIT.
+    ///
+    /// This inserts N events through the production admitted-transaction
+    /// path and holds every transaction at a barrier past its INSERT. It then
+    /// proves three things:
+    /// - (a) while all N are uncommitted, no transaction holds a row-level
+    ///   lock on the channel tuple;
+    /// - (b) while an external transaction holds `FOR SHARE` on the channel
+    ///   row, all N commits, and therefore their TTL refreshes, finish
+    ///   without blocking and without a counted refresh failure;
+    /// - (c) the permanent channel's deadline stays NULL.
+    ///
+    /// Mutation oracle: if the refresh takes `FOR UPDATE` on the channel row,
+    /// the commits queue behind the `FOR SHARE` holder. The join times out,
+    /// or a `lock_timeout` is counted as a refresh failure.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn permanent_channel_event_commits_do_not_lock_the_channel_row() {
         const N: usize = 8;
-        // setup_pool's default cap (10) covers N held transactions plus the
-        // pg_locks inspector connection.
+        // setup_pool's default cap (10) covers N held transactions, the
+        // FOR SHARE holder, and the pg_locks inspector connection.
         let pool = setup_pool().await;
         let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
         let channel = make_test_channel(&pool, community_uuid, None).await;
 
-        // Open N transactions, run the full event INSERT in each (the deferred
-        // trigger fires at COMMIT), and park them at a barrier.
+        // Open N admitted transactions, run the production event insert in
+        // each (the TTL refresh runs in `commit`), and park them at a barrier.
         let mut txs = Vec::new();
         for i in 0..N {
-            let mut tx = pool.begin().await.expect("begin insert txn");
-            let event = make_text_event(&format!("hot channel event {i}"));
-            sqlx::query(
-                "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
-                 VALUES ($1,$2,$3,$4,9,$5,$6,$7,now(),$8)",
+            let mut tx = crate::begin_community_event_write_transaction(
+                &pool,
+                community,
+                crate::observability::WriterOperation::EventWrite,
             )
-            .bind(community_uuid)
-            .bind(event.id.as_bytes().as_slice())
-            .bind(event.pubkey.as_bytes().as_slice())
-            .bind(DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).unwrap())
-            .bind(serde_json::to_value(&event.tags).unwrap())
-            .bind(&event.content)
-            .bind(event.sig.serialize().as_slice())
-            .bind(channel)
-            .execute(&mut *tx)
             .await
-            .expect("insert event inside held txn");
+            .expect("begin admitted insert txn");
+            let event = make_text_event(&format!("hot channel event {i}"));
+            let (_, inserted) = insert_event_in_transaction(&mut tx, &event, Some(channel))
+                .await
+                .expect("insert event inside held txn");
+            assert!(inserted, "held txn {i} must insert its event");
             txs.push(tx);
         }
 
         // With all N transactions holding completed INSERTs, none may hold a
-        // row-level lock on the channels tuple. (The 0022 trigger would not
-        // have taken it yet either — it locks at COMMIT — so also verify the
-        // commit phase below completes without mutual blocking.)
+        // row-level lock on the channels tuple.
         let tuple_locks: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_locks l \
              JOIN pg_class c ON c.oid = l.relation \
@@ -3449,21 +3481,43 @@ mod postgres_tests {
         .expect("inspect pg_locks");
         assert_eq!(tuple_locks, 0, "no channel tuple locks while txns are held");
 
-        // Release all commits concurrently. Under 0022 these serialized on the
-        // channel row (each holding it across its WAL flush); under 0024 the
-        // shared advisory key admits them all. Join with a timeout so a
-        // regression fails fast instead of hanging the suite.
-        let commits = txs
-            .into_iter()
-            .map(|tx| tokio::spawn(async move { tx.commit().await }))
-            .collect::<Vec<_>>();
-        for c in commits {
-            tokio::time::timeout(std::time::Duration::from_secs(10), c)
+        // An external FOR SHARE holder conflicts with any FOR UPDATE / UPDATE
+        // row lock on the channel, so a refresh that locks the permanent row
+        // cannot complete while it is held.
+        let mut holder = pool.begin().await.expect("begin FOR SHARE holder");
+        sqlx::query("SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR SHARE")
+            .bind(community_uuid)
+            .bind(channel)
+            .execute(&mut *holder)
+            .await
+            .expect("holder takes FOR SHARE on the channel row");
+
+        // Release all commits concurrently while the holder is open. Join with
+        // a timeout so a regression fails fast instead of hanging the suite.
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            let commits = futures_util::future::join_all(txs.into_iter().map(AdmittedTx::commit));
+            for result in tokio::time::timeout(std::time::Duration::from_secs(10), commits)
                 .await
-                .expect("concurrent permanent-channel commits must not block")
-                .expect("join commit task")
-                .expect("commit succeeds");
+                .expect("permanent-channel commits must not wait on the channel row")
+            {
+                result.expect("commit succeeds");
+            }
         }
+        holder.rollback().await.expect("release FOR SHARE holder");
+
+        let refresh_failures: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_db_channel_ttl_refresh_failures_total")
+            .collect();
+        assert!(
+            refresh_failures.is_empty(),
+            "permanent-channel refreshes must not fail: {refresh_failures:?}"
+        );
 
         let deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT ttl_deadline FROM channels WHERE community_id = $1 AND id = $2",

@@ -86,7 +86,7 @@ class NoteCard extends HookConsumerWidget {
             child: AvatarImage(
               imageUrl: profile?.avatarUrl,
               radius: 18,
-              backgroundColor: context.colors.primaryContainer,
+              backgroundColor: context.controlSurface,
               fallback: Text(
                 // Name-derived when the profile is cached; keyed to the hex
                 // public key when it isn't, so the compact-npub fallback
@@ -195,7 +195,7 @@ class NoteCard extends HookConsumerWidget {
                 Row(
                   children: [
                     _ActionButton(
-                      icon: effectiveUpvoted ? Icons.favorite : BuzzIcons.heart,
+                      icon: BuzzIcons.heart,
                       label: effectiveCount > 0 ? '$effectiveCount' : null,
                       color: effectiveUpvoted ? Colors.redAccent : null,
                       onTap: () async {

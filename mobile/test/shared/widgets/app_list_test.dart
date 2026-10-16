@@ -1,3 +1,4 @@
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -57,7 +58,7 @@ void main() {
             icon: Icons.palette,
             title: 'Theme',
             value: 'Buzz',
-            trailing: Icon(Icons.chevron_right, key: Key('chevron')),
+            trailing: Icon(BuzzIcons.chevronRight, key: Key('chevron')),
           ),
         ),
       );

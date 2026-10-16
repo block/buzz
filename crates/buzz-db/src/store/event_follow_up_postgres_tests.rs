@@ -1,6 +1,6 @@
 //! PostgreSQL contract for the event follow-up producers (push match
 //! enqueue and channel TTL refresh), on the desired and migration schemas,
-//! with historical overlap, push retired, and both follow-ups app-only.
+//! app-only as shipped and with the historical trigger overlap reconstructed.
 use crate::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
 use crate::{event, migration, push, AdmittedTx, Db, DbConfig, DbError};
 use buzz_core::CommunityId;
@@ -214,67 +214,66 @@ async fn activate_lease(
     );
 }
 
-/// Preserve the overlap and fully app-only compatibility contracts alongside
-/// the shipped push-only retirement (the TTL trigger remains installed).
+/// Which producers are live. `AppOnly` is the shipped schema: 0063 and 0065
+/// retired both follow-up triggers. `Dual` reconstructs the historical overlap
+/// (app follow-ups plus both triggers) in this disposable database only.
 #[derive(Clone, Copy, Debug)]
 enum Arm {
     Dual,
     AppOnly,
-    PushRetired,
 }
 
 async fn apply_arm(pool: &PgPool, arm: Arm) {
     let triggers: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_trigger \
-         WHERE tgrelid = 'events'::regclass \
-           AND tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
+         WHERE tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
     )
     .fetch_one(pool)
     .await
-    .expect("count follow-up triggers");
+    .expect("count follow-up triggers, including partition clones");
     assert_eq!(
-        triggers, 1,
-        "only the TTL trigger remains in the shipped schema"
+        triggers, 0,
+        "no follow-up trigger remains on any partition of the shipped schema"
     );
-    let absent: bool =
-        sqlx::query_scalar("SELECT to_regprocedure('enqueue_push_match_job()') IS NULL")
-            .fetch_one(pool)
-            .await
-            .unwrap();
-    assert!(absent);
-    match arm {
-        Arm::Dual => {
-            // Reconstruct the historical overlap explicitly in this test only.
-            sqlx::raw_sql(include_str!(
-                "../../../../migrations/0040_push_message_kinds.sql"
-            ))
-            .execute(pool)
-            .await
-            .unwrap();
-            sqlx::raw_sql(include_str!(
-                "../../../../migrations/0059_push_rollback_gate.sql"
-            ))
-            .execute(pool)
-            .await
-            .unwrap();
-            sqlx::query("CREATE TRIGGER events_enqueue_push_match AFTER INSERT ON events FOR EACH ROW EXECUTE FUNCTION enqueue_push_match_job()")
-                .execute(pool).await.unwrap();
-        }
-        Arm::AppOnly => {
-            sqlx::query("DROP TRIGGER events_refresh_channel_ttl ON events")
-                .execute(pool)
-                .await
-                .unwrap();
-        }
-        Arm::PushRetired => {}
-    }
-    if !matches!(arm, Arm::Dual) {
+    let absent: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('enqueue_push_match_job()') IS NULL \
+         AND to_regprocedure('refresh_channel_ttl_after_event_insert()') IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert!(absent, "no follow-up trigger function remains");
+    if let Arm::Dual = arm {
         sqlx::raw_sql(include_str!(
-            "../../../../migrations/0059_push_rollback_gate.sql"
+            "../../../../migrations/0040_push_message_kinds.sql"
         ))
         .execute(pool)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0024_event_ttl_refresh_shared_lock.sql"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/0059_push_rollback_gate.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    if let Arm::Dual = arm {
+        for statement in [
+            "CREATE TRIGGER events_enqueue_push_match AFTER INSERT ON events \
+             FOR EACH ROW EXECUTE FUNCTION enqueue_push_match_job()",
+            "CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl AFTER INSERT ON events \
+             DEFERRABLE INITIALLY DEFERRED \
+             FOR EACH ROW EXECUTE FUNCTION refresh_channel_ttl_after_event_insert()",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+    } else {
         let absent: bool =
             sqlx::query_scalar("SELECT to_regprocedure('enqueue_push_match_job()') IS NULL")
                 .fetch_one(pool)
@@ -512,7 +511,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     assert!(
         deadline(pool, community, channel).await
             >= database_time_before_commit + chrono::Duration::seconds(60),
-        "the deferred trigger must refresh TTL at commit"
+        "the TTL refresh must set the deadline at commit time"
     );
     assert_eq!(match_count(&db, community, &committed).await, 1);
 
@@ -822,18 +821,6 @@ async fn migration_schema_event_follow_up_contract_dual() {
 #[ignore = "requires Postgres"]
 async fn migration_schema_event_follow_up_contract_app_only() {
     assert_contract(true, Arm::AppOnly).await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn desired_event_follow_up_contract_push_retired() {
-    assert_contract(false, Arm::PushRetired).await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn migration_schema_event_follow_up_contract_push_retired() {
-    assert_contract(true, Arm::PushRetired).await;
 }
 
 // Runs with both schema sources and with/without the overlap trigger.

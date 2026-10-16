@@ -1,3 +1,4 @@
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -228,37 +229,32 @@ class IosGlassNavigationButton extends HookWidget {
                           )
                         : Icon(
                             switch (icon) {
-                              IosGlassNavigationIcon.more => Icons.more_horiz,
-                              IosGlassNavigationIcon.reply => Icons.reply,
+                              IosGlassNavigationIcon.more => BuzzIcons.ellipsis,
+                              IosGlassNavigationIcon.reply =>
+                                BuzzIcons.cornerUpLeft,
                               IosGlassNavigationIcon.back =>
-                                Icons.arrow_back_ios_new_rounded,
-                              IosGlassNavigationIcon.close =>
-                                Icons.close_rounded,
-                              IosGlassNavigationIcon.camera =>
-                                Icons.camera_alt_rounded,
+                                BuzzIcons.chevronLeft,
+                              IosGlassNavigationIcon.close => BuzzIcons.x,
+                              IosGlassNavigationIcon.camera => BuzzIcons.camera,
                               IosGlassNavigationIcon.photoLibrary =>
-                                Icons.photo_library_rounded,
+                                BuzzIcons.images,
                               IosGlassNavigationIcon.palette =>
-                                Icons.palette_rounded,
+                                BuzzIcons.palette,
                               IosGlassNavigationIcon.droplet =>
-                                Icons.water_drop_rounded,
-                              IosGlassNavigationIcon.emoji =>
-                                Icons.emoji_emotions_rounded,
-                              IosGlassNavigationIcon.person =>
-                                Icons.person_rounded,
-                              IosGlassNavigationIcon.frame =>
-                                Icons.photo_size_select_actual_rounded,
+                                BuzzIcons.droplet,
+                              IosGlassNavigationIcon.emoji => BuzzIcons.smile,
+                              IosGlassNavigationIcon.person => BuzzIcons.user,
+                              IosGlassNavigationIcon.frame => BuzzIcons.square,
                               IosGlassNavigationIcon.rotateCamera =>
-                                Icons.cameraswitch_rounded,
-                              IosGlassNavigationIcon.shutter => Icons.circle,
+                                BuzzIcons.switchCamera,
+                              IosGlassNavigationIcon.shutter =>
+                                BuzzIcons.circle,
                               IosGlassNavigationIcon.colorSwatch =>
-                                Icons.circle,
-                              IosGlassNavigationIcon.sun =>
-                                Icons.light_mode_rounded,
-                              IosGlassNavigationIcon.moon =>
-                                Icons.dark_mode_rounded,
+                                BuzzIcons.circle,
+                              IosGlassNavigationIcon.sun => BuzzIcons.sun,
+                              IosGlassNavigationIcon.moon => BuzzIcons.moon,
                               IosGlassNavigationIcon.systemAppearance =>
-                                Icons.brightness_auto_rounded,
+                                BuzzIcons.sunMoon,
                             },
                             size: icon == IosGlassNavigationIcon.shutter
                                 ? controlSize * 0.72

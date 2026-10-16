@@ -601,12 +601,13 @@ pub async fn update_channel(
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
-    // T1a repair: a TTL change can flip this channel's event-trigger fast
-    // path (migration 0024 reads ttl_seconds under a SHARED per-channel
-    // advisory lock). Take the same key EXCLUSIVE before the UPDATE so a
-    // concurrent event either sees the committed TTL or strictly precedes
-    // this transition — whose own deadline reset is then the latest word.
-    // Non-TTL updates don't touch the fast path and skip the lock.
+    // T1a repair: a TTL change can flip this channel's event-commit fast
+    // path (`event_follow_up::refresh_channel_ttls` reads ttl_seconds under
+    // a SHARED per-channel advisory lock). Take the same key EXCLUSIVE
+    // before the UPDATE so a concurrent event either sees the committed TTL
+    // or strictly precedes this transition — whose own deadline reset is
+    // then the latest word. Non-TTL updates don't touch the fast path and
+    // skip the lock.
     if updates.ttl_seconds.is_some() {
         let mut tx = crate::begin_community_write_transaction(
             pool,
@@ -846,33 +847,53 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
         crate::observability::WriterOperation::Maintenance,
     )
     .await?;
-    let rows = sqlx::query(
-        "UPDATE channels AS ch SET archived_at = NOW() \
-         FROM communities AS c \
-         WHERE ch.community_id = c.id \
-           AND ch.ttl_seconds IS NOT NULL \
+    let communities: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT ch.community_id FROM channels AS ch \
+         JOIN communities AS c ON ch.community_id = c.id \
+         WHERE ch.ttl_seconds IS NOT NULL \
            AND ch.ttl_deadline < NOW() \
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
            AND c.archived_at IS NULL \
-           AND community_write_allowed(ch.community_id) \
-         RETURNING ch.community_id, c.host, ch.id",
+         ORDER BY ch.community_id",
     )
     .fetch_all(&mut *connection)
     .await?;
-
-    rows.into_iter()
-        .map(|row| {
-            let community_id: Uuid = row.try_get("community_id")?;
-            let host: String = row.try_get("host")?;
-            let channel_id: Uuid = row.try_get("id")?;
-            Ok(ReapedEphemeralChannel {
-                community_id: CommunityId::from_uuid(community_id),
-                host,
-                channel_id,
-            })
-        })
-        .collect()
+    drop(connection);
+    let reaped = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "ephemeral_channel_reap",
+        |id, mut tx| async move {
+            let rows = sqlx::query(
+                "UPDATE channels AS ch SET archived_at = NOW() \
+                 FROM communities AS c \
+                 WHERE ch.community_id = $1 AND ch.community_id = c.id \
+                   AND ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < NOW() \
+                   AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
+                   AND c.archived_at IS NULL \
+                 RETURNING ch.community_id, c.host, ch.id",
+            )
+            .bind(id)
+            .fetch_all(tx.conn())
+            .await?;
+            let parsed = rows
+                .into_iter()
+                .map(|row| {
+                    Ok(ReapedEphemeralChannel {
+                        community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                        host: row.try_get("host")?,
+                        channel_id: row.try_get("id")?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            tx.commit().await?;
+            Ok(parsed)
+        },
+    )
+    .await;
+    Ok(reaped.into_iter().flatten().collect())
 }
 
 impl Db {
@@ -1138,9 +1159,9 @@ impl Db {
 }
 
 /// The per-channel TTL advisory lock key. Event commits take it SHARED
-/// (`event_follow_up::refresh_channel_ttls`, and the 0024 trigger until it is
-/// retired); TTL transitions in [`update_channel`] take it EXCLUSIVE. Both
-/// sides build it here, so the keys cannot drift.
+/// (`event_follow_up::refresh_channel_ttls`); TTL transitions in
+/// [`update_channel`] take it EXCLUSIVE. Both sides build it here, so the keys
+/// cannot drift.
 pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> String {
     format!("buzz_channel_ttl:{}:{channel}", community.as_uuid())
 }

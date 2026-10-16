@@ -99,7 +99,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.drag(find.byType(ListView).last, const Offset(0, -400));
     await tester.pumpAndSettle();
-    expect(calls.where((c) => c.method == 'scroll').last.arguments, 52);
+    expect(calls.where((c) => c.method == 'scroll').last.arguments, 520);
     expect(
       tester.getSize(find.byType(UiKitView)).height,
       lessThan(expandedHeight),

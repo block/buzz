@@ -77,6 +77,33 @@ async fn setup_db() -> Db {
     Db::from_pool(pool)
 }
 
+/// A pool that becomes unavailable after the candidate read must end the
+/// sweep at the first tenant, not cost one acquire attempt per tenant.
+#[tokio::test]
+async fn fleet_sweep_stops_at_first_unavailable_connection() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(&crate::test_support::database_url())
+        .expect("construct lazy sweep pool");
+    pool.close().await;
+    let attempted = std::cell::Cell::new(0);
+    let candidates = (0..3).map(|_| {
+        attempted.set(attempted.get() + 1);
+        Uuid::new_v4()
+    });
+
+    let committed = sweep_admitted_communities(
+        &pool,
+        candidates,
+        observability::WriterOperation::Maintenance,
+        "test_sweep",
+        |_, _| async { Ok(()) },
+    )
+    .await;
+
+    assert!(committed.is_empty());
+    assert_eq!(attempted.get(), 1, "sweep must stop after the outage");
+}
+
 #[tokio::test]
 async fn event_write_transaction_preserves_legacy_acquisition_metrics() {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};

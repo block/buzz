@@ -474,7 +474,7 @@ class _AvatarFallback extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: context.colors.primaryContainer,
+      color: context.controlSurface,
       alignment: Alignment.center,
       child: Text(
         initial,

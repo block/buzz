@@ -422,11 +422,21 @@ class ActivityPage extends HookConsumerWidget {
     return FrostedScaffold(
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
-        nativeTitle: 'Activity',
+        nativeTitle: 'Inbox',
+        nativeLeading: IosNavigationAction(
+          label: 'Close inbox',
+          symbol: 'xmark',
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        leading: IconButton(
+          tooltip: 'Close inbox',
+          icon: const Icon(BuzzIcons.x),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         nativeLargeTitle: true,
         nativeActions: [
           IosNavigationAction(
-            label: 'Filter activity',
+            label: 'Filter inbox',
             symbol: 'line.3.horizontal.decrease',
             children: [
               for (final entry in _filterLabels.entries)
@@ -438,7 +448,7 @@ class ActivityPage extends HookConsumerWidget {
             ],
           ),
           IosNavigationAction(
-            label: 'Activity options',
+            label: 'Inbox options',
             symbol: 'ellipsis',
             children: [
               IosNavigationAction(
@@ -463,7 +473,7 @@ class ActivityPage extends HookConsumerWidget {
         horizontalInset: Grid.gutter,
         showBottomDivider: true,
         bottomDividerOpacity: 0.07,
-        title: Text('Activity', style: headerTitleStyle),
+        title: Text('Inbox', style: headerTitleStyle),
         titleStyle: headerTitleStyle,
         actions: [
           _ActivityActionsPill(

@@ -335,7 +335,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     imageUrl: counterpartProfile?.avatarUrl,
                     radius: 40,
                     isAgent: counterpartProfile?.isAgent ?? false,
-                    backgroundColor: context.colors.primaryContainer,
+                    backgroundColor: context.controlSurface,
                     fallback: Text(
                       counterpartProfile?.initial ??
                           dmAvatarInitial(
@@ -651,7 +651,7 @@ class _ChannelDetailsHero extends StatelessWidget {
                 width: 80,
                 height: 80,
                 decoration: BoxDecoration(
-                  color: context.colors.primaryContainer,
+                  color: context.controlSurface,
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
@@ -739,7 +739,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
       leading: AvatarImage(
         imageUrl: avatarUrl,
         radius: 20,
-        backgroundColor: context.colors.primaryContainer,
+        backgroundColor: context.controlSurface,
         fallback: Text(initial),
         isAgent: member.isBot,
       ),

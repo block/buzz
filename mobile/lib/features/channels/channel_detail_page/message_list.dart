@@ -1039,7 +1039,7 @@ class _MessageList extends HookConsumerWidget {
                 onPressed: scrollToOldestUnread,
                 tooltip: 'Jump to oldest unread message',
                 style: IconButton.styleFrom(
-                  backgroundColor: context.colors.primaryContainer,
+                  backgroundColor: context.controlSurface,
                   foregroundColor: context.colors.onPrimaryContainer,
                 ),
                 icon: const Icon(BuzzIcons.chevronUp, size: 20),

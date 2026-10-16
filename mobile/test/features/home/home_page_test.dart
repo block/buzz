@@ -1,3 +1,6 @@
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/search/search_page.dart';
@@ -16,6 +19,7 @@ void main() {
     int unreadInboxCount = 0,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
+    ValueChanged<ValueNotifier<VoidCallback?>>? onNewChatAction,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -30,7 +34,13 @@ void main() {
           child: child!,
         ),
         home: HomePage(
-          mePageBuilder: (_) => const Center(child: Text('Personal workspace')),
+          mePageBuilder: (_, action) {
+            onNewChatAction?.call(action);
+            return const FrostedScaffold(
+              appBar: FrostedAppBar(title: Text('Solo')),
+              body: Center(child: Text('Personal workspace')),
+            );
+          },
           settingsPageBuilder: _buildSettingsPage,
           hasUnreadInbox: unreadInboxCount > 0,
         ),
@@ -47,12 +57,21 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     const support = MethodChannel('buzz/concentric_sheet_surface');
     final created = <Map<Object?, Object?>>[];
+    final initialHeaders = <Map<Object?, Object?>>[];
     messenger.setMockMethodCallHandler(support, (call) async => true);
     messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
       call,
     ) async {
       if (call.method == 'create') {
         final args = call.arguments as Map<Object?, Object?>;
+        if (args['viewType'] == 'buzz/ios_navigation_bar') {
+          initialHeaders.add(
+            const StandardMessageCodec().decodeMessage(
+                  ByteData.sublistView(args['params'] as Uint8List),
+                )
+                as Map<Object?, Object?>,
+          );
+        }
         if (args['viewType'] == 'buzz/concentric_sheet_surface') {
           created.add(
             const StandardMessageCodec().decodeMessage(
@@ -71,9 +90,21 @@ void main() {
     await tester.pumpWidget(await buildHome(unreadInboxCount: 2));
     await tester.pump();
     await tester.pump();
+    // Inspect the creation payload, not a later configure call after PNG rendering.
+    final initialActions = initialHeaders.first['actions'] as List;
+    for (final entry in {
+      'Search': 'magnifyingglass',
+      'Inbox': 'tray',
+    }.entries) {
+      final action = initialActions.cast<Map>().firstWhere(
+        (action) => action['label'] == entry.key,
+      );
+      expect(action['iconData'], isNull);
+      expect(action['symbol'], entry.value);
+    }
     final bar = find.byKey(const ValueKey('home-ios-glass-tabs'));
     expect(bar, findsOneWidget);
-    expect(tester.getSize(bar), const Size(218, 56));
+    expect(tester.getSize(bar), const Size(148, 56));
     expect(created.where((params) => params['usesGlass'] == true), isNotEmpty);
     expect(
       find.descendant(of: bar, matching: find.byIcon(BuzzIcons.house500)),
@@ -81,19 +112,34 @@ void main() {
     );
     expect(
       find.descendant(of: bar, matching: find.byIcon(BuzzIcons.inbox300)),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.bySemanticsLabel('Activity, unread'), findsOneWidget);
+    final headerActions = tester
+        .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+        .nativeActions!;
+    expect(headerActions.map((action) => action.label), [
+      'Search',
+      'Inbox',
+      'Settings',
+    ]);
+    expect(headerActions.map((action) => action.sharesBackground), [
+      true,
+      true,
+      false,
+    ]);
+    expect(headerActions[0].icon, BuzzIcons.search300);
+    expect(headerActions[1].icon, BuzzIcons.inbox300);
+    expect(headerActions[1].activityColor, isNotNull);
+    expect(headerActions[1].activityLabel, 'Unread');
     expect(find.descendant(of: bar, matching: find.byType(Text)), findsNothing);
     final launcherGlass = find.byKey(const ValueKey('quick-actions-ios-glass'));
     expect(launcherGlass, findsOneWidget);
     expect(tester.getSize(launcherGlass), const Size.square(56));
-    expect(
-      created.where(
-        (params) => params['glassTintColor'] == Colors.black.toARGB32(),
-      ),
-      hasLength(1),
+    final launcherSurface = tester.widget<ConcentricSheetSurface>(
+      launcherGlass,
     );
+    expect(launcherSurface.usesGlass, isTrue);
+    expect(launcherSurface.glassTintColor, isNull);
     expect(
       tester
           .widget<Icon>(
@@ -103,7 +149,7 @@ void main() {
             ),
           )
           .color,
-      Colors.white,
+      Theme.of(tester.element(launcherGlass)).colorScheme.onSurface,
     );
     expect(
       created.where((params) => params['usesGlass'] == true).length,
@@ -124,14 +170,17 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
     expect(tester.getSize(launcherGlass), const Size.square(56));
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.pump();
-    expect(
-      find.descendant(of: bar, matching: find.byIcon(BuzzIcons.inbox500)),
-      findsOneWidget,
+    headerActions[1].onPressed!();
+    await tester.pumpAndSettle();
+    expect(find.byType(ActivityPage), findsOneWidget);
+    final inboxHeader = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar),
     );
-    expect(find.bySemanticsLabel('Activity, unread'), findsNothing);
+    expect(inboxHeader.nativeTitle, 'Inbox');
+    expect(inboxHeader.automaticallyImplyLeading, isFalse);
+    expect(inboxHeader.nativeLeading?.symbol, 'xmark');
+    inboxHeader.nativeLeading!.onPressed!();
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Solo'));
     await tester.pumpAndSettle();
     expect(find.text('Personal workspace'), findsOneWidget);
@@ -202,6 +251,15 @@ void main() {
     final avatar = find.byType(ProfileAvatar);
     expect(plus, findsOneWidget);
     expect(search, findsOneWidget);
+    expect(
+      tester.getTopLeft(find.byTooltip('Home')).dx,
+      Grid.gutter + Grid.half,
+    );
+    expect(
+      tester.getBottomRight(plus).dx,
+      tester.view.physicalSize.width / tester.view.devicePixelRatio -
+          Grid.gutter,
+    );
     expect(tester.getCenter(search).dy, lessThan(tester.getCenter(plus).dy));
     expect(tester.getCenter(search).dy, tester.getCenter(avatar).dy);
     expect(
@@ -255,87 +313,18 @@ void main() {
     );
   });
 
-  testWidgets('keeps Home opaque beneath the Settings transition', (
-    tester,
-  ) async {
+  testWidgets('Settings rises from below without scaling Home', (tester) async {
     await tester.pumpWidget(await buildHome());
     await tester.pumpAndSettle();
-
     await tester.tap(find.byType(ProfileAvatar));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 95));
-
-    double homeOpacity() => tester
-        .widget<Opacity>(
-          find.byKey(const ValueKey('home-settings-transition-opacity')),
-        )
-        .opacity;
-
-    expect(homeOpacity(), 1);
-
-    await tester.pumpAndSettle();
-    Navigator.of(
-      tester.element(
-        find.byKey(
-          const ValueKey('settings-transition-opacity'),
-          skipOffstage: false,
-        ),
-      ),
-    ).pop();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 95));
-
-    expect(homeOpacity(), 1);
-  });
-
-  testWidgets('uses one monotonic route animation for Settings and Home', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildHome());
-    await tester.pumpAndSettle();
-
-    double homeScale() => tester
-        .widget<Transform>(
-          find.byKey(const ValueKey('home-settings-transition-scale')),
-        )
-        .transform
-        .storage[0];
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pump();
-
-    final settingsTransition = find.byKey(
-      const ValueKey('settings-transition-opacity'),
-      skipOffstage: false,
+    await tester.pump(const Duration(milliseconds: 100));
+    final transform = tester.widget<Transform>(
+      find.byKey(const ValueKey('home-settings-transition-scale')),
     );
-    final settingsRoute = ModalRoute.of(tester.element(settingsTransition));
-
-    final entranceScales = <double>[homeScale()];
-    final routeValues = <double>[settingsRoute!.animation!.value];
-    for (var frame = 0; frame < 15; frame++) {
-      await tester.pump(const Duration(milliseconds: 16));
-      entranceScales.add(homeScale());
-      routeValues.add(settingsRoute.animation!.value);
-    }
-    expect(entranceScales.first, closeTo(1, 0.000001));
-    final reversalFrames = <int>[];
-    for (var frame = 1; frame < entranceScales.length; frame++) {
-      if (entranceScales[frame] > entranceScales[frame - 1] + 0.000001) {
-        reversalFrames.add(frame);
-      }
-    }
-    expect(
-      reversalFrames,
-      isEmpty,
-      reason:
-          'Home must scale down in one direction on entrance. '
-          'scales=$entranceScales route=$routeValues',
-    );
-    expect(entranceScales, everyElement(inInclusiveRange(0.97, 1)));
-    expect(entranceScales.last, closeTo(0.97, 0.001));
-
+    expect(transform.transform.getMaxScaleOnAxis(), 1);
     await tester.pumpAndSettle();
-    Navigator.of(tester.element(settingsTransition)).pop();
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
     await tester.pumpAndSettle();
   });
 
@@ -362,16 +351,16 @@ void main() {
     await tester.pump();
     expect(hapticCalls, isEmpty);
 
-    await tester.tap(find.byTooltip('Activity'));
+    await tester.tap(find.byTooltip('Solo'));
     await tester.pump();
     expect(hapticCalls, hasLength(1));
     expect(hapticCalls.single.arguments, 'HapticFeedbackType.selectionClick');
 
-    await tester.tap(find.byTooltip('Activity'));
+    await tester.tap(find.byTooltip('Solo'));
     await tester.pump();
     expect(hapticCalls, hasLength(1));
 
-    await tester.tap(find.byTooltip('Solo'));
+    await tester.tap(find.byTooltip('Home'));
     await tester.pump();
     expect(hapticCalls, hasLength(2));
   });
@@ -402,41 +391,32 @@ void main() {
     expect(hapticCalls.single.arguments, 'HapticFeedbackType.lightImpact');
   });
 
-  testWidgets('badges the Inbox tab when it has unread rows', (tester) async {
+  testWidgets('opens Inbox from its unread header button and returns Home', (
+    tester,
+  ) async {
     await tester.pumpWidget(await buildHome(unreadInboxCount: 1));
-    await tester.pump();
-
-    expect(
-      find.byKey(const ValueKey('activity-tab-unread-dot')),
-      findsOneWidget,
-    );
-    final badge = tester.widget<Container>(
-      find.byKey(const ValueKey('activity-tab-unread-dot')),
-    );
-    expect(badge.constraints?.maxWidth, 12);
-    expect(badge.constraints?.maxHeight, 12);
-    expect(find.bySemanticsLabel('Activity, unread'), findsOneWidget);
-    AnimatedScale unreadDotScale() => tester.widget<AnimatedScale>(
-      find.byKey(const ValueKey('activity-tab-unread-dot-scale')),
-    );
-    expect(unreadDotScale().scale, 1);
-    expect(unreadDotScale().alignment, const Alignment(-0.5, 0.5));
-    expect(unreadDotScale().duration, const Duration(milliseconds: 220));
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-
-    expect(
-      find.byKey(const ValueKey('activity-tab-unread-dot')),
-      findsOneWidget,
-    );
-    expect(unreadDotScale().scale, 0);
-    expect(find.bySemanticsLabel('Activity, unread'), findsNothing);
-
-    await tester.tap(find.byTooltip('Home'));
-    await tester.pump();
-
-    expect(unreadDotScale().scale, 1);
+    await tester.pumpAndSettle();
+    final badge = find.byKey(const ValueKey('inbox-header-badge'));
+    expect(tester.widget<Badge>(badge).isLabelVisible, isTrue);
+    expect(find.bySemanticsLabel('Inbox, unread'), findsOneWidget);
+    expect(find.byTooltip('Activity'), findsNothing);
+    final search = tester.getCenter(find.byTooltip('Search'));
+    final inbox = tester.getCenter(find.byTooltip('Inbox'));
+    final avatar = tester.getCenter(find.byType(ProfileAvatar));
+    expect(inbox.dx, greaterThan(search.dx));
+    expect(inbox.dx, lessThan(avatar.dx));
+    expect(inbox.dy, search.dy);
+    await tester.tap(find.byTooltip('Inbox'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ActivityPage), findsOneWidget);
+    expect(find.text('Inbox'), findsOneWidget);
+    await tester.tap(find.byTooltip('Close inbox'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ActivityPage), findsNothing);
+    expect(find.byTooltip('Search'), findsOneWidget);
+    await tester.pumpWidget(await buildHome());
+    await tester.pumpAndSettle();
+    expect(tester.widget<Badge>(badge).isLabelVisible, isFalse);
   });
 
   testWidgets('fades and slides tab content in the selected direction', (
@@ -467,7 +447,7 @@ void main() {
     expect(bodyOpacity().opacity, closeTo(1, 0.001));
     expect(appBarOpacity().opacity, closeTo(1, 0.001));
 
-    await tester.tap(find.byTooltip('Activity'));
+    await tester.tap(find.byTooltip('Solo'));
     await tester.pump();
 
     expect(bodyOffset(), closeTo(24, 0.001));
@@ -513,7 +493,7 @@ void main() {
     await tester.pumpWidget(await buildHome(disableAnimations: true));
     await tester.pump();
 
-    await tester.tap(find.byTooltip('Activity'));
+    await tester.tap(find.byTooltip('Solo'));
     await tester.pump();
 
     final bodyTransform = tester.widget<Transform>(
@@ -535,45 +515,69 @@ void main() {
     expect(bodyOpacity.opacity, closeTo(1, 0.001));
     expect(appBarOpacity.opacity, closeTo(1, 0.001));
   });
-  testWidgets('scales and fades the quick action as tabs change', (
+  testWidgets('Solo compose stays anchored through keyboard dismissal', (
     tester,
   ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    tester.view.padding = const FakeViewPadding(bottom: 34);
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(await buildHome());
-    await tester.pump();
-
-    double scale() => tester
-        .widget<Transform>(find.byKey(const Key('channel-quick-actions-scale')))
-        .transform
-        .storage
-        .first;
-    double opacity() => tester
-        .widget<Opacity>(find.byKey(const Key('channel-quick-actions-opacity')))
-        .opacity;
-
-    expect(scale(), closeTo(1, 0.001));
-    expect(opacity(), closeTo(1, 0.001));
-
-    await tester.tap(find.byTooltip('Activity'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 110));
-
-    expect(scale(), inExclusiveRange(0.8, 1));
-    expect(opacity(), inExclusiveRange(0, 1));
-
     await tester.pumpAndSettle();
-    expect(scale(), closeTo(0.8, 0.001));
-    expect(opacity(), closeTo(0, 0.001));
+    await tester.tap(find.byTooltip('Solo'));
+    await tester.pumpAndSettle();
+    final compose = find.byTooltip('New chat');
+    final restingPosition = tester.getCenter(compose);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    tester.view.padding = FakeViewPadding.zero;
+    await tester.pumpAndSettle();
+    expect(tester.getCenter(compose), restingPosition);
+    tester.view.viewInsets = FakeViewPadding.zero;
+    tester.view.padding = const FakeViewPadding(bottom: 34);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(tester.getCenter(compose), restingPosition);
+    await tester.pumpAndSettle();
+    expect(tester.getCenter(compose), restingPosition);
+  });
 
+  testWidgets('keeps the plus opposite the tabs and opens Solo New chat', (
+    tester,
+  ) async {
+    ValueNotifier<VoidCallback?>? action;
+    var newChats = 0;
+    await tester.pumpWidget(
+      await buildHome(onNewChatAction: (value) => action = value),
+    );
+    await tester.pumpAndSettle();
+    final homePlusPosition = tester.getCenter(
+      find.byTooltip('Create or start conversation'),
+    );
+    await tester.tap(find.byTooltip('Solo'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Create or start conversation'), findsNothing);
+    expect(tester.getCenter(find.byTooltip('New chat')), homePlusPosition);
+    expect(find.byIcon(BuzzIcons.edit), findsOneWidget);
+    action!.value = () => newChats++;
+    await tester.pump();
+    await tester.tap(find.byTooltip('New chat'));
+    await tester.pumpAndSettle();
+    expect(newChats, 1);
+    expect(find.text('Create channel').hitTestable(), findsNothing);
     await tester.tap(find.byTooltip('Home'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 110));
-
-    expect(scale(), inExclusiveRange(0.8, 1));
-    expect(opacity(), inExclusiveRange(0, 1));
-
     await tester.pumpAndSettle();
-    expect(scale(), closeTo(1, 0.001));
-    expect(opacity(), closeTo(1, 0.001));
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pumpAndSettle();
+    expect(find.text('Create channel'), findsOneWidget);
+    expect(newChats, 1);
+    await tester.tap(find.byTooltip('Solo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Home'));
+    await tester.pumpAndSettle();
+    expect(find.text('Create channel').hitTestable(), findsNothing);
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pumpAndSettle();
+    expect(find.text('Create channel').hitTestable(), findsOneWidget);
   });
 }
 

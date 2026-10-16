@@ -298,7 +298,7 @@ void main() {
     expect(find.text('Channels'), findsOneWidget);
     expect(find.text('FORUMS'), findsNothing);
     expect(find.text('DMs'), findsOneWidget);
-    expect(find.text('Community'), findsOneWidget);
+    expect(find.text('Community'), findsNothing);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
     expect(find.byIcon(BuzzIcons.ellipsisVertical), findsWidgets);
@@ -718,149 +718,157 @@ void main() {
     );
   });
 
-  for (final customRoute in [false, true]) {
-    testWidgets(
-      'Home replays native scroll state on return: custom=$customRoute',
-      (tester) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-        addTearDown(() => debugDefaultTargetPlatformOverride = null);
-        tester.view.physicalSize = const Size(390, 600);
-        tester.view.devicePixelRatio = 1;
-        addTearDown(tester.view.reset);
-        final messenger = tester.binding.defaultBinaryMessenger;
-        final calls = <int, List<MethodCall>>{};
-        messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
-          call,
-        ) async {
-          if (call.method == 'create') {
-            final args = call.arguments as Map;
-            if (args['viewType'] == IosNavigationBar.viewType) {
-              final id = args['id'] as int;
-              calls[id] = [];
-              messenger.setMockMethodCallHandler(
-                MethodChannel('${IosNavigationBar.viewType}/$id'),
-                (call) async {
-                  calls[id]!.add(call);
-                  return null;
-                },
-              );
-            }
-          }
-          return null;
-        });
-        addTearDown(() {
-          messenger.setMockMethodCallHandler(
-            SystemChannels.platform_views,
-            null,
-          );
-          for (final id in calls.keys) {
+  for (final routeKind in ['material', 'custom', 'settings']) {
+    testWidgets('Home replays native scroll state on return: route=$routeKind', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = const Size(390, 600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final calls = <int, List<MethodCall>>{};
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+        call,
+      ) async {
+        if (call.method == 'create') {
+          final args = call.arguments as Map;
+          if (args['viewType'] == IosNavigationBar.viewType) {
+            final id = args['id'] as int;
+            calls[id] = [];
             messenger.setMockMethodCallHandler(
               MethodChannel('${IosNavigationBar.viewType}/$id'),
-              null,
+              (call) async {
+                calls[id]!.add(call);
+                return null;
+              },
             );
           }
-        });
-        await tester.pumpWidget(
-          buildTestable(
-            realHome: true,
-            overrides: [
-              channelsProvider.overrideWith(
-                () => _FakeNotifier(
-                  List.generate(
-                    40,
-                    (i) => Channel(
-                      id: 'channel-$i',
-                      description: '',
-                      createdBy: 'test',
-                      createdAt: DateTime(2026),
-                      memberCount: 1,
-                      visibility: 'open',
-                      name: 'channel-$i',
-                      channelType: 'stream',
-                      isMember: true,
-                    ),
+        }
+        return null;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+        for (final id in calls.keys) {
+          messenger.setMockMethodCallHandler(
+            MethodChannel('${IosNavigationBar.viewType}/$id'),
+            null,
+          );
+        }
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          realHome: true,
+          overrides: [
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                List.generate(
+                  40,
+                  (i) => Channel(
+                    id: 'channel-$i',
+                    description: '',
+                    createdBy: 'test',
+                    createdAt: DateTime(2026),
+                    memberCount: 1,
+                    visibility: 'open',
+                    name: 'channel-$i',
+                    channelType: 'stream',
+                    isMember: true,
                   ),
                 ),
               ),
-            ],
-          ),
-        );
-        await tester.pumpAndSettle();
-        final homeCalls = calls.values.single;
-        final position = tester
-            .state<ScrollableState>(
-              find
-                  .descendant(
-                    of: find.byType(CustomScrollView),
-                    matching: find.byType(Scrollable),
-                  )
-                  .first,
-            )
-            .position;
-        position.jumpTo(200);
-        await tester.pumpAndSettle();
-        final scrolledOffset =
-            homeCalls.where((call) => call.method == 'scroll').last.arguments
-                as double;
-        expect(scrolledOffset, greaterThan(0));
-        final navigator = tester.state<NavigatorState>(
-          find.byType(Navigator).first,
-        );
-        unawaited(
-          navigator.push<void>(
-            customRoute
-                ? PageRouteBuilder<void>(
-                    opaque: true,
-                    pageBuilder: (_, _, _) =>
-                        const Scaffold(body: Text('Custom route')),
-                  )
-                : MaterialPageRoute<void>(
-                    builder: (_) => const Scaffold(body: Text('Channel')),
-                  ),
-          ),
-        );
-        await tester.pumpAndSettle();
-        homeCalls.clear();
-        navigator.pop();
-        await tester.pumpAndSettle();
-        expect(position.pixels, 200);
-        expect(
-          homeCalls
-              .where((call) => call.method == 'scroll')
-              .map((call) => call.arguments),
-          contains(scrolledOffset),
-        );
-        expect(homeCalls.last.method, 'prepareForReveal');
-        // The replay must use the live offset, including returning at the top.
-        position.jumpTo(0);
-        await tester.pumpAndSettle();
-        unawaited(
-          navigator.push<void>(
-            customRoute
-                ? PageRouteBuilder<void>(
-                    opaque: true,
-                    pageBuilder: (_, _, _) =>
-                        const Scaffold(body: Text('Custom route')),
-                  )
-                : MaterialPageRoute<void>(
-                    builder: (_) => const Scaffold(body: Text('Channel')),
-                  ),
-          ),
-        );
-        await tester.pumpAndSettle();
-        homeCalls.clear();
-        navigator.pop();
-        await tester.pumpAndSettle();
-        expect(
-          homeCalls
-              .where((call) => call.method == 'scroll')
-              .map((call) => call.arguments),
-          contains(0.0),
-        );
-        await tester.pumpWidget(const SizedBox());
-        debugDefaultTargetPlatformOverride = null;
-      },
-    );
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final homeCalls = calls.values.single;
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(CustomScrollView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      position.jumpTo(200);
+      await tester.pumpAndSettle();
+      final scrolledOffset =
+          homeCalls.where((call) => call.method == 'scroll').last.arguments
+              as double;
+      expect(scrolledOffset, greaterThan(0));
+      final navigator = tester.state<NavigatorState>(
+        find.byType(Navigator).first,
+      );
+      void openCoveringRoute() {
+        if (routeKind == 'settings') {
+          tester
+              .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+              .nativeActions!
+              .singleWhere((action) => action.label == 'Settings')
+              .onPressed!();
+        } else {
+          unawaited(
+            navigator.push<void>(
+              routeKind == 'custom'
+                  ? PageRouteBuilder<void>(
+                      opaque: true,
+                      pageBuilder: (_, _, _) =>
+                          const Scaffold(body: Text('Custom route')),
+                    )
+                  : MaterialPageRoute<void>(
+                      builder: (_) => const Scaffold(body: Text('Channel')),
+                    ),
+            ),
+          );
+        }
+      }
+
+      openCoveringRoute();
+      await tester.pumpAndSettle();
+      homeCalls.clear();
+      navigator.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 40));
+      final earlyRestores = homeCalls
+          .where((call) => call.method == 'prepareForReveal')
+          .length;
+      expect(earlyRestores, greaterThan(0));
+      await tester.pumpAndSettle();
+      expect(
+        homeCalls.where((call) => call.method == 'prepareForReveal').length,
+        greaterThan(earlyRestores),
+        reason:
+            'Replay again after the outgoing route and Home transform settle.',
+      );
+      expect(position.pixels, 200);
+      expect(
+        homeCalls
+            .where((call) => call.method == 'scroll')
+            .map((call) => call.arguments),
+        contains(scrolledOffset),
+      );
+      expect(homeCalls.last.method, 'prepareForReveal');
+      // The replay must use the live offset, including returning at the top.
+      position.jumpTo(0);
+      await tester.pumpAndSettle();
+      openCoveringRoute();
+      await tester.pumpAndSettle();
+      homeCalls.clear();
+      navigator.pop();
+      await tester.pumpAndSettle();
+      expect(
+        homeCalls
+            .where((call) => call.method == 'scroll')
+            .map((call) => call.arguments),
+        contains(0.0),
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
   }
 
   testWidgets('scrolls Home to the top when its tab is selected again', (
@@ -1055,12 +1063,11 @@ void main() {
     relaySession.connect();
     await tester.pumpAndSettle();
 
-    final topLabelX = tester.getTopLeft(find.text('Community')).dx;
+    expect(find.text('Community'), findsNothing);
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
     // The community title shares the leading row with its avatar. Channel
     // labels stay aligned below it.
-    expect(topLabelX, Grid.twelve + 40 + Grid.xxs);
     expect(sectionLabelX, rowLabelX);
 
     relaySession.setReconnecting();
@@ -1082,7 +1089,7 @@ void main() {
     expect(skeletonSectionLabelX, sectionLabelX);
   });
 
-  testWidgets('centers the smaller profile avatar beside the community', (
+  testWidgets('matches community and profile avatar sizes and gutters', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -1104,7 +1111,7 @@ void main() {
       matching: find.byType(MaskedAvatarBadge),
     );
 
-    expect(tester.getSize(communityAvatar), const Size.square(40));
+    expect(tester.getSize(communityAvatar), const Size.square(36));
     expect(tester.getSize(profileAvatar), const Size.square(36));
     expect(
       tester.widget<MaskedAvatarBadge>(profileAvatar).badge,
@@ -1114,6 +1121,10 @@ void main() {
     final communityRect = tester.getRect(communityAvatar);
     final profileRect = tester.getRect(profileAvatar);
     expect(profileRect.center.dy, communityRect.center.dy);
+    expect(
+      communityRect.left,
+      tester.getSize(appBar).width - profileRect.right,
+    );
   });
 
   testWidgets('keeps cached channels visible while reconnecting', (
@@ -1226,11 +1237,13 @@ void main() {
     expect(route, isNot(isA<MaterialPageRoute<void>>()));
     expect(route?.opaque, isFalse);
     expect(route?.allowSnapshotting, isFalse);
-    expect(route?.transitionDuration, const Duration(milliseconds: 150));
-    expect(route?.reverseTransitionDuration, const Duration(milliseconds: 150));
+    expect(route?.transitionDuration, const Duration(milliseconds: 260));
+    expect(route?.reverseTransitionDuration, const Duration(milliseconds: 220));
   });
 
-  testWidgets('reports monotonic Settings route progress', (tester) async {
+  testWidgets('Settings slides up and down without scaling Home', (
+    tester,
+  ) async {
     final progress = <double>[];
     await tester.pumpWidget(
       buildTestable(
@@ -1241,103 +1254,20 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-
     await tester.tap(find.byType(ProfileAvatar));
     await tester.pump();
-    expect(progress, [0]);
-    await tester.pump(const Duration(milliseconds: 16));
-    expect(progress.last, inExclusiveRange(0, 1));
-    await tester.pump(const Duration(milliseconds: 95));
-    expect(progress.last, inExclusiveRange(0, 1));
+    await tester.pump(const Duration(milliseconds: 100));
+    final settings = find.text('Injected settings');
+    expect(tester.getTopLeft(settings).dy, greaterThan(0));
+    expect(progress, everyElement(0));
     await tester.pumpAndSettle();
-    expect(progress.last, 1);
-    for (var index = 1; index < progress.length; index++) {
-      expect(progress[index], greaterThanOrEqualTo(progress[index - 1]));
-    }
-
-    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    final top = tester.getTopLeft(settings).dy;
+    Navigator.of(tester.element(settings)).pop();
     await tester.pump();
-    final reverseStart = progress.length;
-    await tester.pump(const Duration(milliseconds: 95));
-    expect(progress.last, inExclusiveRange(0, 1));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.getTopLeft(settings).dy, greaterThan(top));
     await tester.pumpAndSettle();
-    expect(progress.last, 0);
-    for (var index = reverseStart + 1; index < progress.length; index++) {
-      expect(progress[index], lessThanOrEqualTo(progress[index - 1]));
-    }
-  });
-
-  testWidgets('scales and fully fades Settings into view', (tester) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pump();
-
-    final transition = find.byKey(
-      const ValueKey('settings-transition-opacity'),
-      skipOffstage: false,
-    );
-    final scaleTransition = find.byKey(
-      const ValueKey('settings-transition-scale'),
-      skipOffstage: false,
-    );
-    expect(transition, findsOneWidget);
-    expect(scaleTransition, findsOneWidget);
-    expect(
-      find.descendant(
-        of: transition,
-        matching: find.byKey(
-          const ValueKey('settings-transition-layer'),
-          skipOffstage: false,
-        ),
-      ),
-      findsOneWidget,
-    );
-    expect(tester.widget<FadeTransition>(transition).opacity.value, 0);
-
-    await tester.pump(const Duration(milliseconds: 95));
-    final forwardOpacity = tester
-        .widget<FadeTransition>(transition)
-        .opacity
-        .value;
-    final forwardScale = tester
-        .widget<ScaleTransition>(scaleTransition)
-        .scale
-        .value;
-    final forwardScaleProgress = (1.04 - forwardScale) / 0.04;
-    expect(
-      forwardOpacity,
-      closeTo(Curves.easeOutQuad.transform(95 / 150), 0.02),
-    );
-    expect(forwardScaleProgress, closeTo(forwardOpacity, 0.001));
-    await tester.pumpAndSettle();
-    expect(tester.widget<FadeTransition>(transition).opacity.value, 1);
-
-    Navigator.of(tester.element(find.text('Injected settings'))).pop();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 95));
-    final reverseOpacity = tester
-        .widget<FadeTransition>(transition)
-        .opacity
-        .value;
-    final reverseScale = tester
-        .widget<ScaleTransition>(scaleTransition)
-        .scale
-        .value;
-    final reverseScaleProgress = (1.04 - reverseScale) / 0.04;
-    expect(
-      reverseOpacity,
-      inExclusiveRange(0, 1),
-      reason: 'The complete Settings layer still fades out on exit.',
-    );
-    expect(reverseScaleProgress, closeTo(reverseOpacity, 0.001));
+    expect(settings, findsNothing);
   });
 
   testWidgets('gives feedback for the profile and community controls', (
@@ -1417,7 +1347,13 @@ void main() {
       } finally {
         semantics.dispose();
       }
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       expect(find.byType(BuzzSheetHeader), findsNothing);
       expect(find.text('Community settings'), findsOneWidget);
@@ -1449,7 +1385,13 @@ void main() {
       expect(find.text('Community settings'), findsNothing);
       Navigator.of(tester.element(find.text('Appearance destination'))).pop();
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.text('Invite'));
       await tester.pumpAndSettle();
@@ -1490,7 +1432,13 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(lookups, 1);
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       final appearanceBefore = tester.getRect(find.text('Appearance'));
       expect(find.text('Invite'), findsNothing);
@@ -1500,7 +1448,13 @@ void main() {
       expect(tester.getRect(find.text('Appearance')), appearanceBefore);
       Navigator.of(tester.element(find.text('Appearance'))).pop();
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       expect(
         find.text('Invite'),
@@ -1622,7 +1576,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('Invite'), findsNothing);
     expect(find.text('Appearance'), findsOneWidget);
@@ -1634,7 +1594,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('community-switcher-page')), findsNothing);
     expect(find.byKey(const Key('community-switcher-sheet')), findsNothing);
-    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('Alpha'), findsNothing);
   });
 
   testWidgets('community switcher separates selection from edit removal', (
@@ -1679,7 +1639,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('Community settings'), findsOneWidget);
     expect(find.text('Switch communities'), findsNothing);
@@ -1828,7 +1794,13 @@ void main() {
     await tester.pumpAndSettle();
     final initialIconLoads = iconLoads;
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -1860,7 +1832,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -1898,7 +1876,13 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('community-menu-switch')));
       await tester.pumpAndSettle();
@@ -1974,7 +1958,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -2182,7 +2172,13 @@ void main() {
               matching: find.byType(ClipRSuperellipse),
             );
             destinationRect = tester.getRect(headerAvatar);
-            await tester.tap(find.text('Alpha'));
+            await tester.tap(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is Semantics &&
+                    widget.properties.label == 'Community settings',
+              ),
+            );
           }
           final destination = destinationRect.center;
           await tester.pumpAndSettle();
@@ -2430,10 +2426,11 @@ void main() {
             final bar = tester.widget<FrostedAppBar>(
               find.byType(FrostedAppBar),
             );
-            expect(bar.nativeTitle, 'Bravo');
+            expect(bar.nativeTitle, '');
+            expect(bar.nativeLargeTitle, isFalse);
             expect(bar.nativeLeading!.avatarHidden, isFalse);
           } else {
-            expect(find.text('Bravo'), findsOneWidget);
+            expect(find.text('Bravo'), findsNothing);
           }
           expect(progress.last, 0);
           expect(tester.takeException(), isNull);
@@ -2474,7 +2471,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -2545,7 +2548,13 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.text('Alpha'));
+        await tester.tap(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Community settings',
+          ),
+        );
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('community-menu-switch')));
         await tester.pumpAndSettle();
@@ -2583,7 +2592,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(notifier.switchedIds, ['bravo', 'bravo']);
         expect(find.byKey(const Key('community-switcher-page')), findsNothing);
-        expect(find.text('Bravo'), findsOneWidget);
+        expect(find.text('Bravo'), findsNothing);
         expect(tester.takeException(), isNull);
       },
     );
@@ -2621,7 +2630,13 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text(count == 0 ? 'Community' : 'Community 0'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       final switchRow = find.byKey(const Key('community-menu-switch'));
       await tester.ensureVisible(switchRow);
@@ -2662,7 +2677,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Community'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -2683,7 +2704,7 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('quick actions slide behind navigation when leaving home', (
+  testWidgets('hidden quick actions move behind the left-aligned navigation', (
     tester,
   ) async {
     Widget buildLauncher({required bool visible}) {
@@ -2722,10 +2743,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 110));
     final midpoint = motionTransform().transform.getTranslation().x;
     expect(midpoint, lessThan(0));
-    expect(midpoint, greaterThan(-279));
+    expect(midpoint, greaterThan(-550));
 
     await tester.pumpAndSettle();
-    expect(motionTransform().transform.getTranslation().x, closeTo(-279, 0.01));
+    expect(motionTransform().transform.getTranslation().x, closeTo(-550, 0.01));
     final hiddenOpacity = tester.widget<Opacity>(
       find.byKey(const Key('channel-quick-actions-opacity')),
     );
@@ -2797,10 +2818,9 @@ void main() {
     expect(browseRect.width, createRect.width);
     expect(dmRect.width, closeTo(menuRect.width - 16, 0.01));
 
-    final cardScheme = Theme.of(tester.element(createCard)).colorScheme;
     final expectedCardColor = Color.alphaBlend(
-      cardScheme.onPrimary.withValues(alpha: 0.1),
-      cardScheme.primary,
+      Colors.white.withValues(alpha: 0.1),
+      const Color(0xFF262626),
     );
     final createMaterial = tester.widget<Material>(
       find.descendant(of: createCard, matching: find.byType(Material)).first,
@@ -2815,12 +2835,18 @@ void main() {
     expect(dmMaterial.color, expectedCardColor);
     expect(browseMaterial.color, expectedCardColor);
     expect(
-      (createMaterial.borderRadius as BorderRadius).topLeft.x,
-      closeTo(12, 0.01),
+      ((createMaterial.shape as RoundedSuperellipseBorder).borderRadius
+              as BorderRadius)
+          .topLeft
+          .x,
+      closeTo(20, 0.01),
     );
     expect(
-      (dmMaterial.borderRadius as BorderRadius).topLeft.x,
-      closeTo(12, 0.01),
+      ((dmMaterial.shape as RoundedSuperellipseBorder).borderRadius
+              as BorderRadius)
+          .topLeft
+          .x,
+      closeTo(20, 0.01),
     );
 
     expect(find.text('Start a new stream channel'), findsNothing);

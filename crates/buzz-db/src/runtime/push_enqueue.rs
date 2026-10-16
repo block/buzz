@@ -206,7 +206,6 @@ async fn enqueue(
         "INSERT INTO push_match_queue (community_id, event_id) \
          SELECT $1, $2 FROM events e \
          WHERE e.community_id = $1 AND e.id = $2 AND e.deleted_at IS NULL \
-           AND community_write_allowed($1) \
            AND EXISTS (SELECT 1 FROM push_leases l \
              WHERE l.community_id = $1 AND l.active AND l.endpoint_enabled \
                AND l.updated_at <= e.received_at \
@@ -243,5 +242,71 @@ mod tests {
         producer.submit(community, vec![2; 32]);
         assert_eq!(receiver.len(), CAPACITY - 1);
         producer.join().await;
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn enqueue_admits_active_tenant_and_rejects_quiescing_tenant() {
+            let (db, communities) = crate::test_support::admission_fixture().await;
+            crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+            for (index, community) in communities[..2].iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO events \
+                     (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+                     VALUES ($1, $2, $3, to_timestamp(1), 9, '[]', '', $4)",
+                )
+                .bind(community.as_uuid())
+                .bind(vec![index as u8; 32])
+                .bind(vec![1_u8; 32])
+                .bind(vec![2_u8; 64])
+                .execute(&db.pool)
+                .await
+                .expect("seed event");
+                sqlx::query(
+                    "INSERT INTO push_leases (community_id, author, installation_id, \
+                     source_event_id, source_created_at, generation, active, endpoint_hash, \
+                     endpoint_grant, max_class, subscriptions, expires_at, updated_at) \
+                     VALUES ($1, $2, 'test', $3, 1, 1, true, $4, 'grant', 'default', '[]', \
+                             EXTRACT(EPOCH FROM now())::bigint + 3600, now() - interval '1 hour')",
+                )
+                .bind(community.as_uuid())
+                .bind(vec![3_u8; 32])
+                .bind(vec![4_u8; 32])
+                .bind(vec![5_u8; 32])
+                .execute(&db.pool)
+                .await
+                .expect("seed lease");
+            }
+            let active = Job {
+                community: communities[0],
+                event_id: vec![0_u8; 32],
+                barrier: None,
+            };
+            let quiescing = Job {
+                community: communities[1],
+                event_id: vec![1_u8; 32],
+                barrier: None,
+            };
+            let err = enqueue(&db.pool, &quiescing, None)
+                .await
+                .expect_err("quiescing enqueue");
+            assert!(crate::test_support::is_admission_rejection(&err));
+            enqueue(&db.pool, &active, None)
+                .await
+                .expect("admitted enqueue");
+            for (community, expected) in [(communities[0], 1), (communities[1], 0)] {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM push_match_queue WHERE community_id = $1",
+                )
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("read enqueue state");
+                assert_eq!(count, expected, "queue state for {community}");
+            }
+        }
     }
 }

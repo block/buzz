@@ -34,9 +34,9 @@ final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   );
 });
 
-/// Reuses Settings' entrance/dismissal, while letting a selected avatar leave
+/// Uses a scale-and-fade entrance/dismissal, while letting a selected avatar leave
 /// independently of the surface. The flight already performs the exit fade.
-class _CommunitySwitcherRoute extends _SettingsPageRoute {
+class _CommunitySwitcherRoute extends _CommunitySurfaceRoute {
   _CommunitySwitcherRoute({
     required super.builder,
     required super.onTransitionProgress,
@@ -674,7 +674,7 @@ class _CommunityGridAdd extends StatelessWidget {
             child: Container(
               width: _communityGridAvatarSize,
               height: _communityGridAvatarSize,
-              color: context.colors.primaryContainer.withValues(alpha: 0.5),
+              color: context.controlSurface.withValues(alpha: 0.5),
               child: Icon(
                 BuzzIcons.plus,
                 size: 32,

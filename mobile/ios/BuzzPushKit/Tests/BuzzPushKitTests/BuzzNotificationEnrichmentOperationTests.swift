@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import P256K
 import XCTest
 
 @testable import BuzzPushKit
@@ -251,18 +250,17 @@ final class BuzzNotificationEnrichmentOperationTests: XCTestCase {
   private func signedEvent(kind: Int, content: String, tags: [[String]] = []) throws
     -> VerifiedNostrEvent
   {
-    let key = try P256K.Schnorr.PrivateKey(
-      dataRepresentation: Array(repeating: UInt8(1), count: 32))
-    let pubkey = VerifiedNostrEvent.hex(key.xonly.bytes)
+    let key = Array(repeating: UInt8(1), count: 32)
+    let pubkey = VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: key))
     let serialization = try VerifiedNostrEvent.canonicalSerialization(
       pubkey: pubkey, createdAt: 1, kind: kind, tags: tags, content: content)
     let digest = Array(SHA256.hash(data: serialization))
-    var message = digest
+    let message = digest
     var randomness = Array(repeating: UInt8(2), count: 32)
-    let signature = try key.signature(message: &message, auxiliaryRand: &randomness)
+    let signature = try NostrSchnorr.sign(message: message, secret: key, auxiliaryRandomness: randomness)
     return VerifiedNostrEvent(
       id: VerifiedNostrEvent.hex(digest), pubkey: pubkey,
       createdAt: 1, kind: kind, tags: tags, content: content,
-      sig: VerifiedNostrEvent.hex(signature.dataRepresentation))
+      sig: VerifiedNostrEvent.hex(signature))
   }
 }

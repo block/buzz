@@ -99,7 +99,7 @@ class _DraftsList extends ConsumerWidget {
     final names = ref.watch(identityNameSourcesProvider);
     if (drafts.isEmpty) {
       return const _EmptySurface(
-        icon: BuzzIcons.filePen,
+        icon: BuzzIcons.edit,
         message: 'No drafts',
         detail: 'Unsent messages you start composing will show up here.',
       );
@@ -124,7 +124,7 @@ class _DraftsList extends ConsumerWidget {
         return ListTile(
           key: ValueKey('draft-row-${draft.key}'),
           leading: Icon(
-            BuzzIcons.filePen,
+            BuzzIcons.edit,
             size: 20,
             color: context.colors.onSurfaceVariant,
           ),

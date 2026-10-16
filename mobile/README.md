@@ -21,6 +21,34 @@ external Flutter SDK has touched `mobile/.dart_tool`, rerun `mobile-install`
 with the pinned SDK before building so `flutter_test`, `sky_engine`, and the
 engine all come from the same Flutter version.
 
+### iOS toolchain
+
+Use Xcode 27.0 for iOS development and build validation on an Apple silicon
+Mac running macOS Tahoe 26.6 or later, as required by the
+[Xcode 27 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
+On Intel Macs or hosts that cannot meet those requirements, use a compatible
+Xcode 26 version, which remains supported. Activate the repository's pinned
+Flutter SDK with Hermit as described above.
+
+When multiple Xcode versions are installed, select the intended version for
+the command with `DEVELOPER_DIR`, for example:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode-27.0.0.app/Contents/Developer xcodebuild -version
+```
+
+Adjust the path to your installation. Keep the compiler and SDK from the same
+Xcode installation. The pinned Flutter native-assets tooling can discover the
+globally selected SDK even when `DEVELOPER_DIR` selects another compiler, so
+use a build machine with a matching default Xcode when validating either
+Xcode 26 or Xcode 27.
+
+The native cryptography dependency is pinned upstream C source in
+`ios/BuzzPushKit/Sources/CSecp256k1`; it requires no Swift build-plugin approval.
+GitHub's mobile CI currently uses the Xcode default of its `macos-latest`
+runner. The internal release toolchain is configured separately in
+[buzz-releases](https://github.com/squareup/buzz-releases).
+
 ## Run
 
 ```bash

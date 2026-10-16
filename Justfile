@@ -401,6 +401,10 @@ test-unit:
     cargo test -p buzz-audio-client
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        # Mesh JWKS proxy-bypass regression: infra-free loopback I/O with
+        # child-process environment isolation. Its integration-test binary
+        # is not selected by --lib above. Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-auth --test mesh_jwks_proxy
         cargo nextest run -p buzz-audit --lib
         # Cross-pod disconnect payload tests (NIP-FI and community archive
         # fence); all infra-free.
@@ -1022,10 +1026,14 @@ mobile-build-android:
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! pgrep -x Simulator &>/dev/null; then
-        open -a Simulator
-        sleep 3
+    developer_dir="$(xcode-select -p)"
+    simulator_app="$developer_dir/../Applications/DeviceHub.app"
+    if [[ ! -d "$simulator_app" ]]; then
+        simulator_app="$developer_dir/Applications/Simulator.app"
     fi
+    # Use the selected Xcode even when another version's app is already running.
+    open -a "$simulator_app"
+    sleep 3
     ./scripts/mobile-worktree-overrides.sh
     gateway_url="${BUZZ_PUSH_GATEWAY_URL:-}"
     overrides_file="{{mobile_dir}}/ios/Flutter/AppOverrides.xcconfig"

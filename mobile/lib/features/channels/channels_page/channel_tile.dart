@@ -207,7 +207,7 @@ class _DmAvatar extends ConsumerWidget {
           AvatarImage(
             imageUrl: avatarUrl,
             radius: _kDmAvatarSize / 2,
-            backgroundColor: context.colors.primaryContainer,
+            backgroundColor: context.controlSurface,
             fallback: Text(
               initial,
               style: context.textTheme.labelSmall?.copyWith(

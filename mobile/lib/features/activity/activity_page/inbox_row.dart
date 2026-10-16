@@ -491,7 +491,7 @@ class _RowAvatar extends StatelessWidget {
     return AvatarImage(
       imageUrl: profile?.avatarUrl,
       radius: activityAvatarSize / 2,
-      backgroundColor: context.colors.primaryContainer,
+      backgroundColor: context.controlSurface,
       fallback: Text(
         initial,
         style: TextStyle(

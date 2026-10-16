@@ -256,7 +256,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         key: const ValueKey('avatar-editor-fixed-preview'),
         imageUrl: previewUrl,
         radius: _previewSize / 2,
-        backgroundColor: context.colors.primaryContainer,
+        backgroundColor: context.controlSurface,
         fallback: Text(
           fallbackInitial,
           style: context.textTheme.displayLarge?.copyWith(

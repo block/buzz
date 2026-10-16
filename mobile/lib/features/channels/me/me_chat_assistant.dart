@@ -216,7 +216,7 @@ useMeChatAssistant(
             liveRegion: true,
             child: TextButton.icon(
               onPressed: busy.value ? null : choose,
-              icon: const Icon(Icons.pending_outlined),
+              icon: const Icon(BuzzIcons.clock),
               label: Text('Finish choosing $pendingName'),
             ),
           ),
@@ -238,7 +238,7 @@ useMeChatAssistant(
         imageUrl: profile?.avatarUrl,
         radius: 16,
         isAgent: selected != null,
-        backgroundColor: context.colors.primaryContainer,
+        backgroundColor: context.controlSurface,
         fallback: selected == null
             ? const Icon(BuzzIcons.plus, size: 20)
             : Text(
