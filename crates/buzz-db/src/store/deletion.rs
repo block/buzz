@@ -4530,6 +4530,63 @@ mod postgres_tests {
         (db, store)
     }
 
+    /// Replaces the SQL-parity check retired with the fence functions.
+    ///
+    /// A name in `EXCLUDED_SCOPED_TABLES` hides that table from deletion
+    /// catalog drift detection, so the list is pinned against control-plane
+    /// tables written out here, not derived from either tenant manifest, and
+    /// each must still exist with community provenance.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn excluded_scoped_tables_are_live_control_plane_tables() {
+        const CONTROL_PLANE_TABLES: [&str; 8] = [
+            "community_deletion_approvals",
+            "community_deletion_checkpoints",
+            "community_deletion_executor_heartbeats",
+            "community_deletion_requests",
+            "community_serving_write_leases",
+            "operator_listener_outbox",
+            "product_feedback",
+            "rate_limit_violations",
+        ];
+        let control_plane = BTreeSet::from(CONTROL_PLANE_TABLES);
+        let excluded = EXCLUDED_SCOPED_TABLES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(excluded, control_plane);
+        for table in EXPECTED_SCOPED_TABLES.iter().chain(PURGE_SCOPED_TABLES) {
+            assert!(
+                !control_plane.contains(table),
+                "tenant table {table} must not be excluded"
+            );
+        }
+
+        let (db, _) = store().await;
+        let live: BTreeSet<String> = sqlx::query_scalar(
+            "SELECT c.relname FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') \
+               AND NOT c.relispartition AND a.attname = 'community_id' \
+               AND NOT a.attisdropped",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .expect("community provenance tables")
+        .into_iter()
+        .collect();
+        for table in CONTROL_PLANE_TABLES {
+            assert!(live.contains(table), "stale exclusion {table}");
+        }
+        let accounted = EXPECTED_SCOPED_TABLES
+            .iter()
+            .chain(CONTROL_PLANE_TABLES.iter())
+            .map(|table| (*table).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(live, accounted);
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn desired_state_catalog_has_no_universal_fence_and_still_boots() {
