@@ -68,6 +68,25 @@ When the provisioning config is present and shows the host is not bindable (a
 reserved host or one outside the suffix), `unbind` removes the last issuer too;
 this is how to clear a reserved-host binding that blocks relay startup.
 
+`backfill` never adds the default issuers beside an operator `bind`: both lock
+the community row, and the backfill only inserts while the community still has
+no binding.
+
+## Lookup route
+
+`GET /operator/communities/nip-fi-binding?host=<host>` is operator-signed and
+returns `{"host": ..., "active": ..., "issuers": [...]}`. kgoose relies on this
+contract:
+
+- `host` is the host stored on the community row.
+- Every lifecycle state answers 200. `active` is `false` once the community is
+  archived or its deletion has started quiescing, including a tombstoned
+  community; it stays `true` while a deletion is only requested.
+- `issuers` is `[]` when `BUZZ_NIP_FI_PROVISION_BINDING` is unset, the host is
+  not bindable, or nothing is bound. Only issuers in `BUZZ_NIP_FI_ISSUERS` are
+  reported, in byte order.
+- 404 means no community has this host; 400 means the host is malformed.
+
 ## Rollout
 
 1. Deploy the relay with `BUZZ_NIP_FI_PROVISION_BINDING` set. New communities

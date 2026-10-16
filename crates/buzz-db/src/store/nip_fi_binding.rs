@@ -26,7 +26,9 @@ pub enum NipFiUnbind {
 pub struct NipFiBindingRecord {
     /// Canonical host stored on the community row.
     pub host: String,
-    /// True when the community is not archived and has no deletion in progress.
+    /// True when the community is not archived and its deletion has not
+    /// started quiescing. A community whose deletion was requested but not yet
+    /// quiesced still reports true.
     pub active: bool,
     /// Bound issuers in byte order. Empty means no binding.
     pub issuers: Vec<String>,
@@ -75,6 +77,11 @@ impl Db {
         )
         .await?;
         let mut tx = Transaction::begin(connection, None).await?;
+        // Serializes with the backfill, which locks the same row.
+        sqlx::query("SELECT 1 FROM communities WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await?;
         let inserted = self
             .insert_nip_fi_issuers_in_transaction(&mut tx, community, issuers)
             .await?;
@@ -217,10 +224,13 @@ impl Db {
             .collect()
     }
 
-    /// Bind `issuers` to each of `communities` that is still active, in one
-    /// statement. Takes each community's shared deletion lock first, so a
-    /// community whose deletion has started is skipped rather than aborting
-    /// the batch. Returns the number of new rows.
+    /// Bind `issuers` to each of `communities` that is still active and still
+    /// has no binding, in one statement. Takes each community's shared deletion
+    /// lock first, so a community whose deletion has started is skipped rather
+    /// than aborting the batch. The community rows are then locked, as
+    /// [`Db::bind_nip_fi_issuers`] does, so an operator bind that commits after
+    /// the caller listed the community wins and the default is not added
+    /// beside it. Returns the number of new rows.
     #[datastore_span(name = "bind_nip_fi_issuers_to_active", system = "postgresql")]
     pub async fn bind_nip_fi_issuers_to_active(
         &self,
@@ -244,6 +254,10 @@ impl Db {
         .bind(&ids)
         .execute(&mut *tx)
         .await?;
+        sqlx::query("SELECT 1 FROM communities WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
         let inserted = sqlx::query(
             r#"
             INSERT INTO community_nip_fi_issuers (community_id, issuer)
@@ -252,6 +266,9 @@ impl Db {
             WHERE c.id = ANY($1)
               AND c.deletion_state = 'active'
               AND c.deleted_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM community_nip_fi_issuers b WHERE b.community_id = c.id
+              )
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -483,6 +500,32 @@ mod postgres_tests {
             .await
             .is_err());
         assert!(!community_exists(&db, &bootstrap).await);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn backfill_keeps_only_an_operator_bind_made_after_it_listed() {
+        let db = setup_db().await;
+        let suffix = format!("{}.suffix.example", Uuid::new_v4().simple());
+        let host = format!("acme.{suffix}");
+        db.ensure_configured_community(&host).await.expect("seed");
+        let listed = db
+            .list_unbound_nip_fi_communities(&suffix, "", 1000)
+            .await
+            .expect("list unbound");
+        assert_eq!(listed.len(), 1);
+
+        let operator = "https://operator.example".to_string();
+        db.bind_nip_fi_issuers(listed[0].id, std::slice::from_ref(&operator))
+            .await
+            .expect("operator bind between list and insert");
+        assert_eq!(
+            db.bind_nip_fi_issuers_to_active(&[listed[0].id], &issuers())
+                .await
+                .expect("backfill insert"),
+            0
+        );
+        assert_eq!(bound(&db, &host).await, Some(vec![operator]));
     }
 
     #[tokio::test]

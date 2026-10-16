@@ -402,6 +402,9 @@ pub async fn provision_community(
             tracing::error!(error = %msg, "operator community persistence failed");
             Err(internal_error("operator community persistence failed"))
         }
+        Err(msg) if msg == buzz_auth::BindRefusal::ReservedHost.to_string() => Err(
+            coded_api_error(StatusCode::BAD_REQUEST, "reserved_host", &msg),
+        ),
         Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
     }
 }
@@ -921,6 +924,13 @@ pub struct CommunityNipFiBindingQuery {
 /// that could authorize are reported: none unless the host is bindable under
 /// the provisioning policy (one label under the suffix, not reserved), and
 /// only issuers configured in `BUZZ_NIP_FI_ISSUERS`.
+///
+/// Contract relied on by kgoose:
+/// - `host` is the host stored on the community row, not the queried text.
+/// - A community in any lifecycle state answers 200. Archived or deletion
+///   quiesced communities, including tombstones, report `active: false`.
+/// - An unset provisioning policy, or no binding, reports `issuers: []`.
+/// - 404 means no community row has this host.
 pub async fn community_nip_fi_binding(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2811,6 +2821,10 @@ mod postgres_tests {
                     created,
                     "create_only={create_only} {host}"
                 );
+                if !created {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    assert_eq!(read_json(response).await["code"], "reserved_host");
+                }
                 let row = state
                     .db
                     .lookup_community_by_host(host)

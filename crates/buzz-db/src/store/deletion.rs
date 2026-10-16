@@ -4395,7 +4395,7 @@ mod postgres_tests {
         })
         .await
         .expect("connect isolated migration DB");
-        crate::migration::run_migrations_through(&db.pool, 60)
+        crate::migration::run_migrations_through(&db.pool, 66)
             .await
             .expect("migrate with fence objects present");
         let store = db.deletion_store();
@@ -4417,6 +4417,7 @@ DROP TRIGGER IF EXISTS community_write_fence_audit_log ON audit_log;
 DROP TRIGGER IF EXISTS community_write_fence_channel_members ON channel_members;
 DROP TRIGGER IF EXISTS community_write_fence_channels ON channels;
 DROP TRIGGER IF EXISTS community_write_fence_community_bans ON community_bans;
+DROP TRIGGER IF EXISTS community_write_fence_community_nip_fi_issuers ON community_nip_fi_issuers;
 DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log;
 DROP TRIGGER IF EXISTS community_write_fence_event_mentions ON event_mentions;
 DROP TRIGGER IF EXISTS community_write_fence_events ON events;

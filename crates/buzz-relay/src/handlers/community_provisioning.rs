@@ -417,6 +417,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_verifies_reserved_hosts_before_seeding_the_deployment_community() {
+        let main = include_str!("../main.rs");
+        let verify = main
+            .find("verify_reserved_hosts_unbound(&db, policy).await?;")
+            .expect("startup must refuse a bound reserved host");
+        let seed = main
+            .find("match ensure_deployment_community(&db,")
+            .expect("startup seeds the deployment community");
+        assert!(verify < seed, "the reserved-host check must run first");
+    }
+
+    #[test]
     fn host_valid_bare_domain() {
         assert!(validate_host("acme.communities.buzz.xyz").is_ok());
     }
