@@ -1438,7 +1438,11 @@ fn build_git_issue_assignee_operation(
         tags.push(tag(&["prior", &prior])?);
     }
 
-    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+    // The signer can be an assignee. nostr strips self p tags by default,
+    // which would turn self-assignment/unassignment into an empty operation.
+    Ok(EventBuilder::new(Kind::Custom(1), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
@@ -4143,6 +4147,56 @@ mod tests {
             .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
             .count();
         assert_eq!(p_count, 2);
+    }
+
+    #[test]
+    fn git_issue_self_assignment_preserves_signed_assignee() {
+        let signer = keys();
+        let self_pk = signer.public_key().to_hex();
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".into(),
+        };
+        let issue = "b".repeat(64);
+        let event = build_git_issue_assignment(
+            &repo,
+            &issue,
+            std::slice::from_ref(&self_pk),
+            "Assigned to me",
+        )
+        .unwrap()
+        .sign_with_keys(&signer)
+        .unwrap();
+        event.verify().unwrap();
+        assert_eq!(tag_values(&event, "p"), vec![self_pk]);
+        assert!(has_tag(&event, "t", "assignment"));
+        assert!(has_tag(&event, "e", &issue));
+    }
+
+    #[test]
+    fn git_issue_self_unassignment_preserves_signed_assignee_and_prior() {
+        let signer = keys();
+        let self_pk = signer.public_key().to_hex();
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".into(),
+        };
+        let issue = "b".repeat(64);
+        let prior = "d".repeat(64);
+        let event = build_git_issue_unassignment_with_prior(
+            &repo,
+            &issue,
+            std::slice::from_ref(&self_pk),
+            "Unassigned myself",
+            Some(&prior),
+        )
+        .unwrap()
+        .sign_with_keys(&signer)
+        .unwrap();
+        event.verify().unwrap();
+        assert_eq!(tag_values(&event, "p"), vec![self_pk]);
+        assert!(has_tag(&event, "t", "unassignment"));
+        assert!(has_tag(&event, "prior", &prior));
     }
 
     #[test]
