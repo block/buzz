@@ -1004,18 +1004,12 @@ pub async fn reap_exhausted_matches(pool: &PgPool) -> Result<u64> {
     .fetch_all(&mut *connection)
     .await?;
     drop(connection);
-    let mut deleted = 0;
-    for id in communities {
-        let batch: Result<u64> = async {
-            let Some(mut tx) = crate::begin_community_sweep_transaction(
-                pool,
-                CommunityId::from_uuid(id),
-                crate::observability::WriterOperation::Maintenance,
-            )
-            .await?
-            else {
-                return Ok(0);
-            };
+    let deleted = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "exhausted_match_reap",
+        |id, mut tx| async move {
             let result = sqlx::query(
                 "DELETE FROM push_match_queue WHERE community_id = $1 AND attempts >= $2 \
                  AND (state='pending' OR (state='matching' AND lease_until < now()))",
@@ -1026,15 +1020,10 @@ pub async fn reap_exhausted_matches(pool: &PgPool) -> Result<u64> {
             .await?;
             tx.commit().await?;
             Ok(result.rows_affected())
-        }
-        .await;
-        match batch {
-            Ok(count) => deleted += count,
-            Err(error) => tracing::warn!(community_id = %id, error = %error,
-                "Exhausted push-match reap failed; retained rows will retry next tick"),
-        }
-    }
-    Ok(deleted)
+        },
+    )
+    .await;
+    Ok(deleted.into_iter().sum())
 }
 
 /// Load active endpoint-enabled leases for one tenant.

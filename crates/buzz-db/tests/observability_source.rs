@@ -902,12 +902,13 @@ const GUARDED_TABLE_WRITE_MARKERS: [&str; 9] = [
 
 const COMMUNITY_CHOKEPOINT_MARKER: &str = "begin_community_event_write_transaction(";
 const GENERAL_COMMUNITY_CHOKEPOINT_MARKER: &str = "begin_community_write_transaction(";
+const SWEEP_COMMUNITY_CHOKEPOINT_MARKER: &str = "begin_community_sweep_transaction(";
 const COMMUNITY_CHOKEPOINT_LEGACY_MARKER: &str =
     "begin_community_event_write_transaction_with_legacy_metrics(";
 
 fn has_any_tenant_local_chokepoint(source: &str) -> bool {
     source.contains(COMMUNITY_CHOKEPOINT_MARKER)
-        || source.contains("begin_community_sweep_transaction(")
+        || source.contains(SWEEP_COMMUNITY_CHOKEPOINT_MARKER)
         || source.contains(GENERAL_COMMUNITY_CHOKEPOINT_MARKER)
         || source.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER)
 }

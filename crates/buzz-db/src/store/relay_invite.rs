@@ -207,19 +207,13 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
         ids_by_community.entry(community).or_default().push(id);
     }
 
-    let mut deleted = 0;
-    for id in ordered_communities {
-        let batch: Result<u64> = async {
-            let community = CommunityId::from_uuid(id);
-            let Some(mut tx) = crate::begin_community_sweep_transaction(
-                pool,
-                community,
-                crate::observability::WriterOperation::Maintenance,
-            )
-            .await?
-            else {
-                return Ok(0);
-            };
+    let ids_by_community = &ids_by_community;
+    let deleted = crate::sweep_admitted_communities(
+        pool,
+        ordered_communities,
+        crate::observability::WriterOperation::Maintenance,
+        "relay_invite_reap",
+        |id, mut tx| async move {
             let result = sqlx::query(
                 "DELETE FROM relay_invites WHERE community_id = $1 AND id = ANY($2) AND expires_at < $3",
             )
@@ -230,15 +224,10 @@ pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) ->
             .await?;
             tx.commit().await?;
             Ok(result.rows_affected())
-        }
-        .await;
-        match batch {
-            Ok(count) => deleted += count,
-            Err(error) => tracing::warn!(community_id = %id, error = %error,
-                "Relay invite reap failed; retained rows will retry next tick"),
-        }
-    }
-    Ok(deleted)
+        },
+    )
+    .await;
+    Ok(deleted.into_iter().sum())
 }
 
 /// Atomically claim a v2 relay invite.

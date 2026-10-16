@@ -62,7 +62,7 @@ pub(crate) use runtime::{
     begin_community_event_write_transaction,
     begin_community_event_write_transaction_with_legacy_metrics, begin_community_sweep_transaction,
     begin_community_write_transaction, insert_mentions_in_transaction, observability, route_proof,
-    ReadSessionInner, RouteDecision, RoutePredicate,
+    sweep_admitted_communities, ReadSessionInner, RouteDecision, RoutePredicate,
 };
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, channel,

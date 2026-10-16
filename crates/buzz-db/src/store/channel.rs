@@ -860,18 +860,12 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
     .fetch_all(&mut *connection)
     .await?;
     drop(connection);
-    let mut reaped = Vec::new();
-    for id in communities {
-        let batch: Result<Vec<ReapedEphemeralChannel>> = async {
-            let Some(mut tx) = crate::begin_community_sweep_transaction(
-                pool,
-                CommunityId::from_uuid(id),
-                crate::observability::WriterOperation::Maintenance,
-            )
-            .await?
-            else {
-                return Ok(Vec::new());
-            };
+    let reaped = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "ephemeral_channel_reap",
+        |id, mut tx| async move {
             let rows = sqlx::query(
                 "UPDATE channels AS ch SET archived_at = NOW() \
                  FROM communities AS c \
@@ -896,15 +890,10 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
                 .collect::<Result<Vec<_>>>()?;
             tx.commit().await?;
             Ok(parsed)
-        }
-        .await;
-        match batch {
-            Ok(rows) => reaped.extend(rows),
-            Err(error) => tracing::warn!(community_id = %id, error = %error,
-                "Ephemeral channel reap failed; retained rows will retry next tick"),
-        }
-    }
-    Ok(reaped)
+        },
+    )
+    .await;
+    Ok(reaped.into_iter().flatten().collect())
 }
 
 impl Db {
