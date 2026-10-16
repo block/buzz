@@ -290,20 +290,27 @@ impl ConnectionState {
 /// aborts and panics fall back to `disconnect` and cancel child tasks.
 struct AuthLifecycleGuard {
     conn: Arc<ConnectionState>,
+    close: Arc<crate::access::CloseLine>,
     finished: bool,
 }
 
 impl AuthLifecycleGuard {
-    fn new(conn: Arc<ConnectionState>) -> Self {
+    fn new(conn: Arc<ConnectionState>, close: Arc<crate::access::CloseLine>) -> Self {
         Self {
             conn,
+            close,
             finished: false,
         }
     }
 
+    /// Terminalize the login, recording its identity on the close line.
     fn finish(&mut self, outcome: AuthOutcome) -> Option<AuthContext> {
         self.finished = true;
-        self.conn.finish_auth_on_close(outcome)
+        let authenticated = self.conn.finish_auth_on_close(outcome);
+        if let Some(ctx) = &authenticated {
+            self.close.logged_in(ctx.pubkey);
+        }
+        authenticated
     }
 }
 
@@ -311,7 +318,7 @@ impl Drop for AuthLifecycleGuard {
     fn drop(&mut self) {
         if !self.finished {
             self.conn.cancel.cancel();
-            self.conn.finish_auth_on_close(AuthOutcome::Disconnect);
+            self.finish(AuthOutcome::Disconnect);
         }
     }
 }
@@ -368,6 +375,12 @@ pub(crate) async fn handle_connection(
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
+    // Owned from the upgrade on, so every exit (inactive community, the
+    // connection limit, the active handler, or this future being dropped)
+    // writes the connection's one line.
+    let close = crate::access::CloseLine::open(conn_id, tenant.community(), addr);
+    let close_for_run = Arc::clone(&close);
+    let close_for_drain = Arc::clone(&close);
 
     // Fix 3: Arm the NIP-FI gate and expiry task BEFORE the `is_community_active`
     // bootstrap await so the session deadline is enforced even when the DB check
@@ -443,7 +456,7 @@ pub(crate) async fn handle_connection(
                 run_state,
                 addr,
                 tenant,
-                conn_id,
+                close_for_run,
                 control,
                 nip_fi_assertion,
                 connection_time,
@@ -457,6 +470,8 @@ pub(crate) async fn handle_connection(
             .await
         },
         move || async move {
+            // Bootstrap ended the connection before serving it.
+            close_for_drain.refused("not_admitted");
             // Drain the pre-terminal channel (NIP-FI denial frame, if any) and
             // close the socket with a bounded timeout so a queued denial is
             // delivered even when the active-connection path is never entered.
@@ -507,7 +522,7 @@ async fn handle_active_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
-    conn_id: Uuid,
+    close: Arc<crate::access::CloseLine>,
     control: CommunityConnectionControl,
     nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
     connection_time: chrono::DateTime<chrono::Utc>,
@@ -516,7 +531,7 @@ async fn handle_active_connection(
     // produced by any caller but retained for future test extensibility.
     pre_built: Option<PreBuiltNipFiBundle>,
 ) {
-    let opened = Instant::now();
+    let conn_id = close.conn_id();
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
     // connection_time is threaded in from the HTTP handler (captured immediately
@@ -526,6 +541,7 @@ async fn handle_active_connection(
         Ok(p) => p,
         Err(_) => {
             warn!(peer_addr = %addr, "Connection limit reached, rejecting");
+            close.refused("connection_limit");
             return;
         }
     };
@@ -601,7 +617,7 @@ async fn handle_active_connection(
     });
 
     let conn = Arc::new(ConnectionState {
-        refusal_budget: Default::default(),
+        refusal_budget: Arc::clone(&close.refusals),
         conn_id,
         tenant,
         remote_addr: addr,
@@ -642,7 +658,7 @@ async fn handle_active_connection(
     // don't leak. Decremented in the cleanup path below.
     metrics::gauge!("buzz_ws_connections_active").increment(1.0);
     crate::metrics::record_auth_attempt_started();
-    let mut auth_lifecycle = AuthLifecycleGuard::new(Arc::clone(&conn));
+    let mut auth_lifecycle = AuthLifecycleGuard::new(Arc::clone(&conn), Arc::clone(&close));
 
     // Register after challenge succeeds — avoids leaked entries on early disconnect.
     state.conn_manager.register(
@@ -662,8 +678,7 @@ async fn handle_active_connection(
     let (ws_send, ws_recv) = socket.split();
 
     let send_cancel = cancel.child_token();
-    let queued = Arc::new(crate::access::QueuedTotals::default());
-    let ws_send = crate::access::CountingSink::new(ws_send, Arc::clone(&queued));
+    let ws_send = crate::access::CountingSink::new(ws_send, Arc::clone(&close.queued));
     let send_task = tokio::spawn(send_loop(
         ws_send,
         rx,
@@ -754,7 +769,6 @@ async fn handle_active_connection(
     // Terminalize before joining writer/heartbeat tasks. A blocked socket sink
     // must not keep the authenticated gauge high during shutdown.
     let authenticated = auth_lifecycle.finish(close_outcome);
-    let closed_as = authenticated.as_ref().map(|ctx| ctx.pubkey);
 
     let _ = send_task.await;
     let _ = heartbeat_task.await;
@@ -778,15 +792,6 @@ async fn handle_active_connection(
         }
     }
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
-    crate::access::log_close(
-        conn_id,
-        conn.tenant.community(),
-        addr,
-        closed_as.as_ref(),
-        opened.elapsed(),
-        &queued,
-        &conn.refusal_budget,
-    );
 
     drop(permit);
 }
@@ -1726,6 +1731,167 @@ pub(crate) mod tests {
         );
     }
 
+    /// The close lines `out` holds, once at least one is written.
+    async fn close_lines(out: &crate::access::tests::Captured) -> Vec<serde_json::Value> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let lines: Vec<_> = out
+                    .lines()
+                    .into_iter()
+                    .filter(|l| l["event"] == "close")
+                    .collect();
+                if !lines.is_empty() {
+                    // Let a duplicate, if any, land before counting.
+                    tokio::task::yield_now().await;
+                    break out
+                        .lines()
+                        .into_iter()
+                        .filter(|l| l["event"] == "close")
+                        .collect();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a close line")
+    }
+
+    /// Serve `upgrade` on a local WebSocket, connect once, read until the
+    /// server ends the socket, and return the connection's close lines.
+    async fn close_lines_of<F, Fut>(upgrade: F) -> Vec<serde_json::Value>
+    where
+        F: Fn(axum::extract::ws::WebSocket) -> Fut + Clone + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        use axum::{routing::get, Router};
+        use futures_util::StreamExt as _;
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let app = Router::new().route(
+            "/",
+            get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+                let upgrade = upgrade.clone();
+                async move { ws.on_upgrade(upgrade) }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("connect");
+        while let Ok(Some(Ok(frame))) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), client.next()).await
+        {
+            if frame.is_close() {
+                break;
+            }
+        }
+        let lines = close_lines(&out).await;
+        server.abort();
+        lines
+    }
+
+    /// A connection cancelled during the community-active startup check
+    /// still writes its one close line, marked not admitted.
+    #[tokio::test]
+    async fn startup_cancellation_writes_one_close_line() {
+        let key = nostr::Keys::generate();
+        let deadline = chrono::Utc::now() - chrono::Duration::seconds(2);
+        let assertion =
+            buzz_auth::VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let state = crate::state::tests::test_state().await;
+        let lines = close_lines_of(move |socket| {
+            let (state, assertion) = (Arc::clone(&state), assertion.clone());
+            async move {
+                handle_connection(
+                    socket,
+                    state,
+                    "127.0.0.1:9999".parse().unwrap(),
+                    TenantContext::resolved(
+                        buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                        "test.local".to_owned(),
+                    ),
+                    Some(assertion),
+                    None,
+                    chrono::Utc::now(),
+                )
+                .await
+            }
+        })
+        .await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["refused"], "not_admitted", "{}", lines[0]);
+        assert!(lines[0].get("pubkey").is_none(), "{}", lines[0]);
+    }
+
+    /// A connection refused at the connection limit writes one close line
+    /// saying so.
+    #[tokio::test]
+    async fn connection_limit_refusal_writes_one_close_line() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        state.conn_semaphore = Arc::new(tokio::sync::Semaphore::new(0));
+        let state = Arc::new(state);
+        let lines = close_lines_of(move |socket| {
+            let state = Arc::clone(&state);
+            async move {
+                let tenant = TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                    "test.local".to_owned(),
+                );
+                let addr = "127.0.0.1:9999".parse().unwrap();
+                let close =
+                    crate::access::CloseLine::open(Uuid::new_v4(), tenant.community(), addr);
+                handle_active_connection(
+                    socket,
+                    state,
+                    addr,
+                    tenant,
+                    close,
+                    CommunityConnectionControl::new(CancellationToken::new()),
+                    None,
+                    chrono::Utc::now(),
+                    None,
+                )
+                .await
+            }
+        })
+        .await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["refused"], "connection_limit", "{}", lines[0]);
+    }
+
+    /// Dropping an authenticated handler mid-connection writes its one
+    /// close line, with the identity it logged in as.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_authenticated_handler_writes_one_close_line() {
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let (conn, _rx) = test_conn_with_auth(pending_state());
+        let ctx = auth_context();
+        let pubkey = ctx.pubkey;
+        assert!(conn.authenticate(ctx));
+        let started = Arc::new(Notify::new());
+        let task = {
+            let started = Arc::clone(&started);
+            tokio::spawn(async move {
+                let close = crate::access::CloseLine::open(
+                    conn.conn_id,
+                    conn.tenant.community(),
+                    conn.remote_addr,
+                );
+                let _guard = AuthLifecycleGuard::new(conn, close);
+                started.notify_one();
+                std::future::pending::<()>().await;
+            })
+        };
+        started.notified().await;
+        task.abort();
+        let _ = task.await;
+        let lines = close_lines(&out).await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["pubkey"], pubkey.to_hex(), "{}", lines[0]);
+        assert!(lines[0].get("refused").is_none(), "{}", lines[0]);
+    }
+
     /// Aborting the production lifecycle owner must synchronously terminalize
     /// pending accounting and release an authenticated gauge exactly once.
     #[tokio::test(flavor = "current_thread")]
@@ -1742,7 +1908,12 @@ pub(crate) mod tests {
             let conn = Arc::clone(&authenticated);
             let started = Arc::clone(&authenticated_started);
             tokio::spawn(async move {
-                let _guard = AuthLifecycleGuard::new(conn);
+                let close = crate::access::CloseLine::open(
+                    conn.conn_id,
+                    conn.tenant.community(),
+                    conn.remote_addr,
+                );
+                let _guard = AuthLifecycleGuard::new(conn, close);
                 started.notify_one();
                 std::future::pending::<()>().await;
             })
@@ -1758,7 +1929,12 @@ pub(crate) mod tests {
             let conn = Arc::clone(&pending);
             let started = Arc::clone(&pending_started);
             tokio::spawn(async move {
-                let _guard = AuthLifecycleGuard::new(conn);
+                let close = crate::access::CloseLine::open(
+                    conn.conn_id,
+                    conn.tenant.community(),
+                    conn.remote_addr,
+                );
+                let _guard = AuthLifecycleGuard::new(conn, close);
                 started.notify_one();
                 std::future::pending::<()>().await;
             })
@@ -1848,12 +2024,17 @@ pub(crate) mod tests {
                     ws.on_upgrade(move |socket| async move {
                         let cancel = CancellationToken::new();
                         let control = CommunityConnectionControl::new(cancel);
+                        let close = crate::access::CloseLine::open(
+                            Uuid::new_v4(),
+                            tenant.community(),
+                            "127.0.0.1:1234".parse().expect("client address"),
+                        );
                         handle_active_connection(
                             socket,
                             state,
                             "127.0.0.1:1234".parse().expect("client address"),
                             tenant,
-                            Uuid::new_v4(),
+                            close,
                             control,
                             None,
                             chrono::Utc::now(),
@@ -2395,12 +2576,17 @@ pub(crate) mod tests {
                     async move {
                         ws.on_upgrade(move |socket| async move {
                             let cancel = CancellationToken::new();
+                            let close = crate::access::CloseLine::open(
+                                Uuid::new_v4(),
+                                tenant.community(),
+                                "127.0.0.1:9999".parse().unwrap(),
+                            );
                             handle_active_connection(
                                 socket,
                                 state,
                                 "127.0.0.1:9999".parse().unwrap(),
                                 tenant,
-                                Uuid::new_v4(),
+                                close,
                                 crate::state::CommunityConnectionControl::new(cancel),
                                 None,
                                 chrono::Utc::now(),
@@ -2515,12 +2701,17 @@ pub(crate) mod tests {
                     let (control, assertion) = (control.clone(), assertion.clone());
                     async move {
                         ws.on_upgrade(move |socket| async move {
+                            let close = crate::access::CloseLine::open(
+                                Uuid::new_v4(),
+                                tenant.community(),
+                                "127.0.0.1:9999".parse().unwrap(),
+                            );
                             handle_active_connection(
                                 socket,
                                 state,
                                 "127.0.0.1:9999".parse().unwrap(),
                                 tenant,
-                                Uuid::new_v4(),
+                                close,
                                 control,
                                 assertion,
                                 chrono::Utc::now(),
@@ -3552,12 +3743,17 @@ pub(crate) mod tests {
                                     pre_tx.clone(),
                                     crate::nip_fi_session::NipFiWsRoute::Root,
                                 );
+                                let close = crate::access::CloseLine::open(
+                                    conn_id,
+                                    tenant_i.community(),
+                                    "127.0.0.1:9999".parse().unwrap(),
+                                );
                                 handle_active_connection(
                                     socket,
                                     state_i,
                                     "127.0.0.1:9999".parse().unwrap(),
                                     tenant_i,
-                                    conn_id,
+                                    close,
                                     control,
                                     Some(assertion_i),
                                     conn_time,

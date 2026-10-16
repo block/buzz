@@ -130,6 +130,23 @@ impl<'a> ProvenCaller<'a> {
         self.line.read(filters);
     }
 
+    /// Record what an artifact read covered. Its raw filters are read as
+    /// plain filters, which keeps the standard dimensions (kinds, `#h`,
+    /// authors, bounds) and drops artifact predicates; those only narrow the
+    /// read. A filter that does not parse leaves the line without a summary.
+    fn read_artifact(&mut self, raw: &[Value]) {
+        if !tracing::enabled!(target: crate::access::TARGET, tracing::Level::INFO) {
+            return;
+        }
+        if let Ok(filters) = raw
+            .iter()
+            .map(|v| serde_json::from_value::<nostr::Filter>(v.clone()))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            self.line.read(&filters);
+        }
+    }
+
     /// Record how the request ended.
     pub(crate) fn complete(&mut self, fields: crate::access::RequestFields) {
         self.line.complete(fields);
@@ -294,7 +311,10 @@ pub(crate) fn verify_bridge_auth_with_options(
             rejected.claimed,
             false,
         )
-        .log(crate::access::AuthResult::Failed(rejected.reason));
+        .log_refusal(
+            crate::access::AuthResult::Failed(rejected.reason),
+            StatusCode::UNAUTHORIZED.as_u16(),
+        );
         api_error(StatusCode::UNAUTHORIZED, &rejected.message)
     })
 }
@@ -1164,26 +1184,25 @@ fn event_in_accessible_channel(se: &buzz_core::StoredEvent, accessible: &[uuid::
     }
 }
 
-/// Hard cap on the `reason` field logged for a rejected `/events` request.
-///
-/// The reject message can embed event-controlled content (e.g. a submitted
-/// channel's `visibility`/`channel_type` tag values, or a raw tag pubkey) —
-/// attacker-controlled text that must never reach Datadog unbounded.
-const REJECT_REASON_MAX_BYTES: usize = 256;
-
-/// Truncate `s` to at most `max_bytes`, cutting at the nearest UTF-8 character
-/// boundary so a multi-byte codepoint straddling the cutoff is never split.
-/// Bounds attacker-controlled text before it enters a structured log line —
-/// the line's size must stay bounded regardless of the triggering input size.
-fn truncate_reason(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+/// The fixed code logged for a rejected `/events` write: the NIP-01 prefix
+/// that leads the rejection message (`invalid`, `blocked`, ...), never the
+/// text after it, which can quote event-controlled tag values.
+fn reject_code(msg: &str) -> &'static str {
+    const PREFIXES: [&str; 8] = [
+        "invalid",
+        "blocked",
+        "restricted",
+        "duplicate",
+        "pow",
+        "rate-limited",
+        "auth-required",
+        "error",
+    ];
+    let prefix = msg.split([':', ' ']).next().unwrap_or_default();
+    PREFIXES
+        .into_iter()
+        .find(|p| *p == prefix)
+        .unwrap_or("rejected")
 }
 
 /// Submit a signed Nostr event via HTTP bridge (NIP-98 auth).
@@ -1271,7 +1290,7 @@ enum SubmitOutcome {
     /// The logged `status` reflects the actual response status carried in `response`.
     Rejected {
         kind: u32,
-        reason: String,
+        reason: &'static str,
         response: (StatusCode, Json<Value>),
     },
     /// Any other error (admission, replay, membership, auth, internal) —
@@ -1317,7 +1336,7 @@ impl SubmitOutcome {
             } => RequestFields {
                 accepted: Some(false),
                 kind: Some(*kind),
-                reject_reason: Some(reason.clone()),
+                reject_reason: Some(reason),
                 ..RequestFields::status(response.0.as_u16())
             },
             SubmitOutcome::Err { status, .. } => RequestFields {
@@ -1467,11 +1486,9 @@ async fn submit_event_authed(
             }
         }
         Err(IngestError::Rejected(msg)) => {
-            // `msg` can embed event-controlled content (e.g. a channel
-            // create's raw `visibility`/`channel_type` tag values, or a raw
-            // tag pubkey) — truncate before logging, but return the full msg
-            // in the HTTP response body (unchanged from prior behaviour).
-            let reason = truncate_reason(&msg, REJECT_REASON_MAX_BYTES).to_owned();
+            // `msg` can quote event-controlled tag values: the log gets only
+            // its fixed prefix code, the response body the full message.
+            let reason = reject_code(&msg);
             crate::handlers::ingest::reject_with_transport("http", "invalid");
             SubmitOutcome::Rejected {
                 kind: kind_u32,
@@ -1484,7 +1501,7 @@ async fn submit_event_authed(
             // CLI's reconciliation branch (which gates on `status == 409`) is
             // reachable against the live relay.  The message body is unchanged;
             // the desktop TypeScript layer matches on message text, not status.
-            let reason = truncate_reason(&msg, REJECT_REASON_MAX_BYTES).to_owned();
+            let reason = "canvas_conflict";
             crate::handlers::ingest::reject_with_transport("http", "invalid");
             SubmitOutcome::Rejected {
                 kind: kind_u32,
@@ -1609,6 +1626,7 @@ async fn query_events_authed(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw_filters, false).await
     {
+        caller.read_artifact(&raw_filters);
         return result;
     }
     let thread_windows = thread_window::parse(&raw_filters)?;
@@ -2254,6 +2272,7 @@ async fn count_events_authed(
     let raw: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true).await {
+        caller.read_artifact(&raw);
         return result;
     }
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
@@ -4631,46 +4650,16 @@ pub(crate) mod postgres_tests {
         );
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // truncate_reason regression tests
-    //
-    // Required by T1: prove a near-limit malformed input cannot produce a
-    // near-limit log payload.  No infrastructure needed — pure unit tests.
-    // ──────────────────────────────────────────────────────────────────────────
-
-    /// Near-limit ASCII input (1 MiB) must be capped at exactly `max_bytes`.
     #[test]
-    fn truncate_reason_large_ascii_input_is_bounded() {
-        let big = "a".repeat(1024 * 1024); // 1 MiB
-        let result = truncate_reason(&big, 256);
-        assert_eq!(result.len(), 256);
-        assert!(result.is_ascii());
-    }
-
-    /// A multi-byte codepoint that straddles the byte boundary must not be
-    /// split: the output must end at the last complete codepoint before the
-    /// cap, keeping the slice valid UTF-8.
-    #[test]
-    fn truncate_reason_multibyte_codepoint_at_boundary_is_not_split() {
-        // Build a string of 255 ASCII bytes followed by a 3-byte codepoint (€, U+20AC).
-        // Naïve cutoff at byte 256 would land inside the 3-byte sequence.
-        let mut s = "a".repeat(255);
-        s.push('€'); // 3 bytes: 0xE2 0x82 0xAC — spans bytes 255..258
-        assert_eq!(s.len(), 258);
-
-        let result = truncate_reason(&s, 256);
-        // Must end before the multi-byte codepoint.
-        assert_eq!(result.len(), 255);
-        assert_eq!(result, "a".repeat(255));
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
-    }
-
-    /// Short input well under the cap must be returned unchanged.
-    #[test]
-    fn truncate_reason_short_input_returned_unchanged() {
-        let s = "invalid: kind 24620 rejected";
-        let result = truncate_reason(s, 256);
-        assert_eq!(result, s);
+    fn reject_code_keeps_only_a_known_prefix() {
+        assert_eq!(reject_code("invalid: visibility SECRET"), "invalid");
+        assert_eq!(reject_code("invalid visibility: SECRET"), "invalid");
+        assert_eq!(
+            reject_code("restricted: community writes are fenced"),
+            "restricted"
+        );
+        assert_eq!(reject_code("SECRET: invalid"), "rejected");
+        assert_eq!(reject_code("no prefix SECRET"), "rejected");
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -6049,6 +6038,170 @@ pub(crate) mod postgres_tests {
             "{line}"
         );
         assert_eq!(line["authors"], "*", "an open dimension is `*`: {line}");
+    }
+
+    /// POST `body` to `route` signed by `keys` for `signed_url`, and return
+    /// the status and every access line the request wrote.
+    async fn post_access_lines(
+        state: Arc<crate::state::AppState>,
+        host: &str,
+        route: &str,
+        signed_url: &str,
+        keys: &Keys,
+        body: &[u8],
+    ) -> (axum::http::StatusCode, Vec<serde_json::Value>, String) {
+        let headers = make_nip98_headers(keys, signed_url, "POST", body);
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let status = oneshot_request(state, "POST", route, host, headers, body).await;
+        (status, out.lines(), out.raw())
+    }
+
+    /// A refused `/events` write logs a fixed code; the event's own tag
+    /// values, which the rejection message quotes, appear nowhere.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn rejected_write_logs_a_fixed_code_never_tag_text() {
+        let state = nip_fi_off_test_state().await.expect("local Postgres");
+        let host = with_community(&state).await;
+        let keys = Keys::generate();
+        for (tag, marker) in [
+            ("visibility", "LEAKMARKERVISIBILITY7f3a"),
+            ("channel_type", "LEAKMARKERCHANNELTYPE9c1d"),
+        ] {
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(9007), "")
+                .tags([
+                    nostr::Tag::parse(["name", "marker-test"]).unwrap(),
+                    nostr::Tag::parse([tag, marker]).unwrap(),
+                ])
+                .sign_with_keys(&keys)
+                .unwrap();
+            let body = serde_json::to_vec(&event).unwrap();
+            let url = format!("https://{host}/events");
+            let (status, lines, raw) =
+                post_access_lines(Arc::clone(&state), &host, "/events", &url, &keys, &body).await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{raw}");
+            assert!(!raw.contains(marker), "tag text leaked into logs: {raw}");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(lines[0]["reject_reason"], "invalid", "{}", lines[0]);
+            assert_eq!(lines[0]["accepted"], false, "{}", lines[0]);
+        }
+    }
+
+    /// A served artifact `/query` and `/count` record which kinds, channel
+    /// and limit they read, like any other read.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn artifact_reads_log_their_filter_summary() {
+        let state = nip_fi_off_test_state().await.expect("local Postgres");
+        let host = with_community(&state).await;
+        let keys = Keys::generate();
+        let channel = uuid::Uuid::new_v4().to_string();
+        let body = serde_json::to_vec(&serde_json::json!([{
+            "artifact": "current",
+            "kinds": [45010],
+            "#h": [channel],
+            "limit": 1
+        }]))
+        .unwrap();
+        for route in ["/query", "/count"] {
+            let url = format!("https://{host}{route}");
+            let (status, lines, _) =
+                post_access_lines(Arc::clone(&state), &host, route, &url, &keys, &body).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{lines:?}");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["route"], route, "{line}");
+            assert_eq!(line["kinds"], "45010", "{line}");
+            assert_eq!(line["channel_ids"], channel.as_str(), "{line}");
+            assert_eq!(line["limit"], 1, "{line}");
+            assert_eq!(line["filters"], 1, "{line}");
+        }
+    }
+
+    /// Assert `lines` is one refusal for `route` carrying `status`, the
+    /// status the client actually received.
+    fn assert_one_refusal(
+        lines: &[serde_json::Value],
+        route: &str,
+        status: axum::http::StatusCode,
+    ) {
+        assert_eq!(lines.len(), 1, "one line per refused request: {lines:?}");
+        let line = &lines[0];
+        assert_eq!(line["route"], route, "{line}");
+        assert_eq!(line["status"], status.as_u16(), "{line}");
+        assert_eq!(line["level"], "WARN", "{line}");
+        assert_ne!(line["outcome"], "success", "{line}");
+    }
+
+    /// Off mode: a proof signed for another URL is refused 401, and its one
+    /// line says so.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn off_mode_bad_proof_logs_route_and_status() {
+        let state = nip_fi_off_test_state().await.expect("local Postgres");
+        let host = with_community(&state).await;
+        let wrong = format!("https://{host}/elsewhere");
+        let (status, lines, _) = post_access_lines(
+            state,
+            &host,
+            "/query",
+            &wrong,
+            &Keys::generate(),
+            QUERY_BODY,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        assert_one_refusal(&lines, "/query", status);
+    }
+
+    /// Enforce mode: a missing assertion (refused by the router guard) and a
+    /// bad proof beside a valid assertion (refused by the handler's
+    /// admission, which remaps the proof's 401) each log the status sent.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn enforce_mode_refusals_log_route_and_final_status() {
+        let keys = Keys::generate();
+
+        let state = nip_fi_enforce_test_state().await.expect("local Postgres");
+        let host = with_community(&state).await;
+        let url = format!("https://{host}/query");
+        let (status, lines, _) =
+            post_access_lines(state, &host, "/query", &url, &keys, QUERY_BODY).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        assert_one_refusal(&lines, "/query", status);
+        assert_eq!(lines[0]["reason"], "assertion_missing", "{}", lines[0]);
+
+        let state = nip_fi_enforce_test_state_with_verifier()
+            .await
+            .expect("local Postgres");
+        let host = with_community(&state).await;
+        let headers = same_key_nip98_and_assertion_headers(
+            &keys,
+            &format!("https://{host}/elsewhere"),
+            "POST",
+            QUERY_BODY,
+        );
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let status = oneshot_request(state, "POST", "/query", &host, headers, QUERY_BODY).await;
+        assert!(status.is_client_error(), "{status}");
+        let lines = out.lines();
+        assert_one_refusal(&lines, "/query", status);
+        assert_eq!(lines[0]["method"], "nip98", "{}", lines[0]);
+    }
+
+    /// DenyProtected: the unconditional 503 logs its route and status.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn deny_protected_refusal_logs_route_and_status() {
+        let state = nip_fi_deny_protected_test_state()
+            .await
+            .expect("local Postgres");
+        let host = with_community(&state).await;
+        let url = format!("https://{host}/query");
+        let (status, lines, _) =
+            post_access_lines(state, &host, "/query", &url, &Keys::generate(), QUERY_BODY).await;
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_one_refusal(&lines, "/query", status);
     }
 
     /// A valid proof from a banned identity is refused by the ban check

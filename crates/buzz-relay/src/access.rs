@@ -19,7 +19,6 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use buzz_core::CommunityId;
 use nostr::{Alphabet, Filter, PublicKey, SingleLetterTag};
@@ -562,7 +561,8 @@ pub(crate) struct AuthLine<'a> {
 /// A request line's decision, held until the request ends.
 struct HeldRequest {
     decision: Option<AuthResult>,
-    fields: RequestFields,
+    /// What the request did; `None` until [`AuthLine::complete`].
+    fields: Option<RequestFields>,
     summary: Option<FilterSummary>,
 }
 
@@ -579,11 +579,39 @@ pub(crate) struct RequestFields {
     pub(crate) category: Option<&'static str>,
     pub(crate) line: Option<usize>,
     pub(crate) column: Option<usize>,
-    /// An ingest rejection's message, truncated by the caller.
-    pub(crate) reject_reason: Option<String>,
+    /// An ingest rejection's fixed code, never its message.
+    pub(crate) reject_reason: Option<&'static str>,
+    /// A minted invite: its id, expiry, and use limit (absent: unlimited).
+    /// Never its code.
+    pub(crate) invite_id: Option<Uuid>,
+    pub(crate) expires_at: Option<i64>,
+    pub(crate) max_uses: Option<i32>,
+    /// An invite claim: whether it added the member (`false`: already one).
+    pub(crate) joined: Option<bool>,
+    /// An admin feedback attachment read.
+    pub(crate) feedback_id: Option<Uuid>,
+    pub(crate) attachment_sha256: Option<String>,
 }
 
 impl RequestFields {
+    const EMPTY: Self = Self {
+        status: None,
+        result_count: None,
+        accepted: None,
+        kind: None,
+        event_id: None,
+        category: None,
+        line: None,
+        column: None,
+        reject_reason: None,
+        invite_id: None,
+        expires_at: None,
+        max_uses: None,
+        joined: None,
+        feedback_id: None,
+        attachment_sha256: None,
+    };
+
     /// The response status alone.
     pub(crate) fn status(status: u16) -> Self {
         Self {
@@ -609,7 +637,7 @@ impl<'a> AuthLine<'a> {
     pub(crate) fn for_request(mut self) -> Self {
         self.request = Some(HeldRequest {
             decision: None,
-            fields: RequestFields::default(),
+            fields: None,
             summary: None,
         });
         self
@@ -627,7 +655,7 @@ impl<'a> AuthLine<'a> {
     /// Record how the request ended, for a request line.
     pub(crate) fn complete(&mut self, fields: RequestFields) {
         if let Some(held) = &mut self.request {
-            held.fields = fields;
+            held.fields = Some(fields);
         }
     }
 
@@ -681,12 +709,57 @@ impl Drop for AuthLine<'_> {
         match self.request.take() {
             Some(held) => self.attempt.log_request(
                 held.decision.unwrap_or(aborted),
-                &held.fields,
+                held.fields.as_ref(),
                 held.summary.as_ref(),
             ),
             None => self.finish(aborted),
         }
     }
+}
+
+/// A refusal logged inside a [`refusal_scope`], waiting for the scope to
+/// learn the request's route and final status.
+struct HeldRefusal {
+    method: AuthMethod,
+    route: Option<String>,
+    pubkey: Option<PublicKey>,
+    pubkey_verified: bool,
+    result: AuthResult,
+    status: u16,
+}
+
+thread_local! {
+    /// `Some` while a [`refusal_scope`] runs on this thread.
+    static REFUSAL_SCOPE: std::cell::RefCell<Option<Option<HeldRefusal>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `admit`, an HTTP admission whose verifiers log their refusal before
+/// the route and the final status are known (Enforce mode can remap a
+/// proof's 401 to 403). A refusal logged inside is held and written once
+/// when `admit` returns, carrying `route` and, on `Err`, the response's
+/// actual status.
+#[allow(clippy::result_large_err)] // the admission's own error type
+pub(crate) fn refusal_scope<T>(
+    route: &str,
+    admit: impl FnOnce() -> Result<T, axum::response::Response>,
+) -> Result<T, axum::response::Response> {
+    let outer = REFUSAL_SCOPE.with(|s| s.borrow_mut().replace(None));
+    let result = admit();
+    let held = REFUSAL_SCOPE.with(|s| std::mem::replace(&mut *s.borrow_mut(), outer));
+    if let Some(Some(held)) = held {
+        let status = result
+            .as_ref()
+            .err()
+            .map_or(held.status, |r| r.status().as_u16());
+        let route = held.route.as_deref().unwrap_or(route);
+        AuthAttempt::http(held.method, route, held.pubkey, held.pubkey_verified).log_request(
+            held.result,
+            Some(&RequestFields::status(status)),
+            None,
+        );
+    }
+    result
 }
 
 /// A fixed code for a rejected proof. `Nip98Invalid` and `Internal` carry
@@ -802,6 +875,28 @@ impl AuthAttempt<'_> {
         }
     }
 
+    /// Log a refusal that ends the request with `status`. Inside a
+    /// [`refusal_scope`] the line is held so the scope can stamp the route
+    /// and the status actually sent.
+    pub(crate) fn log_refusal(&self, result: AuthResult, status: u16) {
+        let held = REFUSAL_SCOPE.with(|s| {
+            let mut scope = s.borrow_mut();
+            let slot = scope.as_mut()?;
+            slot.get_or_insert(HeldRefusal {
+                method: self.method,
+                route: self.route.map(str::to_owned),
+                pubkey: self.pubkey,
+                pubkey_verified: self.pubkey_verified,
+                result,
+                status,
+            });
+            Some(())
+        });
+        if held.is_none() {
+            self.log_request(result, Some(&RequestFields::status(status)), None);
+        }
+    }
+
     pub(crate) fn log(&self, result: AuthResult) {
         crate::connection::note_auth_line_written();
         let (level, outcome, reason) = result.parts();
@@ -822,10 +917,20 @@ impl AuthAttempt<'_> {
     }
 
     /// The single line of an HTTP request: its auth decision and, once
-    /// admitted, what the request did. WARN on a refusal or an error status.
-    fn log_request(&self, result: AuthResult, req: &RequestFields, s: Option<&FilterSummary>) {
+    /// admitted, what the request did. An admitted request that never
+    /// completed (cancelled, or a route that forgot) logs
+    /// `request=aborted` and no status. WARN on a refusal, an error status,
+    /// or an aborted request.
+    fn log_request(
+        &self,
+        result: AuthResult,
+        req: Option<&RequestFields>,
+        s: Option<&FilterSummary>,
+    ) {
+        let aborted = req.is_none() && matches!(result, AuthResult::Success);
         let (level, outcome, reason) = result.parts();
-        let level = if req.status.is_some_and(|s| s >= 400) {
+        let req = req.unwrap_or(&RequestFields::EMPTY);
+        let level = if aborted || req.status.is_some_and(|s| s >= 400) {
             Level::WARN
         } else {
             level
@@ -841,6 +946,7 @@ impl AuthAttempt<'_> {
             pubkey_verified = pubkey.is_some().then_some(self.pubkey_verified),
             outcome,
             reason,
+            request = aborted.then_some("aborted"),
             status = req.status,
             result_count = req.result_count,
             accepted = req.accepted,
@@ -849,7 +955,13 @@ impl AuthAttempt<'_> {
             category = req.category,
             line = req.line,
             column = req.column,
-            reject_reason = req.reject_reason.as_deref(),
+            reject_reason = req.reject_reason,
+            invite_id = req.invite_id.map(tracing::field::display),
+            expires_at = req.expires_at,
+            max_uses = req.max_uses,
+            joined = req.joined,
+            feedback_id = req.feedback_id.map(tracing::field::display),
+            attachment_sha256 = req.attachment_sha256.as_deref(),
             filters = s.map(|s| s.filters),
             kinds = s.and_then(|s| s.kinds.as_deref()),
             kind_count = s.map(|s| s.kind_count),
@@ -971,35 +1083,82 @@ where
     }
 }
 
-/// The connection's one line, written when it closes. `pubkey` is the
-/// identity it logged in as, if any; a successful login writes no line of
-/// its own, so its `method` and `pubkey_verified` appear here.
-pub(crate) fn log_close(
+/// The connection's one line, written once when the last holder drops it:
+/// after a normal close, a refusal during startup, or the handler being
+/// dropped. `pubkey` is the identity it logged in as, if any; a successful
+/// login writes no line of its own, so its `method` and `pubkey_verified`
+/// appear here.
+pub(crate) struct CloseLine {
     conn_id: Uuid,
     community: CommunityId,
     peer_addr: SocketAddr,
-    pubkey: Option<&PublicKey>,
-    duration: Duration,
-    queued: &QueuedTotals,
-    refusals: &RefusalBudget,
-) {
-    let pubkey = pubkey.map(PublicKey::to_hex);
-    emit!(
-        Level::INFO,
-        event = "close",
-        conn_id = %conn_id,
-        community = %community,
-        peer_addr = %peer_addr,
-        pubkey = pubkey.as_deref(),
-        method = pubkey.is_some().then_some(AuthMethod::Nip42.as_str()),
-        pubkey_verified = pubkey.is_some().then_some(true),
-        duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
-        events_queued = queued.events(),
-        bytes_queued = queued.bytes(),
-        reads_suppressed = RefusalBudget::suppressed(&refusals.reads),
-        auth_suppressed = RefusalBudget::suppressed(&refusals.auths),
-        "access"
-    );
+    opened: std::time::Instant,
+    pubkey: std::sync::Mutex<Option<PublicKey>>,
+    refused: std::sync::OnceLock<&'static str>,
+    pub(crate) queued: std::sync::Arc<QueuedTotals>,
+    pub(crate) refusals: std::sync::Arc<RefusalBudget>,
+}
+
+impl CloseLine {
+    /// The line for a connection upgraded now.
+    pub(crate) fn open(
+        conn_id: Uuid,
+        community: CommunityId,
+        peer_addr: SocketAddr,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            conn_id,
+            community,
+            peer_addr,
+            opened: std::time::Instant::now(),
+            pubkey: std::sync::Mutex::new(None),
+            refused: std::sync::OnceLock::new(),
+            queued: Default::default(),
+            refusals: Default::default(),
+        })
+    }
+
+    pub(crate) fn conn_id(&self) -> Uuid {
+        self.conn_id
+    }
+
+    /// Record the identity the connection logged in as.
+    pub(crate) fn logged_in(&self, pubkey: PublicKey) {
+        *self.pubkey.lock().unwrap_or_else(|e| e.into_inner()) = Some(pubkey);
+    }
+
+    /// Record why the relay refused the connection before serving it.
+    pub(crate) fn refused(&self, reason: &'static str) {
+        let _ = self.refused.set(reason);
+    }
+}
+
+impl Drop for CloseLine {
+    fn drop(&mut self) {
+        let pubkey = self
+            .pubkey
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(PublicKey::to_hex);
+        emit!(
+            Level::INFO,
+            event = "close",
+            conn_id = %self.conn_id,
+            community = %self.community,
+            peer_addr = %self.peer_addr,
+            refused = self.refused.get().copied(),
+            pubkey = pubkey.as_deref(),
+            method = pubkey.is_some().then_some(AuthMethod::Nip42.as_str()),
+            pubkey_verified = pubkey.is_some().then_some(true),
+            duration_ms = u64::try_from(self.opened.elapsed().as_millis()).unwrap_or(u64::MAX),
+            events_queued = self.queued.events(),
+            bytes_queued = self.queued.bytes(),
+            reads_suppressed = RefusalBudget::suppressed(&self.refusals.reads),
+            auth_suppressed = RefusalBudget::suppressed(&self.refusals.auths),
+            "access"
+        );
+    }
 }
 
 /// The path of a request URL, without scheme, host, or query string. The
@@ -1122,6 +1281,47 @@ pub(crate) mod tests {
 
     fn pk() -> String {
         nostr::Keys::generate().public_key().to_hex()
+    }
+
+    /// A request line admitted but never completed (its future dropped
+    /// mid-request, or a route that forgot `complete`) keeps its login and
+    /// says the request aborted, with no status.
+    #[test]
+    fn admitted_request_never_completed_logs_aborted() {
+        let key = nostr::Keys::generate().public_key();
+        let (_, out) = capture(|| {
+            let mut line = AuthLine::new(AuthAttempt::http(
+                AuthMethod::Nip98,
+                "/query",
+                Some(key),
+                true,
+            ))
+            .for_request();
+            line.finish(AuthResult::Success);
+        });
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert_eq!(line["outcome"], "success", "{line}");
+        assert_eq!(line["pubkey"], key.to_hex(), "{line}");
+        assert_eq!(line["request"], "aborted", "{line}");
+        assert_eq!(line["level"], "WARN", "{line}");
+        assert!(line.get("status").is_none(), "{line}");
+    }
+
+    /// The completed counterpart carries its status and no `request` field.
+    #[test]
+    fn admitted_request_completed_logs_no_abort() {
+        let (_, out) = capture(|| {
+            let mut line =
+                AuthLine::new(AuthAttempt::http(AuthMethod::Nip98, "/query", None, false))
+                    .for_request();
+            line.finish(AuthResult::Success);
+            line.complete(RequestFields::status(200));
+        });
+        let line = &out.lines()[0];
+        assert!(line.get("request").is_none(), "{line}");
+        assert_eq!(line["status"], 200, "{line}");
     }
 
     #[test]

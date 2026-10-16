@@ -377,10 +377,12 @@ where
     // request shape (duplicate, missing, or invalid `Authorization`) can turn
     // it into a 401/403, and so neither NIP-98 nor the verifier runs.
     if mode.denies_unconditionally() {
-        AuthAttempt::nip_fi(None, false).log(AuthResult::Denied(
-            crate::access::AuthReason::AuthorizationUnavailable,
-        ));
-        return Err(http_denial(DenialClass::AuthorizationUnavailable));
+        let denial = http_denial(DenialClass::AuthorizationUnavailable);
+        AuthAttempt::nip_fi(None, false).log_refusal(
+            AuthResult::Denied(crate::access::AuthReason::AuthorizationUnavailable),
+            denial.status().as_u16(),
+        );
+        return Err(denial);
     }
 
     // Off and Shadow: the NIP-98 result passes through unchanged (legacy
@@ -408,8 +410,10 @@ where
                  pubkey,
                  result,
              }| {
+                let denial = http_denial(class);
                 if let Some(result) = result {
-                    AuthAttempt::nip_fi(pubkey, pubkey.is_some()).log(result);
+                    AuthAttempt::nip_fi(pubkey, pubkey.is_some())
+                        .log_refusal(result, denial.status().as_u16());
                 }
                 let reason = match stage {
                     Stage::Pairing => Some("nip_fi_http_key_mismatch"),
@@ -419,7 +423,7 @@ where
                 if let Some(reason) = reason {
                     metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
                 }
-                http_denial(class)
+                denial
             },
         )?;
 
@@ -612,24 +616,27 @@ where
     let mode = state.config.nip_fi.mode;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = &state.config.nip_fi.communities;
-    let admission = match state.nip_fi_deny_map.as_deref() {
-        Some(deny_map) => admit_nip_fi_http(
-            headers,
-            extract_nip98,
-            communities,
-            verifier,
-            mode,
-            deny_map,
-        ),
-        None => admit_nip_fi_http(
-            headers,
-            extract_nip98,
-            communities,
-            verifier,
-            mode,
-            &NoDenyMapConfigured,
-        ),
-    }?;
+    // The scope gives a refusal logged inside the admission its route and
+    // the status actually sent.
+    let admission =
+        crate::access::refusal_scope(route, || match state.nip_fi_deny_map.as_deref() {
+            Some(deny_map) => admit_nip_fi_http(
+                headers,
+                extract_nip98,
+                communities,
+                verifier,
+                mode,
+                deny_map,
+            ),
+            None => admit_nip_fi_http(
+                headers,
+                extract_nip98,
+                communities,
+                verifier,
+                mode,
+                &NoDenyMapConfigured,
+            ),
+        })?;
     Ok(AdmittedRequest::new(admission, route))
 }
 

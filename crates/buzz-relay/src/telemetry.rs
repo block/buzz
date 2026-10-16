@@ -52,7 +52,11 @@ impl TraceContextLookup {
     /// Build a JSON formatter backed by this subscriber dispatch lookup.
     pub fn json_formatter(&self, enabled: bool) -> TraceContextJson {
         TraceContextJson {
-            inner: tracing_subscriber::fmt::format().json().flatten_event(true),
+            inner: tracing_subscriber::fmt::format()
+                .json()
+                .flatten_event(true)
+                // `spans` already ends with the current span.
+                .with_current_span(false),
             enabled,
             context_lookup: self.clone(),
         }
@@ -395,6 +399,8 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(logs.len(), 11);
+        // The current span appears once, as the last entry of `spans`.
+        assert!(logs.iter().all(|log| log.get("span").is_none()), "{logs:?}");
 
         assert_eq!(logs[0]["message"], "root event");
         assert_eq!(logs[0]["answer"], 42);

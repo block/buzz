@@ -189,10 +189,12 @@ async fn nip_fi_assertion_guard(
     // Refusals here end the request before any handler, so the guard logs
     // them; shadow mode refuses nothing and logs nothing.
     if mode.denies_unconditionally() {
-        guard_attempt(&request).log(AuthResult::Denied(
-            crate::access::AuthReason::AuthorizationUnavailable,
-        ));
-        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+        let denial = http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+        guard_attempt(&request).log_refusal(
+            AuthResult::Denied(crate::access::AuthReason::AuthorizationUnavailable),
+            denial.status().as_u16(),
+        );
+        return denial;
     }
 
     let verdict = nip_fi_guard_steps(&state, request.headers());
@@ -207,8 +209,10 @@ async fn nip_fi_assertion_guard(
     match verdict {
         Ok(()) => next.run(request).await,
         Err(((_, class), result)) => {
-            guard_attempt(&request).log(guard_result(&request, result));
-            http_denial(class)
+            let denial = http_denial(class);
+            guard_attempt(&request)
+                .log_refusal(guard_result(&request, result), denial.status().as_u16());
+            denial
         }
     }
 }

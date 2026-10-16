@@ -216,6 +216,56 @@ pub async fn authorize(
         .as_ref()
         .ok_or_else(ApiError::not_found)?;
 
+    let full_path = admin_full_path(path_and_query);
+    authorize_at(state, headers, config, &full_path, method, raw_body, None).await
+}
+
+/// The admin path a NIP-98 client signs for `path_and_query`.
+pub(crate) fn admin_full_path(path_and_query: &str) -> String {
+    format!("{ADMIN_API_PREFIX}{path_and_query}")
+}
+
+/// [`authorize_read`] for a route whose access line also records what the
+/// request did: the returned line is written when the caller drops it.
+/// `full_path` is [`admin_full_path`] of the request target.
+pub(crate) async fn authorize_read_held<'a>(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &Method,
+    full_path: &'a str,
+) -> Result<(AdminAccess, Option<AuthLine<'a>>), ApiError> {
+    let config = state
+        .config
+        .admin
+        .as_ref()
+        .ok_or_else(ApiError::not_found)?;
+    let mut held = None;
+    let access = authorize_at(
+        state,
+        headers,
+        config,
+        full_path,
+        method.as_str(),
+        None,
+        Some(&mut held),
+    )
+    .await?;
+    Ok((access, held))
+}
+
+/// One access line per NIP-98 attempt, logged once the decision is final,
+/// or `aborted` if the request is dropped during a roster or replay wait.
+/// With `held`, an admitted request's line is handed back instead, to be
+/// written with the request's outcome.
+async fn authorize_at<'a>(
+    state: &AppState,
+    headers: &HeaderMap,
+    config: &AdminConfig,
+    full_path: &'a str,
+    method: &str,
+    raw_body: Option<&[u8]>,
+    held: Option<&mut Option<AuthLine<'a>>>,
+) -> Result<AdminAccess, ApiError> {
     match config.auth {
         AdminAuth::Nip98 => {}
         AdminAuth::Disabled => {
@@ -224,24 +274,22 @@ pub async fn authorize(
                 .map_err(|(e, _)| e);
         }
     }
-    // One access line per NIP-98 attempt, logged once the decision is final,
-    // or `aborted` if the request is dropped during a roster or replay wait.
-    let full_path = format!("{ADMIN_API_PREFIX}{path_and_query}");
-    let mut line = AuthLine::new(AuthAttempt::http(
-        AuthMethod::Nip98,
-        &full_path,
-        None,
-        false,
-    ));
+    let mut line = AuthLine::new(AuthAttempt::http(AuthMethod::Nip98, full_path, None, false));
+    if held.is_some() {
+        line = line.for_request();
+    }
     line.abort_reason("request_ended");
     let decided = authorize_staff(
-        state, headers, config, &full_path, method, raw_body, &mut line,
+        state, headers, config, full_path, method, raw_body, &mut line,
     )
     .await;
     line.finish(match &decided {
         Ok(_) => AuthResult::Success,
         Err((_, result)) => *result,
     });
+    if let (Ok(_), Some(held)) = (&decided, held) {
+        *held = Some(line);
+    }
     decided.map_err(|(e, _)| e)
 }
 
@@ -354,7 +402,7 @@ pub async fn authorize_write(
 }
 
 /// The full request target NIP-98 clients sign: path plus any query string.
-fn request_target(uri: &Uri) -> &str {
+pub(crate) fn request_target(uri: &Uri) -> &str {
     uri.path_and_query()
         .map_or_else(|| uri.path(), |pq| pq.as_str())
 }

@@ -322,8 +322,35 @@ async fn feedback_attachment(
     headers: HeaderMap,
     Path((id, sha256)): Path<(Uuid, String)>,
 ) -> Result<Response, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
-    if !is_sha256(&sha256) {
+    let full_path = auth::admin_full_path(auth::request_target(&uri));
+    let (_, mut line) = auth::authorize_read_held(&state, &headers, &method, &full_path).await?;
+    // The request's one access line carries the attachment read.
+    let served = serve_feedback_attachment_checked(&state, &headers, id, &sha256).await;
+    if let Some(line) = &mut line {
+        let fields = match &served {
+            Ok((response, community_id)) => {
+                line.in_community(*community_id);
+                crate::access::RequestFields {
+                    feedback_id: Some(id),
+                    attachment_sha256: Some(sha256),
+                    ..crate::access::RequestFields::status(response.status().as_u16())
+                }
+            }
+            Err(e) => crate::access::RequestFields::status(e.status.as_u16()),
+        };
+        line.complete(fields);
+    }
+    served.map(|(response, _)| response)
+}
+
+/// The attachment `sha256` of feedback `id`, and the community it was read from.
+async fn serve_feedback_attachment_checked(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+    id: Uuid,
+    sha256: &str,
+) -> Result<(Response, buzz_core::tenant::CommunityId), ApiError> {
+    if !is_sha256(sha256) {
         return Err(ApiError::not_found());
     }
 
@@ -342,7 +369,7 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     };
 
-    if !feedback_references_hash(&feedback.tags, community_host, &sha256) {
+    if !feedback_references_hash(&feedback.tags, community_host, sha256) {
         return Err(ApiError::not_found());
     }
 
@@ -362,19 +389,13 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     }
 
-    let response = crate::api::media::serve_feedback_attachment(&state, &tenant, &sha256, &headers)
+    let response = crate::api::media::serve_feedback_attachment(state, &tenant, sha256, headers)
         .await
         .map_err(|error| match error {
             buzz_media::MediaError::NotFound => ApiError::not_found(),
             _ => ApiError::internal(),
         })?;
-    tracing::info!(
-        feedback_id = %feedback.id,
-        community_id = %community_id,
-        attachment_sha256 = %sha256,
-        "admin feedback attachment read"
-    );
-    Ok(response)
+    Ok((response, tenant.community()))
 }
 
 // ── Phase 2: Report resolution ────────────────────────────────────────────────
@@ -1718,8 +1739,10 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres — DB lookup returns 500 without a database"]
     async fn feedback_attachment_rejects_unknown_feedback() {
+        let state = test_state().await;
+        let (_guard, out) = crate::access::tests::capture_scoped();
         let response = status_for(
-            test_state().await,
+            state,
             status_request(authorized(&format!(
                 "/feedback/{}/attachments/{HASH}",
                 Uuid::nil()
@@ -1727,6 +1750,11 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // The read's one access line: the login and the read's status.
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "success", "{}", lines[0]);
+        assert_eq!(lines[0]["status"], 404, "{}", lines[0]);
     }
 
     #[tokio::test]
