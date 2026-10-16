@@ -34,7 +34,9 @@ class _MeEmptyState extends StatelessWidget {
           const SizedBox(height: Grid.gutter),
           Text(
             'A place to work with your agents',
-            style: context.textTheme.titleMedium,
+            style: context.textTheme.bodyMedium?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: Grid.gutter),

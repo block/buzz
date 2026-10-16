@@ -351,7 +351,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const Key('search-empty-state')),
-        matching: find.text('Search'),
+        matching: find.text('Search messages, channels, and people'),
       ),
       findsOneWidget,
     );

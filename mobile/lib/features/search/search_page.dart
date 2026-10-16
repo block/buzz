@@ -285,9 +285,11 @@ class _SearchBody extends ConsumerWidget {
               ),
               const SizedBox(height: Grid.gutter),
               Text(
-                'Search',
+                'Search messages, channels, and people',
                 textAlign: TextAlign.center,
-                style: context.textTheme.titleMedium,
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
               ),
             ],
           ),
