@@ -274,18 +274,20 @@ class _SearchBody extends ConsumerWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                BuzzIcons.search,
-                size: 64,
-                color: context.colors.onSurfaceVariant,
+              Container(
+                width: Grid.xxl,
+                height: Grid.xxl,
+                decoration: BoxDecoration(
+                  color: context.controlSurface,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(BuzzIcons.search, size: 40),
               ),
-              const SizedBox(height: Grid.xs),
+              const SizedBox(height: Grid.gutter),
               Text(
                 'Search',
                 textAlign: TextAlign.center,
-                style: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                ),
+                style: context.textTheme.titleMedium,
               ),
             ],
           ),

@@ -27,7 +27,7 @@ class _MeEmptyState extends StatelessWidget {
             height: Grid.xxl,
             decoration: BoxDecoration(
               color: context.controlSurface,
-              borderRadius: BorderRadius.circular(Radii.card),
+              shape: BoxShape.circle,
             ),
             child: const Icon(BuzzIcons.messageSquare, size: 40),
           ),
