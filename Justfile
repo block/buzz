@@ -1026,10 +1026,14 @@ mobile-build-android:
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! pgrep -x Simulator &>/dev/null; then
-        open -a Simulator
-        sleep 3
+    developer_dir="$(xcode-select -p)"
+    simulator_app="$developer_dir/../Applications/DeviceHub.app"
+    if [[ ! -d "$simulator_app" ]]; then
+        simulator_app="$developer_dir/Applications/Simulator.app"
     fi
+    # Use the selected Xcode even when another version's app is already running.
+    open -a "$simulator_app"
+    sleep 3
     ./scripts/mobile-worktree-overrides.sh
     gateway_url="${BUZZ_PUSH_GATEWAY_URL:-}"
     overrides_file="{{mobile_dir}}/ios/Flutter/AppOverrides.xcconfig"

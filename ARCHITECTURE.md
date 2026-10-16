@@ -501,8 +501,9 @@ shape is an explicit transition, not a flag day:
 - **Community fence (transition foundation):** runtime admission APIs now offer
   one shared community deletion lock per transaction, while deletion lifecycle
   transitions take the matching exclusive lock. A supported serving transaction
-  never spans communities; unmigrated paths still rely on trigger/function
-  backstops.
+  never spans communities. Serving leases use the same application admission.
+  Startup and deletion catalog validation tolerate the universal fence objects
+  being absent; inventories still record live fences for older executors.
 - **Replica floor (transition foundation):** runtime now provides a shared
   replica-floor lock helper for compliant channel-event writers, and the writer
   probe handshake takes the exclusive counterpart before sampling `S`, scanning
@@ -513,7 +514,8 @@ shape is an explicit transition, not a flag day:
 - **Dual enforcement (current):** application-owned lock+precheck paths run in
   front of the existing trigger/function enforcement; commit-time trigger checks
   remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, not part of the lock foundation.
+  gated migration, after every pod tolerates their absence and no rollback below
+  that version is expected.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
