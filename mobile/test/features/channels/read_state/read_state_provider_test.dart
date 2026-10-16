@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -22,10 +25,13 @@ void main() {
   late ProviderContainer container;
   late _FakeRelayConfig config;
 
-  Future<ReadStateNotifier> pumpNotifier() async {
-    SharedPreferences.setMockInitialValues({});
+  Future<ReadStateNotifier> pumpNotifier({
+    Map<String, Object> Function(String pubkey)? stored,
+  }) async {
+    final keys = nostr.Keys.generate();
+    SharedPreferences.setMockInitialValues(stored?.call(keys.public) ?? {});
     final prefs = await SharedPreferences.getInstance();
-    final nsec = nostr.Keys.generate().nsec;
+    final nsec = keys.nsec;
     config = _FakeRelayConfig(nsec);
 
     container = ProviderContainer(
@@ -60,26 +66,44 @@ void main() {
   }
 
   test('read marks stay with the community they were made in', () async {
-    final notifier = await pumpNotifier();
-    // Recent, so the saved copy keeps it.
+    // Recent, so the saved copy keeps message marks.
     final readAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final at = unixSecondsToDateTime(readAt).toIso8601String();
+    final catchUp = activityContextKey(channelId);
+    // Upgrading from the identity-wide marks: the first community to open
+    // takes them all, kept locally.
+    final notifier = await pumpNotifier(
+      stored: (pubkey) => {
+        'buzz.channel-read-state.v2:$pubkey': jsonEncode({
+          channelId: at,
+          catchUp: at,
+          otherMsgKey: at,
+        }),
+      },
+    );
+    expect(state().effectiveTimestamp(channelId), readAt);
+    expect(state().effectiveTimestamp(catchUp), readAt);
     notifier.markContextRead(msgKey, readAt);
 
-    // The same identity in a second community starts with none of them, so
-    // it has nothing of the first community's to publish to its relay.
+    // A second community may have a channel with the same id, so it takes
+    // only the shared marks keyed by event id, and none of the first
+    // community's own, which it would otherwise publish to its relay.
     config.switchTo('http://localhost:2');
     container.read(readStateProvider);
     await settle();
+    expect(state().effectiveTimestamp(channelId), isNull);
+    expect(state().effectiveTimestamp(catchUp), isNull);
+    expect(state().effectiveTimestamp(otherMsgKey), readAt);
     expect(state().effectiveTimestamp(msgKey), isNull);
     container
         .read(readStateProvider.notifier)
-        .markContextRead(channelId, readAt);
+        .markContextRead(channelId, readAt + 5);
 
     config.switchTo('http://localhost:1');
     container.read(readStateProvider);
     await settle();
     expect(state().effectiveTimestamp(msgKey), readAt);
-    expect(state().effectiveTimestamp(channelId), isNull);
+    expect(state().effectiveTimestamp(channelId), readAt);
   });
 
   test('message unread → read → unread round-trips through the real '
