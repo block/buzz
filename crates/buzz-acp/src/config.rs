@@ -486,9 +486,14 @@ pub struct CliArgs {
     pub respond_to: RespondTo,
 
     /// Comma-separated 64-char hex pubkeys for allowlist mode.
-    /// Owner pubkey is always implicitly included.
+    /// Owner pubkey is implicitly included unless --strict-allowlist is set.
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
+
+    /// In allowlist mode, admit only explicitly listed pubkeys, including in DMs.
+    /// Without this opt-in, the owner and same-owner agents remain implicit.
+    #[arg(long, env = "BUZZ_ACP_STRICT_ALLOWLIST", default_value_t = false)]
+    pub strict_allowlist: bool,
 
     /// Comma-separated list of allowed `--respond-to` modes.
     /// When set, the harness rejects startup if `--respond-to` is not in this list.
@@ -600,6 +605,8 @@ pub struct Config {
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
+    /// Exclude implicit owner and sibling access in allowlist mode.
+    pub strict_allowlist: bool,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
@@ -1097,6 +1104,11 @@ impl Config {
             )));
         }
 
+        if args.strict_allowlist && args.respond_to != RespondTo::Allowlist {
+            return Err(ConfigError::ConfigFile(
+                "--strict-allowlist requires --respond-to=allowlist".into(),
+            ));
+        }
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
             if raw.is_empty() {
@@ -1200,6 +1212,7 @@ impl Config {
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
+            strict_allowlist: args.strict_allowlist,
             allowed_respond_to,
             persona_env_vars,
             has_generated_codex_config,
@@ -1578,6 +1591,7 @@ mod tests {
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            strict_allowlist: false,
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -2973,6 +2987,38 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn strict_allowlist_is_opt_in_and_requires_allowlist_mode() {
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY]);
+        assert!(!default.strict_allowlist);
+
+        let invalid = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--strict-allowlist",
+        ]);
+        let error = Config::from_args(invalid).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("requires --respond-to=allowlist"));
+
+        let customer = "a1".repeat(32);
+        let valid = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "allowlist",
+            "--respond-to-allowlist",
+            &customer,
+            "--strict-allowlist",
+        ]);
+        let config = Config::from_args(valid).unwrap();
+        assert!(config.strict_allowlist);
+        assert!(config.respond_to_allowlist.contains(&customer));
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
