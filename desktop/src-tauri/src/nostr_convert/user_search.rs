@@ -419,12 +419,12 @@ mod tests {
     fn rank_matches_name_when_display_name_differs() {
         let e = ev(
             0,
-            r#"{"name":"Virginia Martin","display_name":"V"}"#,
+            r#"{"name":"Otter Opus","display_name":"O"}"#,
             vec![],
         );
-        let r = rank_user_search_results(&[e], "virginia", 10);
+        let r = rank_user_search_results(&[e], "otter", 10);
         assert_eq!(r.users.len(), 1);
-        assert_eq!(r.users[0].display_name.as_deref(), Some("V"));
-        assert_eq!(r.users[0].name.as_deref(), Some("Virginia Martin"));
+        assert_eq!(r.users[0].display_name.as_deref(), Some("O"));
+        assert_eq!(r.users[0].name.as_deref(), Some("Otter Opus"));
     }
 }
