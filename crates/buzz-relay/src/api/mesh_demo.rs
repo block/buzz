@@ -336,8 +336,9 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        let status = resp.status();
         let body = body_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "forwarded response: {body}");
         assert_eq!(body["outcome"], "forwarded");
         assert_eq!(body["echoed_payload"], "mesh echo evidence");
         owner_task.abort();
