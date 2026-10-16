@@ -971,6 +971,40 @@ async fn channel_reap_returns_committed_rows_after_earlier_tenant_error() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn fleet_sweep_returns_committed_results_when_database_drops_mid_page() {
+    let (db, communities) = fixture().await;
+    let [first, second] = two_active_tenants(&db, communities[0]).await;
+    let candidates = [first, second, Uuid::new_v4()];
+    let pulled = std::cell::Cell::new(0);
+    let pool = db.pool.clone();
+    let committed = crate::sweep_admitted_communities(
+        &db.pool,
+        candidates
+            .iter()
+            .copied()
+            .inspect(|_| pulled.set(pulled.get() + 1)),
+        crate::observability::WriterOperation::Maintenance,
+        "test_sweep",
+        |id, tx| {
+            let pool = pool.clone();
+            async move {
+                tx.commit().await?;
+                pool.close().await;
+                Ok(id)
+            }
+        },
+    )
+    .await;
+    assert_eq!(committed, vec![first], "rows committed before the outage");
+    assert_eq!(
+        pulled.get(),
+        2,
+        "the sweep must stop at the unavailable tenant"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn d_tag_backfill_admits_active_tenant_and_skips_quiescing_tenant() {
     let (db, communities) = fixture().await;
     crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
