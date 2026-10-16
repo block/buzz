@@ -7,6 +7,17 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AC1100000000000000000020 /* BuzzClipApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC110000000000000000000A /* BuzzClipApp.swift */; };
+		AC1100000000000000000021 /* InviteClipModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC110000000000000000000B /* InviteClipModel.swift */; };
+		AC1100000000000000000022 /* InviteClipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC110000000000000000000C /* InviteClipView.swift */; };
+		AC1100000000000000000023 /* BuzzInviteLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000011 /* BuzzInviteLink.swift */; };
+		AC1100000000000000000024 /* BuzzPendingInviteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000012 /* BuzzPendingInviteStore.swift */; };
+		AC1100000000000000000025 /* BuzzInviteLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000011 /* BuzzInviteLink.swift */; };
+		AC1100000000000000000026 /* BuzzPendingInviteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000012 /* BuzzPendingInviteStore.swift */; };
+		AC1100000000000000000027 /* AppClipInviteBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000013 /* AppClipInviteBridge.swift */; };
+		AC1100000000000000000028 /* BuzzInviteLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000014 /* BuzzInviteLinkTests.swift */; };
+		AC1100000000000000000029 /* BuzzPendingInviteStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000015 /* BuzzPendingInviteStoreTests.swift */; };
+		AC110000000000000000002A /* BuzzClip.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = AC1100000000000000000010 /* BuzzClip.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000012 /* IdentityFilePlugin.swift */; };
 		BBAA00000000000000000001 /* HostedHpkeBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000002 /* HostedHpkeBackup.swift */; };
 		4A71C0192F40D00100A17E02 /* MeAvatarLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */; };
@@ -63,6 +74,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		AC1100000000000000000034 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AC110000000000000000000E;
+			remoteInfo = BuzzClip;
+		};
 		331C8085294A63A400263BE5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
@@ -73,6 +91,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		AC1100000000000000000033 /* Embed App Clips */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
+			dstSubfolderSpec = 16;
+			files = (
+				AC110000000000000000002A /* BuzzClip.app in Embed App Clips */,
+			);
+			name = "Embed App Clips";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ00000000000000000004 /* Embed App Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -97,6 +126,17 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AC110000000000000000000A /* BuzzClipApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzClipApp.swift; sourceTree = "<group>"; };
+		AC110000000000000000000B /* InviteClipModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InviteClipModel.swift; sourceTree = "<group>"; };
+		AC110000000000000000000C /* InviteClipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InviteClipView.swift; sourceTree = "<group>"; };
+		AC110000000000000000000D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AC110000000000000000000F /* BuzzClip.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = BuzzClip.entitlements; sourceTree = "<group>"; };
+		AC1100000000000000000010 /* BuzzClip.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BuzzClip.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AC1100000000000000000011 /* BuzzInviteLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzInviteLink.swift; sourceTree = "<group>"; };
+		AC1100000000000000000012 /* BuzzPendingInviteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzPendingInviteStore.swift; sourceTree = "<group>"; };
+		AC1100000000000000000013 /* AppClipInviteBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppClipInviteBridge.swift; sourceTree = "<group>"; };
+		AC1100000000000000000014 /* BuzzInviteLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzInviteLinkTests.swift; sourceTree = "<group>"; };
+		AC1100000000000000000015 /* BuzzPendingInviteStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzPendingInviteStoreTests.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000012 /* IdentityFilePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityFilePlugin.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000002 /* HostedHpkeBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedHpkeBackup.swift; sourceTree = "<group>"; };
 		4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeAvatarLoader.swift; sourceTree = "<group>"; };
@@ -168,6 +208,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		AC1100000000000000000031 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ0000000000000000000C /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -196,6 +243,27 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		AC110000000000000000003A /* BuzzClip */ = {
+			isa = PBXGroup;
+			children = (
+				AC110000000000000000000A /* BuzzClipApp.swift */,
+				AC110000000000000000000B /* InviteClipModel.swift */,
+				AC110000000000000000000C /* InviteClipView.swift */,
+				AC110000000000000000000D /* Info.plist */,
+				AC110000000000000000000F /* BuzzClip.entitlements */,
+			);
+			path = BuzzClip;
+			sourceTree = "<group>";
+		};
+		AC110000000000000000003B /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				AC1100000000000000000011 /* BuzzInviteLink.swift */,
+				AC1100000000000000000012 /* BuzzPendingInviteStore.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
 		331C8082294A63A400263BE5 /* RunnerTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -203,6 +271,8 @@
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
 				AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */,
 				BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */,
+				AC1100000000000000000014 /* BuzzInviteLinkTests.swift */,
+				AC1100000000000000000015 /* BuzzPendingInviteStoreTests.swift */,
 				331C80A0294A618700263BE5 /* Fixtures */,
 			);
 			path = RunnerTests;
@@ -246,6 +316,8 @@
 			isa = PBXGroup;
 			children = (
 				BZZ0000000000000000000B /* NotificationService */,
+				AC110000000000000000003A /* BuzzClip */,
+				AC110000000000000000003B /* Shared */,
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
 				97C146EF1CF9000F007C117D /* Products */,
@@ -261,6 +333,7 @@
 				97C146EE1CF9000F007C117D /* Runner.app */,
 				331C8081294A63A400263BE5 /* RunnerTests.xctest */,
 				BZZ00000000000000000009 /* NotificationService.appex */,
+				AC1100000000000000000010 /* BuzzClip.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -311,6 +384,7 @@
 				4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */,
 				4A71C0242F4120100A17E01 /* NativeAttachmentPopoverMenu.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
+				AC1100000000000000000013 /* AppClipInviteBridge.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
 			path = Runner;
@@ -338,6 +412,23 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		AC110000000000000000000E /* BuzzClip */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AC1100000000000000000036 /* Build configuration list for PBXNativeTarget "BuzzClip" */;
+			buildPhases = (
+				AC1100000000000000000030 /* Sources */,
+				AC1100000000000000000031 /* Frameworks */,
+				AC1100000000000000000032 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BuzzClip;
+			productName = BuzzClip;
+			productReference = AC1100000000000000000010 /* BuzzClip.app */;
+			productType = "com.apple.product-type.application.on-demand-install-capable";
+		};
 		331C8080294A63A400263BE5 /* RunnerTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 331C8087294A63A400263BE5 /* Build configuration list for PBXNativeTarget "RunnerTests" */;
@@ -368,6 +459,7 @@
 				97C146EC1CF9000F007C117D /* Resources */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
 				BZZ00000000000000000004 /* Embed App Extensions */,
+				AC1100000000000000000033 /* Embed App Clips */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
 				E0B5862D106D142B580309AF /* [CP] Embed Pods Frameworks */,
 				ED5DDC1D42A9D342928222CC /* [CP] Copy Pods Resources */,
@@ -375,6 +467,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				AC1100000000000000000035 /* PBXTargetDependency */,
 			);
 			name = Runner;
 			packageProductDependencies = (
@@ -414,6 +507,9 @@
 				LastUpgradeCheck = 1510;
 				ORGANIZATIONNAME = "";
 				TargetAttributes = {
+					AC110000000000000000000E = {
+						CreatedOnToolsVersion = 15.0;
+					};
 					BZZ0000000000000000000E = {
 						CreatedOnToolsVersion = 15.0;
 					};
@@ -446,11 +542,19 @@
 				97C146ED1CF9000F007C117D /* Runner */,
 				331C8080294A63A400263BE5 /* RunnerTests */,
 				BZZ0000000000000000000E /* NotificationService */,
+				AC110000000000000000000E /* BuzzClip */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		AC1100000000000000000032 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ00000000000000000010 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -593,6 +697,18 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		AC1100000000000000000030 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AC1100000000000000000020 /* BuzzClipApp.swift in Sources */,
+				AC1100000000000000000021 /* InviteClipModel.swift in Sources */,
+				AC1100000000000000000022 /* InviteClipView.swift in Sources */,
+				AC1100000000000000000023 /* BuzzInviteLink.swift in Sources */,
+				AC1100000000000000000024 /* BuzzPendingInviteStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ0000000000000000000D /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -609,6 +725,8 @@
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
 				AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */,
 				BZZ0000000000000000002B /* BuzzCommunicationNotificationTests.swift in Sources */,
+				AC1100000000000000000028 /* BuzzInviteLinkTests.swift in Sources */,
+				AC1100000000000000000029 /* BuzzPendingInviteStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -653,12 +771,20 @@
 				4A71C0232F4120100A17E01 /* NativeAttachmentPopoverMenu.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
+				AC1100000000000000000027 /* AppClipInviteBridge.swift in Sources */,
+				AC1100000000000000000025 /* BuzzInviteLink.swift in Sources */,
+				AC1100000000000000000026 /* BuzzPendingInviteStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		AC1100000000000000000035 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AC110000000000000000000E /* BuzzClip */;
+			targetProxy = AC1100000000000000000034 /* PBXContainerItemProxy */;
+		};
 		331C8086294A63A400263BE5 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 97C146ED1CF9000F007C117D /* Runner */;
@@ -701,6 +827,85 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
+		AC1100000000000000000037 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BuzzClip/BuzzClip.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BuzzClip/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).Clip";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		AC1100000000000000000038 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BuzzClip/BuzzClip.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BuzzClip/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).Clip";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		AC1100000000000000000039 /* Profile */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BuzzClip/BuzzClip.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BuzzClip/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).Clip";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Profile;
+		};
 		249021D3217E4FDB00AE95B9 /* Profile */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1067,6 +1272,16 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		AC1100000000000000000036 /* Build configuration list for PBXNativeTarget "BuzzClip" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AC1100000000000000000037 /* Debug */,
+				AC1100000000000000000038 /* Release */,
+				AC1100000000000000000039 /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		BZZ0000000000000000000F /* Build configuration list for PBXNativeTarget "NotificationService" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -16,4 +16,9 @@ BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
 BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
 BUZZ_IOS_PUSH_ENVIRONMENT = production
 BUZZ_APP_ATTEST_ENVIRONMENT = production
+
+// Invite host registered for Universal Links (full app) and App Clip
+// invocations (BuzzClip). Placeholder until an invite domain publishes an
+// AASA with `applinks` + `appclips` entries; see docs/app-clip-invite-demo.md.
+BUZZ_INVITE_LINK_HOST = invite.buzz.example
 #include? "AppOverrides.xcconfig"

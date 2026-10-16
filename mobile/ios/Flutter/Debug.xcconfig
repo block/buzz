@@ -17,6 +17,11 @@ BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
 BUZZ_IOS_PUSH_ENVIRONMENT = development
 BUZZ_APP_ATTEST_ENVIRONMENT = development
 
+// Invite host registered for Universal Links (full app) and App Clip
+// invocations (BuzzClip). Placeholder until an invite domain publishes an
+// AASA with `applinks` + `appclips` entries; see docs/app-clip-invite-demo.md.
+BUZZ_INVITE_LINK_HOST = invite.buzz.example
+
 // Worktree-aware debug identity (gitignored, written by
 // scripts/mobile-worktree-overrides.sh): a per-worktree bundle identifier
 // and a branch-labelled display name so debug builds from multiple worktrees

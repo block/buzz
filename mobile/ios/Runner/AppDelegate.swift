@@ -49,6 +49,7 @@ import os.log
   private var identityFilePlugin: IdentityFilePlugin?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
+  private var appClipInviteBridge: BuzzAppClipInviteBridge?
   private var huddleMediaPlugin: HuddleMediaPlugin?
 
   override func application(
@@ -70,6 +71,10 @@ import os.log
     let messenger = engineBridge.applicationRegistrar.messenger()
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
+    appClipInviteBridge = BuzzAppClipInviteBridge(
+      messenger: messenger,
+      store: BuzzPendingInviteStore(appGroupIdentifier: appGroupIdentifier)
+    )
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
       guard call.method == "seal" else { result(FlutterMethodNotImplemented); return }

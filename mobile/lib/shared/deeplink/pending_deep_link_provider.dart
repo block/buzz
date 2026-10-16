@@ -5,6 +5,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import 'app_clip_invite_bridge.dart';
 import 'deep_link.dart';
 import '../community/community_provider.dart';
 import '../push/push_bridge.dart';
@@ -20,6 +21,10 @@ enum DeepLinkCommunityPreparation { ready, switched, unavailable, failed }
 ///
 /// Listens to [AppLinks.uriLinkStream], which delivers both the cold-start link
 /// (the URL that launched the app) and links received while running.
+///
+/// Also drains the invite the iOS App Clip parked before the app was
+/// installed ([takePendingAppClipInvite]); it enters the same queue as if the
+/// invite URL had arrived as a universal link.
 class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   @visibleForTesting
   static Stream<Uri>? debugUriStreamOverride;
@@ -33,6 +38,7 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
     _waiting.clear();
     final stream = debugUriStreamOverride ?? AppLinks().uriLinkStream;
     _subscription = stream.listen(open);
+    unawaited(_pickUpAppClipInvite(ref.read(appClipInvitePickupProvider)));
     _pushNotificationListener = () {
       final link = pendingPushNotificationLink.value;
       if (link != null) _enqueue(link);
@@ -95,6 +101,13 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
       );
       return DeepLinkCommunityPreparation.failed;
     }
+  }
+
+  Future<void> _pickUpAppClipInvite(Future<Uri?> Function() take) async {
+    var disposed = false;
+    ref.onDispose(() => disposed = true);
+    final uri = await take();
+    if (uri != null && !disposed) open(uri);
   }
 
   void _enqueue(BuzzDeepLink link) {
