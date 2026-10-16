@@ -78,7 +78,7 @@ void main() {
       name: 'bound with other backup',
       bound: true,
       backups: [first.public, second.public],
-      state: HostedIdentityState.mismatch,
+      state: HostedIdentityState.needsBackup,
     ),
   ]) {
     test('device key reconciliation: ${scenario.name}', () async {
@@ -88,9 +88,8 @@ void main() {
       account.backups = scenario.backups;
       final result = await service.resolve();
       expect(result.state, scenario.state);
-      final rejected = scenario.state == HostedIdentityState.mismatch;
-      expect(result.pubkey, rejected ? isNull : first.public);
-      expect((await store.read())?.pubkey, rejected ? isNull : first.public);
+      expect(result.pubkey, first.public);
+      expect((await store.read())?.pubkey, first.public);
       expect(await secure.read(key: 'buzz_workspaces'), raw);
       expect(await secure.read(key: 'buzz_communities'), isNull);
       expect(account.calls, ['/v1/buzz/nsec-backups/status']);

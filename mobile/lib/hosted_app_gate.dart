@@ -268,6 +268,9 @@ class HostedAppGate extends HookConsumerWidget {
           _ => null,
         };
         if (relay != null) {
+          final host = Uri.parse(relay).host.toLowerCase();
+          final reserved = HostedEnvironment.isReservedHost(host);
+          if (link is InviteDeepLink && !reserved) return false;
           final communities = await ref
               .read(communityStorageProvider)
               .loadAll();
@@ -287,8 +290,6 @@ class HostedAppGate extends HookConsumerWidget {
             }
             return true;
           }
-          final host = Uri.parse(relay).host.toLowerCase();
-          final reserved = HostedEnvironment.isReservedHost(host);
           if (!reserved && link is AddCommunityDeepLink) {
             if (routeContext.mounted) {
               final joined = await showSelfHostedEntry(

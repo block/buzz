@@ -1,3 +1,4 @@
+import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'dart:convert';
 
 import 'package:buzz/features/onboarding/hosted_profile_setup.dart';
@@ -188,6 +189,29 @@ void main() {
       expect(await f.storage.loadActiveId(), saved.id);
       expect(f.probes, hasLength(1));
       expect(f.sent('/claim'), isEmpty);
+      // Reopening an interrupted self-hosted invite follows legacy recovery.
+      await f.storage.save(saved.copyWith(starterSetupIncomplete: true));
+      f.container.invalidate(communityListProvider);
+      f.container
+          .read(pendingDeepLinkProvider.notifier)
+          .open(
+            Uri(
+              scheme: 'buzz',
+              host: 'join',
+              queryParameters: {
+                'relay': saved.relayUrl,
+                'code': 'consumed-invite',
+              },
+            ),
+          );
+      await f.settle(tester);
+      expect(f.recoveryScopes, hasLength(1));
+      expect(
+        (await f.storage.loadAll()).single.starterSetupIncomplete,
+        isFalse,
+      );
+      expect(f.sent('/claim'), isEmpty);
+
       expect(find.byType(OnboardingAppEntry), findsNothing);
     },
   );

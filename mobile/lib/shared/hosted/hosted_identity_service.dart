@@ -112,13 +112,10 @@ class HostedIdentityService {
         await deviceIdentities?.choices() ?? const <DeviceIdentityChoice>[];
     _sameAccount(subject);
     checkCurrent();
-    // A bound key already on this device needs no remote decryption. Other
-    // listed identities still require reconciliation before adopting a key.
+    // The authoritative bound key already on this device needs no remote
+    // decryption, even when the account retains backups of older identities.
     final matchingDevice =
         bound != null && device.any((item) => item.pubkey == bound);
-    if (matchingDevice && statusKeys.any((key) => key != bound)) {
-      return const HostedIdentityResult(HostedIdentityState.mismatch);
-    }
     if ((statusKeys.isEmpty && bound == null) || matchingDevice) {
       final eligible = device
           .where((item) => bound == null || item.pubkey == bound)
