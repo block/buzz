@@ -1708,7 +1708,7 @@ class RunnerTests: XCTestCase {
       NativeMessageActionDefinition(
         arguments: [
           "id": "followThread", "title": "Follow thread",
-          "symbol": "bell", "group": "utility",
+          "symbol": "bell.slash", "group": "utility",
         ]
       )
     )
