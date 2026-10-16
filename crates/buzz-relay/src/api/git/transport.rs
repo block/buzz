@@ -106,7 +106,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let route = parts.uri.path().to_owned();
         if !mode.restricts() {
             if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
-                git_header_rejected(&route, &parts.headers);
+                git_header_rejected(&route, &parts.headers, &rejection);
                 // Off returns `rejection` as is; shadow also records the
                 // enforce verdict for the failed proof, still with no DB work.
                 crate::nip_fi_http::observe_failed_proof(state, &parts.headers);
@@ -334,8 +334,10 @@ fn enforce_git_ban_cascade(
     }
 }
 
-fn git_failed(route: &str, reason: &'static str) {
-    AuthAttempt::http(AuthMethod::Nip98, route, None, false).log(AuthResult::Failed(reason));
+/// Log a rejected git proof with the status of the response it sends.
+fn git_failed(route: &str, reason: &'static str, response: &Response) {
+    AuthAttempt::http(AuthMethod::Nip98, route, None, false)
+        .log_refusal(AuthResult::Failed(reason), response.status().as_u16());
 }
 
 /// Verify a git request's NIP-98 proof (the admission closure). Each failure
@@ -352,7 +354,7 @@ fn verify_git_proof(
     // In Enforce mode it runs for the first time inside this closure
     // (on the auth-rejection path the NIP-FI layer maps the error).
     let (event_json, method_for_verify) = parse_git_auth_header_full(headers, method)
-        .inspect_err(|_| git_header_rejected(route, headers))?;
+        .inspect_err(|r| git_header_rejected(route, headers, r))?;
 
     // SECURITY: method intentionally not verified for git routes. The tautological
     // check (event.method == event.method) is deliberate — see comment block above.
@@ -363,8 +365,9 @@ fn verify_git_proof(
             .map_err(|e| {
             // Fixed code only: a URL-mismatch error echoes the
             // client's whole signed `u` tag.
-            git_failed(route, auth_error_code(&e));
-            (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response()
+            let response = (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response();
+            git_failed(route, auth_error_code(&e), &response);
+            response
         })?;
 
     // NOTE: NIP-98 event-ID dedup intentionally NOT implemented here.
@@ -375,8 +378,9 @@ fn verify_git_proof(
     // replay protection for v1. Per-request signing requires protocol changes.
 
     let event: nostr::Event = serde_json::from_str(&event_json).map_err(|_| {
-        git_failed(route, "nip98_invalid");
-        (StatusCode::UNAUTHORIZED, "invalid auth event").into_response()
+        let response = (StatusCode::UNAUTHORIZED, "invalid auth event").into_response();
+        git_failed(route, "nip98_invalid", &response);
+        response
     })?;
     let signed_auth_created_at = event.created_at.as_secs();
 
@@ -391,11 +395,12 @@ fn verify_git_proof(
 /// is git's credential-less first request, answered with the 401 challenge
 /// it asks for, so it is `challenged`; a header that is present but bad is a
 /// failed proof.
-fn git_header_rejected(route: &str, headers: &axum::http::HeaderMap) {
+fn git_header_rejected(route: &str, headers: &axum::http::HeaderMap, response: &Response) {
     if headers.contains_key(header::AUTHORIZATION) {
-        git_failed(route, "nip98_invalid");
+        git_failed(route, "nip98_invalid", response);
     } else {
-        AuthAttempt::http(AuthMethod::Nip98, route, None, false).log(AuthResult::Challenged);
+        AuthAttempt::http(AuthMethod::Nip98, route, None, false)
+            .log_refusal(AuthResult::Challenged, response.status().as_u16());
     }
 }
 
@@ -4277,6 +4282,97 @@ mod off_mode_precedence_tests {
                 let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
                     .execute(&admin)
                     .await;
+            }
+        }
+
+        /// Through the production router: git's credential-less first request
+        /// in Enforce mode is one INFO `challenged` line, a malformed proof
+        /// beside a valid assertion is one WARN `failed` line carrying the
+        /// remapped 403, and the same proof in Off mode carries its legacy 401.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn git_access_lines_carry_level_outcome_and_status_sent() {
+            struct AdmitAnyAssertion;
+            impl buzz_auth::VerifyAssertion for AdmitAnyAssertion {
+                fn verify_assertion(
+                    &self,
+                    _token: &str,
+                    _community: &buzz_auth::CommunityBinding,
+                ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
+                {
+                    Ok(buzz_auth::VerifiedAssertion::new_for_test(
+                        nostr::Keys::generate().public_key(),
+                    ))
+                }
+            }
+            let cases: [(buzz_auth::NipFiMode, &[(&str, &str)], u16, &str, &str); 3] = [
+                (
+                    buzz_auth::NipFiMode::Enforce,
+                    &[],
+                    401,
+                    "challenged",
+                    "INFO",
+                ),
+                (
+                    buzz_auth::NipFiMode::Enforce,
+                    &[
+                        ("authorization", "Nostr !!!bad!!!"),
+                        (buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer any.valid.token"),
+                    ],
+                    403,
+                    "failed",
+                    "WARN",
+                ),
+                (
+                    buzz_auth::NipFiMode::Off,
+                    &[("authorization", "Nostr !!!bad!!!")],
+                    401,
+                    "failed",
+                    "WARN",
+                ),
+            ];
+            for (mode, headers, status, outcome, level) in cases {
+                let mut state = off_mode_state().await.expect("local Postgres");
+                let host = format!("git-access-{}.test", uuid::Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                {
+                    let s = Arc::get_mut(&mut state).expect("fixture state is uniquely owned");
+                    Arc::make_mut(&mut s.config).nip_fi.mode = mode;
+                    Arc::make_mut(&mut s.config).nip_fi.communities =
+                        crate::nip_fi_core::test_support::any_host(
+                            "https://git-access.relay.invalid",
+                        );
+                    s.nip_fi_verifier = Some(Arc::new(AdmitAnyAssertion));
+                }
+                let mut req = axum::http::Request::builder()
+                    .method("GET")
+                    .uri(GIT_PATH)
+                    .header("host", &host);
+                for (name, value) in headers {
+                    req = req.header(*name, *value);
+                }
+                let req = req.body(axum::body::Body::empty()).expect("build request");
+                let (guard, out) = crate::access::tests::capture_scoped();
+                let resp = crate::router::build_router(state)
+                    .oneshot(req)
+                    .await
+                    .expect("router oneshot");
+                drop(guard);
+                assert_eq!(resp.status().as_u16(), status, "{mode:?} {headers:?}");
+                let lines: Vec<_> = out
+                    .lines()
+                    .into_iter()
+                    .filter(|l| l["event"] == "auth")
+                    .collect();
+                assert_eq!(lines.len(), 1, "{mode:?} {headers:?}: {lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["outcome"], outcome, "{line}");
+                assert_eq!(line["level"], level, "{line}");
+                assert_eq!(line["status"], status, "{line}");
             }
         }
 

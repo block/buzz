@@ -410,6 +410,9 @@ pub(crate) enum AuthMethod {
     Blossom,
     /// Dev-mode `X-Pubkey` header: a claimed key that nothing signed.
     XPubkey,
+    /// Admitted by network position alone (`BUZZ_ADMIN_AUTH=disabled`):
+    /// no proof and no key.
+    NetworkTrusted,
 }
 
 impl AuthMethod {
@@ -420,6 +423,7 @@ impl AuthMethod {
             Self::NipFi => "nip_fi",
             Self::Blossom => "blossom",
             Self::XPubkey => "x_pubkey",
+            Self::NetworkTrusted => "network_trusted",
         }
     }
 }
@@ -930,7 +934,9 @@ impl AuthAttempt<'_> {
         let aborted = req.is_none() && matches!(result, AuthResult::Success);
         let (level, outcome, reason) = result.parts();
         let req = req.unwrap_or(&RequestFields::EMPTY);
-        let level = if aborted || req.status.is_some_and(|s| s >= 400) {
+        // A challenge is git's normal first step, so its 401 stays INFO.
+        let challenged = matches!(result, AuthResult::Challenged);
+        let level = if aborted || (!challenged && req.status.is_some_and(|s| s >= 400)) {
             Level::WARN
         } else {
             level

@@ -227,13 +227,14 @@ pub(crate) fn admin_full_path(path_and_query: &str) -> String {
 
 /// [`authorize_read`] for a route whose access line also records what the
 /// request did: the returned line is written when the caller drops it.
+/// A network-trusted read has no proof, so its line carries no key.
 /// `full_path` is [`admin_full_path`] of the request target.
 pub(crate) async fn authorize_read_held<'a>(
     state: &AppState,
     headers: &HeaderMap,
     method: &Method,
     full_path: &'a str,
-) -> Result<(AdminAccess, Option<AuthLine<'a>>), ApiError> {
+) -> Result<(AdminAccess, AuthLine<'a>), ApiError> {
     let config = state
         .config
         .admin
@@ -250,7 +251,13 @@ pub(crate) async fn authorize_read_held<'a>(
         Some(&mut held),
     )
     .await?;
-    Ok((access, held))
+    let line = held.unwrap_or_else(|| {
+        let attempt = AuthAttempt::http(AuthMethod::NetworkTrusted, full_path, None, false);
+        let mut line = AuthLine::new(attempt).for_request();
+        line.finish(AuthResult::Success);
+        line
+    });
+    Ok((access, line))
 }
 
 /// One access line per NIP-98 attempt, logged once the decision is final,

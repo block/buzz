@@ -349,9 +349,11 @@ pub(crate) async fn upload_blob(
     // enterprise-assertion refusals, so exactly one of them writes the line.
     let admission = match admit_nip_fi_http_on_state(&state, &headers, route, move || {
         let reject = |e: MediaError, claimed: Option<nostr::PublicKey>| {
+            let code = blossom_proof_code(&e);
+            let response = e.into_response();
             AuthAttempt::http(AuthMethod::Blossom, route, claimed, false)
-                .log(AuthResult::Failed(blossom_proof_code(&e)));
-            e.into_response()
+                .log_refusal(AuthResult::Failed(code), response.status().as_u16());
+            response
         };
         let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| reject(e, None))?;
         // Pre-body check: freshness, cardinality, and server tag. The x-tag
@@ -855,9 +857,11 @@ pub(crate) async fn get_blob(
     });
     let admission = match admit_nip_fi_http_on_state(&state, &req_headers, BLOB_ROUTE, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness).map_err(|e| {
+            let code = blossom_proof_code(&e);
+            let response = e.into_response();
             AuthAttempt::http(AuthMethod::Blossom, BLOB_ROUTE, None, false)
-                .log(AuthResult::Failed(blossom_proof_code(&e)));
-            e.into_response()
+                .log_refusal(AuthResult::Failed(code), response.status().as_u16());
+            response
         })
     }) {
         Ok(a) => a,
@@ -1162,9 +1166,11 @@ pub(crate) async fn head_blob(
     });
     let admission = match admit_nip_fi_http_on_state(&state, &headers, BLOB_ROUTE, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness).map_err(|e| {
+            let code = blossom_proof_code(&e);
+            let response = e.into_response();
             AuthAttempt::http(AuthMethod::Blossom, BLOB_ROUTE, None, false)
-                .log(AuthResult::Failed(blossom_proof_code(&e)));
-            e.into_response()
+                .log_refusal(AuthResult::Failed(code), response.status().as_u16());
+            response
         })
     }) {
         Ok(a) => a,
@@ -2785,12 +2791,61 @@ mod tests {
             );
             assert_eq!(status, StatusCode::FORBIDDEN);
             assert_one_upload_line(&lines, "blossom", "failed", Some("malformed_auth"));
+            assert_eq!(lines[0]["status"], 403, "the remapped status: {}", lines[0]);
 
             let (rt, state, host) = media_fixture(media_off_test_state());
             let (status, lines) =
                 upload_auth_lines(&rt, &state, &host, "Nostr !!!not-base64!!!", None);
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert_one_upload_line(&lines, "blossom", "failed", Some("malformed_auth"));
+            assert_eq!(lines[0]["status"], 401, "the legacy status: {}", lines[0]);
+        }
+
+        /// A malformed read proof alongside a valid enterprise assertion: GET
+        /// and HEAD each write one WARN `failed` line carrying the 403 sent.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn bad_read_proof_logs_the_status_sent() {
+            let (rt, state, host) = media_fixture(media_enforce_test_state());
+            let path = format!("/media/{}.jpg", "d".repeat(64));
+            for method in ["GET", "HEAD"] {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(
+                    axum::http::header::AUTHORIZATION,
+                    "Nostr !!!bad!!!".parse().expect("valid header bytes"),
+                );
+                headers.insert(
+                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                    format!(
+                        "Bearer {}",
+                        signed_assertion(&Keys::generate().public_key().to_hex())
+                    )
+                    .parse()
+                    .expect("valid header"),
+                );
+                let ((status, _, _), out) = crate::access::tests::capture(|| {
+                    rt.block_on(media_oneshot(
+                        Arc::clone(&state),
+                        method,
+                        &path,
+                        &host,
+                        headers,
+                        b"",
+                    ))
+                });
+                assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
+                let lines: Vec<_> = out
+                    .lines()
+                    .into_iter()
+                    .filter(|l| l["event"] == "auth")
+                    .collect();
+                assert_eq!(lines.len(), 1, "{method}: {lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["outcome"], "failed", "{method}: {line}");
+                assert_eq!(line["level"], "WARN", "{method}: {line}");
+                assert_eq!(line["status"], 403, "{method}: {line}");
+                assert_eq!(line["route"], "/<sha256>", "{method}: {line}");
+            }
         }
 
         /// An admitted upload logs one `success` once the concurrency permit

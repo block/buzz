@@ -130,17 +130,32 @@ impl<'a> ProvenCaller<'a> {
         self.line.read(filters);
     }
 
-    /// Record what an artifact read covered. Its raw filters are read as
-    /// plain filters, which keeps the standard dimensions (kinds, `#h`,
-    /// authors, bounds) and drops artifact predicates; those only narrow the
-    /// read. A filter that does not parse leaves the line without a summary.
+    /// Record what an artifact read covered. Only the standard dimensions
+    /// of each raw filter are summarized; every other predicate (artifact
+    /// or client-defined tags) only narrows the read, so it is dropped
+    /// before parsing and cannot cancel the summary. A filter whose standard
+    /// dimensions do not parse leaves the line without a summary.
     fn read_artifact(&mut self, raw: &[Value]) {
+        const SUMMARIZED: [&str; 9] = [
+            "kinds", "authors", "ids", "#h", "#p", "since", "until", "limit", "search",
+        ];
         if !tracing::enabled!(target: crate::access::TARGET, tracing::Level::INFO) {
             return;
         }
+        let standard = |v: &Value| -> Value {
+            let mut kept = serde_json::Map::new();
+            if let Some(obj) = v.as_object() {
+                for key in SUMMARIZED {
+                    if let Some(x) = obj.get(key) {
+                        kept.insert(key.to_owned(), x.clone());
+                    }
+                }
+            }
+            Value::Object(kept)
+        };
         if let Ok(filters) = raw
             .iter()
-            .map(|v| serde_json::from_value::<nostr::Filter>(v.clone()))
+            .map(|v| serde_json::from_value::<nostr::Filter>(standard(v)))
             .collect::<Result<Vec<_>, _>>()
         {
             self.line.read(&filters);
@@ -6115,6 +6130,39 @@ pub(crate) mod postgres_tests {
             assert_eq!(line["channel_ids"], channel.as_str(), "{line}");
             assert_eq!(line["limit"], 1, "{line}");
             assert_eq!(line["filters"], 1, "{line}");
+        }
+    }
+
+    /// A client-defined tag the plain filter parser rejects (`#1`) narrows
+    /// an artifact read but must not cancel its summary, and its value is
+    /// never logged.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn artifact_reads_with_custom_tags_keep_their_summary() {
+        let state = nip_fi_off_test_state().await.expect("local Postgres");
+        let host = with_community(&state).await;
+        let keys = Keys::generate();
+        let channel = uuid::Uuid::new_v4().to_string();
+        let marker = "CUSTOMTAGMARKER4b2e";
+        let body = serde_json::to_vec(&serde_json::json!([{
+            "artifact": "current",
+            "kinds": [45010],
+            "#h": [channel],
+            "#1": [marker],
+            "limit": 1
+        }]))
+        .unwrap();
+        for route in ["/query", "/count"] {
+            let url = format!("https://{host}{route}");
+            let (status, lines, raw) =
+                post_access_lines(Arc::clone(&state), &host, route, &url, &keys, &body).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{raw}");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["kinds"], "45010", "{line}");
+            assert_eq!(line["channel_ids"], channel.as_str(), "{line}");
+            assert_eq!(line["limit"], 1, "{line}");
+            assert!(!raw.contains(marker), "custom tag value logged: {raw}");
         }
     }
 

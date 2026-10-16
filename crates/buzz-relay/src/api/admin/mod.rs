@@ -326,20 +326,18 @@ async fn feedback_attachment(
     let (_, mut line) = auth::authorize_read_held(&state, &headers, &method, &full_path).await?;
     // The request's one access line carries the attachment read.
     let served = serve_feedback_attachment_checked(&state, &headers, id, &sha256).await;
-    if let Some(line) = &mut line {
-        let fields = match &served {
-            Ok((response, community_id)) => {
-                line.in_community(*community_id);
-                crate::access::RequestFields {
-                    feedback_id: Some(id),
-                    attachment_sha256: Some(sha256),
-                    ..crate::access::RequestFields::status(response.status().as_u16())
-                }
+    let fields = match &served {
+        Ok((response, community_id)) => {
+            line.in_community(*community_id);
+            crate::access::RequestFields {
+                feedback_id: Some(id),
+                attachment_sha256: Some(sha256),
+                ..crate::access::RequestFields::status(response.status().as_u16())
             }
-            Err(e) => crate::access::RequestFields::status(e.status.as_u16()),
-        };
-        line.complete(fields);
-    }
+        }
+        Err(e) => crate::access::RequestFields::status(e.status.as_u16()),
+    };
+    line.complete(fields);
     served.map(|(response, _)| response)
 }
 
@@ -1755,6 +1753,101 @@ mod postgres_tests {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0]["outcome"], "success", "{}", lines[0]);
         assert_eq!(lines[0]["status"], 404, "{}", lines[0]);
+    }
+
+    /// A served attachment writes one access line carrying the feedback id,
+    /// attachment hash, community and final status, in both admin auth
+    /// modes; a network-trusted read carries no key.
+    mod external_infra_minio_tests {
+        use super::*;
+
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn served_attachment_writes_one_line_in_both_admin_modes() {
+            let signed = nip98_state(vec![test_operator_keys().public_key().to_hex()]).await;
+            let open = disabled_mode_state().await;
+            for (mode, state) in [("nip98", signed), ("network_trusted", open)] {
+                let host = format!("attach-{}.test", Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                let tenant = crate::tenant::bind_community(&state.db, &host)
+                    .await
+                    .expect("bind community");
+                let bytes = format!("attachment bytes {}", Uuid::new_v4()).into_bytes();
+                let sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+                state
+                    .media_storage
+                    .put(&format!("{sha256}.txt"), &bytes, "text/plain")
+                    .await
+                    .expect("put blob");
+                let meta = buzz_media::BlobMeta {
+                    dim: String::new(),
+                    blurhash: String::new(),
+                    thumb_url: String::new(),
+                    ext: "txt".into(),
+                    mime_type: "text/plain".into(),
+                    size: bytes.len() as u64,
+                    uploaded_at: 0,
+                    duration_secs: None,
+                };
+                state
+                    .media_storage
+                    .put_sidecar(&tenant, &sha256, &meta)
+                    .await
+                    .expect("put sidecar");
+                let feedback_id = Uuid::new_v4();
+                let tags = serde_json::json!([[
+                    "imeta",
+                    format!("url /media/{sha256}.txt"),
+                    format!("x {sha256}")
+                ]]);
+                sqlx::query(
+                    "INSERT INTO product_feedback (id, community_id, event_id, submitter_pubkey, \
+                     category, body, tags, status, event_created_at, received_at) \
+                     VALUES ($1, $2, $3, $4, 'bug', 'see attachment', $5, 'new', now(), now())",
+                )
+                .bind(feedback_id)
+                .bind(tenant.community().as_uuid())
+                .bind([feedback_id.as_bytes().as_slice(), feedback_id.as_bytes()].concat())
+                .bind(vec![9_u8; 32])
+                .bind(&tags)
+                .execute(state.db.pool())
+                .await
+                .expect("insert feedback");
+
+                let uri = format!("/feedback/{feedback_id}/attachments/{sha256}");
+                let request = if mode == "nip98" {
+                    authorized(&uri)
+                } else {
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::HOST, "admin.example")
+                };
+                let (guard, out) = crate::access::tests::capture_scoped();
+                let response = status_for(state, status_request(request)).await;
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                drop(guard);
+                assert_eq!(status, StatusCode::OK, "{mode}");
+                assert_eq!(body.as_ref(), bytes.as_slice(), "{mode}");
+                let lines = out.lines();
+                assert_eq!(lines.len(), 1, "{mode}: {lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["method"], mode, "{line}");
+                assert_eq!(line["status"], 200, "{line}");
+                assert_eq!(line["feedback_id"], feedback_id.to_string(), "{line}");
+                assert_eq!(line["attachment_sha256"], sha256.as_str(), "{line}");
+                assert_eq!(line["community"], tenant.community().to_string(), "{line}");
+                if mode == "network_trusted" {
+                    assert!(line.get("pubkey").is_none(), "{line}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
