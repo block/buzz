@@ -426,17 +426,23 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        sqlx::query(
+        let affected = sqlx::query(
             r#"
             UPDATE communities
             SET icon = $2
-            WHERE id = $1
+            WHERE id = $1 AND deletion_state = 'active' AND deleted_at IS NULL
             "#,
         )
         .bind(community_id.as_uuid())
         .bind(icon)
         .execute(&mut *connection)
-        .await?;
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(DbError::AccessDenied(format!(
+                "community {community_id} is missing or write-fenced"
+            )));
+        }
         Ok(())
     }
 
@@ -661,7 +667,7 @@ impl Db {
         }
         let row = sqlx::query(
             "UPDATE communities SET archived_at = COALESCE(archived_at, now()) \
-             WHERE id = $1 RETURNING id, host, archived_at",
+             WHERE id = $1 AND deletion_state = 'active' RETURNING id, host, archived_at",
         )
         .bind(community_id)
         .fetch_one(&mut *tx)
@@ -728,10 +734,12 @@ impl Db {
             tx.rollback().await?;
             return Ok(UnarchiveCommunityResult::DeletionPending);
         }
-        sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
-            .bind(community_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE communities SET archived_at = NULL WHERE id = $1 AND deletion_state = 'active'",
+        )
+        .bind(community_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(UnarchiveCommunityResult::Unarchived(
             UnarchivedCommunityRecord {

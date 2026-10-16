@@ -1336,8 +1336,21 @@ fn should_scan_guarded_write_source_file(path: &std::path::Path) -> bool {
         // Whole files loaded only via `#[cfg(test)] #[path = "..."] mod ...;` are
         // entirely test code but carry no internal `#[cfg(test)]` marker of their
         // own to slice against. Standalone `*_tests.rs` modules share that shape.
+        && file_name != "test_support.rs"
         && file_name != "tests.rs"
         && !file_name.ends_with("_tests.rs")
+}
+
+fn collect_production_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read source directory") {
+        let entry = entry.expect("read directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_production_rs_files(&path, out);
+        } else if should_scan_guarded_write_source_file(&path) {
+            out.push(path);
+        }
+    }
 }
 
 #[test]
@@ -1359,6 +1372,10 @@ fn serving_table_policy_skips_standalone_test_modules() {
         "the suffix-based rule must cover other standalone test-only modules"
     );
     assert!(
+        !should_scan_guarded_write_source_file(Path::new("src/test_support.rs")),
+        "test_support.rs is loaded only under cfg(test)"
+    );
+    assert!(
         should_scan_guarded_write_source_file(Path::new("src/store/event.rs")),
         "production source must remain in scope"
     );
@@ -1366,19 +1383,7 @@ fn serving_table_policy_skips_standalone_test_modules() {
 
 #[test]
 fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
-    use std::path::{Path, PathBuf};
-
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let entry = entry.expect("read directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if should_scan_guarded_write_source_file(&path) {
-                out.push(path);
-            }
-        }
-    }
+    use std::path::Path;
 
     // `buzz-relay` is scanned too: relay code reaches fenced tables only through
     // `buzz-db` helpers, and a direct relay write must meet the same rule.
@@ -1389,7 +1394,7 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
         ("buzz-relay", manifest.join("../buzz-relay/src")),
     ] {
         let mut files = Vec::new();
-        collect_rs_files(&src_root, &mut files);
+        collect_production_rs_files(&src_root, &mut files);
         assert!(
             !files.is_empty(),
             "guarded-table scan must see {crate_name} production source files"
@@ -1631,20 +1636,7 @@ fn masker_blanks_every_literal_form_and_keeps_code() {
 /// continuations, `\n`/`\t`/`\r` escapes, and with or without a `public.`
 /// schema prefix.
 fn inserts_events_row(source: &str) -> bool {
-    let mut normalized = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch.is_whitespace() || ch == '\\' {
-            if ch == '\\' && matches!(chars.peek(), Some('n' | 't' | 'r')) {
-                chars.next();
-            }
-            if !normalized.ends_with(' ') {
-                normalized.push(' ');
-            }
-        } else {
-            normalized.push(ch.to_ascii_lowercase());
-        }
-    }
+    let normalized = normalize_sql_source(source);
     ["insert into events", "insert into public.events"]
         .iter()
         .any(|marker| {
@@ -1879,18 +1871,7 @@ mod tests {
 
 #[test]
 fn every_production_event_insert_runs_the_follow_up_hook() {
-    use std::path::{Path, PathBuf};
-
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let path = entry.expect("read directory entry").path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if should_scan_guarded_write_source_file(&path) {
-                out.push(path);
-            }
-        }
-    }
+    use std::path::Path;
 
     let crates_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1899,7 +1880,7 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
     for entry in std::fs::read_dir(crates_root).expect("read crates directory") {
         let src = entry.expect("read crates entry").path().join("src");
         if src.is_dir() {
-            collect_rs_files(&src, &mut files);
+            collect_production_rs_files(&src, &mut files);
         }
     }
 
@@ -1934,4 +1915,823 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
         hooked_writers >= 7,
         "expected at least seven hooked event writers, found {hooked_writers}"
     );
+}
+
+fn normalize_sql_source(source: &str) -> String {
+    let mut normalized = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() || ch == '\\' {
+            if ch == '\\' && matches!(chars.peek(), Some('n' | 't' | 'r')) {
+                chars.next();
+            }
+            if !normalized.ends_with(' ') {
+                normalized.push(' ');
+            }
+        } else {
+            normalized.push(ch.to_ascii_lowercase());
+        }
+    }
+    normalized
+}
+
+// This policy covers the supported Rust writers while the retiring database
+// guards remain in place for mixed-version pods. SQL is read from the original
+// source; calls and struct fields use the existing masked view.
+const SINGLE_TABLE_GUARD_TABLES: [&str; 5] = [
+    "channels",
+    "communities",
+    "community_deletion_requests",
+    "community_deletion_approvals",
+    "community_deletion_manifest_keys",
+];
+const DELETION_STORE_PATH: &str = "buzz-db/src/store/deletion.rs";
+
+/// The text after each occurrence of `marker` that sits on identifier
+/// boundaries, so `on conflict` matches before a space or `(` alike.
+fn sql_token_suffixes<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
+    let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    source
+        .match_indices(marker)
+        .filter_map(|(at, found)| {
+            let rest = &source[at + found.len()..];
+            (!source[..at].chars().next_back().is_some_and(is_ident)
+                && !rest.chars().next().is_some_and(is_ident))
+            .then_some(rest)
+        })
+        .collect()
+}
+
+fn sql_table_suffixes<'a>(source: &'a str, verb: &str, table: &str) -> Vec<&'a str> {
+    [format!("{verb} {table}"), format!("{verb} public.{table}")]
+        .iter()
+        .flat_map(|marker| sql_token_suffixes(source, marker))
+        .collect()
+}
+
+// Keep SET and WHERE from the same statement, including an INSERT's conflict UPDATE.
+fn sql_update_sets<'a>(source: &'a str, table: &str) -> Vec<(&'a str, &'a str)> {
+    let updates = sql_table_suffixes(source, "update", table)
+        .into_iter()
+        .filter_map(|rest| {
+            let rest = rest.split(['"', ';']).next()?.trim_start();
+            // UPDATE table [[AS] alias] SET ..., including SET(a, b) = ...
+            let set = *sql_token_suffixes(rest, "set").first()?;
+            let alias = &rest[..rest.len() - set.len() - "set".len()];
+            (alias.split_whitespace().count() <= 2).then_some(set.trim_start())
+        });
+    let conflict_updates = sql_table_suffixes(source, "insert into", table)
+        .into_iter()
+        .filter_map(|rest| {
+            let statement = rest.split(['"', ';']).next()?;
+            let conflict = *sql_token_suffixes(statement, "on conflict").first()?;
+            sql_token_suffixes(conflict, "do update set")
+                .first()
+                .map(|set| set.trim_start())
+        });
+    updates
+        .chain(conflict_updates)
+        .map(|set| set.split_once(" where ").unwrap_or((set, "")))
+        .collect()
+}
+
+const DESTRUCTIVE_FROZEN_OR_EQUAL: &str =
+    "destructive_storage_frozen_at is null or destructive_storage_manifest =";
+
+/// A guard admits a statement only as a plain conjunct of its own WHERE: it
+/// follows the WHERE start or an `AND` (never `NOT`), and there is no `OR`
+/// word outside the known frozen-or-equal groups, and no subquery.
+fn plain_guard(predicate: &str, guard: &str) -> bool {
+    let conjunct = predicate.match_indices(guard).any(|(at, _)| {
+        let before = &predicate[..at];
+        // Allow a table qualifier: `communities.deletion_state = ...`.
+        let before = before
+            .strip_suffix('.')
+            .map_or(before, |qualified| {
+                qualified.trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+            })
+            .trim_end_matches([' ', '(']);
+        before.is_empty() || before.ends_with(" and")
+    });
+    let rest = predicate.replace(DESTRUCTIVE_FROZEN_OR_EQUAL, "").replace(
+        "destructive_storage_manifest is null or destructive_storage_manifest =",
+        "",
+    );
+    let words = || rest.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
+    conjunct && !words().any(|word| word == "or" || word == "select")
+}
+
+fn sql_assigned_columns(set: &str) -> Vec<&str> {
+    set.match_indices('=')
+        .flat_map(|(at, _)| -> Vec<&str> {
+            let left = set[..at].trim_end();
+            if left.ends_with(')') {
+                // Tuple assignment: SET (a, b) = (...).
+                let mut depth = 0;
+                for (at, ch) in left.char_indices().rev() {
+                    match ch {
+                        ')' => depth += 1,
+                        '(' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return left[at + 1..left.len() - 1]
+                                    .split(',')
+                                    .map(str::trim)
+                                    .collect();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            left.rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .filter(|column| !column.is_empty())
+                .into_iter()
+                .collect()
+        })
+        .collect()
+}
+
+fn single_table_guard_violations(
+    path: &str,
+    production: &str,
+    // Lifecycle exemption, stamp exemption, chunk guard, active predicate, request freezes.
+    rule_hits: &mut [Vec<String>; 5],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let code = mask_comments_and_literals(production);
+    if let Some((_, fields)) = code.split_once("struct ChannelUpdate") {
+        let fields = fields
+            .split_once('{')
+            .expect("struct body")
+            .1
+            .split('}')
+            .next()
+            .expect("struct fields");
+        if fields.split(',').any(|field| {
+            field.split_once(':').is_some_and(|(name, _)| {
+                name.split_whitespace()
+                    .last()
+                    .is_some_and(|name| name.starts_with("community"))
+            })
+        }) {
+            violations.push("ChannelUpdate must not expose a community field".to_owned());
+        }
+    }
+    for function in function_slices(production) {
+        let header = function_header(function);
+        let sql = normalize_sql_source(function);
+        let code = mask_comments_and_literals(function);
+        let mut reject = |reason: &str| violations.push(format!("{header}: {reason}"));
+        let name = header
+            .split_once("fn ")
+            .expect("function name")
+            .1
+            .split('(')
+            .next()
+            .expect("function arguments");
+        let lifecycle_writer =
+            path == DELETION_STORE_PATH && header.starts_with("async fn transition_community(");
+        let channel_sets = sql_update_sets(&sql, "channels");
+        if channel_sets
+            .iter()
+            .any(|(set, _)| sql_assigned_columns(set).contains(&"community_id"))
+            || (!channel_sets.is_empty()
+                && sql.split("set_parts.push(").skip(1).any(|part| {
+                    let assignment = part.split(';').next().expect("dynamic SET fragment");
+                    sql_assigned_columns(assignment).contains(&"community_id")
+                }))
+        {
+            reject("channels.community_id UPDATE");
+        }
+        let community_sets = sql_update_sets(&sql, "communities");
+        if community_sets.iter().any(|(set, _)| {
+            sql_assigned_columns(set).iter().any(|column| {
+                ["deletion_state", "deletion_fence_generation", "deleted_at"].contains(column)
+            })
+        }) {
+            if lifecycle_writer {
+                rule_hits[0].push(name.to_owned());
+            } else {
+                reject("community lifecycle UPDATE outside transition_community");
+            }
+        }
+        if !community_sets.is_empty() && !lifecycle_writer {
+            rule_hits[3].push(name.to_owned());
+            if community_sets
+                .iter()
+                .any(|(_, predicate)| !plain_guard(predicate, "deletion_state = 'active'"))
+            {
+                reject("community UPDATE requires an active predicate in its statement");
+            }
+        }
+        if sql_table_suffixes(&sql, "insert into", "communities")
+            .iter()
+            .any(|rest| {
+                let Some(columns) = rest.trim_start().strip_prefix('(') else {
+                    return true;
+                };
+                columns
+                    .split(')')
+                    .next()
+                    .expect("INSERT columns")
+                    .split(',')
+                    .any(|column| {
+                        ["deletion_state", "deletion_fence_generation", "deleted_at"]
+                            .contains(&column.trim())
+                    })
+            })
+        {
+            reject(
+                "community creation requires explicit columns without deletion lifecycle fields",
+            );
+        }
+        if !sql_table_suffixes(&sql, "delete from", "communities").is_empty() {
+            reject("production community DELETE");
+        }
+        let request_sets = sql_update_sets(&sql, "community_deletion_requests");
+        if request_sets.iter().any(|(set, _)| {
+            sql_assigned_columns(set).iter().any(|column| {
+                [
+                    "community_id",
+                    "community_host",
+                    "request_origin",
+                    "owner_pubkey",
+                    "mediating_operator_pubkey",
+                    "acknowledgement_version",
+                ]
+                .contains(column)
+            })
+        }) {
+            reject("deletion request identity/provenance UPDATE");
+        }
+        let mut freezes_inventory = false;
+        let mut freezes_destructive_storage = false;
+        for (set, predicate) in &request_sets {
+            let columns = sql_assigned_columns(set);
+            if columns.iter().any(|column| {
+                [
+                    "schema_manifest",
+                    "storage_manifest",
+                    "inventory_manifest",
+                    "inventory_digest",
+                    "inventory_frozen_at",
+                ]
+                .contains(column)
+            }) {
+                freezes_inventory = true;
+                if !plain_guard(predicate, "inventory_frozen_at is null") {
+                    reject(
+                        "request inventory UPDATE requires inventory_frozen_at IS NULL in WHERE",
+                    );
+                }
+            }
+            if columns
+                .iter()
+                .any(|column| column.starts_with("destructive_storage_"))
+            {
+                freezes_destructive_storage = true;
+                if !plain_guard(predicate, DESTRUCTIVE_FROZEN_OR_EQUAL) {
+                    reject("request destructive storage UPDATE requires the frozen-or-equal guard in WHERE");
+                }
+                if columns
+                    .iter()
+                    .filter(|column| column.starts_with("destructive_storage_"))
+                    .any(|column| !set.contains(&format!("{column} = coalesce({column},")))
+                {
+                    reject("request destructive storage UPDATE must preserve a frozen value with COALESCE");
+                }
+            }
+        }
+        if freezes_inventory || freezes_destructive_storage {
+            rule_hits[4].push(name.to_owned());
+        }
+        if ["update", "delete from"]
+            .iter()
+            .any(|verb| !sql_table_suffixes(&sql, verb, "community_deletion_approvals").is_empty())
+            || !sql_update_sets(&sql, "community_deletion_approvals").is_empty()
+        {
+            reject("approval UPDATE, upsert or DELETE");
+        }
+        let manifest = "community_deletion_manifest_keys";
+        let manifest_updates = sql_table_suffixes(&sql, "update", manifest).len();
+        let manifest_writes = manifest_updates
+            + sql_table_suffixes(&sql, "insert into", manifest).len()
+            + sql_table_suffixes(&sql, "delete from", manifest).len();
+        if manifest_writes > 0 {
+            // Chunk content never changes. The only UPDATE is the one-way
+            // `deleted_at` stamp, held to the same plain-conjunct rule as guards.
+            let sets = sql_update_sets(&sql, manifest);
+            let deletion_stamp = path == DELETION_STORE_PATH
+                && header.starts_with("pub async fn mark_manifest_chunk_deleted(")
+                && manifest_writes == 1
+                && manifest_updates == 1
+                && matches!(sets.as_slice(), [(set, predicate)]
+                    if set.trim() == "deleted_at = now()"
+                        && ["request_id = $1", "chunk_no = $2", "deleted_at is null"]
+                            .iter()
+                            .all(|guard| plain_guard(predicate, guard)));
+            let guarded = code.contains("guard_manifest_chunk_write(");
+            if deletion_stamp {
+                rule_hits[1].push(name.to_owned());
+            } else if manifest_updates > 0 || !sets.is_empty() {
+                reject("manifest chunk UPDATE other than the one-way deleted_at stamp");
+            } else if path == DELETION_STORE_PATH && guarded {
+                rule_hits[2].push(name.to_owned());
+            } else {
+                reject("manifest chunk INSERT or DELETE must use guard_manifest_chunk_write");
+            }
+        }
+    }
+    violations
+}
+
+#[test]
+fn single_table_policy_rejects_channel_retenanting() {
+    for source in [
+        r#"async fn retenant() { query("UPDATE channels SET community_id = $1 WHERE id = $2"); }"#,
+        r#"async fn retenant() { query("update public.channels as c set name = $1, community_id=$2 where id=$3"); }"#,
+        r#"async fn retenant() { set_parts.push(format!("community_id = $1")); query("UPDATE channels SET {} WHERE id = $2"); }"#,
+        "pub struct ChannelUpdate { pub community_id: Option<CommunityId>, }",
+        "pub struct ChannelUpdate { pub community: CommunityId, }",
+    ] {
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, source, &mut Default::default())
+                .len(),
+            1,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_requires_active_community_updates() {
+    let source = r#"async fn bypass() {
+        query("UPDATE communities SET icon = NULL WHERE id = $1");
+    }"#;
+    assert_eq!(
+        single_table_guard_violations(DELETION_STORE_PATH, source, &mut Default::default()).len(),
+        1
+    );
+    let guarded = source.replace(
+        "WHERE id = $1",
+        "WHERE id = $1 AND deletion_state = 'active'",
+    );
+    assert!(
+        single_table_guard_violations(DELETION_STORE_PATH, &guarded, &mut Default::default())
+            .is_empty()
+    );
+    // A predicate in a SELECT or another UPDATE does not admit this statement.
+    let separate = source.replace(
+        "query(",
+        "query(\"SELECT id FROM communities WHERE deletion_state = 'active'\"); query(",
+    );
+    assert_eq!(
+        single_table_guard_violations(DELETION_STORE_PATH, &separate, &mut Default::default())
+            .len(),
+        1
+    );
+    let two_updates = r#"async fn bypass() {
+        query("UPDATE communities SET icon = NULL WHERE id = $1 AND deletion_state = 'active'");
+        query("UPDATE communities SET icon = NULL WHERE id = $2");
+    }"#;
+    assert_eq!(
+        single_table_guard_violations(DELETION_STORE_PATH, two_updates, &mut Default::default())
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn single_table_policy_rejects_weakened_guards() {
+    for sql in [
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND (deletion_state = 'active' OR true)",
+        "UPDATE communities SET icon = NULL WHERE id = $1 OR deletion_state = 'active'",
+        "UPDATE communities SET icon = NULL WHERE id IN (SELECT id FROM communities WHERE deletion_state = 'active')",
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND NOT deletion_state = 'active'",
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND NOT communities.deletion_state = 'active'",
+        "UPDATE communities SET icon = NULL WHERE id = $1 AND (deletion_state = 'active')OR(true)",
+        "UPDATE community_deletion_requests SET inventory_digest = NULL WHERE id = $1 AND (inventory_frozen_at IS NULL OR true)",
+        "UPDATE community_deletion_requests SET destructive_storage_manifest = COALESCE(destructive_storage_manifest, $2) WHERE id = $1 AND (destructive_storage_frozen_at IS NULL OR destructive_storage_manifest = $2 OR true)",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_requires_inventory_freeze_predicate() {
+    for column in [
+        "schema_manifest",
+        "storage_manifest",
+        "inventory_manifest",
+        "inventory_digest",
+        "inventory_frozen_at",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"UPDATE community_deletion_requests SET {column} = NULL WHERE id = $1\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{column}"
+        );
+        let guarded = source.replace(
+            "WHERE id = $1",
+            "WHERE id = $1 AND inventory_frozen_at IS NULL",
+        );
+        assert!(
+            single_table_guard_violations(DELETION_STORE_PATH, &guarded, &mut Default::default())
+                .is_empty(),
+            "{column}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_requires_destructive_freeze_predicate() {
+    for column in [
+        "destructive_storage_manifest",
+        "destructive_storage_frozen_at",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"UPDATE community_deletion_requests SET {column} = COALESCE({column}, $2) WHERE id = $1\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{column}"
+        );
+        let guarded = source.replace("WHERE id = $1", "WHERE id = $1 AND (destructive_storage_frozen_at IS NULL OR destructive_storage_manifest = $2)");
+        assert!(
+            single_table_guard_violations(DELETION_STORE_PATH, &guarded, &mut Default::default())
+                .is_empty(),
+            "{column}"
+        );
+        // The guard keeps an equal manifest admissible, so SET must not overwrite it.
+        let overwrite = guarded.replace(&format!("COALESCE({column}, $2)"), "NULL");
+        let violations =
+            single_table_guard_violations(DELETION_STORE_PATH, &overwrite, &mut Default::default());
+        assert!(
+            violations.len() == 1 && violations[0].contains("preserve a frozen value"),
+            "{column}: {violations:?}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_checks_conflict_updates() {
+    for (sql, reason) in [
+        ("INSERT INTO communities (host) VALUES ($1) ON CONFLICT (host) DO UPDATE SET icon = NULL", "requires an active predicate"),
+        ("INSERT INTO communities (host) VALUES ($1) ON CONFLICT (host) DO UPDATE SET deleted_at = now() WHERE communities.deletion_state = 'active'", "lifecycle UPDATE"),
+        ("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET community_id = $2", "identity/provenance UPDATE"),
+        ("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET inventory_digest = NULL", "inventory_frozen_at IS NULL"),
+        ("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET destructive_storage_manifest = NULL", "frozen-or-equal guard"),
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        let violations = single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default());
+        assert!(violations.iter().any(|violation| violation.contains(reason)), "{sql}: {violations:?}");
+    }
+    let source = r#"async fn guarded() {
+        query("INSERT INTO communities (host) VALUES ($1) ON CONFLICT (host) DO UPDATE SET host = communities.host WHERE communities.deletion_state = 'active'");
+        query("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET inventory_digest = $2 WHERE inventory_frozen_at IS NULL");
+        query("INSERT INTO community_deletion_requests (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET destructive_storage_manifest = COALESCE(destructive_storage_manifest, $2) WHERE destructive_storage_frozen_at IS NULL OR destructive_storage_manifest = $2");
+    }"#;
+    assert!(
+        single_table_guard_violations(DELETION_STORE_PATH, source, &mut Default::default())
+            .is_empty()
+    );
+}
+
+#[test]
+fn single_table_policy_rejects_implicit_community_insert_columns() {
+    for sql in [
+        "INSERT INTO communities VALUES ($1, $2)",
+        "INSERT INTO communities SELECT * FROM staging",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{sql}"
+        );
+    }
+    let explicit = r#"async fn create() { query("INSERT INTO communities (host) SELECT host FROM staging"); }"#;
+    assert!(
+        single_table_guard_violations(DELETION_STORE_PATH, explicit, &mut Default::default())
+            .is_empty()
+    );
+}
+
+#[test]
+fn single_table_policy_checks_tuple_assignments() {
+    for (sql, reason) in [
+        ("UPDATE channels SET (name, community_id) = ($1, $2) WHERE id = $3", "channels.community_id UPDATE"),
+        ("UPDATE channels SET(name, community_id) = ($1, $2) WHERE id = $3", "channels.community_id UPDATE"),
+        ("UPDATE communities SET (icon, deletion_state) = (NULL, 'active') WHERE id = $1 AND deletion_state = 'active'", "lifecycle UPDATE"),
+        ("UPDATE community_deletion_requests SET (stage, community_id) = ($1, $2) WHERE id = $3", "identity/provenance UPDATE"),
+        ("UPDATE community_deletion_requests SET (inventory_digest, inventory_manifest) = (NULL, NULL) WHERE id = $1", "inventory_frozen_at IS NULL"),
+        ("UPDATE community_deletion_requests SET (destructive_storage_manifest, destructive_storage_frozen_at) = (NULL, NULL) WHERE id = $1", "frozen-or-equal guard"),
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        let violations = single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default());
+        assert!(violations.iter().any(|violation| violation.contains(reason)), "{sql}: {violations:?}");
+    }
+    let guarded = r#"async fn freeze() { query("UPDATE community_deletion_requests SET (inventory_manifest, inventory_digest) = ($2, $3) WHERE id = $1 AND inventory_frozen_at IS NULL"); }"#;
+    assert!(
+        single_table_guard_violations(DELETION_STORE_PATH, guarded, &mut Default::default())
+            .is_empty()
+    );
+}
+
+#[test]
+fn single_table_policy_rejects_community_lifecycle_bypasses() {
+    for column in ["deletion_state", "deletion_fence_generation", "deleted_at"] {
+        let source = format!("async fn bypass() {{ query(\"UPDATE communities SET {column} = $1 WHERE id = $2 AND deletion_state = 'active'\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{column}"
+        );
+        let transition = source.replace("bypass", "transition_community");
+        assert!(single_table_guard_violations(
+            DELETION_STORE_PATH,
+            &transition,
+            &mut Default::default()
+        )
+        .is_empty());
+        assert_eq!(
+            single_table_guard_violations(
+                "buzz-relay/src/bypass.rs",
+                &transition,
+                &mut Default::default()
+            )
+            .len(),
+            1
+        );
+    }
+    for column in ["deletion_state", "deletion_fence_generation", "deleted_at"] {
+        let source = format!("async fn bypass() {{ query(\"INSERT INTO communities (id, {column}) VALUES ($1, $2)\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{column}"
+        );
+    }
+    let deletion = r#"async fn bypass() { query("DELETE FROM communities WHERE id = $1"); }"#;
+    assert_eq!(
+        single_table_guard_violations(DELETION_STORE_PATH, deletion, &mut Default::default()).len(),
+        1
+    );
+}
+
+#[test]
+fn single_table_policy_rejects_request_retargeting() {
+    for column in [
+        "community_id",
+        "community_host",
+        "request_origin",
+        "owner_pubkey",
+        "mediating_operator_pubkey",
+        "acknowledgement_version",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"UPDATE community_deletion_requests SET {column} = $1 WHERE id = $2\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{column}"
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_rejects_approval_mutations() {
+    for sql in [
+        "UPDATE community_deletion_approvals SET approved_by = $1 WHERE request_id = $2",
+        "DELETE FROM community_deletion_approvals WHERE request_id = $1",
+        "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT (request_id) DO UPDATE SET note = EXCLUDED.note",
+        "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT(request_id) DO UPDATE SET note = EXCLUDED.note",
+        "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT(request_id) DO UPDATE SET(note) = ROW(EXCLUDED.note)",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{sql}"
+        );
+    }
+    let append = r#"async fn approve() {
+        query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2)");
+        query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT (request_id) DO NOTHING");
+        query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT(request_id) DO NOTHING");
+    }"#;
+    assert!(
+        single_table_guard_violations(DELETION_STORE_PATH, append, &mut Default::default())
+            .is_empty()
+    );
+}
+
+#[test]
+fn single_table_policy_rejects_unguarded_manifest_writers() {
+    for sql in [
+        "INSERT INTO community_deletion_manifest_keys (keys) VALUES ($1)",
+        "DELETE FROM community_deletion_manifest_keys WHERE request_id = $1",
+    ] {
+        let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default())
+                .len(),
+            1,
+            "{sql}"
+        );
+        // A guard in another function or a literal does not admit this writer.
+        let mixed = format!("async fn guarded() {{ guard_manifest_chunk_write(); }}\n{source}");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &mixed, &mut Default::default())
+                .len(),
+            1
+        );
+        let fake = source.replace("query(", "let _ = \"guard_manifest_chunk_write(\"; query(");
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &fake, &mut Default::default())
+                .len(),
+            1
+        );
+        let guarded = source.replace("query(", "guard_manifest_chunk_write(); query(");
+        assert!(single_table_guard_violations(
+            DELETION_STORE_PATH,
+            &guarded,
+            &mut Default::default()
+        )
+        .is_empty());
+        assert_eq!(
+            single_table_guard_violations(
+                "buzz-relay/src/bypass.rs",
+                &guarded,
+                &mut Default::default()
+            )
+            .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn single_table_policy_rejects_manifest_content_updates() {
+    // The chunk guard admits INSERT and DELETE only: content never changes.
+    for sql in [
+        "UPDATE community_deletion_manifest_keys SET keys = $1 WHERE request_id = $2",
+        "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no, keys) VALUES ($1, $2, $3) ON CONFLICT (request_id, chunk_no) DO UPDATE SET keys = EXCLUDED.keys",
+        "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no, keys) VALUES ($1, $2, $3) ON CONFLICT(request_id, chunk_no) DO UPDATE SET keys = EXCLUDED.keys",
+    ] {
+        let source = format!("async fn append() {{ guard_manifest_chunk_write(); query(\"{sql}\"); }}");
+        let violations =
+            single_table_guard_violations(DELETION_STORE_PATH, &source, &mut Default::default());
+        assert_eq!(violations.len(), 1, "{sql}: {violations:?}");
+        assert!(violations[0].contains("other than the one-way deleted_at stamp"));
+    }
+}
+
+#[test]
+fn single_table_policy_holds_the_manifest_stamp_to_plain_conjuncts() {
+    let stamp = r#"pub async fn mark_manifest_chunk_deleted() {
+        query("UPDATE community_deletion_manifest_keys SET deleted_at = now() WHERE request_id = $1 AND chunk_no = $2 AND deleted_at IS NULL");
+    }"#;
+    let mut hits: [Vec<String>; 5] = Default::default();
+    assert!(single_table_guard_violations(DELETION_STORE_PATH, stamp, &mut hits).is_empty());
+    assert_eq!(hits[1], ["mark_manifest_chunk_deleted"]);
+    for (from, to) in [
+        (" AND deleted_at IS NULL", ""),
+        ("deleted_at = now()", "deleted_at = now(), keys = $3"),
+        ("deleted_at = now()", "deleted_at = NULL"),
+        ("deleted_at IS NULL", "deleted_at IS NULL OR true"),
+        (
+            "chunk_no = $2 AND deleted_at IS NULL",
+            "chunk_no IN (SELECT chunk_no FROM chunks WHERE request_id = $1 AND deleted_at IS NULL)",
+        ),
+        ("request_id = $1 AND ", ""),
+        ("chunk_no = $2 AND ", ""),
+        // A second write in the stamp function does not share its exemption.
+        (
+            "deleted_at IS NULL\");",
+            "deleted_at IS NULL\"); query(\"DELETE FROM community_deletion_manifest_keys WHERE request_id = $1\");",
+        ),
+        // The stamp must be a plain UPDATE, not a conflict upsert.
+        (
+            "UPDATE community_deletion_manifest_keys SET",
+            "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no) VALUES ($1, $2) ON CONFLICT (request_id, chunk_no) DO UPDATE SET",
+        ),
+    ] {
+        let weakened = stamp.replace(from, to);
+        assert_ne!(weakened, stamp);
+        assert_eq!(
+            single_table_guard_violations(DELETION_STORE_PATH, &weakened, &mut Default::default())
+                .len(),
+            1,
+            "{weakened}"
+        );
+    }
+    let renamed_stamp = stamp.replace("mark_manifest_chunk_deleted", "restamp");
+    assert_eq!(
+        single_table_guard_violations(DELETION_STORE_PATH, &renamed_stamp, &mut Default::default())
+            .len(),
+        1
+    );
+    assert_eq!(
+        single_table_guard_violations("buzz-relay/src/bypass.rs", stamp, &mut Default::default())
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn every_production_single_table_guard_writer_preserves_its_invariants() {
+    use std::path::Path;
+
+    let crates_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates root");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(crates_root).expect("read crates directory") {
+        let src = entry.expect("read crate entry").path().join("src");
+        if src.is_dir() {
+            collect_production_rs_files(&src, &mut files);
+        }
+    }
+    let mut writers = [0usize; 5];
+    let mut rule_hits: [Vec<String>; 5] = Default::default();
+    let mut violations = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path).expect("read production source");
+        let production = strip_cfg_test_items(&source);
+        for function in function_slices(&production) {
+            let sql = normalize_sql_source(function);
+            for (index, table) in SINGLE_TABLE_GUARD_TABLES.iter().enumerate() {
+                if ["insert into", "update", "delete from"]
+                    .iter()
+                    .any(|verb| !sql_table_suffixes(&sql, verb, table).is_empty())
+                {
+                    writers[index] += 1;
+                }
+            }
+        }
+        let relative = path
+            .strip_prefix(crates_root)
+            .expect("crate source")
+            .to_string_lossy()
+            .replace('\\', "/");
+        violations.extend(
+            single_table_guard_violations(&relative, &production, &mut rule_hits)
+                .into_iter()
+                .map(|violation| format!("{relative}: {violation}")),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "single-table guard policy: {violations:#?}"
+    );
+    // Exact rule hits pin the parser to the known production seams.
+    for (hits, expected) in rule_hits.iter_mut().zip([
+        vec!["transition_community"],
+        vec!["mark_manifest_chunk_deleted"],
+        vec![
+            "append_manifest_key_chunk",
+            "clear_manifest_key_chunks",
+            "mark_logically_verified",
+        ],
+        vec![
+            "archive_community_owned_by",
+            "ensure_configured_community_with_operation",
+            "set_community_icon",
+            "unarchive_community_owned_by",
+        ],
+        vec![
+            "complete_owner_preparation",
+            "freeze_destructive_storage_manifest",
+            "freeze_inventory",
+        ],
+    ]) {
+        hits.sort();
+        assert_eq!(*hits, expected, "production single-table rule hits");
+    }
+    // Lower bounds pin discovery without fixing the exact number of writers.
+    for ((table, seen), floor) in SINGLE_TABLE_GUARD_TABLES
+        .iter()
+        .zip(writers)
+        .zip([7, 4, 15, 2, 4])
+    {
+        assert!(
+            seen >= floor,
+            "{table}: expected at least {floor} writers, found {seen}"
+        );
+    }
 }
