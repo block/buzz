@@ -364,7 +364,12 @@ class _FloatingTabBar extends StatelessWidget {
                 height: double.infinity,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: context.controlSurface,
+                    color: defaultTargetPlatform == TargetPlatform.iOS
+                        ? Color.alphaBlend(
+                            Colors.black.withValues(alpha: 0.05),
+                            context.controlSurface,
+                          )
+                        : context.controlSurface,
                     borderRadius: BorderRadius.circular(
                       HomePage._selectedTabRadius,
                     ),

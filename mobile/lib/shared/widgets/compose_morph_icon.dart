@@ -40,7 +40,7 @@ class ComposeMorphIcon extends StatelessWidget {
           tween: Tween(end: compose ? 1 : -1),
           duration: reduced ? Duration.zero : const Duration(milliseconds: 80),
           builder: (context, direction, _) => Transform.rotate(
-            angle: direction * lift * math.pi / 12,
+            angle: direction * lift * math.pi / 2,
             child: Transform.scale(
               scale: 1 + 0.08 * lift,
               child: surfaceBuilder?.call(icon) ?? icon,
