@@ -828,6 +828,7 @@ export function ChannelScreen({
                 profilePanelTab={profilePanelTab}
                 profilePanelView={profilePanelView}
                 selectedPostId={selectedForumPostId}
+                typingEntries={typingEntries}
                   targetReplyId={targetForumReplyId}
                 />,
                 searchTarget,
