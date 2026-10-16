@@ -23,7 +23,8 @@
 //!    (a) finished before the activity scan — its commit precedes `M`'s
 //!    commit, so the replica session has replayed it;
 //!    (b) open at the activity scan — represented by `xact_start`, so it is
-//!    bounded by the `oldest_xact_start` term;
+//!    bounded by the `oldest_xact_start` term (a prepared transaction has
+//!    no `xact_start` to read, so one existing fails the sample closed);
 //!    (c) started after the activity scan — its insert-time app guard runs
 //!    after `S`, so it cannot commit a row with
 //!    `created_at < S - floor`.
@@ -470,6 +471,17 @@ pub enum ProbeError {
         /// Number of other client backends with masked/unknown state.
         masked: i64,
     },
+    /// A prepared (2PC) transaction exists. Its rows were floor-checked at
+    /// insert time, which `pg_prepared_xacts` cannot bound, and no supported
+    /// writer prepares transactions — treat it as out-of-band.
+    #[error(
+        "{prepared} prepared transaction(s) in pg_prepared_xacts — out-of-band writer; \
+         replica floor cannot bound their rows"
+    )]
+    PreparedTransactions {
+        /// Number of prepared transactions in the cluster.
+        prepared: i64,
+    },
     /// The single heartbeat row (migration 0026) is missing on the writer.
     #[error("replica_heartbeat row missing on the writer — migration 0026 not applied?")]
     HeartbeatRowMissing,
@@ -662,18 +674,19 @@ async fn sample_writer(
         //
         //    Prepared transactions (2PC) are a bucket of their own: while
         //    prepared they have left `pg_stat_activity` but can still commit
-        //    after the token. Their floor check must precede PREPARE, so
-        //    `pg_prepared_xacts.prepared` bounds their rows exactly like
-        //    `xact_start`; fold it into the same minimum.
+        //    after the token. Only the retired deferred trigger checked their
+        //    rows at PREPARE; the insert-time app guard runs earlier, at a clock
+        //    `pg_prepared_xacts` does not expose, so `prepared` no longer bounds
+        //    their rows. No supported writer issues PREPARE TRANSACTION (the
+        //    source policy enforces it) and `max_prepared_transactions` defaults
+        //    to 0, so any prepared transaction is out-of-band: fail closed.
         let row = sqlx::query(
             r#"
             SELECT
-                least(
-                    (SELECT min(xact_start)
-                       FROM pg_stat_activity
-                      WHERE pid <> pg_backend_pid()),
-                    (SELECT min(prepared) FROM pg_prepared_xacts)
-                ) AS oldest_xact_start,
+                (SELECT min(xact_start)
+                   FROM pg_stat_activity
+                  WHERE pid <> pg_backend_pid()) AS oldest_xact_start,
+                (SELECT count(*) FROM pg_prepared_xacts) AS prepared,
                 (SELECT count(*)
                    FROM pg_stat_activity
                   WHERE pid <> pg_backend_pid()
@@ -689,6 +702,10 @@ async fn sample_writer(
         let masked: i64 = row.get("masked");
         if masked > 0 {
             return Err(ProbeError::MaskedActivity { masked });
+        }
+        let prepared: i64 = row.get("prepared");
+        if prepared > 0 {
+            return Err(ProbeError::PreparedTransactions { prepared });
         }
         let oldest_xact_start: Option<DateTime<Utc>> = row.get("oldest_xact_start");
         Ok((sampled_at, oldest_xact_start))
@@ -1463,6 +1480,62 @@ mod postgres_tests {
 
         tx.rollback().await.expect("rollback");
         unpriv.close().await;
+    }
+
+    /// With the floor trigger retired, nothing bounds a prepared (2PC)
+    /// transaction's rows by `pg_prepared_xacts.prepared`, so the sample must
+    /// fail closed while one exists. On a server with the default
+    /// `max_prepared_transactions = 0` (CI, compose, chart) the test instead
+    /// pins that 2PC is unavailable, which is the supported-writer exclusion.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cluster_global_sample_writer_fails_closed_on_prepared_transaction() {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
+        let max_prepared: String = sqlx::query_scalar("SHOW max_prepared_transactions")
+            .fetch_one(&pool)
+            .await
+            .expect("show max_prepared_transactions");
+
+        let gid = format!("fence_probe_{}", uuid::Uuid::new_v4().simple());
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .expect("begin");
+        sqlx::query("SELECT 1")
+            .execute(&mut *conn)
+            .await
+            .expect("touch tx");
+        let prepare = sqlx::query(sqlx::AssertSqlSafe(format!("PREPARE TRANSACTION '{gid}'")))
+            .execute(&mut *conn)
+            .await;
+
+        if max_prepared == "0" {
+            prepare.expect_err("PREPARE TRANSACTION must fail when 2PC is disabled");
+            sqlx::query("ROLLBACK")
+                .execute(&mut *conn)
+                .await
+                .expect("rollback");
+            return;
+        }
+
+        prepare.expect("prepare transaction");
+        drop(conn);
+        let result = sample_writer(&pool).await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("ROLLBACK PREPARED '{gid}'")))
+            .execute(&pool)
+            .await
+            .expect("rollback prepared");
+        let err = result.expect_err("a prepared transaction must fail the sample closed");
+        assert!(
+            matches!(err, ProbeError::PreparedTransactions { prepared } if prepared >= 1),
+            "expected PreparedTransactions, got {err:?}"
+        );
+        sample_writer(&pool)
+            .await
+            .expect("sample succeeds once no transaction is prepared");
     }
 
     /// The Aurora PostgreSQL identity function name is exact — the
