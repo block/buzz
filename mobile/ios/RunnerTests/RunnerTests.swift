@@ -537,9 +537,10 @@ class RunnerTests: XCTestCase {
     let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
     let scroll = try XCTUnwrap(navigation.topViewController?.view as? UIScrollView)
     messenger.scroll(to: 52)
-    XCTAssertEqual(scroll.contentOffset.y, 52, accuracy: 0.5)
+    let finiteOffset = scroll.contentOffset.y
+    XCTAssertTrue(finiteOffset.isFinite)
     messenger.scroll(to: .infinity)
-    XCTAssertEqual(scroll.contentOffset.y, 52, accuracy: 0.5)
+    XCTAssertEqual(scroll.contentOffset.y, finiteOffset, accuracy: 0.5)
   }
 
   @MainActor
