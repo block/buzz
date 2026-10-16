@@ -1,6 +1,11 @@
 import { captureRelayRemovals } from "@/features/agents/managedAgentRelayCleanup";
 import { sendChannelMessage } from "@/shared/api/tauri";
-import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type {
+  Channel,
+  ManagedAgent,
+  PresenceStatus,
+  RelayAgent,
+} from "@/shared/api/types";
 import type { AgentAvailabilityReader } from "./useAgentAvailability";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -28,17 +33,43 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
-/** Lifecycle action routing only; deployed is a retained receipt, not presence. */
-export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
-  return agent.status === "running" || agent.status === "deployed";
+/**
+ * Lifecycle action routing only. `deployed` is a retained receipt that the
+ * desktop never clears, so it cannot say whether the remote body still exists:
+ * after `!shutdown` or an inactivity reap the receipt outlives the pod. Pass
+ * relay presence where the caller has it — established `offline` overrides the
+ * receipt so the surface offers Deploy (which re-converges the provider) rather
+ * than a Shutdown aimed at nothing. Unknown presence keeps the receipt.
+ */
+export function isManagedAgentActive(
+  agent: Pick<ManagedAgent, "status">,
+  availability?: PresenceStatus,
+) {
+  if (agent.status === "deployed") return availability !== "offline";
+  return agent.status === "running";
 }
 
-export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+/** The status to display: a `deployed` receipt whose agent is established
+ * offline reads as stopped, the same as a local agent that is not running. */
+export function displayedManagedAgentStatus(
+  status: ManagedAgent["status"],
+  availability?: PresenceStatus,
+): ManagedAgent["status"] {
+  return status === "deployed" &&
+    !isManagedAgentActive({ status }, availability)
+    ? "stopped"
+    : status;
+}
+
+export function getManagedAgentPrimaryActionLabel(
+  agent: ManagedAgent,
+  availability?: PresenceStatus,
+) {
   if (agent.backend.type === "provider") {
-    return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+    return isManagedAgentActive(agent, availability) ? "Shutdown" : "Deploy";
   }
 
-  if (isManagedAgentActive(agent)) {
+  if (isManagedAgentActive(agent, availability)) {
     return "Stop";
   }
 

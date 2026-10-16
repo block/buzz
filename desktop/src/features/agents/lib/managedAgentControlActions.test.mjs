@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  displayedManagedAgentStatus,
+  getManagedAgentPrimaryActionLabel,
+  isManagedAgentActive,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -40,6 +43,73 @@ function agent(overrides = {}) {
     ...overrides,
   };
 }
+
+test("a deployed provider agent established offline offers Deploy again", () => {
+  const deployed = agent({
+    status: "deployed",
+    backend: { type: "provider", id: "kubernetes", config: {} },
+    backendAgentId: "buzz-agent-deadbeef",
+  });
+
+  // The receipt outlives `!shutdown` and inactivity reaping, so offline
+  // presence must route the primary action back to Deploy.
+  assert.equal(isManagedAgentActive(deployed, "offline"), false);
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(deployed, "offline"),
+    "Deploy",
+  );
+  for (const availability of ["online", "away", undefined]) {
+    assert.equal(isManagedAgentActive(deployed, availability), true);
+    assert.equal(
+      getManagedAgentPrimaryActionLabel(deployed, availability),
+      "Shutdown",
+    );
+  }
+});
+
+test("lifecycle activity over every status and availability", () => {
+  // Only a `deployed` receipt yields to presence, and only to established
+  // offline. A process status (running/stopped) and a missing deploy are never
+  // overridden: positive presence alone grants no lifecycle authority.
+  const expected = {
+    running: { online: true, away: true, offline: true, unknown: true },
+    stopped: { online: false, away: false, offline: false, unknown: false },
+    deployed: { online: true, away: true, offline: false, unknown: true },
+    not_deployed: {
+      online: false,
+      away: false,
+      offline: false,
+      unknown: false,
+    },
+  };
+  for (const [status, row] of Object.entries(expected)) {
+    for (const [presence, active] of Object.entries(row)) {
+      const availability = presence === "unknown" ? undefined : presence;
+      assert.equal(
+        isManagedAgentActive(agent({ status }), availability),
+        active,
+        `${status} × ${presence}`,
+      );
+    }
+  }
+});
+
+test("displayed status over every status and availability", () => {
+  // Only an established-offline `deployed` receipt changes what is shown.
+  for (const status of ["running", "stopped", "deployed", "not_deployed"]) {
+    for (const availability of ["online", "away", "offline", undefined]) {
+      const expected =
+        status === "deployed" && availability === "offline"
+          ? "stopped"
+          : status;
+      assert.equal(
+        displayedManagedAgentStatus(status, availability),
+        expected,
+        `${status} × ${availability ?? "unknown"}`,
+      );
+    }
+  }
+});
 
 test("relay-mesh agents delegate start to the backend preflight", async () => {
   const meshAgent = agent({

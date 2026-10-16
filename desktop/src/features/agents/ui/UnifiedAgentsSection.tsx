@@ -283,7 +283,7 @@ function AgentPersonaCard({
       provider: persona.provider,
       defaultModel,
     });
-  const isActive = agent ? isManagedAgentActive(agent) : false;
+  const isActive = agent ? isManagedAgentActive(agent, availability) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
     ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
@@ -398,7 +398,7 @@ function StandaloneAgentCard({
     agent.lastError,
     agent.lastErrorCode,
   )?.copy;
-  const isActive = isManagedAgentActive(agent);
+  const isActive = isManagedAgentActive(agent, availability);
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
 
   return (

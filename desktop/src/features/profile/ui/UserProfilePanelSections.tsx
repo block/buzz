@@ -428,19 +428,20 @@ export function ProfileSummaryView({
           agentStartBlockReason={
             managedAgent
               ? agentPresenceStartBlockReason(
-                  isManagedAgentActive(managedAgent),
+                  isManagedAgentActive(managedAgent, presenceStatus),
                   presenceStatus,
                 )
               : undefined
           }
           agentActionLabel={
             isOwner === true && managedAgent
-              ? getManagedAgentPrimaryActionLabel(managedAgent)
+              ? getManagedAgentPrimaryActionLabel(managedAgent, presenceStatus)
               : undefined
           }
           agentActionLive={
-            managedAgent?.status === "running" ||
-            managedAgent?.status === "deployed"
+            managedAgent
+              ? isManagedAgentActive(managedAgent, presenceStatus)
+              : false
           }
           onAgentPrimaryAction={
             isOwner === true && managedAgent

@@ -17,6 +17,7 @@ import {
 } from "@/shared/api/tauri";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -24,6 +25,7 @@ import type {
   CreateManagedAgentInput,
   ManagedAgent,
   ManagedAgentBackend,
+  PresenceStatus,
   RespondToMode,
 } from "@/shared/api/types";
 
@@ -46,6 +48,11 @@ export type AttachManagedAgentToChannelInput = {
    * published message and an aborted send leaves no orphan wake.
    */
   detachedStart?: (agent: ManagedAgent) => void;
+  /**
+   * Relay presence, when the caller read it. A provider `deployed` receipt
+   * established offline (shut down or reaped) is redeployed, not trusted.
+   */
+  availability?: PresenceStatus;
 };
 
 export type AttachManagedAgentToChannelResult = {
@@ -202,11 +209,7 @@ export async function attachManagedAgentToChannel(
     // community's (agent, relay) pair, and `startManagedAgent` spawns that same
     // pair — so this ensures the pair the caller is attaching to, never
     // another community's.
-    const isRemote = input.agent.backend.type === "provider";
-    const needsStart = isRemote
-      ? input.agent.status !== "deployed"
-      : input.agent.status !== "running" && input.agent.status !== "deployed";
-    if (needsStart) {
+    if (!isManagedAgentActive(input.agent, input.availability)) {
       if (input.detachedStart) {
         input.detachedStart(input.agent);
       } else {

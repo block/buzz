@@ -38,7 +38,7 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
-      if (isManagedAgentActive(managedAgent)) {
+      if (isManagedAgentActive(managedAgent, availability)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
           channels: channels ?? [],
@@ -82,7 +82,7 @@ export function useAgentLifecycleActions({
 
     try {
       const blockReason = agentPresenceStartBlockReason(
-        isManagedAgentActive(managedAgent),
+        isManagedAgentActive(managedAgent, availability),
         availability,
       );
       if (blockReason) throw new Error(blockReason);

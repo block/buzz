@@ -1,12 +1,15 @@
 import * as React from "react";
 import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  PresenceStatus,
+} from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   enqueueAgentWake,
   getErrorMessage,
-  isManagedAgentRunning,
-  isProviderBackedAgent,
+  mentionedAgentNeedsWake,
   type QueuedAgentWake,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
@@ -45,10 +48,14 @@ type AttachAgentToChannel = (input: {
   agent: ManagedAgent;
   role: "bot";
   detachedStart: (agent: ManagedAgent) => void;
+  availability?: PresenceStatus;
 }) => Promise<unknown>;
 
 type UseEnsureAgentMentionsReadyOptions = {
   attachAgentToChannel: AttachAgentToChannel;
+  /** Relay presence, read only for a provider `deployed` receipt: an agent
+   * established offline (shut down or reaped) is redeployed, not trusted. */
+  readAvailability: (pubkey: string) => Promise<PresenceStatus | undefined>;
   getManagedAgentsByPubkey: () => Promise<Map<string, ManagedAgent>>;
   getPersonas: () => Promise<AgentPersona[]>;
   memberPubkeys: ReadonlySet<string>;
@@ -69,6 +76,7 @@ export function useEnsureAgentMentionsReady({
   getManagedAgentsByPubkey,
   getPersonas,
   memberPubkeys,
+  readAvailability,
 }: UseEnsureAgentMentionsReadyOptions): EnsureAgentMentionsReady {
   return React.useCallback(
     async (
@@ -120,13 +128,12 @@ export function useEnsureAgentMentionsReady({
             wroteRelayState = true;
           }
           if (isCancelled()) break;
+          const availability =
+            readyAgent.status === "deployed"
+              ? await readAvailability(pubkey)
+              : undefined;
           if (participants.has(pubkey)) {
-            if (
-              (isProviderBackedAgent(readyAgent) &&
-                readyAgent.status !== "deployed") ||
-              (!isProviderBackedAgent(readyAgent) &&
-                !isManagedAgentRunning(readyAgent))
-            ) {
+            if (mentionedAgentNeedsWake(readyAgent, availability)) {
               enqueueAgentWake(agentsToWake, readyAgent);
             }
           } else {
@@ -134,6 +141,7 @@ export function useEnsureAgentMentionsReady({
               channelId: capturedChannelId,
               agent: readyAgent,
               role: "bot",
+              availability,
               detachedStart: (agentToWake) =>
                 enqueueAgentWake(agentsToWake, agentToWake),
             });
@@ -158,6 +166,7 @@ export function useEnsureAgentMentionsReady({
       getManagedAgentsByPubkey,
       getPersonas,
       memberPubkeys,
+      readAvailability,
     ],
   );
 }

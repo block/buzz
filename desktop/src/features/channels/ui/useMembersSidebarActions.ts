@@ -89,8 +89,10 @@ export function useMembersSidebarActions({
 
   const stoppableManagedBots = React.useMemo(
     () =>
-      controllableManagedBots.filter((agent) => isManagedAgentActive(agent)),
-    [controllableManagedBots],
+      controllableManagedBots.filter((agent) =>
+        isManagedAgentActive(agent, getAvailability(agent.pubkey)),
+      ),
+    [controllableManagedBots, getAvailability],
   );
 
   const isActionPending =
@@ -189,7 +191,7 @@ export function useMembersSidebarActions({
         return;
       }
 
-      if (isManagedAgentActive(agent)) {
+      if (isManagedAgentActive(agent, getAvailability(agent.pubkey))) {
         await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
@@ -226,7 +228,10 @@ export function useMembersSidebarActions({
   async function handleRespawnAll() {
     await runBulkAgentAction({
       action: async (agent) => {
-        assertStartNotBlockedByPresence(agent, isManagedAgentActive(agent));
+        assertStartNotBlockedByPresence(
+          agent,
+          isManagedAgentActive(agent, getAvailability(agent.pubkey)),
+        );
         await respawnManagedAgentWithRules({
           agent,
           relayUrl,

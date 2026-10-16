@@ -75,6 +75,7 @@ async function renderEnsureReady(overrides = {}) {
     getManagedAgentsByPubkey: async () => new Map(),
     getPersonas: async () => [],
     memberPubkeys: new Set(),
+    readAvailability: async () => undefined,
     ...overrides,
   };
   return renderHook(() => useEnsureAgentMentionsReady(options));
@@ -138,6 +139,64 @@ test("only agents that are not up are queued", async () => {
     [OTHER_AGENT],
     "a running agent needs no wake; a not-deployed provider agent does",
   );
+  rendered.unmount();
+});
+
+test("a deployed provider agent is redeployed only once presence shows it gone", async () => {
+  const deployedProvider = managedAgent({
+    status: "deployed",
+    backend: { type: "provider", id: "kubernetes", config: {} },
+  });
+  const wakesFor = async (availability) => {
+    const rendered = await renderEnsureReady({
+      readAvailability: async () => availability,
+      getManagedAgentsByPubkey: async () =>
+        new Map([[MEMBER_AGENT, deployedProvider]]),
+      memberPubkeys: new Set([MEMBER_AGENT]),
+    });
+    const result = await rendered.result.current([MEMBER_AGENT], CHANNEL_ID);
+    rendered.unmount();
+    return result.agentsToWake.map((wake) => wake.agent.pubkey);
+  };
+
+  // The `deployed` receipt outlives a shut-down or inactivity-reaped pod;
+  // established offline presence is what says the body is gone.
+  assert.deepEqual(await wakesFor("offline"), [MEMBER_AGENT]);
+  assert.deepEqual(await wakesFor("online"), []);
+  assert.deepEqual(
+    await wakesFor(undefined),
+    [],
+    "unknown presence keeps trusting the receipt",
+  );
+});
+
+test("a non-member deployed provider agent hands its presence to the attach", async () => {
+  const deployedProvider = managedAgent({
+    status: "deployed",
+    backend: { type: "provider", id: "kubernetes", config: {} },
+  });
+  const attachCalls = [];
+  const presenceReads = [];
+  const rendered = await renderEnsureReady({
+    attachAgentToChannel: async (input) => {
+      attachCalls.push(input);
+      return {};
+    },
+    getManagedAgentsByPubkey: async () =>
+      new Map([[MEMBER_AGENT, deployedProvider]]),
+    readAvailability: async (pubkey) => {
+      presenceReads.push(pubkey);
+      return "offline";
+    },
+  });
+
+  await rendered.result.current([MEMBER_AGENT], CHANNEL_ID);
+
+  // The attach decides the redeploy (pinned in channelAgents.attach.test);
+  // this pins that the send path reads presence once and passes it through.
+  assert.deepEqual(presenceReads, [MEMBER_AGENT]);
+  assert.equal(attachCalls.length, 1);
+  assert.equal(attachCalls[0].availability, "offline");
   rendered.unmount();
 });
 

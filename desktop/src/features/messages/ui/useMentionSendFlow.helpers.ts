@@ -1,5 +1,6 @@
 import type { MentionRevalidationOptions } from "@/features/messages/lib/agentMentionRevalidation";
-import type { ManagedAgent } from "@/shared/api/types";
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import type { ManagedAgent, PresenceStatus } from "@/shared/api/types";
 import {
   type ImetaMedia,
   mergeOutgoingTags,
@@ -175,12 +176,16 @@ export function mergeMentionRecipients(
   ]);
 }
 
-export function isManagedAgentRunning(agent: ManagedAgent) {
-  return agent.status === "running" || agent.status === "deployed";
-}
-
-export function isProviderBackedAgent(agent: ManagedAgent) {
-  return agent.backend.type === "provider";
+/**
+ * Whether a mentioned managed agent must be started/deployed before it can see
+ * the message. A provider agent's `deployed` receipt outlives a shut-down or
+ * inactivity-reaped body, so established offline presence queues a redeploy.
+ */
+export function mentionedAgentNeedsWake(
+  agent: ManagedAgent,
+  availability: PresenceStatus | undefined,
+) {
+  return !isManagedAgentActive(agent, availability);
 }
 
 /** Carry captured recipient identity through composer clearing and uploads. */

@@ -111,9 +111,10 @@ export function useManagedAgentActions() {
     useAgentAvailabilityLookup(managedPubkeyList);
 
   function assertStartNotBlockedByPresence(agent: ManagedAgent) {
+    const availability = getAvailability(agent.pubkey);
     const reason = agentPresenceStartBlockReason(
-      isManagedAgentActive(agent),
-      getAvailability(agent.pubkey),
+      isManagedAgentActive(agent, availability),
+      availability,
     );
     if (reason) throw new Error(reason);
   }
@@ -416,7 +417,9 @@ export function useManagedAgentActions() {
 
   async function handleBulkStopRunning() {
     await runBulkAction(
-      managedAgents.filter((a) => isManagedAgentActive(a)),
+      managedAgents.filter((a) =>
+        isManagedAgentActive(a, getAvailability(a.pubkey)),
+      ),
       "Stop",
       "stop",
       async (a) => {
