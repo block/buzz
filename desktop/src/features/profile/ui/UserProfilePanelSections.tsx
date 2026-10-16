@@ -7,7 +7,7 @@ import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { agentPresenceStartBlockReason } from "@/features/agents/lib/useAgentAvailability";
 import {
   getManagedAgentPrimaryActionLabel,
-  isManagedAgentActive,
+  isManagedAgentLive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
@@ -428,7 +428,7 @@ export function ProfileSummaryView({
           agentStartBlockReason={
             managedAgent
               ? agentPresenceStartBlockReason(
-                  isManagedAgentActive(managedAgent, presenceStatus),
+                  isManagedAgentLive(managedAgent, presenceStatus),
                   presenceStatus,
                 )
               : undefined
@@ -440,7 +440,7 @@ export function ProfileSummaryView({
           }
           agentActionLive={
             managedAgent
-              ? isManagedAgentActive(managedAgent, presenceStatus)
+              ? isManagedAgentLive(managedAgent, presenceStatus)
               : false
           }
           onAgentPrimaryAction={

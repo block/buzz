@@ -5,8 +5,9 @@ import {
   displayedManagedAgentStatus,
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
-  startManagedAgentWithRules,
+  isManagedAgentLive,
   respawnManagedAgentWithRules,
+  startManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
@@ -53,13 +54,13 @@ test("a deployed provider agent established offline offers Deploy again", () => 
 
   // The receipt outlives `!shutdown` and inactivity reaping, so offline
   // presence must route the primary action back to Deploy.
-  assert.equal(isManagedAgentActive(deployed, "offline"), false);
+  assert.equal(isManagedAgentLive(deployed, "offline"), false);
   assert.equal(
     getManagedAgentPrimaryActionLabel(deployed, "offline"),
     "Deploy",
   );
   for (const availability of ["online", "away", undefined]) {
-    assert.equal(isManagedAgentActive(deployed, availability), true);
+    assert.equal(isManagedAgentLive(deployed, availability), true);
     assert.equal(
       getManagedAgentPrimaryActionLabel(deployed, availability),
       "Shutdown",
@@ -67,7 +68,7 @@ test("a deployed provider agent established offline offers Deploy again", () => 
   }
 });
 
-test("lifecycle activity over every status and availability", () => {
+test("liveness over every status and availability", () => {
   // Only a `deployed` receipt yields to presence, and only to established
   // offline. A process status (running/stopped) and a missing deploy are never
   // overridden: positive presence alone grants no lifecycle authority.
@@ -86,11 +87,24 @@ test("lifecycle activity over every status and availability", () => {
     for (const [presence, active] of Object.entries(row)) {
       const availability = presence === "unknown" ? undefined : presence;
       assert.equal(
-        isManagedAgentActive(agent({ status }), availability),
+        isManagedAgentLive(agent({ status }), availability),
         active,
         `${status} × ${presence}`,
       );
     }
+  }
+});
+
+test("control-plane activity stays receipt-only", () => {
+  // Bookkeeping callers (e.g. the local-only respawn guard) must keep reading
+  // the receipt; liveness is isManagedAgentLive's job.
+  for (const [status, active] of [
+    ["running", true],
+    ["deployed", true],
+    ["stopped", false],
+    ["not_deployed", false],
+  ]) {
+    assert.equal(isManagedAgentActive(agent({ status })), active, status);
   }
 });
 

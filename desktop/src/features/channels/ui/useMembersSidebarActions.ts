@@ -11,8 +11,8 @@ import {
   useStopManagedAgentMutation,
 } from "@/features/agents/hooks";
 import {
+  isManagedAgentLive,
   respawnManagedAgentWithRules,
-  isManagedAgentActive,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -90,7 +90,7 @@ export function useMembersSidebarActions({
   const stoppableManagedBots = React.useMemo(
     () =>
       controllableManagedBots.filter((agent) =>
-        isManagedAgentActive(agent, getAvailability(agent.pubkey)),
+        isManagedAgentLive(agent, getAvailability(agent.pubkey)),
       ),
     [controllableManagedBots, getAvailability],
   );
@@ -191,7 +191,7 @@ export function useMembersSidebarActions({
         return;
       }
 
-      if (isManagedAgentActive(agent, getAvailability(agent.pubkey))) {
+      if (isManagedAgentLive(agent, getAvailability(agent.pubkey))) {
         await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
@@ -230,7 +230,7 @@ export function useMembersSidebarActions({
       action: async (agent) => {
         assertStartNotBlockedByPresence(
           agent,
-          isManagedAgentActive(agent, getAvailability(agent.pubkey)),
+          isManagedAgentLive(agent, getAvailability(agent.pubkey)),
         );
         await respawnManagedAgentWithRules({
           agent,

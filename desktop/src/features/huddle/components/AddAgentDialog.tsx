@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderCircle } from "lucide-react";
 import * as React from "react";
 
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
 import { fetchAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { Dialog } from "@/shared/ui/dialog";
@@ -90,7 +90,7 @@ export function AddAgentDialog({
         !isLocal && agent.status === "deployed"
           ? await fetchAgentAvailability(agent.pubkey)
           : undefined;
-      const needsStart = !isManagedAgentActive(agent, availability);
+      const needsStart = !isManagedAgentLive(agent, availability);
       if (needsStart && isLocal) {
         await invoke("start_managed_agent", { pubkey: agent.pubkey });
         startedForAdd = true;

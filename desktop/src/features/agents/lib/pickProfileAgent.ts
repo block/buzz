@@ -1,4 +1,4 @@
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
 import type { ManagedAgent, PresenceStatus } from "@/shared/api/types";
 
 /**
@@ -24,7 +24,7 @@ export function pickProfileAgent(
   getAvailability?: (pubkey: string) => PresenceStatus | undefined,
 ) {
   const isActive = (agent: ManagedAgent) =>
-    isManagedAgentActive(agent, getAvailability?.(agent.pubkey));
+    isManagedAgentLive(agent, getAvailability?.(agent.pubkey));
   return [...agents]
     .filter((agent) => !isArchived(agent.pubkey))
     .sort((left, right) => {

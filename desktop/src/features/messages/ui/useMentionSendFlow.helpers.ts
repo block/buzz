@@ -1,5 +1,5 @@
 import type { MentionRevalidationOptions } from "@/features/messages/lib/agentMentionRevalidation";
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
 import type { ManagedAgent, PresenceStatus } from "@/shared/api/types";
 import {
   type ImetaMedia,
@@ -185,7 +185,7 @@ export function mentionedAgentNeedsWake(
   agent: ManagedAgent,
   availability: PresenceStatus | undefined,
 ) {
-  return !isManagedAgentActive(agent, availability);
+  return !isManagedAgentLive(agent, availability);
 }
 
 /** Carry captured recipient identity through composer clearing and uploads. */

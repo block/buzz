@@ -33,17 +33,24 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
+/** Control-plane bookkeeping only; deployed is a retained receipt, not presence.
+ * Use {@link isManagedAgentLive} for whether the agent is actually running. */
+export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
+  return agent.status === "running" || agent.status === "deployed";
+}
+
 /**
- * Lifecycle action routing only. `deployed` is a retained receipt that the
- * desktop never clears, so it cannot say whether the remote body still exists:
- * after `!shutdown` or an inactivity reap the receipt outlives the pod. Pass
- * relay presence where the caller has it — established `offline` overrides the
- * receipt so the surface offers Deploy (which re-converges the provider) rather
- * than a Shutdown aimed at nothing. Unknown presence keeps the receipt.
+ * Whether the agent is actually running, for lifecycle routing and status
+ * display. A local agent's `running` is its live process. A provider's
+ * `deployed` is a receipt the desktop never clears (I3 in
+ * docs/remote-agents.md: presence is the status), so it outlives a shut-down or
+ * reaped body: established `offline` presence overrides it and the surface
+ * offers Deploy, which re-converges the provider, rather than a Shutdown aimed
+ * at nothing. Unknown presence keeps the receipt.
  */
-export function isManagedAgentActive(
+export function isManagedAgentLive(
   agent: Pick<ManagedAgent, "status">,
-  availability?: PresenceStatus,
+  availability: PresenceStatus | undefined,
 ) {
   if (agent.status === "deployed") return availability !== "offline";
   return agent.status === "running";
@@ -55,10 +62,7 @@ export function managedAgentActivityFrom(
   availability: ReadonlyMap<string, PresenceStatus | undefined>,
 ) {
   return (agent: Pick<ManagedAgent, "pubkey" | "status">) =>
-    isManagedAgentActive(
-      agent,
-      availability.get(normalizePubkey(agent.pubkey)),
-    );
+    isManagedAgentLive(agent, availability.get(normalizePubkey(agent.pubkey)));
 }
 
 /** The status to display: a `deployed` receipt whose agent is established
@@ -67,8 +71,7 @@ export function displayedManagedAgentStatus(
   status: ManagedAgent["status"],
   availability?: PresenceStatus,
 ): ManagedAgent["status"] {
-  return status === "deployed" &&
-    !isManagedAgentActive({ status }, availability)
+  return status === "deployed" && !isManagedAgentLive({ status }, availability)
     ? "stopped"
     : status;
 }
@@ -78,10 +81,10 @@ export function getManagedAgentPrimaryActionLabel(
   availability?: PresenceStatus,
 ) {
   if (agent.backend.type === "provider") {
-    return isManagedAgentActive(agent, availability) ? "Shutdown" : "Deploy";
+    return isManagedAgentLive(agent, availability) ? "Shutdown" : "Deploy";
   }
 
-  if (isManagedAgentActive(agent, availability)) {
+  if (isManagedAgentLive(agent, availability)) {
     return "Stop";
   }
 

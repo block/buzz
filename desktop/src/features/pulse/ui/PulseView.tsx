@@ -1,4 +1,4 @@
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
 import { useAgentAvailabilityLookup } from "@/features/agents/lib/useAgentAvailability";
 import { Search } from "lucide-react";
 import * as React from "react";
@@ -121,7 +121,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
           channels: [],
           channelIds: [],
           capabilities: [],
-          status: isManagedAgentActive(
+          status: isManagedAgentLive(
             agent,
             getManagedAvailability(agent.pubkey),
           )

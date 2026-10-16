@@ -18,7 +18,7 @@ import {
 } from "@/shared/api/tauri";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -213,7 +213,7 @@ export async function attachManagedAgentToChannel(
     // community's (agent, relay) pair, and `startManagedAgent` spawns that same
     // pair — so this ensures the pair the caller is attaching to, never
     // another community's.
-    if (!isManagedAgentActive(input.agent, input.availability)) {
+    if (!isManagedAgentLive(input.agent, input.availability)) {
       if (input.detachedStart) {
         input.detachedStart(input.agent);
       } else {

@@ -17,7 +17,7 @@ import {
 
 import {
   getManagedAgentPrimaryActionLabel,
-  isManagedAgentActive,
+  isManagedAgentLive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -228,7 +228,7 @@ export function MembersSidebarMemberCard({
                     ? "default"
                     : "secondary"
                   : managedAgent &&
-                      isManagedAgentActive(
+                      isManagedAgentLive(
                         managedAgent,
                         presenceStatus ?? undefined,
                       )
@@ -239,7 +239,7 @@ export function MembersSidebarMemberCard({
               {managedAgentRuntime
                 ? agentCommunityAvailability(managedAgentRuntime)
                 : managedAgent &&
-                    isManagedAgentActive(
+                    isManagedAgentLive(
                       managedAgent,
                       presenceStatus ?? undefined,
                     )
@@ -363,7 +363,7 @@ function MemberActionsMenu({
     ? agentPresenceStartBlockReason(
         pairAction
           ? pairAction === "stop"
-          : isManagedAgentActive(managedAgent, availability),
+          : isManagedAgentLive(managedAgent, availability),
         availability,
       )
     : undefined;
@@ -543,7 +543,7 @@ function getManagedAgentActionIcon(
   agent: ManagedAgent,
   availability: PresenceStatus | undefined,
 ) {
-  if (isManagedAgentActive(agent, availability)) {
+  if (isManagedAgentLive(agent, availability)) {
     return <Square className="h-4 w-4" />;
   }
 

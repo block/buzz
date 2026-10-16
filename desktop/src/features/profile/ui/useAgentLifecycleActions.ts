@@ -2,7 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  isManagedAgentActive,
+  isManagedAgentLive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
@@ -38,7 +38,7 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
-      if (isManagedAgentActive(managedAgent, availability)) {
+      if (isManagedAgentLive(managedAgent, availability)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
           channels: channels ?? [],
@@ -82,7 +82,7 @@ export function useAgentLifecycleActions({
 
     try {
       const blockReason = agentPresenceStartBlockReason(
-        isManagedAgentActive(managedAgent, availability),
+        isManagedAgentLive(managedAgent, availability),
         availability,
       );
       if (blockReason) throw new Error(blockReason);
