@@ -80,12 +80,12 @@ retirement sequence below.
 fence trigger, including by calling the existing helper
 `attach_community_write_fence`. Writers of a new tenant-owned table MUST be
 fenced in the application instead, by community admission. Serving writers,
-including fleet sweeps (one community at a time), open their transaction with
-`begin_community_write_transaction` or one of its variants
-(`crates/buzz-db/src/runtime/mod.rs`). It returns an `AdmittedTx`
-(`crates/buzz-db/src/runtime/admitted_tx.rs`), built by
+including fleet sweeps (one community at a time), are admitted by
 `DeletionStore::guard_transaction`, which takes the shared community deletion
-lock and refuses a community that is not `active`. Helpers that take
+lock and refuses a community that is not `active`. Most open their transaction
+with `begin_community_write_transaction` or one of its variants
+(`crates/buzz-db/src/runtime/mod.rs`), which returns an `AdmittedTx`
+(`crates/buzz-db/src/runtime/admitted_tx.rs`). Helpers that take
 `&mut AdmittedTx` reject a raw transaction at compile time, but crate code can
 still bypass the type, so the fence triggers remain the authoritative backstop
 (ARCHITECTURE.md § *Supported Writer Contract*). A table without a trigger has
@@ -225,8 +225,9 @@ write-blocking lock. Scans that do not block writes, such as
   community has `deletion_state = 'active'` and `deleted_at IS NULL`, as
   `DeletionStore::guard_transaction` does. Selecting active communities
   before taking the lock races with deletion.
-- A repair script that inserts channel-bearing `events` rows, or moves an
-  event's `created_at` backward, is outside the replica-floor proof: an
+- A repair script that writes a channel-bearing `events` row older than the
+  floor (inserting one, moving `created_at` backward, or setting `channel_id`
+  on an old row) is outside the replica-floor proof: an
   operator session does not set `buzz.created_at_floor`, so the commit-time
   floor guard lets it through (`migrations/0021`). Its PR MUST document a
   reviewed procedure that keeps replica routing closed from before the first
