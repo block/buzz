@@ -12,6 +12,7 @@
 //! - Quarantine vars inherited for ancestry checks
 //! - HMAC binds callback to specific push operation
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use tokio::fs;
@@ -29,6 +30,9 @@ use tracing::{error, info};
 /// Git sets automatically (quarantine):
 /// - `GIT_OBJECT_DIRECTORY` — quarantine object store
 /// - `GIT_ALTERNATE_OBJECT_DIRECTORIES` — includes the real object store
+///
+/// The script is written with a `#!/usr/bin/env bash` shebang; see
+/// [`render_pre_receive_hook`] for replacing it with an explicit interpreter.
 const PRE_RECEIVE_HOOK: &str = r#"#!/usr/bin/env bash
 # Buzz pre-receive hook — FAIL-CLOSED
 # ANY error, timeout, or non-200 response → reject the push.
@@ -144,12 +148,32 @@ fi
 exit 0
 "#;
 
+/// Shebang line [`PRE_RECEIVE_HOOK`] starts with.
+const DEFAULT_SHEBANG: &str = "#!/usr/bin/env bash\n";
+
+/// Render the hook script, optionally replacing its shebang interpreter.
+///
+/// `interpreter` comes from `BUZZ_BASH_PATH` (validated in config): an absolute
+/// path to bash for hosts without `/usr/bin/env`, such as minimal containers.
+/// `None` keeps the portable `#!/usr/bin/env bash`.
+fn render_pre_receive_hook(interpreter: Option<&str>) -> Cow<'static, str> {
+    match interpreter {
+        None => Cow::Borrowed(PRE_RECEIVE_HOOK),
+        Some(interpreter) => {
+            let body = PRE_RECEIVE_HOOK
+                .strip_prefix(DEFAULT_SHEBANG)
+                .expect("PRE_RECEIVE_HOOK starts with DEFAULT_SHEBANG");
+            Cow::Owned(format!("#!{interpreter}\n{body}"))
+        }
+    }
+}
+
 /// Install the pre-receive hook into a bare repository.
 ///
 /// Creates a `hooks/` directory and writes the hook script with execute permission.
 /// Called during repo creation (kind:30617 handling) and can be called to
 /// retrofit existing repos.
-pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
+pub async fn install_hook(repo_path: &Path, interpreter: Option<&str>) -> anyhow::Result<()> {
     let hooks_dir = repo_path.join("hooks");
     fs::create_dir_all(&hooks_dir).await.map_err(|e| {
         error!(path = %hooks_dir.display(), error = %e, "failed to create hooks dir");
@@ -157,7 +181,8 @@ pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
     })?;
 
     let hook_path = hooks_dir.join("pre-receive");
-    fs::write(&hook_path, PRE_RECEIVE_HOOK).await.map_err(|e| {
+    let hook = render_pre_receive_hook(interpreter);
+    fs::write(&hook_path, hook.as_bytes()).await.map_err(|e| {
         error!(path = %hook_path.display(), error = %e, "failed to write hook");
         anyhow::anyhow!("failed to write pre-receive hook: {e}")
     })?;
@@ -179,7 +204,7 @@ pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::PRE_RECEIVE_HOOK;
+    use super::{render_pre_receive_hook, DEFAULT_SHEBANG, PRE_RECEIVE_HOOK};
 
     #[test]
     fn runtime_image_installs_pre_receive_hook_tools() {
@@ -203,5 +228,19 @@ mod tests {
                 "relay runtime image must install {tool}; the git pre-receive hook uses it and fails closed without it"
             );
         }
+    }
+
+    #[test]
+    fn default_hook_keeps_env_shebang() {
+        assert!(PRE_RECEIVE_HOOK.starts_with(DEFAULT_SHEBANG));
+        assert_eq!(render_pre_receive_hook(None), PRE_RECEIVE_HOOK);
+    }
+
+    #[test]
+    fn custom_interpreter_replaces_only_the_shebang() {
+        let hook = render_pre_receive_hook(Some("/nix/store/abc-bash/bin/bash"));
+        let (first, rest) = hook.split_once('\n').expect("hook has a body");
+        assert_eq!(first, "#!/nix/store/abc-bash/bin/bash");
+        assert_eq!(rest, &PRE_RECEIVE_HOOK[DEFAULT_SHEBANG.len()..]);
     }
 }
