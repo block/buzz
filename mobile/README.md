@@ -23,9 +23,12 @@ engine all come from the same Flutter version.
 
 ### iOS toolchain
 
-Use Xcode 27.0 for iOS development and build validation. Xcode 26 remains
-supported for compatibility. Activate the repository's pinned Flutter SDK
-with Hermit as described above.
+Use Xcode 27.0 for iOS development and build validation on an Apple silicon
+Mac running macOS Tahoe 26.6 or later, as required by the
+[Xcode 27 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
+On Intel Macs or hosts that cannot meet those requirements, use a compatible
+Xcode 26 version, which remains supported. Activate the repository's pinned
+Flutter SDK with Hermit as described above.
 
 When multiple Xcode versions are installed, select the intended version for
 the command with `DEVELOPER_DIR`, for example:
