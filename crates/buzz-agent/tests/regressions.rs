@@ -1655,6 +1655,31 @@ fn reply_nag_count(request: &Value) -> usize {
         .unwrap_or(0)
 }
 
+/// The reply-guard reminder text injected into one captured request, if any.
+///
+/// Distinguishes the three reminders (normal / failed / uncertain) so a test
+/// can prove the guard chose the right instruction, not merely that it nagged.
+fn reply_nag_text(request: &Value) -> Option<String> {
+    request["messages"]
+        .as_array()?
+        .iter()
+        .filter_map(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap_or("")).ok())
+        .find(|p| p["server"] == "buzz-agent")
+        .and_then(|p| p["text"].as_str().map(str::to_owned))
+}
+
+/// A `buzz-dev-mcp` shell body carrying `stdout` and exit status, as the model
+/// sees it. The reply guard parses this to confirm a send.
+fn fake_shell_body(stdout: &str, exit_code: i64) -> String {
+    json!({ "exit_code": exit_code, "stdout": stdout, "stderr": "", "timed_out": false })
+        .to_string()
+}
+
+/// A successful `buzz messages send` CLI ack with a valid event id.
+fn accepted_send_ack() -> String {
+    format!(r#"{{"accepted":true,"event_id":"{}"}}"#, "a".repeat(64))
+}
+
 /// A publish-shaped call to a real registered shell tool.
 fn openai_shell_send(id: &str) -> Value {
     openai_tool_call(
@@ -1782,10 +1807,11 @@ async fn reply_guard_nags_twice_then_lets_the_turn_end() {
     h.shutdown().await;
 }
 
-/// A real publish attempt through a registered shell tool satisfies the guard:
-/// no reminder, no extra round.
+/// A send that returns a successful relay ack satisfies the guard: no reminder,
+/// no extra round. (Case D: `accepted:true` + valid event id + static content.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reply_guard_satisfied_by_registered_shell_send() {
+    let ack = fake_shell_body(&accepted_send_ack(), 0);
     let llm = spawn_capturing_llm(vec![
         openai_shell_send("tc1"),
         openai_text("posted"),
@@ -1795,7 +1821,11 @@ async fn reply_guard_satisfied_by_registered_shell_send() {
     let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_REQUIRE_REPLY", "1")]).await;
     let sid = init_session_with_fake_mcp(
         &mut h,
-        &[("FAKE_MCP_TOOL_COUNT", "1"), ("FAKE_MCP_SHELL_TOOL", "1")],
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_SHELL_TOOL", "1"),
+            ("FAKE_MCP_RESULT_TEXT", &ack),
+        ],
     )
     .await;
 
@@ -1806,10 +1836,144 @@ async fn reply_guard_satisfied_by_registered_shell_send() {
     assert_eq!(
         captured.len(),
         2,
-        "a recognized send must not be nagged, got {} LLM calls",
+        "a confirmed send must not be nagged, got {} LLM calls",
         captured.len()
     );
     assert_eq!(reply_nag_count(&captured[1]), 0);
+    h.shutdown().await;
+}
+
+/// Case A: an explicit rejection (`accepted:false`) is a proven failure, so the
+/// guard must emit the *corrective* reminder (one repost allowed), not the
+/// uncertain/no-resend one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_failed_send_gets_corrective_nag() {
+    let body = fake_shell_body(r#"{"accepted":false}"#, 0);
+    let llm = spawn_capturing_llm(vec![
+        openai_shell_send("tc1"),
+        openai_text("still silent"),
+        openai_text("must-not-be-requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_SHELL_TOOL", "1"),
+            ("FAKE_MCP_RESULT_TEXT", &body),
+        ],
+    )
+    .await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 3, "one corrective reminder then end");
+    let nag = reply_nag_text(&captured[2]).expect("failed send must be nagged");
+    assert!(
+        nag.contains("publish once now"),
+        "expected the corrective reminder: {nag}"
+    );
+    assert!(
+        !nag.contains("Do not send another channel message"),
+        "a proven failure must NOT use the no-resend reminder: {nag}"
+    );
+    h.shutdown().await;
+}
+
+/// Case B: an ambiguous result (timeout exit, no ack) is NOT a proven failure.
+/// The guard must emit the uncertainty reminder that forbids a blind resend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_uncertain_send_gets_no_resend_nag() {
+    // Exit 124 is the shell's own timeout code; no usable ack in stdout.
+    let body = fake_shell_body("", 124);
+    let llm = spawn_capturing_llm(vec![
+        openai_shell_send("tc1"),
+        openai_text("still silent"),
+        openai_text("must-not-be-requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_SHELL_TOOL", "1"),
+            ("FAKE_MCP_RESULT_TEXT", &body),
+        ],
+    )
+    .await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 3, "one uncertainty reminder then end");
+    let nag = reply_nag_text(&captured[2]).expect("uncertain send must be nagged");
+    assert!(
+        nag.contains("Do not send another channel message"),
+        "expected the no-resend reminder: {nag}"
+    );
+    assert!(
+        nag.contains("delivery is unknown"),
+        "expected the uncertainty framing: {nag}"
+    );
+    assert!(
+        !nag.contains("publish once now"),
+        "an uncertain delivery must NOT invite a repost: {nag}"
+    );
+    h.shutdown().await;
+}
+
+/// Case C: no publish attempt at all gets the original reply reminder, which
+/// names the command and licenses genuine silence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reply_guard_no_attempt_gets_normal_nag() {
+    let llm = spawn_capturing_llm(vec![
+        openai_text("silent-1"),
+        openai_text("must-not-be-requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_REQUIRE_REPLY", "1"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let r = prompt_to_completion(&mut h, &sid).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 2, "one normal reminder then end");
+    let nag = reply_nag_text(&captured[1]).expect("a silent turn must be nagged");
+    assert!(
+        nag.contains("buzz messages send"),
+        "normal reminder names the command: {nag}"
+    );
+    assert!(
+        nag.contains("silence is genuinely correct"),
+        "normal reminder licenses silence: {nag}"
+    );
     h.shutdown().await;
 }
 
