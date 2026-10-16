@@ -12997,6 +12997,9 @@ export function maybeInstallE2eTauriMocks() {
         // e2e runs headless with no OS idle API; the presence hook falls back
         // to in-app activity tracking.
         return null;
+      case "get_backdrop_filter_unpainted":
+        // The e2e browser paints backdrop-filter; keep the glass surfaces.
+        return false;
       case "get_git_identity":
         // Matches the synthetic human author on a mock snapshot commit so the
         // viewer-identity avatar attribution is exercised in e2e.
