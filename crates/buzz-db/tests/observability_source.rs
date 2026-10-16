@@ -1438,21 +1438,60 @@ fn raw_literal_prefix_starts_token(bytes: &[u8], index: usize) -> bool {
 fn mask_comments_and_literals(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut masked = bytes.to_vec();
-    let mut blank = |from: usize, to: usize| {
-        for byte in &mut masked[from..to.min(bytes.len())] {
+    for span in source_spans(source) {
+        for byte in &mut masked[span.start..span.end] {
             if *byte != b'\n' {
                 *byte = b' ';
             }
         }
-    };
+    }
+    String::from_utf8(masked).expect("masking replaces whole ASCII-delimited spans")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    Comment,
+    /// A plain (`"…"`) string literal; `start` is its opening quote.
+    Str,
+    /// A raw string literal; `start` is its `r`, followed by `hashes` `#`s.
+    RawStr {
+        hashes: usize,
+    },
+    Char,
+}
+
+struct SourceSpan {
+    start: usize,
+    end: usize,
+    kind: SpanKind,
+}
+
+impl SourceSpan {
+    /// The text between a string literal's delimiters, escapes left as written.
+    fn string_body<'a>(&self, source: &'a str) -> Option<&'a str> {
+        match self.kind {
+            SpanKind::Str => source.get(self.start + 1..self.end.saturating_sub(1)),
+            SpanKind::RawStr { hashes } => {
+                source.get(self.start + 2 + hashes..self.end.saturating_sub(1 + hashes))
+            }
+            SpanKind::Comment | SpanKind::Char => None,
+        }
+    }
+}
+
+/// Every comment, string, raw string, and char literal in `source`, in order.
+fn source_spans(source: &str) -> Vec<SourceSpan> {
+    let bytes = source.as_bytes();
+    let mut spans = Vec::new();
     let mut index = 0usize;
     while index < bytes.len() {
         let start = index;
-        match bytes[index] {
+        let kind = match bytes[index] {
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
                 while index < bytes.len() && bytes[index] != b'\n' {
                     index += 1;
                 }
+                SpanKind::Comment
             }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 let mut depth = 0usize;
@@ -1470,6 +1509,7 @@ fn mask_comments_and_literals(source: &str) -> String {
                         index += 1;
                     }
                 }
+                SpanKind::Comment
             }
             b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
                 && raw_literal_prefix_starts_token(bytes, index)
@@ -1491,6 +1531,7 @@ fn mask_comments_and_literals(source: &str) -> String {
                 index = source[body..]
                     .find(&close)
                     .map_or(bytes.len(), |offset| body + offset + close.len());
+                SpanKind::RawStr { hashes }
             }
             b'"' => {
                 index += 1;
@@ -1498,18 +1539,24 @@ fn mask_comments_and_literals(source: &str) -> String {
                     index += if bytes[index] == b'\\' { 2 } else { 1 };
                 }
                 index += 1;
+                SpanKind::Str
             }
             b'\'' if char_literal_end(source, index).is_some() => {
                 index = char_literal_end(source, index).expect("guard matched");
+                SpanKind::Char
             }
             _ => {
                 index += 1;
                 continue;
             }
-        }
-        blank(start, index);
+        };
+        spans.push(SourceSpan {
+            start,
+            end: index.min(bytes.len()),
+            kind,
+        });
     }
-    String::from_utf8(masked).expect("masking replaces whole ASCII-delimited spans")
+    spans
 }
 
 /// The end (exclusive) of the char literal whose opening quote is at `start`,
@@ -2318,8 +2365,247 @@ fn updates_event_floor_columns(function: &str) -> bool {
     direct_update || events_upsert
 }
 
-fn event_floor_policy_violations(production: &str) -> Vec<String> {
+/// The offset of the delimiter that closes the bracket opened at `open` in
+/// `masked` (comments and literals already blanked).
+fn matching_close(masked: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, byte) in masked.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `text` as a plain Rust string literal.
+fn plain_literal(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The string literal that is the whole of `arg`, if it is one.
+fn sole_string_literal(arg: &str) -> Option<SourceSpan> {
+    let trimmed = arg.trim();
+    let offset = arg.len() - arg.trim_start().len();
+    let mut spans = source_spans(trimmed).into_iter();
+    let span = spans.next()?;
+    (spans.next().is_none()
+        && span.start == 0
+        && span.end == trimmed.len()
+        && matches!(span.kind, SpanKind::Str | SpanKind::RawStr { .. }))
+    .then_some(SourceSpan {
+        start: span.start + offset,
+        end: span.end + offset,
+        kind: span.kind,
+    })
+}
+
+/// Whether literal text spells event-write SQL the floor policy must see.
+fn spells_event_write_sql(text: &str) -> bool {
+    let normalized = normalized_sql_source(text);
+    normalized.contains("insert into") || normalized.contains("update ")
+}
+
+/// Bring SQL that per-function literal scans cannot see into view, so the
+/// floor policy fails closed on it now that no trigger backs it up: each
+/// `include_str!("…")` becomes one literal holding the included file
+/// (resolved against `path`), and the literal arguments of each `concat!` are
+/// joined into one literal. Forms that stay opaque are violations: an
+/// `include_str!` whose path is not one literal or cannot be read, and a
+/// `concat!` that spells SQL around a non-literal argument.
+fn sql_visible_source(path: &std::path::Path, source: &str) -> (String, Vec<String>) {
+    let mut violations = Vec::new();
+    let mut text = source.to_owned();
+    for (macro_name, expand_include) in [("include_str!(", true), ("concat!(", false)] {
+        // Last occurrence first: a rewrite never moves an earlier offset, and
+        // an inner `concat!` is joined before the one around it.
+        loop {
+            let masked = mask_comments_and_literals(&text);
+            let Some(at) = masked
+                .match_indices(macro_name)
+                .map(|(at, _)| at)
+                .filter(|at| {
+                    !masked[..*at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                })
+                .last()
+            else {
+                break;
+            };
+            let open = at + macro_name.len() - 1;
+            let Some(close) = matching_close(&masked, open) else {
+                violations.push(format!("{macro_name}…) is unterminated"));
+                break;
+            };
+            let args = &text[open + 1..close];
+            let replacement = if expand_include {
+                let included = sole_string_literal(args)
+                    .and_then(|span| span.string_body(args).map(str::to_owned))
+                    .and_then(|relative| {
+                        let resolved = path.parent()?.join(&relative);
+                        std::fs::read_to_string(resolved).ok()
+                    });
+                match included {
+                    Some(contents) => plain_literal(&contents),
+                    None => {
+                        violations.push(format!("include_str!({}) is opaque", args.trim()));
+                        plain_literal("")
+                    }
+                }
+            } else {
+                let masked_args = &masked[open + 1..close];
+                let mut pieces = Vec::new();
+                let mut joined = String::new();
+                let mut opaque = false;
+                let mut depth = 0usize;
+                let mut arg_start = 0usize;
+                for (index, byte) in masked_args.bytes().chain(std::iter::once(b',')).enumerate() {
+                    match byte {
+                        b'(' | b'[' | b'{' => depth += 1,
+                        b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                        b',' if depth == 0 => {
+                            let arg = &args[arg_start..index.min(args.len())];
+                            arg_start = index + 1;
+                            if arg.trim().is_empty() {
+                                continue;
+                            }
+                            match sole_string_literal(arg) {
+                                Some(span) => {
+                                    let body = span.string_body(arg).unwrap_or_default();
+                                    let body = if matches!(span.kind, SpanKind::Str) {
+                                        body.to_owned()
+                                    } else {
+                                        body.replace('\\', "\\\\").replace('"', "\\\"")
+                                    };
+                                    joined.push_str(&body);
+                                }
+                                None => {
+                                    opaque = true;
+                                    if !joined.is_empty() {
+                                        pieces.push(format!("\"{joined}\""));
+                                    }
+                                    joined.clear();
+                                    pieces.push(arg.trim().to_owned());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !joined.is_empty() {
+                    pieces.push(format!("\"{joined}\""));
+                }
+                if opaque && spells_event_write_sql(args) {
+                    violations.push(format!(
+                        "concat!({}) spells SQL around a non-literal argument",
+                        args.trim()
+                    ));
+                }
+                if opaque {
+                    // Keep the opaque form visible to the per-function scan but
+                    // drop the macro name so this loop terminates.
+                    format!("concat_opaque!({})", pieces.join(", "))
+                } else {
+                    pieces.pop().unwrap_or_else(|| plain_literal(""))
+                }
+            };
+            text.replace_range(at..=close, &replacement);
+        }
+    }
+    (text, violations)
+}
+
+/// Length of the function item that starts `masked_function` (comments and
+/// literals blanked): through the `}` closing its body, or through the `;` of
+/// a bodiless declaration. Unlike [`cfg_test_item_len`], a `;` inside the
+/// signature's parentheses or brackets (`[u8; 4]`) does not end it. Without a
+/// body the whole input counts, so an unrecognized shape never hides SQL.
+fn function_item_len(masked_function: &str) -> usize {
+    let mut nesting = 0usize;
+    for (index, byte) in masked_function.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' => nesting += 1,
+            b')' | b']' => nesting = nesting.saturating_sub(1),
+            b';' if nesting == 0 => return index + 1,
+            b'{' if nesting == 0 => {
+                return matching_close(masked_function, index)
+                    .map_or(masked_function.len(), |close| close + 1);
+            }
+            _ => {}
+        }
+    }
+    masked_function.len()
+}
+
+/// Each function slice cut to the function's own item, so a const or static
+/// after its body is not attributed to it (see [`item_level_literals`]).
+fn function_items(production: &str) -> Vec<&str> {
     function_slices(production)
+        .into_iter()
+        .map(|function| &function[..function_item_len(&mask_comments_and_literals(function))])
+        .collect()
+}
+
+/// String literal bodies outside every function body: consts, statics and
+/// macro bodies. A function's floor guard cannot be attributed to SQL there.
+fn item_level_literals(production: &str) -> String {
+    let base = production.as_ptr() as usize;
+    let functions: Vec<(usize, usize)> = function_items(production)
+        .into_iter()
+        .map(|function| {
+            let start = function.as_ptr() as usize - base;
+            (start, start + function.len())
+        })
+        .collect();
+    let mut literals = String::new();
+    for span in source_spans(production) {
+        if functions
+            .iter()
+            .any(|(start, end)| *start <= span.start && span.end <= *end)
+        {
+            continue;
+        }
+        if let Some(body) = span.string_body(production) {
+            literals.push_str(body);
+            literals.push('\n');
+        }
+    }
+    literals
+}
+
+/// Every floor-policy violation in one production file, after
+/// [`sql_visible_source`] has exposed included and concatenated SQL.
+fn file_event_floor_policy_violations(path: &std::path::Path, source: &str) -> Vec<String> {
+    let (production, mut violations) = sql_visible_source(path, &strip_cfg_test_items(source));
+    let item_level = item_level_literals(&production);
+    if inserts_events_row(&item_level) || updates_event_floor_columns(&item_level) {
+        violations.push("event-write SQL outside any function body".to_owned());
+    }
+    // The fence cannot bound a prepared transaction's rows without the
+    // retired trigger (see `replica_fence::sample_writer`), so no supported
+    // writer may prepare one.
+    let literals: String = source_spans(&production)
+        .iter()
+        .filter_map(|span| span.string_body(&production))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized_sql_source(&literals).contains("prepare transaction") {
+        violations.push("PREPARE TRANSACTION in a production writer".to_owned());
+    }
+    violations.extend(event_floor_policy_violations(&production));
+    violations
+}
+
+fn event_floor_policy_violations(production: &str) -> Vec<String> {
+    function_items(production)
         .into_iter()
         .filter(|function| {
             let header = function_header(function);
@@ -2457,6 +2743,87 @@ pub(crate) async fn write_nip43_membership_snapshot(tx: &mut AdmittedTx) {
 }
 
 #[test]
+fn event_floor_policy_fails_closed_on_sql_it_cannot_attribute() {
+    let dir = std::env::temp_dir().join(format!("buzz-floor-policy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    std::fs::write(
+        dir.join("insert_event.sql"),
+        "INSERT INTO \"events\" (id) VALUES ($1)",
+    )
+    .expect("sql fixture");
+    std::fs::write(dir.join("notes.md"), "Prose that quotes nothing.").expect("md fixture");
+    let path = dir.join("writer.rs");
+    let source = r##"
+const LEADING_INSERT: &str = "INSERT INTO events (id) VALUES ($1)";
+const USER_AGENT: &str = concat!("buzz-agent/", env!("CARGO_PKG_VERSION"));
+static NOTES: &str = include_str!("notes.md");
+async fn joined_insert(tx: &mut AdmittedTx) {
+    sqlx::query(concat!("INSERT INTO ", "events (id) VALUES ($1)"));
+}
+async fn guarded_joined_insert(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query(concat!("INSERT INTO ", r#"events"#, " (id) VALUES ($1)"));
+}
+const TRAILING_REWRITE: &str = "UPDATE events SET created_at = $1 WHERE id = $2";
+async fn joined_rewrite(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query(concat!("UPDATE events ", "SET created_at = $1 WHERE id = $2"));
+}
+async fn included_insert(tx: &mut AdmittedTx) {
+    sqlx::query(include_str!("insert_event.sql"));
+}
+async fn guarded_included_insert(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query(include_str!("insert_event.sql"));
+}
+async fn opaque_include(tx: &mut AdmittedTx) {
+    sqlx::query(include_str!(concat!(env!("OUT_DIR"), "/insert.sql")));
+}
+async fn opaque_concat(tx: &mut AdmittedTx) {
+    sqlx::query(concat!("INSERT INTO ", env!("EVENTS_TABLE")));
+}
+async fn two_phase(tx: &mut AdmittedTx) {
+    sqlx::query("PREPARE TRANSACTION 'fence'");
+}
+"##;
+    let violations = file_event_floor_policy_violations(&path, source);
+    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+    assert_eq!(
+        violations,
+        [
+            r#"include_str!(concat!(env!("OUT_DIR"), "/insert.sql")) is opaque"#,
+            r#"concat!("INSERT INTO ", env!("EVENTS_TABLE")) spells SQL around a non-literal argument"#,
+            "event-write SQL outside any function body",
+            "PREPARE TRANSACTION in a production writer",
+            "async fn joined_insert(tx: &mut AdmittedTx) {",
+            "async fn joined_rewrite(tx: &mut AdmittedTx) {",
+            "async fn included_insert(tx: &mut AdmittedTx) {",
+        ]
+    );
+
+    // Each item-level form is caught on its own, wherever it sits.
+    for item in [
+        "const LEADING: &str = \"INSERT INTO events (id) VALUES ($1)\";\nfn f() {}\n",
+        "fn f() {}\nconst TRAILING: &str = \"UPDATE events SET channel_id = $1\";\nfn g() {}\n",
+        "fn f() {}\nstatic INCLUDED: &str = include_str!(\"insert_event.sql\");\n",
+    ] {
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(
+            dir.join("insert_event.sql"),
+            "insert into events (id) values ($1)",
+        )
+        .expect("sql fixture");
+        let found = file_event_floor_policy_violations(&path, item);
+        std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+        assert_eq!(
+            found,
+            ["event-write SQL outside any function body"],
+            "item-level SQL in `{item}`"
+        );
+    }
+}
+
+#[test]
 fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it() {
     let files = production_event_writer_source_files();
     let crates_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2469,8 +2836,9 @@ fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it(
     let mut guarded_writers = 0;
     let mut violations = Vec::new();
     for path in files {
-        let production = strip_cfg_test_items(&std::fs::read_to_string(&path).expect("source"));
-        guarded_writers += function_slices(&production)
+        let source = std::fs::read_to_string(&path).expect("source");
+        let (production, _) = sql_visible_source(&path, &strip_cfg_test_items(&source));
+        guarded_writers += function_items(&production)
             .into_iter()
             .filter(|function| {
                 inserts_events_row(function)
@@ -2479,7 +2847,7 @@ fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it(
             })
             .count();
         violations.extend(
-            event_floor_policy_violations(&production)
+            file_event_floor_policy_violations(&path, &source)
                 .into_iter()
                 .map(|header| format!("{}: {header}", path.display())),
         );
