@@ -231,7 +231,7 @@ class ChannelActions {
     if (trimmed.isEmpty) return const [];
 
     final events = await _session.searchProfiles(trimmed, limit: limit);
-    return directoryUsersFromProfileEvents(events)
+    return directoryUsersFromProfileEvents(events, alphabetize: false)
         .where(
           (user) =>
               _currentPubkey == null ||
