@@ -1,10 +1,10 @@
 //! Deployment-global operator-listener mention matching and notification delivery.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use chrono::{DateTime, TimeDelta, Utc};
-use futures_util::future::join_all;
 use serde::Serialize;
+use tokio::{sync::Notify, task::JoinSet};
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -13,9 +13,11 @@ use crate::{handlers::req::event_visible_to_reader, nip98::nip98_header, state::
 use reqwest::StatusCode;
 
 const CLAIM_SECS: i64 = 30;
-const DELIVERY_BATCH_LIMIT: i64 = 10;
+const MAX_IN_FLIGHT: usize = 10;
 const IDLE_POLL_FLOOR: Duration = Duration::from_millis(250);
 const IDLE_POLL_CEILING: Duration = Duration::from_secs(2);
+const CLAIM_FAILURE_DELAY: Duration = Duration::from_secs(2);
+const WAKE_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const OUTBOX_REAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const REGISTRATION_REAP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -31,13 +33,6 @@ struct MentionNotification<'a> {
     event_kind: i32,
     event_created_at: i64,
     event: &'a nostr::Event,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerIteration {
-    Worked,
-    Idle,
-    Failed,
 }
 
 /// Reap stale deliveries every five minutes and expired registrations daily.
@@ -71,15 +66,114 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
             return;
         }
     };
+    let wake = Arc::new(Notify::new());
+    tokio::spawn(run_wake_listener(state.db.clone(), Arc::clone(&wake)));
+    let admission = buzz_db::operator_listener::DeliveryAdmission {
+        require_membership: state.config.require_relay_membership,
+        allow_owner_membership: state.config.allow_nip_oa_auth,
+        require_allowlist: state.config.pubkey_allowlist_enabled,
+    };
+    run_delivery_loop(
+        &wake,
+        |capacity| {
+            let state = Arc::clone(&state);
+            async move {
+                state
+                    .db
+                    .claim_operator_listener_deliveries(
+                        capacity as i64,
+                        Utc::now() + TimeDelta::seconds(CLAIM_SECS),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        },
+        |delivery| {
+            let state = Arc::clone(&state);
+            let http = http.clone();
+            async move {
+                let store = DbDeliveryStore {
+                    db: &state.db,
+                    admission,
+                };
+                deliver_one(
+                    &state.config.operator_listener_delivery_urls,
+                    &state.relay_keypair,
+                    &store,
+                    &ReqwestDeliveryTransport { http: &http },
+                    delivery,
+                )
+                .await;
+            }
+        },
+    )
+    .await;
+}
+
+/// Wake the delivery loop whenever new outbox rows commit on any pod.
+///
+/// Notifications are a latency hint only: the loop's idle poll still finds
+/// rows whose wake-up was lost while this listener was disconnected.
+async fn run_wake_listener(db: buzz_db::Db, wake: Arc<Notify>) {
+    loop {
+        match db.listen_for_operator_listener_deliveries().await {
+            Ok(mut wakes) => loop {
+                // A `None` (reconnected) may have skipped notifications, so
+                // it wakes the loop too.
+                if let Err(error) = wakes.recv().await {
+                    warn!(%error, "operator-listener wake listener disconnected");
+                    break;
+                }
+                wake.notify_one();
+            },
+            Err(error) => warn!(%error, "operator-listener wake listener failed to connect"),
+        }
+        tokio::time::sleep(WAKE_RECONNECT_DELAY).await;
+    }
+}
+
+/// Claim rows whenever a delivery slot is free, so one slow endpoint never
+/// holds up the deliveries behind it.
+async fn run_delivery_loop<C, CF, D, DF>(wake: &Notify, mut claim: C, deliver: D)
+where
+    C: FnMut(usize) -> CF,
+    CF: Future<Output = Result<Vec<buzz_db::operator_listener::ClaimedDelivery>, String>>,
+    D: Fn(buzz_db::operator_listener::ClaimedDelivery) -> DF,
+    DF: Future<Output = ()> + Send + 'static,
+{
+    let mut in_flight = JoinSet::new();
     let mut idle_delay = IDLE_POLL_FLOOR;
     loop {
-        match run_delivery_once(&state, &http).await {
-            WorkerIteration::Worked => idle_delay = IDLE_POLL_FLOOR,
-            WorkerIteration::Idle => {
-                tokio::time::sleep(idle_delay).await;
+        let capacity = MAX_IN_FLIGHT - in_flight.len();
+        if capacity > 0 {
+            match claim(capacity).await {
+                Ok(claimed) if !claimed.is_empty() => {
+                    for delivery in claimed {
+                        in_flight.spawn(deliver(delivery));
+                    }
+                    idle_delay = IDLE_POLL_FLOOR;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(%error, "operator-listener delivery claim failed");
+                    idle_delay = CLAIM_FAILURE_DELAY;
+                }
+            }
+        }
+        tokio::select! {
+            Some(joined) = in_flight.join_next() => {
+                // Refill every freed slot with one claim, not one per row.
+                for joined in std::iter::once(joined).chain(std::iter::from_fn(|| in_flight.try_join_next())) {
+                    if let Err(error) = joined {
+                        error!(%error, "operator-listener delivery task failed");
+                    }
+                }
+            }
+            () = wake.notified() => idle_delay = IDLE_POLL_FLOOR,
+            () = tokio::time::sleep(idle_delay) => {
                 idle_delay = (idle_delay * 2).min(IDLE_POLL_CEILING);
             }
-            WorkerIteration::Failed => tokio::time::sleep(Duration::from_secs(2)).await,
         }
     }
 }
@@ -89,11 +183,6 @@ fn build_delivery_http_client(timeout: Duration) -> Result<reqwest::Client, reqw
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-}
-
-async fn run_delivery_once(state: &AppState, http: &reqwest::Client) -> WorkerIteration {
-    let transport = ReqwestDeliveryTransport { http };
-    run_delivery_once_with_transport(state, &transport).await
 }
 
 #[async_trait::async_trait]
@@ -186,48 +275,6 @@ impl DeliveryTransport for ReqwestDeliveryTransport<'_> {
             .map(|response| response.status())
             .map_err(|error| error.to_string())
     }
-}
-
-async fn run_delivery_once_with_transport<T: DeliveryTransport>(
-    state: &AppState,
-    transport: &T,
-) -> WorkerIteration {
-    let claimed = match state
-        .db
-        .claim_operator_listener_deliveries(
-            DELIVERY_BATCH_LIMIT,
-            Utc::now() + TimeDelta::seconds(CLAIM_SECS),
-        )
-        .await
-    {
-        Ok(claimed) => claimed,
-        Err(error) => {
-            error!(%error, "operator-listener delivery claim failed");
-            return WorkerIteration::Failed;
-        }
-    };
-    if claimed.is_empty() {
-        return WorkerIteration::Idle;
-    }
-    let store = DbDeliveryStore {
-        db: &state.db,
-        admission: buzz_db::operator_listener::DeliveryAdmission {
-            require_membership: state.config.require_relay_membership,
-            allow_owner_membership: state.config.allow_nip_oa_auth,
-            require_allowlist: state.config.pubkey_allowlist_enabled,
-        },
-    };
-    join_all(claimed.into_iter().map(|delivery| {
-        deliver_one(
-            &state.config.operator_listener_delivery_urls,
-            &state.relay_keypair,
-            &store,
-            transport,
-            delivery,
-        )
-    }))
-    .await;
-    WorkerIteration::Worked
 }
 
 async fn deliver_one<T: DeliveryTransport, S: DeliveryStore>(
@@ -579,6 +626,216 @@ mod tests {
                 attempt,
             },
         )
+    }
+
+    /// Drives the production delivery loop against an in-memory outbox.
+    struct LoopHarness {
+        wake: Arc<Notify>,
+        outbox: Arc<Mutex<Vec<buzz_db::operator_listener::ClaimedDelivery>>>,
+        stalled: Arc<Mutex<Vec<Uuid>>>,
+        claims: tokio::sync::mpsc::UnboundedReceiver<usize>,
+        delivered: tokio::sync::mpsc::UnboundedReceiver<Uuid>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl LoopHarness {
+        fn start() -> Self {
+            let wake = Arc::new(Notify::new());
+            let outbox = Arc::new(Mutex::new(Vec::new()));
+            let stalled = Arc::new(Mutex::new(Vec::new()));
+            let (claims_tx, claims) = tokio::sync::mpsc::unbounded_channel();
+            let (delivered_tx, delivered) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn({
+                let wake = Arc::clone(&wake);
+                let outbox = Arc::clone(&outbox);
+                let stalled = Arc::clone(&stalled);
+                async move {
+                    run_delivery_loop(
+                        &wake,
+                        |capacity| {
+                            let _ = claims_tx.send(capacity);
+                            let mut outbox = outbox.lock().expect("outbox lock");
+                            let take = capacity.min(outbox.len());
+                            std::future::ready(Ok(outbox.drain(..take).collect()))
+                        },
+                        |delivery: buzz_db::operator_listener::ClaimedDelivery| {
+                            let _ = delivered_tx.send(delivery.id);
+                            let stalls =
+                                stalled.lock().expect("stalled lock").contains(&delivery.id);
+                            async move {
+                                if stalls {
+                                    std::future::pending::<()>().await;
+                                }
+                            }
+                        },
+                    )
+                    .await;
+                }
+            });
+            Self {
+                wake,
+                outbox,
+                stalled,
+                claims,
+                delivered,
+                task,
+            }
+        }
+
+        fn enqueue(&self) -> Uuid {
+            let (_, _, delivery) = delivery_fixture(1);
+            let id = delivery.id;
+            self.outbox.lock().expect("outbox lock").push(delivery);
+            id
+        }
+
+        /// Enqueue a row whose delivery never finishes, like a hung endpoint.
+        fn enqueue_stalled(&self) -> Uuid {
+            let id = self.enqueue();
+            self.stalled.lock().expect("stalled lock").push(id);
+            id
+        }
+
+        /// Let the loop back off to its slowest idle poll, then return just
+        /// after a claim, when the loop has the full ceiling left to sleep.
+        async fn settle_idle(&mut self) {
+            tokio::time::sleep(IDLE_POLL_CEILING * 4).await;
+            while self.claims.try_recv().is_ok() {}
+            tokio::time::timeout(IDLE_POLL_CEILING * 2, self.claims.recv())
+                .await
+                .expect("idle loop keeps claiming")
+                .expect("idle claim");
+        }
+    }
+
+    impl Drop for LoopHarness {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wake_delivers_without_waiting_for_idle_poll() {
+        let mut harness = LoopHarness::start();
+        harness.settle_idle().await;
+
+        let id = harness.enqueue();
+        harness.wake.notify_one();
+
+        let delivered = tokio::time::timeout(IDLE_POLL_FLOOR, harness.delivered.recv())
+            .await
+            .expect("woken loop delivers before any idle poll fires");
+        assert_eq!(delivered, Some(id));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_delivery_does_not_hold_up_later_rows() {
+        let mut harness = LoopHarness::start();
+        let stalled = harness.enqueue_stalled();
+        harness.wake.notify_one();
+        assert_eq!(harness.delivered.recv().await, Some(stalled));
+        harness.settle_idle().await;
+
+        let next = harness.enqueue();
+        harness.wake.notify_one();
+
+        let delivered = tokio::time::timeout(IDLE_POLL_FLOOR, harness.delivered.recv())
+            .await
+            .expect("later row delivers while the first is still stalled");
+        assert_eq!(delivered, Some(next));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn in_flight_deliveries_are_bounded() {
+        let mut harness = LoopHarness::start();
+        for _ in 0..MAX_IN_FLIGHT * 2 {
+            harness.enqueue_stalled();
+        }
+        harness.wake.notify_one();
+
+        tokio::time::sleep(IDLE_POLL_CEILING * 4).await;
+
+        let mut delivered = 0;
+        while harness.delivered.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, MAX_IN_FLIGHT);
+        assert_eq!(
+            harness.outbox.lock().expect("outbox lock").len(),
+            MAX_IN_FLIGHT
+        );
+        while let Ok(capacity) = harness.claims.try_recv() {
+            assert!(capacity > 0, "loop must not claim with no free slot");
+        }
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn committed_mention_wakes_delivery_loop() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to test DB");
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let host = format!("operator-listener-wake-{}.example", Uuid::new_v4().simple());
+            let community = db
+                .ensure_configured_community(&host)
+                .await
+                .expect("create test community")
+                .id;
+            let listener = Keys::generate();
+            let target = Keys::generate();
+            db.register_operator_listener_pubkeys(
+                listener.public_key().as_bytes(),
+                &[target.public_key().to_bytes().to_vec()],
+            )
+            .await
+            .expect("register listener target");
+            let wake = Arc::new(Notify::new());
+            let listening = tokio::spawn(run_wake_listener(db.clone(), Arc::clone(&wake)));
+
+            // The listener connects in the background, so mention until one
+            // commit lands after its LISTEN.
+            let mut woke = false;
+            for attempt in 0..25 {
+                let event = EventBuilder::new(Kind::Custom(9), format!("mention {attempt}"))
+                    .tag(nostr::Tag::public_key(target.public_key()))
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign mention");
+                db.insert_event(community, &event, None)
+                    .await
+                    .expect("insert mention");
+                if tokio::time::timeout(Duration::from_millis(200), wake.notified())
+                    .await
+                    .is_ok()
+                {
+                    woke = true;
+                    break;
+                }
+            }
+            listening.abort();
+
+            for statement in [
+                "DELETE FROM operator_listener_outbox WHERE community_id = $1",
+                "DELETE FROM event_mentions WHERE community_id = $1",
+                "DELETE FROM events WHERE community_id = $1",
+                "DELETE FROM communities WHERE id = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(community.as_uuid())
+                    .execute(&pool)
+                    .await
+                    .expect("clean up test rows");
+            }
+            sqlx::query("DELETE FROM operator_listener_pubkeys WHERE listener_pubkey = $1")
+                .bind(listener.public_key().as_bytes().as_slice())
+                .execute(&pool)
+                .await
+                .expect("clean up test registration");
+            assert!(woke, "a committed mention should wake the delivery loop");
+        }
     }
 
     #[tokio::test]

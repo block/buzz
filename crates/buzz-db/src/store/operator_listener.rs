@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, TimeDelta, Utc};
 use nostr::Event;
+use sqlx::postgres::{PgListener, PgPoolOptions};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as _};
 use uuid::Uuid;
 
@@ -21,6 +22,8 @@ pub const MAX_DELIVERY_ATTEMPTS: i32 = 9;
 pub const OUTBOX_RETENTION: TimeDelta = TimeDelta::minutes(15);
 /// Registration lifetime before the daily cleanup removes it.
 pub const PUBKEY_RETENTION: TimeDelta = TimeDelta::days(30);
+/// Postgres `NOTIFY` channel signalled when committed outbox rows are new.
+const OUTBOX_NOTIFY_CHANNEL: &str = "buzz_operator_listener_outbox";
 
 async fn acquire_maintenance_writer(
     pool: &PgPool,
@@ -125,7 +128,54 @@ pub(crate) async fn enqueue_mentions_in_transaction(
     }
     separated.push_unseparated(") ON CONFLICT DO NOTHING");
 
-    Ok(query.build().execute(tx.conn()).await?.rows_affected())
+    let enqueued = query.build().execute(tx.conn()).await?.rows_affected();
+    if enqueued > 0 {
+        // Postgres delivers this on commit and drops it on rollback, so
+        // delivery workers wake only for rows they can already claim.
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(OUTBOX_NOTIFY_CHANNEL)
+            .bind(event.id.to_hex())
+            .execute(tx.conn())
+            .await?;
+    }
+    Ok(enqueued)
+}
+
+/// Wake-ups for delivery workers when new outbox rows commit.
+pub struct OutboxWakes {
+    listener: PgListener,
+}
+
+impl OutboxWakes {
+    /// Wait for the next wake-up.
+    ///
+    /// Returns the committed event id, or `None` after the connection was
+    /// re-established, when notifications may have been missed.
+    pub async fn recv(&mut self) -> Result<Option<String>> {
+        Ok(self
+            .listener
+            .try_recv()
+            .await?
+            .map(|notification| notification.payload().to_owned()))
+    }
+}
+
+/// Listen for committed outbox rows on a dedicated writer connection.
+pub async fn listen_for_deliveries(writer: &PgPool) -> Result<OutboxWakes> {
+    // A listener holds its connection indefinitely, so it never takes a
+    // serving-pool slot.
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .max_lifetime(None)
+        .idle_timeout(None)
+        .connect_lazy_with(
+            (*writer.connect_options())
+                .clone()
+                .application_name("buzz-operator-listener-wake"),
+        );
+    let mut listener = PgListener::connect_with(&pool).await?;
+    listener.listen(OUTBOX_NOTIFY_CHANNEL).await?;
+    Ok(OutboxWakes { listener })
 }
 
 /// Register target pubkeys for one deployment-global listener.
@@ -437,6 +487,11 @@ impl Db {
         remove_pubkeys(&self.pool, listener_pubkey, target_pubkeys).await
     }
 
+    /// Listen for newly committed operator-listener deliveries.
+    pub async fn listen_for_operator_listener_deliveries(&self) -> Result<OutboxWakes> {
+        listen_for_deliveries(&self.pool).await
+    }
+
     /// Claim due operator-listener deliveries.
     #[datastore_span(name = "claim_operator_listener_deliveries", system = "postgresql")]
     pub async fn claim_operator_listener_deliveries(
@@ -539,6 +594,21 @@ mod postgres_tests {
             .expect("connect to test DB")
     }
 
+    /// Whether a wake-up for `event` arrives within `wait`. Other tests share
+    /// the channel, so wake-ups for other events are skipped.
+    async fn woke_for(wakes: &mut OutboxWakes, event: &Event, wait: std::time::Duration) -> bool {
+        let event_id = event.id.to_hex();
+        tokio::time::timeout(wait, async {
+            loop {
+                if wakes.recv().await.expect("receive wake-up").as_deref() == Some(&event_id) {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn event_insert_enqueues_registered_listener_in_same_transaction() {
@@ -565,6 +635,10 @@ mod postgres_tests {
         .await
         .expect("register listener target");
 
+        let mut wakes = listen_for_deliveries(&pool)
+            .await
+            .expect("listen for deliveries");
+
         let event = EventBuilder::new(Kind::Custom(9), "mention")
             .tag(Tag::public_key(target.public_key()))
             .sign_with_keys(&Keys::generate())
@@ -574,6 +648,10 @@ mod postgres_tests {
                 .await
                 .expect("insert event");
         assert!(inserted);
+        assert!(
+            woke_for(&mut wakes, &event, std::time::Duration::from_secs(5)).await,
+            "committed delivery should wake listeners"
+        );
 
         let outbox_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM operator_listener_outbox WHERE community_id = $1 AND event_id = $2",
@@ -749,6 +827,9 @@ mod postgres_tests {
             .tag(Tag::public_key(target.public_key()))
             .sign_with_keys(&Keys::generate())
             .expect("sign test event");
+        let mut wakes = listen_for_deliveries(&pool)
+            .await
+            .expect("listen for deliveries");
 
         let mut tx = crate::begin_community_event_write_transaction(
             &pool,
@@ -780,6 +861,10 @@ mod postgres_tests {
         .expect("count rolled-back delivery");
         assert_eq!(event_count, 0);
         assert_eq!(outbox_count, 0);
+        assert!(
+            !woke_for(&mut wakes, &event, std::time::Duration::from_millis(500)).await,
+            "rolled-back delivery must not wake listeners"
+        );
 
         sqlx::query("DELETE FROM operator_listener_pubkeys WHERE listener_pubkey = $1")
             .bind(listener.public_key().as_bytes().as_slice())
