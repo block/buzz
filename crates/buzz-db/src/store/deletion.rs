@@ -2254,12 +2254,6 @@ impl DeletionStore {
         validate_catalog_on(&mut tx).await?;
         verify_lease_and_fence(&mut tx, token, DeletionStage::BindingsRemoved, generation).await?;
         set_executor_gucs(&mut tx, token.community_id, generation).await?;
-        // Migration 0011 fences hard deletion of NIP-RS rows against legacy
-        // writers. Whole-community deletion is an intentional hard-delete path,
-        // and the transaction is already bound to an approved, fenced tenant.
-        sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-            .execute(&mut *tx)
-            .await?;
 
         // Preserve deployment-global operator evidence while severing tenant provenance.
         for table in ["product_feedback", "rate_limit_violations"] {
