@@ -2322,7 +2322,7 @@ impl Db {
     ///
     /// Counts route on the BOUNDED arm only, never covered: the covered
     /// arm bounds insert-completeness but not deletion visibility (soft
-    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// deletes are UPDATEs outside the floor check), and a count has no
     /// downstream per-row re-filter to absorb extra rows — a silently
     /// inflated number for up to `FENCE_STALENESS` is a different product
     /// statement than a page briefly showing a deleted row. `Bounded` ties

@@ -1478,11 +1478,14 @@ mod tests {
         let test_scope = CommunityId::from_uuid(Uuid::new_v4());
         let query = crate::EventQuery::for_community(test_scope);
 
-        routed_db.read_pool_boot_ping_for_tests().await;
-        routed_db
-            .verify_replica_fence_at_boot()
+        writer_db
+            .ensure_configured_community_for_bootstrap(&format!(
+                "pool-operation-bootstrap-{}.invalid",
+                Uuid::new_v4().simple()
+            ))
             .await
-            .expect("real startup fence verification succeeds");
+            .expect("real community bootstrap succeeds");
+        routed_db.read_pool_boot_ping_for_tests().await;
         let _ = crate::replica_fence::probe_once(&writer_pool, routed_db.fence()).await;
         routed_db.fence().force_open_for_tests(Utc::now());
         assert_eq!(

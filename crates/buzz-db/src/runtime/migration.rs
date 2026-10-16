@@ -50,14 +50,6 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
     MIGRATOR.run(&mut *conn).await?;
-    // The replica-fence proof (see `replica_fence`) requires the commit-time
-    // `created_at` floor trigger from migration 0021 — correctly shaped — on
-    // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
-    // clones parent triggers, but a partition attached with `ATTACH
-    // PARTITION` or created by an older code path would silently escape the
-    // guard, so migration fails closed if any is missing. (The fence probe
-    // re-runs this same check at startup on non-migrating relays.)
-    crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
     crate::channel::verify_channel_roster_fence_catalog(&mut *conn).await?;
     Ok(())
 }
@@ -705,10 +697,11 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations.len(), 61);
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[59].version, 60);
+        assert_eq!(migrations[60].version, 62);
         assert!(migrations[59]
             .sql
             .as_str()
@@ -1044,12 +1037,6 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE TABLE join_policy_acceptances"));
 
-        // Replica-fence commit-time floor guard on channel-bearing events.
-        assert_eq!(migrations[20].version, 21);
-        assert!(migrations[20]
-            .sql
-            .as_str()
-            .contains("events_created_at_floor_guard"));
         assert!(!migrations[0]
             .sql
             .as_str()

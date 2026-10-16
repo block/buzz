@@ -9029,18 +9029,6 @@ mod postgres_tests {
         // `fail_outbox_row` (not `mark_outbox_delivered`) when the insert itself
         // fails — so nothing is durably persisted, and the row is NOT marked delivered.
         //
-        // The failure is induced AFTER tenant resolution, inside `emit_system_message`'s
-        // `insert_event` call, by:
-        //  1. Building a dedicated test pool whose `after_connect` sets the
-        //     `buzz.created_at_floor` GUC session-locally (not database-globally).
-        //     Every connection from that pool inherits the floor; no other pool or
-        //     test is affected, and there is no cleanup race on panic.
-        //  2. Backdating the outbox row's `created_at` beyond that floor.
-        //  `emit_system_message` derives the Nostr event's `created_at` from
-        //  `row.created_at` (the idempotency timestamp). With the floor active, the
-        //  deferrable trigger fires on INSERT and raises a check_violation, which
-        //  `insert_event` propagates as `Err`. The `?` in `emit_system_message` then
-        //  propagates it up through `deliver_tombstone → deliver_one → fail_outbox_row`.
         let pool = e2e_pool().await;
         let (community_id, _host) = e2e_community(&pool, "race-c3").await;
         let target = vec![24u8; 32];
@@ -9144,43 +9132,22 @@ mod postgres_tests {
         .await
         .expect("insert fail-outbox row");
 
-        // Backdate the outbox row's created_at so emit_system_message uses an old
-        // idempotency_ts. The events_created_at_floor trigger will reject the INSERT
-        // once we arm the GUC below.
-        sqlx::query(
-            "UPDATE relay_admin_outbox SET created_at = now() - interval '10 seconds' WHERE id = $1",
+        // Inject a durable insert failure only in this per-test database. This
+        // exercises error propagation and retry state independently of the floor.
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_c3_system_message() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF NEW.kind = 40099 THEN \
+             RAISE EXCEPTION 'injected system-message insert failure' USING ERRCODE = '23514'; \
+             END IF; RETURN NEW; END $$; \
+             CREATE TRIGGER reject_c3_system_message BEFORE INSERT ON events \
+             FOR EACH ROW EXECUTE FUNCTION reject_c3_system_message();",
         )
-        .bind(fail_outbox_id)
         .execute(&pool)
         .await
-        .expect("backdate outbox created_at");
+        .expect("install isolated insert failure");
+        let fresh_state = state_from_pool(pool.clone()).await;
 
-        // Build a dedicated pool whose after_connect sets buzz.created_at_floor = 5
-        // session-locally on each connection (set_config 3rd arg false = session scope).
-        // A floor of 5 s means any event with created_at > 5 s ago is rejected.
-        // Our outbox row's created_at is ~10 s ago → trigger fires on insert_event.
-        // This pool is fully isolated: no other pool or test is affected, and there
-        // is no cleanup dependence (dropping the pool closes all its connections).
-        let db_url = database_url();
-        let floor_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query("SELECT set_config('buzz.created_at_floor', '5', false)")
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&db_url)
-            .await
-            .expect("connect floor pool");
-
-        // Build an AppState around the floor pool so deliver_one's insert_event call
-        // runs on a connection where the deferrable trigger is active.
-        let fresh_state = state_from_pool(floor_pool.clone()).await;
-
-        // Claim the row via the floor pool so deliver_one has a real claim token.
+        // Claim the row so deliver_one has a real claim token.
         let lease_until = chrono::Utc::now() + chrono::Duration::seconds(30);
         let mut batch = fresh_state
             .db
@@ -9193,14 +9160,18 @@ mod postgres_tests {
             .expect("fail_outbox_id must be in batch");
         let row = batch.remove(row_idx);
 
-        // deliver_one fails inside emit_system_message at insert_event (deferrable
-        // floor-guard trigger → check_violation) and must call fail_outbox_row —
+        // deliver_one fails inside emit_system_message at insert_event and
+        // must call fail_outbox_row —
         // NOT mark_outbox_delivered.
         crate::handlers::admin_outbox_worker::deliver_one(&fresh_state, &row).await;
 
-        // Drop the floor pool — all its connections close, GUC vanishes with them.
-        // No ALTER DATABASE, no global state, no reset required.
-        drop(floor_pool);
+        sqlx::raw_sql(
+            "DROP TRIGGER reject_c3_system_message ON events; \
+             DROP FUNCTION reject_c3_system_message();",
+        )
+        .execute(&pool)
+        .await
+        .expect("remove isolated insert failure");
 
         // No tombstone event was persisted — the failure was inside insert_event.
         let post_event_count: i64 = sqlx::query_scalar(

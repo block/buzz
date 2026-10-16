@@ -356,8 +356,8 @@ pub(crate) mod route_proof {
     use uuid::Uuid;
 
     /// Proof that a query/page can only return rows with
-    /// `channel_id IS NOT NULL` — the domain of the commit-time floor guard
-    /// (migration 0021). `channel_ids` (retains channel-NULL rows) and
+    /// `channel_id IS NOT NULL` — the domain of the application floor check
+    /// (see [`replica_fence`]). `channel_ids` (retains channel-NULL rows) and
     /// `global_only = false` are explicitly NOT proofs.
     ///
     /// Each constructor keys off *how* its path proves channel-bearing-ness:
@@ -415,18 +415,18 @@ pub(crate) enum RoutePredicate {
     /// read budget `B` (default off). Bounds TIME — the page misses at most
     /// the freshest `B` of writes. Sound for ANY query shape, including
     /// global (channel-NULL) rows: it relies only on heartbeat commit order,
-    /// not the floor guard.
+    /// not the floor check.
     Bounded,
     /// Completeness: the proved wall must cover the page's upper bound.
     /// Bounds CONTENT — every row at/below `upper` is present, meaningful
     /// even when the cursor is hours old, where `B`-freshness says nothing.
-    /// Sound ONLY on the floor guard's domain (channel-bearing rows), hence
+    /// Sound ONLY on the application floor's domain (channel-bearing rows), hence
     /// the proof token. `upper` is non-optional: the no-upper-bound
     /// post-verifying case is [`RoutePredicate::CoveredPostVerified`].
     ///
     /// Bounds INSERT-completeness only — "no missing rows", not "no extra
     /// rows". Soft deletes are `UPDATE .. SET deleted_at` commits outside
-    /// the floor guard and never touch `created_at`, so a covered page can
+    /// the floor check and never touch `created_at`, so a covered page can
     /// briefly serve a row the writer already excludes; deletion visibility
     /// is bounded by replication lag under `FENCE_STALENESS` (30s), not by
     /// `upper` or `B`. Do not extend the covered arm to a surface that
@@ -708,10 +708,6 @@ impl Db {
     /// When `config.read_database_url` is set, a second pool with the same
     /// sizing is connected to it for lag-tolerant reads (see [`Db::read`]).
     ///
-    /// The writer pool arms the commit-time `created_at` floor guard
-    /// (migration 0021) on every connection by setting the
-    /// `buzz.created_at_floor` GUC — this is what makes the replica fence
-    /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
         let pool = Self::connect_writer_pool(config).await?;
         let read_max_connections = config
@@ -742,11 +738,10 @@ impl Db {
 
     /// Connect the writer pool with all session-level safety premises.
     ///
-    /// SQLx stores one `after_connect` hook, so the floor guard and transaction
-    /// isolation assertion must remain in this single closure. Registering a
-    /// second hook replaces the first and silently disarms the floor trigger.
+    /// SQLx stores one `after_connect` hook, so session timeouts and the
+    /// transaction isolation assertion must remain in this single closure.
     /// Additional writer pools, including the relay audit pool, must use this
-    /// constructor so they inherit the timeout, floor-guard, and isolation
+    /// constructor so they inherit the timeout and isolation
     /// policy installed by [`Db::new`].
     pub async fn connect_writer_pool(config: &DbConfig) -> Result<PgPool> {
         use connection_observability::{
@@ -770,22 +765,6 @@ impl Db {
                     // physical dial. Entering `after_connect` is the truthful
                     // point at which DNS/network/TLS/authentication succeeded.
                     record_milestone(DbPoolRole::Writer, DbConnectionStep::PhysicalConnect);
-
-                    // `SET` cannot take bind parameters; `set_config` can.
-                    let floor = DbConnectionStepAttempt::start(
-                        DbPoolRole::Writer,
-                        DbConnectionStep::CreatedAtFloor,
-                    );
-                    if let Err(error) =
-                        sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
-                        .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
-                        .execute(&mut *conn)
-                        .await
-                    {
-                        floor.fail();
-                        return Err(error);
-                    }
-                    floor.succeed();
 
                     // `lock_timeout` fails the waiting statement; it does not
                     // cancel the holder. `idle_in_transaction_session_timeout`
@@ -893,9 +872,8 @@ impl Db {
     /// are dialed only on first acquire; the ~10-minute reaper never tops
     /// the pool back up, which is fine — routed reads re-fill it on demand.
     ///
-    /// No floor guard or writer-isolation assertion: replica sessions are
-    /// read-only, so the commit-time trigger from migration 0021 never fires
-    /// here and the write fence that depends on READ COMMITTED is never reached.
+    /// No writer-isolation assertion: replica sessions are read-only, so the
+    /// write fence that depends on READ COMMITTED is never reached here.
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
@@ -1015,43 +993,19 @@ impl Db {
         &self.fence
     }
 
-    /// Verify the floor guard end-to-end, then spawn the background fence
-    /// probe. Returns `Ok(false)` when no replica is configured.
-    ///
-    /// Ordering matters (Perci, PR #2084 review): this must run **after**
-    /// the migration decision. On a relay with `BUZZ_AUTO_MIGRATE` off, the
-    /// writer pool arms the GUC regardless, but if migration 0021 has not
-    /// been applied there is no trigger enforcing it — and a heartbeat probe
-    /// would open the fence over an unenforced floor. So the probe is gated
-    /// on an unconditional two-part verification against the live schema:
-    /// catalog shape ([`replica_fence::verify_floor_guard_catalog`]) and
-    /// observed semantics through this exact pool
-    /// ([`replica_fence::verify_floor_guard_behavior`]).
-    ///
-    /// On any verification failure the probe is never spawned and the fence
-    /// stays closed: every cursor page routes to the writer. The relay keeps
-    /// serving — degraded capacity, never holes.
-    pub async fn spawn_fence_probe(&self) -> Result<bool> {
+    /// Spawn the background fence probe after the migration decision.
+    /// Returns `false` when no replica is configured. Probe failures keep
+    /// the fence closed and cursor reads on the writer. Application floor
+    /// coverage is enforced by the supported-writer contract and fleet gate.
+    pub fn spawn_fence_probe(&self) -> bool {
         if self.read_pool.is_none() {
-            return Ok(false);
+            return false;
         }
-        self.verify_replica_fence_at_boot().await?;
         tokio::spawn(replica_fence::run_probe(
             self.pool.clone(),
             std::sync::Arc::clone(&self.fence),
         ));
-        Ok(true)
-    }
-
-    /// Verify replica-fence catalog shape and behavior through attributed
-    /// writer/bootstrap acquisitions without starting the recurring probe.
-    pub(crate) async fn verify_replica_fence_at_boot(&self) -> Result<()> {
-        let mut connection =
-            observability::acquire_writer(&self.pool, observability::WriterOperation::Bootstrap)
-                .await?;
-        replica_fence::verify_floor_guard_catalog(&mut *connection).await?;
-        drop(connection);
-        replica_fence::verify_floor_guard_behavior(&self.pool).await
+        true
     }
 
     /// The pool for lag-tolerant reads: the read replica when configured,
@@ -1613,3 +1567,7 @@ mod pool_role_tests {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod postgres_tests;
+
+#[cfg(test)]
+#[path = "tests/floor_retirement.rs"]
+mod floor_retirement_postgres_tests;

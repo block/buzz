@@ -45,15 +45,15 @@ pub const DB_POOL_ACQUIRE_RAW_SERIES_PER_POD: usize =
     runtime::observability::POOL_ACQUIRE_RAW_SERIES_PER_POD;
 
 /// Valid database connection role/step pairs with a start counter.
-pub const DB_CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+pub const DB_CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 3] =
     runtime::CONNECTION_STARTED_STEPS;
 
 /// Valid database connection role/step pairs with a duration histogram.
-pub const DB_CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+pub const DB_CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 3] =
     runtime::CONNECTION_DURATION_STEPS;
 
 /// Valid database connection role/step/outcome terminal combinations.
-pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 15] =
+pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 12] =
     runtime::CONNECTION_TERMINALS;
 
 /// Raw Prometheus series ceiling per pod for connection-step telemetry.

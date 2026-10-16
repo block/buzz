@@ -1,4 +1,4 @@
-//! App-floor regressions with every floor-trigger clone disabled in the
+//! App-floor regressions with no enabled floor-trigger clone in the
 //! nextest-provided per-test database, so the DB backstop cannot mask a bypass.
 
 use buzz_core::CommunityId;
@@ -18,19 +18,14 @@ async fn fixture() -> (Db, CommunityId, Uuid, Keys) {
         .connect(&crate::test_support::database_url())
         .await
         .expect("isolated test database");
-    sqlx::query("ALTER TABLE events DISABLE TRIGGER events_created_at_floor")
-        .execute(&pool)
-        .await
-        .expect("disable floor trigger recursively on the partitioned table");
-    let (total, enabled): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE tgenabled <> 'D') FROM pg_trigger \
-         WHERE tgname = 'events_created_at_floor' \
+    let enabled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_trigger \
+         WHERE tgname = 'events_created_at_floor' AND tgenabled <> 'D' \
          AND tgrelid IN (SELECT relid FROM pg_partition_tree('events'))",
     )
     .fetch_one(&pool)
     .await
     .expect("check every trigger clone");
-    assert!(total > 0, "the test must disable an existing backstop");
     assert_eq!(enabled, 0, "no partition may mask a missing app check");
     let community = CommunityId::from_uuid(Uuid::new_v4());
     sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")

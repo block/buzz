@@ -1933,7 +1933,7 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
         format!("{}/{}", &base[..idx], wname)
     };
 
-    // `Db::new` so the writer arms the floor guard and the reader is the
+    // `Db::new` so the writer uses production session policy and the reader is the
     // real lazy `connect_read_pool` pool (min_connections=0, 150ms
     // acquire timeout). Reader is sized 1 so holding one connection
     // saturates it.
@@ -2241,9 +2241,8 @@ async fn routed_reads_are_confined_to_the_requested_community() {
 }
 
 /// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
-/// used) must still let [`Db::spawn_fence_probe`] verify the writer's
-/// floor guard and spawn — reader-down or reader-idle at boot must not
-/// disable fence probing.
+/// used) must still let [`Db::spawn_fence_probe`] spawn — reader-down or
+/// reader-idle at boot must not disable fence probing.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn lazy_reader_pool_still_spawns_fence_probe() {
@@ -2258,11 +2257,7 @@ async fn lazy_reader_pool_still_spawns_fence_probe() {
         let idx = base.rfind('/').expect("db url has a path segment");
         format!("{}/{}", &base[..idx], wname)
     };
-    // `Db::new` (not `from_pools`) so the WRITER pool arms the
-    // `buzz.created_at_floor` GUC — `spawn_fence_probe` verifies the
-    // floor guard on a writer connection, and `create_scratch_db`'s
-    // plain `PgPool::connect` never arms it. The reader is still the
-    // lazy `connect_read_pool` pool this test is about.
+    // Use the production writer policy and lazy `connect_read_pool`.
     let db = Db::new(&DbConfig {
         database_url: writer_url.clone(),
         read_database_url: Some(writer_url),
@@ -2270,12 +2265,9 @@ async fn lazy_reader_pool_still_spawns_fence_probe() {
         ..DbConfig::default()
     })
     .await
-    .expect("connect armed Db with lazy reader");
+    .expect("connect Db with lazy reader");
 
-    let spawned = db
-        .spawn_fence_probe()
-        .await
-        .expect("floor-guard verification must pass on the migrated writer");
+    let spawned = db.spawn_fence_probe();
     assert!(spawned, "a configured (lazy) reader must spawn the probe");
 
     drop_scratch_db(&admin, db.pool.clone(), &wname).await;
@@ -2568,100 +2560,6 @@ async fn thread_full_replica_page_above_fence_is_reverified_on_writer() {
     drop_scratch_db(&admin, writer, &wname).await;
 }
 
-/// Commit-time floor guard (migration 0021), exact held-transaction
-/// adversary: a channel-bearing row whose `created_at` is older than the
-/// floor at COMMIT time must abort the transaction — the guard runs
-/// inside commit processing with `clock_timestamp()`, so holding the
-/// transaction open cannot outrun it. channel_id-NULL rows are
-/// structurally exempt, and sessions without the GUC are unaffected.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn created_at_floor_guard_aborts_old_channel_rows_at_commit() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (pool, name) = create_scratch_db(&admin, "floor_guard").await;
-
-    let author = nostr::Keys::generate();
-    let community = Uuid::new_v4();
-    let channel = Uuid::new_v4();
-    seed_community_channel(&pool, community, channel, &author).await;
-
-    let insert_raw = |ev: nostr::Event, channel_id: Option<Uuid>| {
-        let pool = pool.clone();
-        async move {
-            let mut tx = pool.begin().await.expect("begin");
-            // Arm the guard for this transaction only (the relay's
-            // writer pool arms it per connection; tests are explicit).
-            sqlx::query("SELECT set_config('buzz.created_at_floor', $1, true)")
-                .bind(crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string())
-                .execute(&mut *tx)
-                .await
-                .expect("arm guard");
-            sqlx::query(
-                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, \
-                     content, sig, received_at, channel_id) \
-                     VALUES ($1, $2, $3, to_timestamp($4), 9, '[]', $5, $6, NOW(), $7)",
-            )
-            .bind(community)
-            .bind(ev.id.as_bytes().as_slice())
-            .bind(ev.pubkey.to_bytes().as_slice())
-            .bind(ev.created_at.as_secs() as f64)
-            .bind(&ev.content)
-            .bind(ev.sig.serialize().as_slice())
-            .bind(channel_id)
-            .execute(&mut *tx)
-            .await
-            .expect("insert inside tx (guard is deferred to commit)");
-            // Hold the transaction "open" past the insert, then commit —
-            // the deferred guard must still see the stale created_at.
-            sqlx::query("SELECT pg_sleep(0.05)")
-                .execute(&mut *tx)
-                .await
-                .expect("hold tx");
-            tx.commit().await
-        }
-    };
-
-    let now_secs = chrono::Utc::now().timestamp() as u64;
-    let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
-
-    // Old channel-bearing row → COMMIT aborts with check_violation.
-    let old = signed_event_at(&author, "old-held-tx", now_secs - floor - 60);
-    let err = insert_raw(old, Some(channel))
-        .await
-        .expect_err("below-floor channel row must abort at COMMIT");
-    let code = match &err {
-        sqlx::Error::Database(db_err) => db_err.code().map(|c| c.to_string()),
-        other => panic!("expected database error, got {other:?}"),
-    };
-    assert_eq!(
-        code.as_deref(),
-        Some("23514"),
-        "guard raises check_violation"
-    );
-
-    // Fresh channel-bearing row → commits.
-    let fresh = signed_event_at(&author, "fresh", now_secs);
-    insert_raw(fresh, Some(channel))
-        .await
-        .expect("fresh row commits under the armed guard");
-
-    // Old row WITHOUT a channel (push lease / profile shapes) →
-    // structurally exempt, commits.
-    let old_global = signed_event_at(&author, "old-global", now_secs - floor - 60);
-    insert_raw(old_global, None)
-        .await
-        .expect("channel_id-NULL rows are exempt from the floor");
-
-    // Unarmed session (no GUC) → guard inert; backfills stay possible
-    // (and must hold the fence closed, per the migration header).
-    let old_backfill = signed_event_at(&author, "old-backfill", now_secs - floor - 60);
-    insert_top_level(&pool, community, channel, &old_backfill).await;
-
-    drop_scratch_db(&admin, pool, &name).await;
-}
-
 #[test]
 fn writer_pool_safety_hook_is_single_and_composed() {
     let source = include_str!("mod.rs");
@@ -2675,13 +2573,10 @@ fn writer_pool_safety_hook_is_single_and_composed() {
         1,
         "SQLx replaces after_connect hooks; writer safety must use exactly one"
     );
-    assert!(connect_pool.contains("buzz.created_at_floor"));
     assert!(connect_pool.contains("SHOW transaction_isolation"));
     assert!(connect_pool.contains("'lock_timeout'"));
     assert!(connect_pool.contains("'idle_in_transaction_session_timeout'"));
     assert!(connect_pool.contains("'statement_timeout'"));
-    assert!(!connect_pool.contains("arm_floor_guard"));
-    assert!(!connect_pool.contains("_arm_floor_guard"));
     assert!(!connect_pool.contains("allow(unused_variables)"));
 
     let reader_doc = source
@@ -2738,7 +2633,6 @@ async fn writer_pool_metrics_record_every_initial_connection_ready() {
         2
     );
     for step in [
-        DbConnectionStep::CreatedAtFloor,
         DbConnectionStep::SessionTimeouts,
         DbConnectionStep::Isolation,
     ] {
@@ -3090,106 +2984,6 @@ async fn session_timeouts_install_through_db_new_and_bound_lock_waits() {
     drop_scratch_db(&admin, db.pool.clone(), &name).await;
 }
 
-/// The armed writer pool (`Db::new`) must enforce the floor end-to-end
-/// through the public insert APIs, and the session GUC must be verifiably
-/// set on pooled connections.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed_pool, name) = create_scratch_db(&admin, "floor_pool").await;
-
-    let author = nostr::Keys::generate();
-    let community = Uuid::new_v4();
-    let channel = Uuid::new_v4();
-    seed_community_channel(&seed_pool, community, channel, &author).await;
-
-    // Connect a Db the production way: after_connect arms the guard.
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let scratch_url = format!("{}/{}", &base[..idx], name);
-    let db = Db::new(&DbConfig {
-        database_url: scratch_url,
-        max_connections: 2,
-        ..DbConfig::default()
-    })
-    .await
-    .expect("connect armed Db");
-    let cid = CommunityId::from_uuid(community);
-
-    // Perci nit: assert the effective session value, not the intent.
-    let effective: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
-        .fetch_one(&db.pool)
-        .await
-        .expect("SHOW guard GUC");
-    assert_eq!(
-        effective,
-        crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string(),
-        "writer pool must arm the floor guard on every connection"
-    );
-    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
-        .fetch_one(&db.pool)
-        .await
-        .expect("SHOW writer isolation");
-    assert_eq!(
-        isolation, "read committed",
-        "the same writer after_connect hook must enforce the isolation premise"
-    );
-
-    let now_secs = chrono::Utc::now().timestamp() as u64;
-    let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
-
-    // insert_event (single INSERT, autocommit): old channel row rejected.
-    let old = signed_event_at(&author, "old-direct", now_secs - floor - 60);
-    let err = event::insert_event(&db.pool, cid, &old, Some(channel))
-        .await
-        .expect_err("armed pool must reject below-floor channel inserts");
-    assert!(
-        err.to_string().contains("below the replica-fence floor"),
-        "unexpected error: {err}"
-    );
-
-    // insert_event_with_thread_metadata (multi-statement tx): same.
-    let old2 = signed_event_at(&author, "old-thread-meta", now_secs - floor - 90);
-    let ts =
-        chrono::DateTime::from_timestamp(old2.created_at.as_secs() as i64, 0).expect("valid ts");
-    let err = event::insert_event_with_thread_metadata(
-        &db.pool,
-        cid,
-        &old2,
-        Some(channel),
-        Some(event::ThreadMetadataParams {
-            event_id: old2.id.as_bytes(),
-            event_created_at: ts,
-            channel_id: channel,
-            parent_event_id: None,
-            parent_event_created_at: None,
-            root_event_id: None,
-            root_event_created_at: None,
-            depth: 0,
-            broadcast: true,
-        }),
-    )
-    .await
-    .expect_err("armed pool must reject below-floor thread-metadata inserts");
-    assert!(
-        err.to_string().contains("below the replica-fence floor"),
-        "unexpected error: {err}"
-    );
-
-    // Fresh events pass through both APIs.
-    let fresh = signed_event_at(&author, "fresh-direct", now_secs);
-    event::insert_event(&db.pool, cid, &fresh, Some(channel))
-        .await
-        .expect("fresh insert passes the armed guard");
-
-    drop_scratch_db(&admin, seed_pool, &name).await;
-    // db pool still holds connections to the dropped DB; close it.
-    db.pool.close().await;
-}
-
 /// A writer transaction holding the shared replica-floor advisory lock, the
 /// shape a floor-compliant writer takes before the exclusive probe can run.
 async fn begin_replica_floor_locked_writer(db: &Db) -> sqlx::Transaction<'static, sqlx::Postgres> {
@@ -3197,7 +2991,7 @@ async fn begin_replica_floor_locked_writer(db: &Db) -> sqlx::Transaction<'static
         .pool
         .begin()
         .await
-        .expect("begin floor-guarded writer tx");
+        .expect("begin floor-compliant writer tx");
     sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
         .bind(crate::replica_fence::REPLICA_FLOOR_LOCK_KEY)
         .execute(&mut *tx)
@@ -3323,201 +3117,6 @@ async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release()
 
     db.pool.close().await;
     drop_scratch_db(&admin, seed_pool, &name).await;
-}
-
-/// `spawn_fence_probe` must verify the floor guard before letting the
-/// probe run — catalog shape AND observed behavior — and refuse on
-/// sabotage. This is the production gate for a relay running with
-/// `BUZZ_AUTO_MIGRATE` off: an armed GUC with no enforcing trigger must
-/// never yield an open fence.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn fence_probe_refuses_to_start_without_verified_floor_guard() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed_pool, wname) = create_scratch_db(&admin, "fence_gate_w").await;
-    let (replica_pool, rname) = create_scratch_db(&admin, "fence_gate_r").await;
-    seed_pool.close().await;
-    replica_pool.close().await;
-
-    let base = admin_url().await;
-    let idx = base.rfind('/').expect("db url has a path segment");
-    let writer_url = format!("{}/{}", &base[..idx], wname);
-    let replica_url = format!("{}/{}", &base[..idx], rname);
-
-    // Healthy schema: verification passes, probe starts. A SEPARATE Db
-    // instance, because its background probe legitimately opens its own
-    // fence (the heartbeat probe is writer-side only) — the refusal
-    // assertions below must run against a fence whose spawns were all
-    // refused.
-    let db_healthy = Db::new(&DbConfig {
-        database_url: writer_url.clone(),
-        read_database_url: Some(replica_url.clone()),
-        max_connections: 2,
-        ..DbConfig::default()
-    })
-    .await
-    .expect("connect armed Db with replica");
-    assert!(
-        db_healthy
-            .spawn_fence_probe()
-            .await
-            .expect("verification passes"),
-        "probe must start on a verified schema"
-    );
-
-    let db = Db::new(&DbConfig {
-        database_url: writer_url,
-        read_database_url: Some(replica_url),
-        max_connections: 2,
-        ..DbConfig::default()
-    })
-    .await
-    .expect("connect armed Db with replica");
-
-    // Sabotage A: catalog-shaped no-op — same trigger, gutted function
-    // body. Catalog check alone would pass; behavior check must refuse.
-    sqlx::query(
-        "CREATE OR REPLACE FUNCTION events_created_at_floor_guard() RETURNS trigger \
-             LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
-    )
-    .execute(&db.pool)
-    .await
-    .expect("gut the guard function");
-    let err = db
-        .spawn_fence_probe()
-        .await
-        .expect_err("inert guard body must refuse the probe");
-    assert!(
-        err.to_string().contains("floor guard is inert"),
-        "unexpected error: {err}"
-    );
-
-    // Sabotage B: trigger dropped entirely (the BUZZ_AUTO_MIGRATE=off /
-    // 0021-unapplied shape). Catalog check must refuse.
-    sqlx::query("DROP TRIGGER events_created_at_floor ON events")
-        .execute(&db.pool)
-        .await
-        .expect("drop the guard trigger");
-    let err = db
-        .spawn_fence_probe()
-        .await
-        .expect_err("missing trigger must refuse the probe");
-    assert!(
-        err.to_string().contains("missing or mis-shaped"),
-        "unexpected error: {err}"
-    );
-
-    // In both refusal states the fence never opened.
-    assert!(
-        db.fence().verified_through().is_none(),
-        "fence must remain closed when verification refuses the probe"
-    );
-
-    db_healthy.pool.close().await;
-    if let Some(rp) = &db_healthy.read_pool {
-        rp.close().await;
-    }
-    db.pool.close().await;
-    if let Some(rp) = &db.read_pool {
-        rp.close().await;
-    }
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {wname} WITH (FORCE)"
-    )))
-    .execute(&admin)
-    .await;
-    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {rname} WITH (FORCE)"
-    )))
-    .execute(&admin)
-    .await;
-}
-
-/// The `UPDATE OF` arm of the floor guard (Perci's second structural
-/// hole): an old row legitimately admitted with `channel_id` NULL must
-/// not be movable into keyset windows, and a channel row's `created_at`
-/// must not be movable below the fence — through raw SQL, at COMMIT.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (pool, name) = create_scratch_db(&admin, "floor_upd").await;
-
-    let author = nostr::Keys::generate();
-    let community = Uuid::new_v4();
-    let channel = Uuid::new_v4();
-    seed_community_channel(&pool, community, channel, &author).await;
-
-    let now_secs = chrono::Utc::now().timestamp() as u64;
-    let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
-
-    // Seed via unarmed session: one old channel-NULL row, one fresh
-    // channel row.
-    let old_null = signed_event_at(&author, "old-null", now_secs - floor - 120);
-    insert_top_level(&pool, community, channel, &old_null).await;
-    sqlx::query("UPDATE events SET channel_id = NULL WHERE community_id = $1 AND id = $2")
-        .bind(community)
-        .bind(old_null.id.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .expect("detach channel (unarmed seed)");
-    let fresh = signed_event_at(&author, "fresh-row", now_secs);
-    insert_top_level(&pool, community, channel, &fresh).await;
-
-    // Armed transaction, deferred to COMMIT (the production shape).
-    let run_armed_update = |sql: &'static str, id: Vec<u8>, age: Option<u64>| {
-        let pool = pool.clone();
-        async move {
-            let mut tx = pool.begin().await.expect("begin");
-            sqlx::query("SELECT set_config('buzz.created_at_floor', $1, true)")
-                .bind(crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string())
-                .execute(&mut *tx)
-                .await
-                .expect("arm guard");
-            let q = sqlx::query(sql).bind(community).bind(id);
-            let q = match age {
-                Some(a) => q.bind(a as f64),
-                None => q,
-            };
-            q.execute(&mut *tx)
-                .await
-                .expect("update inside tx (deferred)");
-            tx.commit().await
-        }
-    };
-
-    // channel-NULL → channel-bearing on an old row: COMMIT must abort.
-    let err = run_armed_update(
-        "UPDATE events SET channel_id = community_id WHERE community_id = $1 AND id = $2",
-        old_null.id.as_bytes().to_vec(),
-        None,
-    )
-    .await
-    .expect_err("moving an old channel-NULL row into a channel must abort at COMMIT");
-    assert!(
-        matches!(&err, sqlx::Error::Database(e) if e.code().as_deref() == Some("23514")),
-        "unexpected error: {err}"
-    );
-
-    // created_at rewrite below the floor on a channel row: COMMIT must abort.
-    let err = run_armed_update(
-            "UPDATE events SET created_at = clock_timestamp() - make_interval(secs => $3::double precision) \
-             WHERE community_id = $1 AND id = $2",
-            fresh.id.as_bytes().to_vec(),
-            Some(floor + 120),
-        )
-        .await
-        .expect_err("rewriting created_at below the floor must abort at COMMIT");
-    assert!(
-        matches!(&err, sqlx::Error::Database(e) if e.code().as_deref() == Some("23514")),
-        "unexpected error: {err}"
-    );
-
-    drop_scratch_db(&admin, pool, &name).await;
 }
 
 // ---- Statement-deadline cancellation vs. replica fallback ----------------

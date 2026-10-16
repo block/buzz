@@ -67,7 +67,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i functions/enqueue_push_match_job.sql
 \i functions/refresh_channel_ttl_after_event_insert.sql
 \i functions/guard_channel_roster_snapshot.sql
-\i functions/events_created_at_floor_guard.sql
 \i functions/prevent_community_deletion_request_retargeting.sql
 \i functions/prevent_community_deletion_approval_removal.sql
 \i functions/protect_community_deletion_manifest_keys.sql

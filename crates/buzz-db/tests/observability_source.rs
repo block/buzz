@@ -444,22 +444,11 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 
     let runtime = include_str!("../src/runtime/mod.rs");
     assert!(runtime.contains("observability::refresh_pool_waiters(self.read_pool.is_some())"));
-    assert!(runtime.contains("self.verify_replica_fence_at_boot().await?"));
-    let fence_boot = runtime
-        .split_once("pub(crate) async fn verify_replica_fence_at_boot")
-        .expect("runtime must expose attributed boot fence verification")
-        .1
-        .split_once("/// The pool for lag-tolerant reads")
-        .expect("boot fence verification must precede routed-read plumbing")
-        .0;
-    assert!(fence_boot.contains("WriterOperation::Bootstrap"));
-
     let replica_fence = include_str!("../src/runtime/replica_fence.rs");
     let replica_fence_production = replica_fence
         .split("\n#[cfg(test)]")
         .next()
         .expect("replica-fence production source");
-    assert!(replica_fence_production.contains("WriterOperation::Bootstrap"));
     assert!(replica_fence_production.contains("WriterOperation::Maintenance"));
     assert!(!replica_fence_production.contains("pool.begin().await"));
     assert!(!replica_fence_production.contains("writer.acquire().await"));
@@ -915,8 +904,7 @@ fn has_any_tenant_local_chokepoint(source: &str) -> bool {
 const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate::AdmittedTx"];
 
 // Narrow reviewed exceptions for non-serving verification probes only.
-const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 3] = [
-    "pub async fn verify_floor_guard_behavior(",
+const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 2] = [
     "pub async fn verify_channel_roster_fence_behavior(",
     "pub async fn backfill_d_tags(&self) -> Result<u64> {",
 ];
@@ -1422,10 +1410,8 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
 
 // Rolled-back verification probes write `events` rows that never commit, so
 // they owe no push job or TTL refresh.
-const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
-    "pub async fn verify_floor_guard_behavior(",
-    "pub async fn verify_channel_roster_fence_behavior(",
-];
+const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 1] =
+    ["pub async fn verify_channel_roster_fence_behavior("];
 
 /// `source` with every `#[cfg(test)]` item removed, wherever it sits in the
 /// file. Each item runs to the `;` that ends it or to the brace that closes
@@ -1497,21 +1483,60 @@ fn raw_literal_prefix_starts_token(bytes: &[u8], index: usize) -> bool {
 fn mask_comments_and_literals(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut masked = bytes.to_vec();
-    let mut blank = |from: usize, to: usize| {
-        for byte in &mut masked[from..to.min(bytes.len())] {
+    for span in source_spans(source) {
+        for byte in &mut masked[span.start..span.end] {
             if *byte != b'\n' {
                 *byte = b' ';
             }
         }
-    };
+    }
+    String::from_utf8(masked).expect("masking replaces whole ASCII-delimited spans")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    Comment,
+    /// A plain (`"…"`) string literal; `start` is its opening quote.
+    Str,
+    /// A raw string literal; `start` is its `r`, followed by `hashes` `#`s.
+    RawStr {
+        hashes: usize,
+    },
+    Char,
+}
+
+struct SourceSpan {
+    start: usize,
+    end: usize,
+    kind: SpanKind,
+}
+
+impl SourceSpan {
+    /// The text between a string literal's delimiters, escapes left as written.
+    fn string_body<'a>(&self, source: &'a str) -> Option<&'a str> {
+        match self.kind {
+            SpanKind::Str => source.get(self.start + 1..self.end.saturating_sub(1)),
+            SpanKind::RawStr { hashes } => {
+                source.get(self.start + 2 + hashes..self.end.saturating_sub(1 + hashes))
+            }
+            SpanKind::Comment | SpanKind::Char => None,
+        }
+    }
+}
+
+/// Every comment, string, raw string, and char literal in `source`, in order.
+fn source_spans(source: &str) -> Vec<SourceSpan> {
+    let bytes = source.as_bytes();
+    let mut spans = Vec::new();
     let mut index = 0usize;
     while index < bytes.len() {
         let start = index;
-        match bytes[index] {
+        let kind = match bytes[index] {
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
                 while index < bytes.len() && bytes[index] != b'\n' {
                     index += 1;
                 }
+                SpanKind::Comment
             }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 let mut depth = 0usize;
@@ -1529,6 +1554,7 @@ fn mask_comments_and_literals(source: &str) -> String {
                         index += 1;
                     }
                 }
+                SpanKind::Comment
             }
             b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
                 && raw_literal_prefix_starts_token(bytes, index)
@@ -1550,6 +1576,7 @@ fn mask_comments_and_literals(source: &str) -> String {
                 index = source[body..]
                     .find(&close)
                     .map_or(bytes.len(), |offset| body + offset + close.len());
+                SpanKind::RawStr { hashes }
             }
             b'"' => {
                 index += 1;
@@ -1557,18 +1584,24 @@ fn mask_comments_and_literals(source: &str) -> String {
                     index += if bytes[index] == b'\\' { 2 } else { 1 };
                 }
                 index += 1;
+                SpanKind::Str
             }
             b'\'' if char_literal_end(source, index).is_some() => {
                 index = char_literal_end(source, index).expect("guard matched");
+                SpanKind::Char
             }
             _ => {
                 index += 1;
                 continue;
             }
-        }
-        blank(start, index);
+        };
+        spans.push(SourceSpan {
+            start,
+            end: index.min(bytes.len()),
+            kind,
+        });
     }
-    String::from_utf8(masked).expect("masking replaces whole ASCII-delimited spans")
+    spans
 }
 
 /// The end (exclusive) of the char literal whose opening quote is at `start`,
@@ -1743,7 +1776,7 @@ pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
         .await
         .expect("write");
 }
-pub async fn verify_floor_guard_behavior(pool: &PgPool) {
+pub async fn verify_channel_roster_fence_behavior(pool: &PgPool) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
         .execute(pool)
         .await
@@ -1957,13 +1990,11 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
     );
 }
 
-// These startup probes always roll back; they deliberately exercise the DB
-// backstops rather than the app check. The two serving writers are exempt only
+// This startup probe always rolls back; it deliberately exercises the roster
+// DB backstop rather than the app check. The two serving writers are exempt only
 // while their INSERT remains structurally channel-NULL (checked below).
-const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 2] = [
-    "pub async fn verify_floor_guard_behavior(",
-    "pub async fn verify_channel_roster_fence_behavior(",
-];
+const EVENT_FLOOR_PROBE_EXCEPTIONS: [&str; 1] =
+    ["pub async fn verify_channel_roster_fence_behavior("];
 
 fn is_channel_null_event_writer(function: &str) -> bool {
     let header = function_header(function);
@@ -1979,29 +2010,44 @@ fn is_channel_null_event_writer(function: &str) -> bool {
     false
 }
 
-fn updates_event_floor_columns(function: &str) -> bool {
-    let normalized = normalized_sql_source(function);
-    normalized.match_indices("update ").any(|(index, marker)| {
-        let Some((target, assignments)) = normalized[index + marker.len()..].split_once(" set ")
-        else {
-            return false;
-        };
-        let mut target = target.split_whitespace();
-        let mut table = target.next();
-        if table == Some("only") {
-            table = target.next();
-        }
-        if !matches!(table, Some("events" | "public.events")) {
-            return false;
-        }
-        // The target may have an alias, with or without AS.
-        let alias = target.collect::<Vec<_>>();
-        if !matches!(alias.as_slice(), [] | [_] | ["as", _]) {
-            return false;
-        }
-        let assignments = assignments.split(" where ").next().expect("first part");
-        let mut depth = 0usize;
-        assignments
+/// Whether a `SET` list assigns `created_at` or `channel_id`, including the
+/// row form `(a, b) = (...)`, or a column it cannot read (a `{…}`
+/// placeholder). Stops at the first `WHERE`.
+fn assigns_event_floor_column(assignments: &str) -> bool {
+    let assignments = assignments.split(" where ").next().expect("first part");
+    let mut depth = 0usize;
+    assignments
+        .split(|ch| {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            ch == ',' && depth == 0
+        })
+        .any(|assignment| {
+            assignment.split_once('=').is_some_and(|(columns, _)| {
+                columns
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .split(',')
+                    .map(str::trim)
+                    .any(|column| {
+                        matches!(column, "created_at" | "channel_id") || column.starts_with('{')
+                    })
+            })
+        })
+}
+
+/// Whether a `SET` list (up to the first `WHERE`) is missing from its
+/// literal: empty, or holding an item with no `=`, such as a `{…}`
+/// placeholder or a column whose value follows in another literal.
+fn set_list_is_unreadable(assignments: &str) -> bool {
+    let assignments = assignments.split(" where ").next().expect("first part");
+    let mut depth = 0usize;
+    assignments.trim().is_empty()
+        || assignments
             .split(|ch| {
                 match ch {
                     '(' => depth += 1,
@@ -2010,21 +2056,367 @@ fn updates_event_floor_columns(function: &str) -> bool {
                 }
                 ch == ',' && depth == 0
             })
-            .any(|assignment| {
-                assignment.split_once('=').is_some_and(|(columns, _)| {
-                    columns
-                        .trim()
-                        .trim_start_matches('(')
-                        .trim_end_matches(')')
-                        .split(',')
-                        .any(|column| matches!(column.trim(), "created_at" | "channel_id"))
-                })
-            })
+            .any(|assignment| !assignment.contains('='))
+}
+
+/// The table a write targets, without its schema (a literal or a `{…}`
+/// placeholder; any schema may hold an `events` table).
+fn unqualified_table(target: &str) -> &str {
+    target.rsplit_once('.').map_or(target, |(_, table)| table)
+}
+
+/// Whether one SQL literal (normalized) assigns a floor column through a
+/// direct `UPDATE` of `events`, or of a target it does not spell: a
+/// placeholder, or a `SET` list whose `UPDATE` lies in another literal.
+/// A `SET` list it cannot read counts as assigning one.
+fn literal_updates_event_floor_columns(sql: &str) -> bool {
+    // `SET(` with no space is still a row assignment.
+    let sql = format!(" {} ", sql.trim()).replace(" set(", " set (");
+    sql.match_indices(" set ").any(|(index, marker)| {
+        let assignments = &sql[index + marker.len()..];
+        // A SET list continued in another literal or argument cannot be read.
+        let unreadable = set_list_is_unreadable(assignments);
+        if !unreadable && !assigns_event_floor_column(assignments) {
+            return false;
+        }
+        let before = &sql[..index];
+        if before.ends_with(" do update") {
+            // The upsert check resolves the INSERT, which may be in another
+            // literal of the same builder, but only from a readable SET list.
+            return unreadable;
+        }
+        let Some(update) = before.rfind(" update ") else {
+            // A bare SET (Redis `SET`, prose) is not SQL unless it assigns.
+            return !unreadable;
+        };
+        let mut target = before[update + " update ".len()..].split_whitespace();
+        let mut table = target.next();
+        if table == Some("only") {
+            table = target.next();
+        }
+        // The target may have an alias, with or without AS.
+        let alias = target.collect::<Vec<_>>();
+        let (Some(table), [] | [_] | ["as", _]) = (table, alias.as_slice()) else {
+            // An unreadable target is a violation only when it assigns a
+            // floor column; prose ("update … is set") assigns nothing.
+            return !unreadable;
+        };
+        let table = unqualified_table(table);
+        table == "events" || table.contains('{')
     })
 }
 
-fn event_floor_policy_violations(production: &str) -> Vec<String> {
+fn updates_event_floor_columns(function: &str) -> bool {
+    let direct_update = source_spans(function)
+        .iter()
+        .filter_map(|span| span.string_body(function))
+        .any(|body| literal_updates_event_floor_columns(&normalized_sql_source(body)));
+    // `ON CONFLICT ... DO UPDATE SET` names no table: it updates the target of
+    // the INSERT it belongs to, so an events upsert can re-home an existing row.
+    let normalized = normalized_sql_source(function).replace(" set(", " set (");
+    let events_upsert = normalized
+        .match_indices("do update set ")
+        .any(|(index, marker)| {
+            normalized[..index]
+                .rfind("insert into ")
+                .is_some_and(|insert| {
+                    let table = normalized[insert + "insert into ".len()..]
+                        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
+                        .next();
+                    matches!(table, Some("events" | "public.events"))
+                })
+                && assigns_event_floor_column(&normalized[index + marker.len()..])
+        });
+    direct_update || events_upsert
+}
+
+/// Writes one SQL literal (normalized) hides from the per-function checks:
+/// an INSERT whose target or tail is not literal, `events` written by a
+/// statement other than INSERT, or a PREPARE.
+fn literal_sql_violations(sql: &str) -> Vec<&'static str> {
+    let sql = format!(" {} ", sql.trim());
+    let mut violations = Vec::new();
+    for (index, _) in sql.match_indices(" into ") {
+        let rest = &sql[index + " into ".len()..];
+        let target = rest.split([' ', '(']).next().expect("first part");
+        let table = unqualified_table(target);
+        if sql[..index].ends_with(" insert") {
+            if target.is_empty() || table.contains('{') {
+                violations.push("INSERT target is not a literal table");
+            } else if table == "events" && rest.contains('{') {
+                violations.push("events INSERT with a non-literal part");
+            }
+        } else if table == "events" {
+            violations.push("events written by a statement other than INSERT");
+        }
+    }
+    if sql.match_indices(" copy ").any(|(index, marker)| {
+        let target = sql[index + marker.len()..].split([' ', '(']).next();
+        target.is_some_and(|target| unqualified_table(target) == "events")
+    }) {
+        violations.push("events written by a statement other than INSERT");
+    }
+    let words = sql.split_whitespace().collect::<Vec<_>>();
+    if words
+        .windows(2)
+        .any(|pair| pair[0] == "prepare" && (pair[1] == "transaction" || pair[1].starts_with('{')))
+        || words.last() == Some(&"prepare")
+    {
+        violations.push("PREPARE TRANSACTION in a production writer");
+    }
+    violations
+}
+
+/// The offset of the delimiter that closes the bracket opened at `open` in
+/// `masked` (comments and literals already blanked).
+fn matching_close(masked: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, byte) in masked.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `text` as a plain Rust string literal.
+fn plain_literal(text: &str) -> String {
+    format!("\"{}\"", plain_body(text))
+}
+
+/// Raw `text` escaped as the body of a plain string literal.
+fn plain_body(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A string literal's body, as written in a plain (escaped) literal.
+fn plain_string_body(span: &SourceSpan, source: &str) -> Option<String> {
+    let body = span.string_body(source)?;
+    Some(if matches!(span.kind, SpanKind::Str) {
+        body.to_owned()
+    } else {
+        plain_body(body)
+    })
+}
+
+/// The string literal that is the whole of `arg`, if it is one.
+fn sole_string_literal(arg: &str) -> Option<SourceSpan> {
+    let trimmed = arg.trim();
+    let offset = arg.len() - arg.trim_start().len();
+    let mut spans = source_spans(trimmed).into_iter();
+    let span = spans.next()?;
+    (spans.next().is_none()
+        && span.start == 0
+        && span.end == trimmed.len()
+        && matches!(span.kind, SpanKind::Str | SpanKind::RawStr { .. }))
+    .then_some(SourceSpan {
+        start: span.start + offset,
+        end: span.end + offset,
+        kind: span.kind,
+    })
+}
+
+/// The opening delimiter of each `name!` macro call in `masked` (comments
+/// and literals blanked), last first, with any path prefix (`::core::`) and
+/// any of `(`, `[` or `{`: `(start of name, delimiter offset)`.
+fn macro_calls(masked: &str, name: &str) -> Vec<(usize, usize)> {
+    let mut calls = masked
+        .match_indices(name)
+        .filter_map(|(at, _)| {
+            let starts_token = !masked[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            let after = masked[at + name.len()..].strip_prefix('!')?;
+            let open = at + name.len() + 1 + (after.len() - after.trim_start().len());
+            (starts_token && matches!(masked.as_bytes().get(open), Some(b'(' | b'[' | b'{')))
+                .then_some((at, open))
+        })
+        .collect::<Vec<_>>();
+    calls.reverse();
+    calls
+}
+
+/// Bring SQL that per-function literal scans cannot see into view, so the
+/// floor policy fails closed on it now that no trigger backs it up: each
+/// `include_str!("…")` becomes one literal holding the included file
+/// (resolved against `path`), and each `concat!` becomes one literal of its
+/// arguments, with `{opaque}` standing in for any non-literal argument. The
+/// SQL checks treat a placeholder in a write target or a `SET` column as
+/// unattributable. An `include_str!` whose path is not one literal or
+/// cannot be read is a violation, as is any `query_file` macro.
+fn sql_visible_source(path: &std::path::Path, source: &str) -> (String, Vec<String>) {
+    let mut violations = Vec::new();
+    let mut text = source.to_owned();
+    for (macro_name, expand_include) in [("include_str", true), ("concat", false)] {
+        // Last occurrence first: a rewrite never moves an earlier offset, and
+        // an inner `concat!` is joined before the one around it.
+        loop {
+            let masked = mask_comments_and_literals(&text);
+            let Some(&(at, open)) = macro_calls(&masked, macro_name).first() else {
+                break;
+            };
+            let Some(close) = matching_close(&masked, open) else {
+                violations.push(format!("{macro_name}!…) is unterminated"));
+                break;
+            };
+            let args = &text[open + 1..close];
+            let replacement = if expand_include {
+                let included = sole_string_literal(args)
+                    .and_then(|span| span.string_body(args).map(str::to_owned))
+                    .and_then(|relative| {
+                        let resolved = path.parent()?.join(&relative);
+                        std::fs::read_to_string(resolved).ok()
+                    });
+                match included {
+                    Some(contents) => plain_literal(&contents),
+                    None => {
+                        violations.push(format!("include_str!({}) is opaque", args.trim()));
+                        plain_literal("")
+                    }
+                }
+            } else {
+                let masked_args = &masked[open + 1..close];
+                let mut joined = String::new();
+                let mut depth = 0usize;
+                let mut arg_start = 0usize;
+                for (index, byte) in masked_args.bytes().chain(std::iter::once(b',')).enumerate() {
+                    match byte {
+                        b'(' | b'[' | b'{' => depth += 1,
+                        b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                        b',' if depth == 0 => {
+                            let arg = &args[arg_start..index.min(args.len())];
+                            arg_start = index + 1;
+                            if arg.trim().is_empty() {
+                                continue;
+                            }
+                            match sole_string_literal(arg)
+                                .and_then(|span| plain_string_body(&span, arg))
+                            {
+                                Some(body) => joined.push_str(&body),
+                                None => joined.push_str("{opaque}"),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                format!("\"{joined}\"")
+            };
+            text.replace_range(at..=close, &replacement);
+        }
+    }
+    // sqlx's `query_file*!` macros load SQL from a file at compile time;
+    // nothing uses them, so ban them rather than resolve them.
+    let masked = mask_comments_and_literals(&text);
+    for (at, _) in masked.match_indices("query_file") {
+        let starts_token = !masked[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+        let name_len = masked[at..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(masked.len() - at);
+        if starts_token && masked[at + name_len..].trim_start().starts_with('!') {
+            violations.push(format!(
+                "{}! loads SQL from a file",
+                &masked[at..at + name_len]
+            ));
+        }
+    }
+    (text, violations)
+}
+
+/// Length of the function item that starts `masked_function` (comments and
+/// literals blanked): through the `}` closing its body, or through the `;` of
+/// a bodiless declaration. Unlike [`cfg_test_item_len`], a `;` inside the
+/// signature's parentheses or brackets (`[u8; 4]`) does not end it. Without a
+/// body the whole input counts, so an unrecognized shape never hides SQL.
+fn function_item_len(masked_function: &str) -> usize {
+    let mut nesting = 0usize;
+    for (index, byte) in masked_function.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' => nesting += 1,
+            b')' | b']' => nesting = nesting.saturating_sub(1),
+            b';' if nesting == 0 => return index + 1,
+            b'{' if nesting == 0 => {
+                return matching_close(masked_function, index)
+                    .map_or(masked_function.len(), |close| close + 1);
+            }
+            _ => {}
+        }
+    }
+    masked_function.len()
+}
+
+/// Each function slice cut to the function's own item, so a const or static
+/// after its body is not attributed to it (see [`item_level_literals`]).
+fn function_items(production: &str) -> Vec<&str> {
     function_slices(production)
+        .into_iter()
+        .map(|function| &function[..function_item_len(&mask_comments_and_literals(function))])
+        .collect()
+}
+
+/// String literals outside every function body (consts, statics and macro
+/// bodies), as plain literals one per line. A function's floor guard cannot
+/// be attributed to SQL there.
+fn item_level_literals(production: &str) -> String {
+    let base = production.as_ptr() as usize;
+    let functions: Vec<(usize, usize)> = function_items(production)
+        .into_iter()
+        .map(|function| {
+            let start = function.as_ptr() as usize - base;
+            (start, start + function.len())
+        })
+        .collect();
+    let mut literals = String::new();
+    for span in source_spans(production) {
+        if functions
+            .iter()
+            .any(|(start, end)| *start <= span.start && span.end <= *end)
+        {
+            continue;
+        }
+        if let Some(body) = plain_string_body(&span, production) {
+            literals.push_str(&format!("\"{body}\"\n"));
+        }
+    }
+    literals
+}
+
+/// Every floor-policy violation in one production file, after
+/// [`sql_visible_source`] has exposed included and concatenated SQL.
+fn file_event_floor_policy_violations(path: &std::path::Path, source: &str) -> Vec<String> {
+    let (production, mut violations) = sql_visible_source(path, &strip_cfg_test_items(source));
+    // The fence cannot bound a prepared transaction's rows without the
+    // retired trigger (see `replica_fence::sample_writer`), so no supported
+    // writer may prepare one.
+    for span in source_spans(&production) {
+        if let Some(body) = span.string_body(&production) {
+            for violation in literal_sql_violations(&normalized_sql_source(body)) {
+                if !violations.iter().any(|seen| seen == violation) {
+                    violations.push(violation.to_owned());
+                }
+            }
+        }
+    }
+    let item_level = item_level_literals(&production);
+    if inserts_events_row(&item_level) || updates_event_floor_columns(&item_level) {
+        violations.push("event-write SQL outside any function body".to_owned());
+    }
+    violations.extend(event_floor_policy_violations(&production));
+    violations
+}
+
+fn event_floor_policy_violations(production: &str) -> Vec<String> {
+    function_items(production)
         .into_iter()
         .filter(|function| {
             let header = function_header(function);
@@ -2094,6 +2486,30 @@ async fn quoted_schema_update(tx: &mut AdmittedTx) {
 async fn delete_only(tx: &mut AdmittedTx) {
     sqlx::query("UPDATE events SET deleted_at=now() WHERE channel_id=$1 AND created_at<$2");
 }
+async fn row_time_no_space(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET(created_at,kind)=($1,1) WHERE id=$2");
+}
+async fn guarded_upsert_rehome(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id, channel_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET channel_id = EXCLUDED.channel_id");
+}
+async fn guarded_upsert_row_time(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET(kind, created_at) = (1, $2)");
+}
+async fn guarded_upsert_other_column(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET tags = EXCLUDED.tags");
+}
+async fn guarded_upsert_do_nothing(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT (id) DO NOTHING");
+}
+async fn guarded_insert_then_other_table_upsert(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query("INSERT INTO events (id) VALUES ($1) ON CONFLICT DO NOTHING");
+    sqlx::query("INSERT INTO parameterized_event_watermarks (d_tag, created_at) VALUES ($1, $2) ON CONFLICT (d_tag) DO UPDATE SET created_at = EXCLUDED.created_at");
+}
 "#;
     assert_eq!(
         event_floor_policy_violations(source),
@@ -2111,6 +2527,9 @@ async fn delete_only(tx: &mut AdmittedTx) {
             "async fn quoted_schema_insert(tx: &mut AdmittedTx) {",
             "async fn quoted_update(tx: &mut AdmittedTx) {",
             "async fn quoted_schema_update(tx: &mut AdmittedTx) {",
+            "async fn row_time_no_space(tx: &mut AdmittedTx) {",
+            "async fn guarded_upsert_rehome(tx: &mut AdmittedTx) {",
+            "async fn guarded_upsert_row_time(tx: &mut AdmittedTx) {",
         ]
     );
 }
@@ -2135,6 +2554,194 @@ pub async fn publish_nip43_membership_locked(tx: &mut AdmittedTx) {
 }
 
 #[test]
+fn event_floor_policy_fails_closed_on_sql_it_cannot_attribute() {
+    let dir = std::env::temp_dir().join(format!("buzz-floor-policy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    std::fs::write(
+        dir.join("insert_event.sql"),
+        "INSERT INTO \"events\" (id) VALUES ($1)",
+    )
+    .expect("sql fixture");
+    std::fs::write(dir.join("notes.md"), "Prose that quotes nothing.").expect("md fixture");
+    let path = dir.join("writer.rs");
+    let source = r##"
+const LEADING_INSERT: &str = "INSERT INTO events (id) VALUES ($1)";
+const USER_AGENT: &str = concat!("buzz-agent/", env!("CARGO_PKG_VERSION"));
+static NOTES: &str = include_str!("notes.md");
+async fn joined_insert(tx: &mut AdmittedTx) {
+    sqlx::query(concat!("INSERT INTO ", "events (id) VALUES ($1)"));
+}
+async fn guarded_joined_insert(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query(concat!("INSERT INTO ", r#"events"#, " (id) VALUES ($1)"));
+}
+const TRAILING_REWRITE: &str = "UPDATE events SET created_at = $1 WHERE id = $2";
+async fn joined_rewrite(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query(concat!("UPDATE events ", "SET created_at = $1 WHERE id = $2"));
+}
+async fn included_insert(tx: &mut AdmittedTx) {
+    sqlx::query(include_str!("insert_event.sql"));
+}
+async fn guarded_included_insert(tx: &mut AdmittedTx) {
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel).await?;
+    sqlx::query(include_str!("insert_event.sql"));
+}
+async fn opaque_include(tx: &mut AdmittedTx) {
+    sqlx::query(include_str!(concat!(env!("OUT_DIR"), "/insert.sql")));
+}
+async fn opaque_concat(tx: &mut AdmittedTx) {
+    sqlx::query(concat!("INSERT INTO ", env!("EVENTS_TABLE")));
+}
+async fn two_phase(tx: &mut AdmittedTx) {
+    sqlx::query("PREPARE TRANSACTION 'fence'");
+}
+"##;
+    let violations = file_event_floor_policy_violations(&path, source);
+
+    // One writer per shape: the SQL is split, assembled, loaded or spelled so
+    // the per-literal checks cannot read it whole.
+    const WRITER: &str = "async fn writer(tx: &mut AdmittedTx) {";
+    const OPAQUE_INSERT: &str = "INSERT target is not a literal table";
+    let shapes: [(&str, &[&str]); 23] = [
+        // Controls: an opaque WHERE predicate (the retention deletes), a
+        // placeholder table with no floor column (tenant severing), and a
+        // builder whose upsert continues in another literal.
+        (
+            r#"sqlx::query(concat!("UPDATE events SET deleted_at = NOW() WHERE NOT ", pred!(), ""))"#,
+            &[],
+        ),
+        (
+            r#"format!("UPDATE {table} SET community_id = NULL WHERE community_id = $1")"#,
+            &[],
+        ),
+        (
+            r#"QueryBuilder::new("INSERT INTO listeners (a) ").push(" ON CONFLICT (a) DO UPDATE SET created_at = EXCLUDED.created_at")"#,
+            &[],
+        ),
+        // A non-literal `concat!` argument as the target or a SET column.
+        (
+            r#"concat!("UPDATE ", table!(), " SET created_at = $1")"#,
+            &[WRITER],
+        ),
+        (
+            r#"concat!("UPDATE events SET ", cols!(), " = $1")"#,
+            &[WRITER],
+        ),
+        // Every macro delimiter.
+        (
+            r#"concat!["INSERT INTO ", "events (id) VALUES ($1)"]"#,
+            &[WRITER],
+        ),
+        (
+            r#"::core::concat!{"INSERT INTO ", "events (id) VALUES ($1)"}"#,
+            &[WRITER],
+        ),
+        (r#"include_str!["insert_event.sql"]"#, &[WRITER]),
+        (r#"include_str! {"insert_event.sql"}"#, &[WRITER]),
+        // Compile-time file SQL is banned outright.
+        (
+            r#"sqlx::query_file!("insert_event.sql")"#,
+            &["query_file! loads SQL from a file"],
+        ),
+        (
+            r#"sqlx::query_file_as!(Row, "insert_event.sql")"#,
+            &["query_file_as! loads SQL from a file"],
+        ),
+        // SQL assembled at runtime.
+        (
+            r#"format!("{}{}", "INSERT INTO ", "events (id) VALUES ($1)")"#,
+            &[OPAQUE_INSERT],
+        ),
+        (
+            r#"format!("INSERT INTO {t} (id) VALUES ($1)")"#,
+            &[OPAQUE_INSERT],
+        ),
+        (
+            r#"["INSERT INTO ", "events (id) VALUES ($1)"].concat()"#,
+            &[OPAQUE_INSERT],
+        ),
+        (
+            r#"format!("INSERT INTO events (id) VALUES ($1) {suffix}")"#,
+            &["events INSERT with a non-literal part", WRITER],
+        ),
+        (
+            r#"format!("{}{}", "UPDATE ", "events SET created_at = $1")"#,
+            &[WRITER],
+        ),
+        (
+            r#"format!("UPDATE public.events SET {column} = $1")"#,
+            &[WRITER],
+        ),
+        // A SET list continued in another literal or argument.
+        (
+            r#"format!("UPDATE events SET {}", "created_at = $1")"#,
+            &[WRITER],
+        ),
+        (
+            r#"["UPDATE events SET ", "channel_id = $1"].concat()"#,
+            &[WRITER],
+        ),
+        (
+            r#"QueryBuilder::new("UPDATE events SET ").push("created_at = ")"#,
+            &[WRITER],
+        ),
+        (
+            r#"QueryBuilder::new("INSERT INTO events (id) ").push(" ON CONFLICT (id) DO UPDATE SET ").push("channel_id = EXCLUDED.channel_id")"#,
+            &[WRITER],
+        ),
+        (
+            r#"sqlx::query("MERGE INTO events e USING src ON e.id = src.id WHEN MATCHED THEN DO NOTHING")"#,
+            &["events written by a statement other than INSERT"],
+        ),
+        (
+            r#"format!("{} TRANSACTION 'x'", "PREPARE")"#,
+            &["PREPARE TRANSACTION in a production writer"],
+        ),
+    ];
+    let shape_violations = shapes.map(|(shape, _)| {
+        file_event_floor_policy_violations(&path, &format!("{WRITER}\n    {shape};\n}}\n"))
+    });
+
+    // Each item-level form is caught on its own, wherever it sits.
+    std::fs::write(
+        dir.join("insert_event.sql"),
+        "insert into events (id) values ($1)",
+    )
+    .expect("sql fixture");
+    let items = [
+        "const LEADING: &str = \"INSERT INTO events (id) VALUES ($1)\";\nfn f() {}\n",
+        "fn f() {}\nconst TRAILING: &str = \"UPDATE events SET channel_id = $1\";\nfn g() {}\n",
+        "fn f() {}\nstatic INCLUDED: &str = include_str!(\"insert_event.sql\");\n",
+    ];
+    let item_violations = items.map(|item| file_event_floor_policy_violations(&path, item));
+    std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+
+    assert_eq!(
+        violations,
+        [
+            r#"include_str!(concat!(env!("OUT_DIR"), "/insert.sql")) is opaque"#,
+            OPAQUE_INSERT,
+            "PREPARE TRANSACTION in a production writer",
+            "event-write SQL outside any function body",
+            "async fn joined_insert(tx: &mut AdmittedTx) {",
+            "async fn joined_rewrite(tx: &mut AdmittedTx) {",
+            "async fn included_insert(tx: &mut AdmittedTx) {",
+        ]
+    );
+    for ((shape, expected), found) in shapes.iter().zip(&shape_violations) {
+        assert_eq!(found, expected, "shape `{shape}`");
+    }
+    for (item, found) in items.iter().zip(&item_violations) {
+        assert_eq!(
+            found,
+            &["event-write SQL outside any function body"],
+            "item-level SQL in `{item}`"
+        );
+    }
+}
+
+#[test]
 fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it() {
     let files = collect_production_rs_files();
     let crates_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2147,8 +2754,9 @@ fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it(
     let mut guarded_writers = 0;
     let mut violations = Vec::new();
     for path in files {
-        let production = strip_cfg_test_items(&std::fs::read_to_string(&path).expect("source"));
-        guarded_writers += function_slices(&production)
+        let source = std::fs::read_to_string(&path).expect("source");
+        let (production, _) = sql_visible_source(&path, &strip_cfg_test_items(&source));
+        guarded_writers += function_items(&production)
             .into_iter()
             .filter(|function| {
                 inserts_events_row(function)
@@ -2157,7 +2765,7 @@ fn every_production_channel_event_insert_checks_the_floor_and_never_rewrites_it(
             })
             .count();
         violations.extend(
-            event_floor_policy_violations(&production)
+            file_event_floor_policy_violations(&path, &source)
                 .into_iter()
                 .map(|header| format!("{}: {header}", path.display())),
         );
@@ -2185,7 +2793,7 @@ fn event_floor_guard_uses_the_database_statement_clock_and_shared_floor() {
     );
     assert!(
         guard.contains(".bind(CREATED_AT_FLOOR_SECS as f64)"),
-        "app check, GUC and fence wall must share the same floor constant"
+        "app check and fence wall must share the same floor constant"
     );
 }
 

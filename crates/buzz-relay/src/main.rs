@@ -551,26 +551,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     info!("Community deletion serving fences verified");
     step.finish();
 
-    // Freshness fence probe: cursor pages route to the replica only for
-    // history the probe has verified as fully replayed. Deliberately AFTER
-    // the migration decision: spawn_fence_probe first verifies the
-    // commit-time floor guard (catalog shape + observed behavior through the
-    // armed pool) against the live schema, so a relay running with
-    // BUZZ_AUTO_MIGRATE off and migration 0021 unapplied can never open the
-    // fence over an unenforced floor. Verification failure is loud but
-    // non-fatal: the fence stays closed and every cursor page routes to the
-    // writer.
-    let mut step = StepTimer::start(StartupStep::ReplicaFenceProbe);
-    match db.spawn_fence_probe().await {
-        Ok(true) => info!("Replica fence probe started (floor guard verified)"),
-        Ok(false) => {}
-        Err(e) => {
-            step.degrade();
-            error!(
-                "Replica fence disabled — floor guard verification failed: {e}. \
-                 All cursor reads stay on the writer."
-            );
-        }
+    // The ordered heartbeat probe opens replica routing only after a
+    // successful sample. Errors keep cursor reads on the writer.
+    let step = StepTimer::start(StartupStep::ReplicaFenceProbe);
+    if db.spawn_fence_probe() {
+        info!("Replica fence probe started");
     }
     step.finish();
 

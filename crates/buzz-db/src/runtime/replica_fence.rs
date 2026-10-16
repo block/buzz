@@ -5,10 +5,9 @@
 //!
 //! 1. **Insert-time floor**: supported channel-event writers check `created_at`
 //!    against database `clock_timestamp()` on their admitted transaction for
-//!    each new row. Duplicate INSERTs need no floor check. This is the primary
-//!    guard. Migration 0021's deferred trigger and the writer-pool
-//!    `buzz.created_at_floor` GUC remain the mixed-version backstop until phase 2;
-//!    they also reject rows that age below the floor before COMMIT.
+//!    each new row. Duplicate INSERTs need no floor check. This is the only
+//!    guard: migration 0062 retired 0021's deferred trigger and the
+//!    writer-pool `buzz.created_at_floor` GUC.
 //! 2. **Ordered heartbeat handshake** (this module): on one pinned writer
 //!    connection, one transaction first takes the exclusive replica-floor
 //!    advisory lock (draining compliant shared-lock channel writers), then
@@ -24,7 +23,8 @@
 //!    (a) finished before the activity scan — its commit precedes `M`'s
 //!    commit, so the replica session has replayed it;
 //!    (b) open at the activity scan — represented by `xact_start`, so it is
-//!    bounded by the `oldest_xact_start` term;
+//!    bounded by the `oldest_xact_start` term (a prepared transaction has
+//!    no `xact_start` to read, so one existing fails the sample closed);
 //!    (c) started after the activity scan — its insert-time app guard runs
 //!    after `S`, so it cannot commit a row with
 //!    `created_at < S - floor`.
@@ -53,9 +53,9 @@
 //! mismatch, or an observed token below every retained entry all route the
 //! request back to the writer — degraded capacity, never holes.
 //!
-//! Raw SQL without the armed GUC and `session_replication_role = replica`
-//! restores bypass the supported app writers. These operational bypasses are
-//! outside the proof and require holding the fence closed; see `migrations/0021`.
+//! Raw SQL and `session_replication_role = replica` restores bypass the
+//! application floor check. These operational bypasses are outside the proof
+//! and require holding the fence closed.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -67,12 +67,12 @@ use uuid::Uuid;
 
 use buzz_datastore_tracing::datastore_span;
 
-/// Seconds of `created_at` history the app and mixed-version trigger tolerate.
+/// Seconds of `created_at` history the application floor check tolerates.
 ///
 /// Must exceed the relay's ingest envelope (±900 s) by enough slack that a
-/// legitimately accepted event still commits within the floor even under
-/// slow validation/lock waits. The writer pool arms the guard with this value
-/// and the fence subtracts it; the two uses must never diverge.
+/// legitimately accepted event still passes the check after slow
+/// validation/lock waits. Application checks and the fence wall use this
+/// same value; the two uses must never diverge.
 pub const CREATED_AT_FLOOR_SECS: i64 = 960;
 
 /// Enforce the channel-event floor on the admitted INSERT connection.
@@ -110,13 +110,13 @@ pub(crate) async fn guard_event_created_at_floor(
 /// transactions against the writer probe handshake.
 ///
 /// Shared holders are channel-event write transactions validating `created_at`
-/// under the armed floor contract; the probe takes the exclusive lock before
-/// sampling and publishing its heartbeat token.
+/// under the application floor contract; the probe takes the exclusive lock
+/// before sampling and publishing its heartbeat token.
 pub const REPLICA_FLOOR_LOCK_KEY: i64 = 0x62757a7a666c6f72;
 
 /// Safety margin subtracted from the fence on top of the floor.
 ///
-/// All proof timestamps (`clock_timestamp()`, `xact_start`, the guard's
+/// All proof timestamps (`clock_timestamp()`, `xact_start`, the floor check's
 /// clock) come from the writer host, so this only needs to absorb
 /// `created_at` second-truncation and scheduling noise, not clock skew
 /// between machines.
@@ -350,208 +350,6 @@ impl ReplicaFence {
     }
 }
 
-/// Catalog-level verification that the commit-time floor guard (migration
-/// 0021) is present and correctly shaped on the `events` parent AND every
-/// partition: right function, `DEFERRABLE INITIALLY DEFERRED`, row-level,
-/// AFTER, firing on both INSERT and UPDATE (an UPDATE can move an exempt
-/// channel-NULL row into the guarded set, or rewrite `created_at` downward).
-///
-/// This is a name-and-shape check only; it cannot detect a sabotaged
-/// function body. [`verify_floor_guard_behavior`] proves the semantics.
-///
-/// Generic over the executor so the migration path can run it on the
-/// lock-holding connection while the startup probe keeps using the pool.
-#[datastore_span(name = "replica_fence_verify_catalog", system = "postgresql")]
-pub async fn verify_floor_guard_catalog<'e>(
-    executor: impl sqlx::PgExecutor<'e>,
-) -> crate::Result<()> {
-    // tgtype bits: 1 = ROW, 2 = BEFORE, 4 = INSERT, 16 = UPDATE, 64 = INSTEAD.
-    // Required: ROW + INSERT + UPDATE set, BEFORE + INSTEAD clear.
-    let missing: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT c.relname::text
-        FROM (
-            SELECT 'events'::regclass AS oid
-            UNION ALL
-            SELECT inhrelid FROM pg_inherits WHERE inhparent = 'events'::regclass
-        ) rels
-        JOIN pg_class c ON c.oid = rels.oid
-        WHERE NOT EXISTS (
-            SELECT 1 FROM pg_trigger t
-            WHERE t.tgrelid = rels.oid
-              AND t.tgname = 'events_created_at_floor'
-              AND t.tgfoid = 'events_created_at_floor_guard'::regproc
-              AND t.tgdeferrable
-              AND t.tginitdeferred
-              AND t.tgtype & 1 = 1      -- row-level
-              AND t.tgtype & 2 = 0      -- AFTER, not BEFORE
-              AND t.tgtype & 64 = 0     -- not INSTEAD OF
-              AND t.tgtype & 4 = 4      -- fires on INSERT
-              AND t.tgtype & 16 = 16    -- fires on UPDATE
-        )
-        "#,
-    )
-    .fetch_all(executor)
-    .await?;
-    if !missing.is_empty() {
-        return Err(crate::error::DbError::InvalidData(format!(
-            "created_at floor guard trigger missing or mis-shaped on: {} \
-             (replica fence must stay closed)",
-            missing.join(", ")
-        )));
-    }
-    Ok(())
-}
-
-/// Behavioral verification of the floor guard, end-to-end through the armed
-/// pool. A catalog check cannot detect a no-op function body or an unarmed
-/// pool; this proves the semantics the fence proof cites, inside one
-/// rolled-back transaction:
-///
-/// 1. the pool's session GUC equals [`CREATED_AT_FLOOR_SECS`] (arming);
-/// 2. an old channel-bearing INSERT raises `check_violation` (23514);
-/// 3. a fresh channel-bearing INSERT commits;
-/// 4. rewriting a fresh row's `created_at` below the floor raises;
-/// 5. an old channel-NULL INSERT is exempt, but flipping its `channel_id`
-///    on raises (the `UPDATE OF` arm).
-///
-/// `SET CONSTRAINTS ALL IMMEDIATE` makes the deferred trigger fire per
-/// statement so each adversary is observable under a savepoint; deferral to
-/// COMMIT is separately pinned by the held-transaction fixture.
-#[datastore_span(name = "replica_fence_verify_behavior", system = "postgresql")]
-pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
-    use crate::error::DbError;
-
-    let expect_violation = |res: Result<sqlx::postgres::PgQueryResult, sqlx::Error>,
-                            what: &str|
-     -> crate::Result<()> {
-        match res {
-            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23514") => Ok(()),
-            Ok(_) => Err(DbError::InvalidData(format!(
-                "floor guard is inert: {what} was accepted (replica fence must stay closed)"
-            ))),
-            Err(e) => Err(DbError::InvalidData(format!(
-                "floor guard verification failed unexpectedly on {what}: {e}"
-            ))),
-        }
-    };
-
-    let connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::Bootstrap,
-    )
-    .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-
-    // 1. Pool arming (Perci: assert the effective value, not the intent).
-    let armed: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| {
-            DbError::InvalidData(format!(
-                "buzz.created_at_floor GUC not set on this pool: {e}"
-            ))
-        })?;
-    if armed != CREATED_AT_FLOOR_SECS.to_string() {
-        return Err(DbError::InvalidData(format!(
-            "buzz.created_at_floor is '{armed}', expected '{CREATED_AT_FLOOR_SECS}': \
-             pool is not armed"
-        )));
-    }
-
-    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
-        .execute(&mut *tx)
-        .await?;
-
-    // Scratch community satisfying the FK; the whole transaction rolls back.
-    let community = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-        .bind(community)
-        .bind(format!("fence-verify-{}.invalid", community.simple()))
-        .execute(&mut *tx)
-        .await?;
-    let channel = uuid::Uuid::new_v4();
-
-    let insert = |tx_id: [u8; 32], age_secs: i64, ch: Option<uuid::Uuid>| {
-        sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, \
-             content, sig, received_at, channel_id) \
-             VALUES ($1, $2, $3, clock_timestamp() - make_interval(secs => $4::double precision), \
-             9, '[]', 'fence-verify', $5, NOW(), $6)",
-        )
-        .bind(community)
-        .bind(tx_id.to_vec())
-        .bind(vec![0u8; 32])
-        .bind(age_secs as f64)
-        .bind(vec![0u8; 64])
-        .bind(ch)
-    };
-    let old_age = CREATED_AT_FLOOR_SECS + 60;
-
-    // 2. Old channel-bearing insert must raise.
-    sqlx::query("SAVEPOINT floor_probe")
-        .execute(&mut *tx)
-        .await?;
-    let res = insert(rand_id(), old_age, Some(channel))
-        .execute(&mut *tx)
-        .await;
-    expect_violation(res, "an old channel-bearing INSERT")?;
-    sqlx::query("ROLLBACK TO SAVEPOINT floor_probe")
-        .execute(&mut *tx)
-        .await?;
-
-    // 3. Fresh channel-bearing insert must pass.
-    let fresh_id = rand_id();
-    insert(fresh_id, 0, Some(channel)).execute(&mut *tx).await?;
-
-    // 4. Rewriting created_at below the floor must raise (in- or
-    //    cross-partition, either arm of the guard catches the NEW row).
-    sqlx::query("SAVEPOINT floor_probe")
-        .execute(&mut *tx)
-        .await?;
-    let res = sqlx::query(
-        "UPDATE events SET created_at = clock_timestamp() - make_interval(secs => $1::double precision) \
-         WHERE community_id = $2 AND id = $3",
-    )
-    .bind(old_age as f64)
-    .bind(community)
-    .bind(fresh_id.to_vec())
-    .execute(&mut *tx)
-    .await;
-    expect_violation(res, "rewriting created_at below the floor")?;
-    sqlx::query("ROLLBACK TO SAVEPOINT floor_probe")
-        .execute(&mut *tx)
-        .await?;
-
-    // 5. Old channel-NULL insert is exempt; flipping channel_id on must raise.
-    let null_id = rand_id();
-    insert(null_id, old_age, None).execute(&mut *tx).await?;
-    sqlx::query("SAVEPOINT floor_probe")
-        .execute(&mut *tx)
-        .await?;
-    let res = sqlx::query("UPDATE events SET channel_id = $1 WHERE community_id = $2 AND id = $3")
-        .bind(channel)
-        .bind(community)
-        .bind(null_id.to_vec())
-        .execute(&mut *tx)
-        .await;
-    expect_violation(res, "moving an old channel-NULL row into a channel")?;
-    sqlx::query("ROLLBACK TO SAVEPOINT floor_probe")
-        .execute(&mut *tx)
-        .await?;
-
-    tx.rollback().await?;
-    Ok(())
-}
-
-fn rand_id() -> [u8; 32] {
-    let mut id = [0u8; 32];
-    for chunk in id.chunks_mut(16) {
-        chunk.copy_from_slice(&uuid::Uuid::new_v4().into_bytes()[..chunk.len()]);
-    }
-    id
-}
-
 /// One writer-side sample of the ordered handshake.
 #[derive(Debug)]
 struct WriterSample {
@@ -585,6 +383,17 @@ pub enum ProbeError {
     MaskedActivity {
         /// Number of other client backends with masked/unknown state.
         masked: i64,
+    },
+    /// A prepared (2PC) transaction exists. Its rows were floor-checked at
+    /// insert time, which `pg_prepared_xacts` cannot bound, and no supported
+    /// writer prepares transactions — treat it as out-of-band.
+    #[error(
+        "{prepared} prepared transaction(s) in pg_prepared_xacts — out-of-band writer; \
+         replica floor cannot bound their rows"
+    )]
+    PreparedTransactions {
+        /// Number of prepared transactions in the cluster.
+        prepared: i64,
     },
     /// The single heartbeat row (migration 0026) is missing on the writer.
     #[error("replica_heartbeat row missing on the writer — migration 0026 not applied?")]
@@ -632,26 +441,27 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
     //      conservative direction (a long autovacuum merely holds the fence
     //      back), and it keeps the classification simple.
     //    Scope is every other backend regardless of role or application
-    //    name: an admin psql transaction writes under the same trigger and
-    //    must be representable in the oldest-xact term.
+    //    name: every open transaction must be representable in the
+    //    oldest-xact term. Out-of-band writes require a closed breaker.
     //
     //    Prepared transactions (2PC) are a bucket of their own: while
     //    prepared they have left `pg_stat_activity` but can still commit
-    //    after the token. Their deferred floor guard already ran at PREPARE,
-    //    so `pg_prepared_xacts.prepared` bounds their rows exactly like
-    //    `xact_start`; fold it into the same minimum. Only the retained
-    //    deferred trigger provides that PREPARE-time check: the insert-time
-    //    app guard runs earlier, and no app writer issues PREPARE TRANSACTION.
-    //    Dropping the trigger must keep this case covered.
+    //    after the token. Only the retired deferred trigger checked their
+    //    rows at PREPARE; the insert-time app guard runs earlier, at a clock
+    //    `pg_prepared_xacts` does not expose, so `prepared` no longer bounds
+    //    their rows. No supported writer issues PREPARE TRANSACTION (the
+    //    source policy enforces it) and `max_prepared_transactions` defaults
+    //    to 0, so any prepared transaction is out-of-band: fail closed. The
+    //    count is cluster-wide, like the activity scan: a prepared
+    //    transaction in any database on the writer is outside the supported
+    //    deploy, so it closes the fence rather than being scoped away.
     let row = sqlx::query(
         r#"
         SELECT
-            least(
-                (SELECT min(xact_start)
-                   FROM pg_stat_activity
-                  WHERE pid <> pg_backend_pid()),
-                (SELECT min(prepared) FROM pg_prepared_xacts)
-            ) AS oldest_xact_start,
+            (SELECT min(xact_start)
+               FROM pg_stat_activity
+              WHERE pid <> pg_backend_pid()) AS oldest_xact_start,
+            (SELECT count(*) FROM pg_prepared_xacts) AS prepared,
             (SELECT count(*)
                FROM pg_stat_activity
               WHERE pid <> pg_backend_pid()
@@ -667,6 +477,10 @@ async fn sample_writer(writer: &PgPool) -> Result<WriterSample, ProbeError> {
     let masked: i64 = row.get("masked");
     if masked > 0 {
         return Err(ProbeError::MaskedActivity { masked });
+    }
+    let prepared: i64 = row.get("prepared");
+    if prepared > 0 {
+        return Err(ProbeError::PreparedTransactions { prepared });
     }
     let oldest_xact_start: Option<DateTime<Utc>> = row.get("oldest_xact_start");
 
@@ -1182,6 +996,62 @@ mod postgres_tests {
             .execute(&admin)
             .await
             .expect("drop role");
+    }
+
+    /// With the floor trigger retired, nothing bounds a prepared (2PC)
+    /// transaction's rows by `pg_prepared_xacts.prepared`, so the sample must
+    /// fail closed while one exists. On a server with the default
+    /// `max_prepared_transactions = 0` (CI, compose, chart) the test instead
+    /// pins that 2PC is unavailable, which is the supported-writer exclusion.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cluster_global_sample_writer_fails_closed_on_prepared_transaction() {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
+        let max_prepared: String = sqlx::query_scalar("SHOW max_prepared_transactions")
+            .fetch_one(&pool)
+            .await
+            .expect("show max_prepared_transactions");
+
+        let gid = format!("fence_probe_{}", uuid::Uuid::new_v4().simple());
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .expect("begin");
+        sqlx::query("SELECT 1")
+            .execute(&mut *conn)
+            .await
+            .expect("touch tx");
+        let prepare = sqlx::query(sqlx::AssertSqlSafe(format!("PREPARE TRANSACTION '{gid}'")))
+            .execute(&mut *conn)
+            .await;
+
+        if max_prepared == "0" {
+            prepare.expect_err("PREPARE TRANSACTION must fail when 2PC is disabled");
+            sqlx::query("ROLLBACK")
+                .execute(&mut *conn)
+                .await
+                .expect("rollback");
+            return;
+        }
+
+        prepare.expect("prepare transaction");
+        drop(conn);
+        let result = sample_writer(&pool).await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("ROLLBACK PREPARED '{gid}'")))
+            .execute(&pool)
+            .await
+            .expect("rollback prepared");
+        let err = result.expect_err("a prepared transaction must fail the sample closed");
+        assert!(
+            matches!(err, ProbeError::PreparedTransactions { prepared } if prepared >= 1),
+            "expected PreparedTransactions, got {err:?}"
+        );
+        sample_writer(&pool)
+            .await
+            .expect("sample succeeds once no transaction is prepared");
     }
 
     /// The Aurora PostgreSQL identity function name is exact — the

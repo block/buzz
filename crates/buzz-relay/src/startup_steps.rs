@@ -47,7 +47,7 @@ pub enum StartupStep {
     PartitionEnsure,
     /// Verify the community-deletion serving fences.
     DeletionFenceVerify,
-    /// Verify the replica floor guard and start the fence probe.
+    /// Start the replica freshness fence probe.
     ReplicaFenceProbe,
     /// Ensure the deployment community, backfill the allowlist, and bootstrap the owner.
     MembershipBootstrap,

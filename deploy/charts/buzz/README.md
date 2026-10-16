@@ -354,7 +354,7 @@ can give it to a caller.
 | `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
 | `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
 
-The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+The fixed steps are `writer_pool`, `physical_connect`,
 `session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
 duration, and terminal evidence. `physical_connect` and `ready` are success
 milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
@@ -368,8 +368,8 @@ start counter to derive the number of attempts currently in progress. The
 session phases run in order, so a later phase start also proves the earlier
 phases succeeded for that attempt.
 
-Four start counters, four 13-series histograms, and fifteen terminal counters
-create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+Three start counters, three 13-series histograms, and twelve terminal counters
+create a hard ceiling of 54 raw Prometheus series per pod. Connection ordinals,
 database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
 labels.
 
