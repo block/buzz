@@ -2597,19 +2597,25 @@ const SINGLE_TABLE_GUARD_TABLES: [&str; 5] = [
 ];
 const DELETION_STORE_PATH: &str = "buzz-db/src/store/deletion.rs";
 
+/// The text after each occurrence of `marker` that sits on identifier
+/// boundaries, so `on conflict` matches before a space or `(` alike.
+fn sql_token_suffixes<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
+    let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    source
+        .match_indices(marker)
+        .filter_map(|(at, found)| {
+            let rest = &source[at + found.len()..];
+            (!source[..at].chars().next_back().is_some_and(is_ident)
+                && !rest.chars().next().is_some_and(is_ident))
+            .then_some(rest)
+        })
+        .collect()
+}
+
 fn sql_table_suffixes<'a>(source: &'a str, verb: &str, table: &str) -> Vec<&'a str> {
     [format!("{verb} {table}"), format!("{verb} public.{table}")]
         .iter()
-        .flat_map(|marker| {
-            source.match_indices(marker).filter_map(|(at, found)| {
-                let before = &source[..at];
-                let rest = &source[at + found.len()..];
-                let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
-                (!before.chars().next_back().is_some_and(is_ident)
-                    && !rest.chars().next().is_some_and(is_ident))
-                .then_some(rest)
-            })
-        })
+        .flat_map(|marker| sql_token_suffixes(source, marker))
         .collect()
 }
 
@@ -2629,8 +2635,10 @@ fn sql_update_sets<'a>(source: &'a str, table: &str) -> Vec<(&'a str, &'a str)> 
         .into_iter()
         .filter_map(|rest| {
             let statement = rest.split(['"', ';']).next()?;
-            let (_, conflict) = statement.split_once(" on conflict ")?;
-            conflict.split_once(" do update set ").map(|(_, set)| set)
+            let conflict = *sql_token_suffixes(statement, "on conflict").first()?;
+            sql_token_suffixes(conflict, "do update set")
+                .first()
+                .map(|set| set.trim_start())
         });
     updates
         .chain(conflict_updates)
@@ -3160,6 +3168,7 @@ fn single_table_policy_rejects_approval_mutations() {
         "UPDATE community_deletion_approvals SET approved_by = $1 WHERE request_id = $2",
         "DELETE FROM community_deletion_approvals WHERE request_id = $1",
         "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT (request_id) DO UPDATE SET note = EXCLUDED.note",
+        "INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT(request_id) DO UPDATE SET note = EXCLUDED.note",
     ] {
         let source = format!("async fn bypass() {{ query(\"{sql}\"); }}");
         assert_eq!(
@@ -3172,6 +3181,7 @@ fn single_table_policy_rejects_approval_mutations() {
     let append = r#"async fn approve() {
         query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2)");
         query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT (request_id) DO NOTHING");
+        query("INSERT INTO community_deletion_approvals (request_id, note) VALUES ($1, $2) ON CONFLICT(request_id) DO NOTHING");
     }"#;
     assert!(
         single_table_guard_violations(DELETION_STORE_PATH, append, &mut Default::default())
@@ -3230,6 +3240,7 @@ fn single_table_policy_rejects_manifest_content_updates() {
     for sql in [
         "UPDATE community_deletion_manifest_keys SET keys = $1 WHERE request_id = $2",
         "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no, keys) VALUES ($1, $2, $3) ON CONFLICT (request_id, chunk_no) DO UPDATE SET keys = EXCLUDED.keys",
+        "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no, keys) VALUES ($1, $2, $3) ON CONFLICT(request_id, chunk_no) DO UPDATE SET keys = EXCLUDED.keys",
     ] {
         let source = format!("async fn append() {{ guard_manifest_chunk_write(); query(\"{sql}\"); }}");
         let violations =
