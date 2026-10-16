@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'hosted_app_gate.dart';
-import 'shared/hosted/debug_backup.dart';
 import 'onboarding_app_entry.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
@@ -395,13 +394,7 @@ class App extends HookConsumerWidget {
                       excluding: pairedCommunity != null,
                       child: AbsorbPointer(
                         absorbing: pairedCommunity != null,
-                        child: DebugBackup.enabled
-                            ? Banner(
-                                message: 'FAKE BACKUP',
-                                location: BannerLocation.topEnd,
-                                child: child ?? const SizedBox.shrink(),
-                              )
-                            : child ?? const SizedBox.shrink(),
+                        child: child ?? const SizedBox.shrink(),
                       ),
                     ),
                     // Cover the navigator while onboarding is removed and the

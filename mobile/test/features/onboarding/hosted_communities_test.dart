@@ -1,5 +1,4 @@
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
-import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -15,7 +14,7 @@ import '../../helpers/widget_helpers.dart';
 
 void main() {
   testWidgets(
-    'welcome auto-add discovery and empty-state handoff use the real flow',
+    'cancel sign-in and resolve batch conflicts without replacing saved identities',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(440, 956));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -87,57 +86,6 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byType(CheckboxListTile), findsOneWidget);
         expect(find.text('two'), findsOneWidget);
-      }
-      await tester.pumpWidget(const SizedBox.shrink());
-      {
-        FlutterSecureStorage.setMockInitialValues({});
-        PendingDeepLinkNotifier.debugUriStreamOverride =
-            const Stream<Uri>.empty();
-        final f = HostedCommunitiesFixture();
-        await f.initialize(widget: true);
-        addTearDown(() async {
-          PendingDeepLinkNotifier.debugUriStreamOverride = null;
-          await f.dispose();
-        });
-        await tester.pumpWidget(
-          WidgetHelpers.testable(
-            disableAnimations: true,
-            child: const HostedAppGate(
-              authenticated: false,
-              child: OnboardingAppEntry(),
-            ),
-            overrides: [hostedFlowProvider.overrideWithValue(f.flow)],
-          ),
-        );
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Continue with Builderlab'));
-        await tester.pumpAndSettle();
-        expect(f.flow.stage, HostedFlowStage.idle);
-        expect(find.byType(HostedConnectPage), findsNothing);
-        expect(find.text('Scan a QR code'), findsOneWidget);
-        expect(find.text('Use pairing code'), findsOneWidget);
-        expect(
-          find.text(
-            'No communities available to add. Scan a QR code or use an invite link.',
-          ),
-          findsOneWidget,
-        );
-        f.rows = [f.row('denied')];
-        f.rejectCurrent = true;
-        await tester.tap(find.text('Continue with Builderlab'));
-        await tester.pumpAndSettle();
-        expect(find.byType(BuzzSheetHeader), findsNothing);
-        expect(find.text('This account does not have access.'), findsOneWidget);
-        await tester.ensureVisible(find.text('Scan a QR code'));
-        expect(find.text('Scan a QR code').hitTestable(), findsOneWidget);
-        await tester.ensureVisible(find.text('Use pairing code'));
-        expect(find.text('Use pairing code').hitTestable(), findsOneWidget);
-        await tester.ensureVisible(find.text('Continue with Builderlab'));
-        f.rejectCurrent = false;
-        await tester.tap(find.text('Continue with Builderlab'));
-        await tester.pumpAndSettle();
-        expect(f.admitted, ['denied']);
-        expect(find.text('This account does not have access.'), findsNothing);
       }
     },
   );

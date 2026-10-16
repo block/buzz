@@ -2,9 +2,6 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/identity_transfer/nsec_transfer.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
-import 'dart:convert';
-import 'package:file_selector/file_selector.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -14,7 +11,6 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final keys = nostr.Keys('1'.padLeft(64, '0'));
   final other = nostr.Keys('2'.padLeft(64, '0'));
-  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     test(
@@ -71,65 +67,6 @@ void main() {
       );
     }
   });
-
-  test('file import validates size, UTF-8, and key type', () async {
-    XFile file(List<int> bytes) => XFile.fromData(Uint8List.fromList(bytes));
-    expect(
-      await NsecTransfer.readFile(file(utf8.encode('${keys.nsec}\n'))),
-      keys.nsec,
-    );
-    for (final bytes in [
-      utf8.encode('x' * 1025),
-      [0xff],
-      utf8.encode(keys.public),
-    ]) {
-      await expectLater(
-        NsecTransfer.readFile(file(bytes)),
-        throwsA(AccountIdentityFailure.invalidKey),
-      );
-    }
-  });
-
-  test(
-    'manual import is create-only, preserves receipt and occupied keys',
-    () async {
-      final store = AccountIdentityStore();
-      final receipt = BackupReceipt(
-        backend: 'https://app.builderlab.xyz',
-        subject: 'a',
-        pubkey: keys.public,
-        backupId: 'backup',
-      );
-      await store.create(keys.nsec, recoveredBackup: receipt);
-      final restored = await NsecTransfer.importAccount(
-        ' ${keys.nsec}\n',
-        store,
-      );
-      expect(restored.backup?.backupId, 'backup');
-      await expectLater(
-        NsecTransfer.importAccount(other.nsec, store),
-        throwsA(AccountIdentityFailure.occupied),
-      );
-      expect(await store.withKeys((k) async => k.public), keys.public);
-      expect((await store.read())?.backup?.backupId, 'backup');
-    },
-  );
-
-  test(
-    'manual import fences cancelled operations before secure write',
-    () async {
-      final store = AccountIdentityStore();
-      await expectLater(
-        NsecTransfer.importAccount(
-          keys.nsec,
-          store,
-          checkCurrent: () => throw StateError('cancelled'),
-        ),
-        throwsStateError,
-      );
-      expect(await store.read(), isNull);
-    },
-  );
 
   test(
     'export respects biometric policy, auth denial and selected identity',

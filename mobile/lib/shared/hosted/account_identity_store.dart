@@ -8,7 +8,6 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
-import 'debug_backup.dart';
 
 /// Safe failures: never include a secret or the storage/plugin exception.
 enum AccountIdentityFailure {
@@ -66,8 +65,8 @@ class AccountIdentitySnapshot {
   final BackupReceipt? backup;
 
   bool hasBackupFor({required String backend, required String subject}) =>
-      (DebugBackup.enabled ||
-          !(backup?.backupId.startsWith(DebugBackup.receiptPrefix) ?? false)) &&
+      // Retired walkthrough receipts must never authorize real admission.
+      !(backup?.backupId.startsWith('debug-simulated-backup:') ?? false) &&
       backup?.backend == backend &&
       backup?.subject == subject &&
       backup?.pubkey == pubkey;

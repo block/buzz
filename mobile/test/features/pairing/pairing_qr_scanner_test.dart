@@ -1,8 +1,6 @@
 import 'dart:async';
 
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
-import 'package:buzz/features/pairing/pairing_input_page.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,33 +26,6 @@ void main() {
     await fakeScannerPlatform.dispose();
     MobileScannerPlatform.instance = defaultScannerPlatform;
   });
-
-  testWidgets(
-    'onboarding pairing input opens existing scanner and preserves typed input on cancel',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      final codes = <String>[];
-      await tester.pumpWidget(
-        ProviderScope(
-          child: MaterialApp(home: PairingInputPage(onCode: codes.add)),
-        ),
-      );
-      await tester.tap(find.text('Continue'));
-      await tester.pump();
-      expect(codes, isEmpty);
-      await tester.enterText(find.byType(TextField), '  nostrpair://fixture  ');
-      await tester.tap(find.text('Scan a QR code'));
-      await tester.pumpAndSettle();
-      expect(find.byType(FallbackPairingQrScanner), findsOneWidget);
-      await tester.binding.handlePopRoute();
-      await tester.pumpAndSettle();
-      expect(find.byType(FallbackPairingQrScanner), findsNothing);
-      expect(codes, isEmpty);
-      await tester.tap(find.text('Continue'));
-      expect(codes, ['nostrpair://fixture']);
-      debugDefaultTargetPlatformOverride = null;
-    },
-  );
 
   group('DynamicIslandQrScannerGeometry', () {
     const viewport = Size(393, 852);

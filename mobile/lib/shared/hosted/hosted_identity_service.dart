@@ -5,7 +5,6 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'account_identity_store.dart';
 import 'builderlab_account.dart';
 import 'device_identity_source.dart';
-import 'debug_backup.dart';
 
 enum HostedIdentityState {
   ready,
@@ -35,14 +34,10 @@ class HostedIdentityService {
   HostedIdentityService({
     required this.account,
     required this.store,
-    this.canGenerateAfterLegacyReconciliation,
-    this.deviceIdentities,
-  });
+    DeviceIdentitySource? deviceIdentities,
+  }) : deviceIdentities = deviceIdentities ?? DeviceIdentitySource();
 
-  /// Return true only when legacy community identities have been reconciled.
-  /// Must not call AccountIdentityStore: invoked under its writer lock.
-  final Future<bool> Function()? canGenerateAfterLegacyReconciliation;
-  final DeviceIdentitySource? deviceIdentities;
+  final DeviceIdentitySource deviceIdentities;
   final BuilderlabAccountClient account;
   final AccountIdentityStore store;
   Future<void> _tail = Future<void>.value();
@@ -82,12 +77,7 @@ class HostedIdentityService {
     }
     if (local != null && bound != null) return _result(local, bound, subject);
 
-    final status = DebugBackup.enabled
-        ? <String, dynamic>{
-            'backup_nostr_pubkeys': <String>[],
-            'current_nostr_pubkey': bound,
-          }
-        : await account.post('/v1/buzz/nsec-backups/status', {});
+    final status = await account.post('/v1/buzz/nsec-backups/status', {});
     _sameAccount(subject);
     checkCurrent();
     final listed = status['backup_nostr_pubkeys'];
@@ -114,8 +104,7 @@ class HostedIdentityService {
       }
       return _result(local, bound, subject);
     }
-    final device =
-        await deviceIdentities?.choices() ?? const <DeviceIdentityChoice>[];
+    final device = await deviceIdentities.choices();
     _sameAccount(subject);
     checkCurrent();
     // The authoritative bound key already on this device needs no remote
@@ -136,7 +125,7 @@ class HostedIdentityService {
             choices: eligible,
           );
         }
-        final saved = await deviceIdentities!.adopt(
+        final saved = await deviceIdentities.adopt(
           chosen!,
           store,
           checkCurrent: () {
@@ -152,9 +141,7 @@ class HostedIdentityService {
         authorize: () async {
           _sameAccount(subject);
           checkCurrent();
-          final reconciled = deviceIdentities != null
-              ? (await deviceIdentities!.choices()).isEmpty
-              : await canGenerateAfterLegacyReconciliation?.call() ?? false;
+          final reconciled = (await deviceIdentities.choices()).isEmpty;
           _sameAccount(subject);
           checkCurrent();
           return reconciled;
@@ -169,10 +156,6 @@ class HostedIdentityService {
           : _result(generated, bound, subject);
     }
 
-    // A bound identity missing locally cannot be recovered by this simulation.
-    if (DebugBackup.enabled) {
-      return const HostedIdentityResult(HostedIdentityState.recoveryBlocked);
-    }
     final recovered = await account.post('/v1/buzz/nsec-backups/recovery', {});
     _sameAccount(subject);
     final backups = recovered['backups'];

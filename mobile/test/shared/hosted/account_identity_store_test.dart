@@ -11,28 +11,36 @@ void main() {
   );
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
-  test('recovery atomically retains scoped receipt across restart', () async {
-    final receipt = BackupReceipt(
-      backend: 'https://app.builderlab.xyz',
-      subject: 'account-a',
-      pubkey: key.public,
-      backupId: 'backup-1',
+  for (final simulated in [false, true]) {
+    test(
+      'recovery retains scoped receipt; simulated=$simulated cannot authorize',
+      () async {
+        final receipt = BackupReceipt(
+          backend: 'https://app.builderlab.xyz',
+          subject: 'account-a',
+          pubkey: key.public,
+          backupId: simulated ? 'debug-simulated-backup:old' : 'backup-1',
+        );
+        final store = AccountIdentityStore();
+        expect(await store.read(), isNull);
+        await store.create(key.nsec, recoveredBackup: receipt);
+        final restored = (await AccountIdentityStore().read())!;
+        expect(
+          restored.hasBackupFor(
+            backend: receipt.backend,
+            subject: receipt.subject,
+          ),
+          !simulated,
+        );
+        expect(
+          restored.hasBackupFor(backend: receipt.backend, subject: 'account-b'),
+          isFalse,
+        );
+        expect(await store.withKeys((keys) async => keys.public), key.public);
+        expect((await store.create(key.nsec)).pubkey, key.public);
+      },
     );
-    final store = AccountIdentityStore();
-    expect(await store.read(), isNull);
-    await store.create(key.nsec, recoveredBackup: receipt);
-    final restored = (await AccountIdentityStore().read())!;
-    expect(
-      restored.hasBackupFor(backend: receipt.backend, subject: receipt.subject),
-      isTrue,
-    );
-    expect(
-      restored.hasBackupFor(backend: receipt.backend, subject: 'account-b'),
-      isFalse,
-    );
-    expect(await store.withKeys((keys) async => keys.public), key.public);
-    expect((await store.create(key.nsec)).pubkey, key.public);
-  });
+  }
 
   test(
     'unreadable storage never allows creation or touches legacy keys',

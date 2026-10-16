@@ -54,7 +54,7 @@ void main() {
 
   Future<HostedIdentityService> service({
     bool includeDevice = false,
-    Future<bool> Function()? generationGate,
+    Future<List<DeviceIdentityChoice>> Function()? inventory,
   }) async {
     final expiry = DateTime.now()
         .toUtc()
@@ -104,8 +104,9 @@ void main() {
     return HostedIdentityService(
       account: account,
       store: store,
-      deviceIdentities: includeDevice ? DeviceIdentitySource() : null,
-      canGenerateAfterLegacyReconciliation: generationGate ?? () async => true,
+      deviceIdentities: includeDevice
+          ? DeviceIdentitySource()
+          : _Inventory(inventory ?? () async => []),
     );
   }
 
@@ -353,20 +354,28 @@ void main() {
     },
   );
 
-  test('authoritative absence generates once only after legacy gate', () async {
-    listedKeys = [];
-    final blocked = await service(generationGate: () async => false);
-    expect(
-      (await blocked.resolve()).state,
-      HostedIdentityState.needsAuthoritativeAbsence,
-    );
-    expect(await store.read(), isNull);
-    final resolver = await service();
-    final first = await resolver.resolve();
-    expect(first.state, HostedIdentityState.needsBinding);
-    expect((await resolver.resolve()).pubkey, first.pubkey);
-    expect(recoveryCalls, 0);
-  });
+  test(
+    'authoritative absence rechecks inventory before generating once',
+    () async {
+      listedKeys = [];
+      var reads = 0;
+      final blocked = await service(
+        inventory: () async => ++reads == 1
+            ? []
+            : [DeviceIdentityChoice(keys[2].public, 'Newly saved')],
+      );
+      expect(
+        (await blocked.resolve()).state,
+        HostedIdentityState.needsAuthoritativeAbsence,
+      );
+      expect(await store.read(), isNull);
+      final resolver = await service();
+      final first = await resolver.resolve();
+      expect(first.state, HostedIdentityState.needsBinding);
+      expect((await resolver.resolve()).pubkey, first.pubkey);
+      expect(recoveryCalls, 0);
+    },
+  );
 
   for (final scenario in ['403', '404', '500', 'missing', 'cancelled']) {
     test('unproven absence ($scenario) cannot generate', () async {
@@ -374,9 +383,9 @@ void main() {
       listedKeys = scenario == 'missing' ? null : [];
       statusCode = int.tryParse(scenario) ?? 200;
       final resolver = await service(
-        generationGate: () async {
+        inventory: () async {
           current = false;
-          return true;
+          return [];
         },
       );
       await expectLater(
@@ -388,4 +397,12 @@ void main() {
       await expectCommunityPreserved();
     });
   }
+}
+
+// Substitute the external device inventory, not generation authorization.
+class _Inventory extends DeviceIdentitySource {
+  _Inventory(this.read);
+  final Future<List<DeviceIdentityChoice>> Function() read;
+  @override
+  Future<List<DeviceIdentityChoice>> choices() => read();
 }

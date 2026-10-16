@@ -49,22 +49,15 @@ void main() {
     );
   }
 
-  test(
-    'malformed list targets and failed discovery never look like empty lists',
-    () async {
-      final f = await fixture();
-      f.rows = [
-        {...f.row('one'), 'normalized_host': 'wss://user@evil.example/path'},
-      ];
-      await f.flow.signInAccount();
-      expect(f.flow.problem, HostedFlowProblem.invalidResponse);
-      expect(f.admitted, isEmpty);
-      f.rejectList = true;
-      await f.flow.signInAccount();
-      expect(f.flow.stage, HostedFlowStage.blocked);
-      expect(f.flow.problem, HostedFlowProblem.retry);
-    },
-  );
+  test('malformed list targets cannot authorize admission', () async {
+    final f = await fixture();
+    f.rows = [
+      {...f.row('one'), 'normalized_host': 'wss://user@evil.example/path'},
+    ];
+    await f.flow.signInAccount();
+    expect(f.flow.problem, HostedFlowProblem.invalidResponse);
+    expect(f.admitted, isEmpty);
+  });
   test('expired A batch is discarded after browser login as B', () async {
     final f = await fixture();
     await f.flow.initialize();

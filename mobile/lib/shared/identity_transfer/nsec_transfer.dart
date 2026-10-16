@@ -1,9 +1,6 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -19,41 +16,14 @@ abstract final class NsecTransfer {
     return AccountIdentityStore.publicKeyForNsec(text.trim());
   }
 
-  /// Creates the hosted account slot without replacing an occupied identity.
-  static Future<AccountIdentitySnapshot> importAccount(
-    String text,
-    AccountIdentityStore store, {
-    void Function()? checkCurrent,
-  }) => store.create(text.trim(), checkCurrent: checkCurrent);
-
   /// Reads a single small UTF-8 nsec file. Cancellation returns null.
   static Future<String?> pickFile() async {
-    if (defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS) {
-      final text = await const MethodChannel(
-        'buzz/identity_file',
-      ).invokeMethod<String>('import');
-      if (text == null) return null;
-      preview(text);
-      return text.trim();
-    }
-    final file = await openFile();
-    if (file == null) return null;
-    return readFile(file);
-  }
-
-  /// Validates a small UTF-8 private-key file before returning transient input.
-  static Future<String> readFile(XFile file) async {
-    try {
-      if (await file.length() > 1024) {
-        throw AccountIdentityFailure.invalidKey;
-      }
-      final text = utf8.decode(await file.readAsBytes()).trim();
-      preview(text);
-      return text;
-    } catch (_) {
-      throw AccountIdentityFailure.invalidKey;
-    }
+    final text = await const MethodChannel(
+      'buzz/identity_file',
+    ).invokeMethod<String>('import');
+    if (text == null) return null;
+    preview(text);
+    return text.trim();
   }
 
   /// Authorizes the selected community identity immediately before export.

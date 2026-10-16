@@ -42,7 +42,7 @@ void main() {
         cloudChoice: true,
         signedIn: false,
       );
-      f.starterFailures = 1;
+      f.starterFailures = 2;
       final browserReturn = Completer<void>();
       f.beforeBrowserReturn = () => browserReturn.future;
       await f.mount(tester);
@@ -87,10 +87,15 @@ void main() {
         jsonDecode(f.sent('/accept-policy').single.body)['age_confirmed'],
         isTrue,
       );
+      // Reopen the saved invite after its claim was consumed. Starter recovery
+      // must retain the durable marker and must not claim it again.
+      await f.link(tester, 'one');
+      expect((await f.storage.loadAll()).single.starterSetupIncomplete, isTrue);
+      expect(find.text('Try again').hitTestable(), findsOneWidget);
       await f.tap(tester, 'Try again');
       expect(find.byType(HostedProfileSetup), findsOneWidget);
       expect(f.sent('/claim'), hasLength(1));
-      expect(f.recoveryScopes, hasLength(2));
+      expect(f.recoveryScopes, hasLength(3));
       expect(
         f.recoveryScopes.every((scope) => scope.nsec == pending.nsec),
         isTrue,
@@ -115,7 +120,7 @@ void main() {
     (tester, f) async {
       await f.initialize(localIdentity: false, cloudChoice: true);
       f.cloudKeys.addAll([f.keys, f.secondKeys]);
-      f.rows.addAll([f.row('one'), f.row('two')]);
+      f.rejectList = true;
       f.secondRelayFailures = 1;
       final legacy = Community.create(
         name: 'Saved local',
@@ -130,6 +135,28 @@ void main() {
       expect(find.text('Use Builderlab identity'), findsNWidgets(2));
       await f.tap(tester, fullNpub(f.secondKeys.public)!);
       expect((await f.store.read())!.pubkey, f.secondKeys.public);
+      expect(
+        find.text('We could not finish connecting. You can try again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'No communities available to add. Scan a QR code or use an invite link.',
+        ),
+        findsNothing,
+      );
+      f.rejectList = false;
+      await f.tap(tester, 'Continue with Builderlab');
+      expect(
+        find.text(
+          'No communities available to add. Scan a QR code or use an invite link.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Scan a QR code'), findsOneWidget);
+      expect(find.text('Use pairing code'), findsOneWidget);
+      f.rows.addAll([f.row('one'), f.row('two')]);
+      await f.tap(tester, 'Continue with Builderlab');
       // Joined communities are added automatically after choosing the identity.
       expect(find.byType(CheckboxListTile).hitTestable(), findsNothing);
       expect(find.byType(HostedProfileSetup), findsOneWidget);
@@ -165,26 +192,31 @@ void main() {
     },
   );
 
-  journey(
-    'new device recovers bound cloud key and joins without replacing identity',
-    (tester, f) async {
-      await f.initialize(localIdentity: false);
-      f.cloudKeys.addAll([f.secondKeys, f.keys]);
-      f.rows.add(f.row('one'));
-      f.offerProfile = false;
-      await f.mount(tester);
-      await f.tap(tester, 'Continue with Builderlab');
-      // One discovered community is admitted automatically.
-      final saved = (await f.storage.loadAll()).single;
-      expect(saved.nsec, f.keys.nsec);
-      expect(saved.pubkey, f.keys.public);
-      expect((await f.store.read())!.pubkey, f.keys.public);
-      expect(f.sent('/recovery'), hasLength(1));
-      expect(f.sent('/challenge'), isEmpty);
-      expect(await f.storage.loadActiveId(), saved.id);
-      expect(find.byType(OnboardingAppEntry), findsNothing);
-    },
-  );
+  for (final unreadableProfile in [false, true]) {
+    journey(
+      'new device recovers and preserves existing/unreadable profile ($unreadableProfile)',
+      (tester, f) async {
+        await f.initialize(localIdentity: false);
+        f.cloudKeys.addAll([f.secondKeys, f.keys]);
+        f.rows.add(f.row('one'));
+        f.offerProfile = false;
+        f.profileUnavailable = unreadableProfile;
+        await f.mount(tester);
+        await f.tap(tester, 'Continue with Builderlab');
+        // One discovered community is admitted automatically.
+        expect(f.profileWrites, isEmpty);
+        expect(find.byType(HostedProfileSetup), findsNothing);
+        final saved = (await f.storage.loadAll()).single;
+        expect(saved.nsec, f.keys.nsec);
+        expect(saved.pubkey, f.keys.public);
+        expect((await f.store.read())!.pubkey, f.keys.public);
+        expect(f.sent('/recovery'), hasLength(1));
+        expect(f.sent('/challenge'), isEmpty);
+        expect(await f.storage.loadActiveId(), saved.id);
+        expect(find.byType(OnboardingAppEntry), findsNothing);
+      },
+    );
+  }
 
   journey(
     'self-hosted link explicitly reuses saved account key and persists admission',

@@ -95,22 +95,6 @@ void main() {
     expect(f.flow.stage, HostedFlowStage.profile);
   }
 
-  for (final existing in [true, false]) {
-    test(
-      'existing or unreadable profile is never replaced ($existing)',
-      () async {
-        load = () async {
-          if (!existing) throw StateError('relay unavailable');
-          return UserProfile(pubkey: f.keys.public, about: 'Existing');
-        };
-        await offer();
-        expect(reads, 1);
-        expect(f.flow.stage, HostedFlowStage.idle);
-        expect(writes, isEmpty);
-      },
-    );
-  }
-
   test('account cancellation while loading prevents prompt', () async {
     final loading = Completer<UserProfile?>();
     load = () => loading.future;

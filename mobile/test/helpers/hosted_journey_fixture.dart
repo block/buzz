@@ -48,6 +48,8 @@ class HostedJourneyFixture {
   int browserStarts = 0;
   int secondRelayFailures = 0;
   bool offerProfile = true;
+  bool profileUnavailable = false;
+  bool rejectList = false;
   final expiry = DateTime.now()
       .toUtc()
       .add(const Duration(minutes: 5))
@@ -158,6 +160,7 @@ class HostedJourneyFixture {
         'backup_id': jsonDecode(request.body)['backup_id'],
       };
     } else if (path.endsWith('/communities/joined')) {
+      if (rejectList) return http.Response('{}', 503);
       result = {'communities': rows};
     } else if (path == '/api/join-policy') {
       if (policyFailures-- > 0) throw AccountFailure.unavailable;
@@ -320,8 +323,11 @@ class _Profile extends ProfileNotifier {
   _Profile(this.fixture);
   final HostedJourneyFixture fixture;
   @override
-  Future<UserProfile?> build() async =>
-      fixture.offerProfile ? null : UserProfile(pubkey: fixture.bound!);
+  Future<UserProfile?> build() async {
+    if (fixture.profileUnavailable) throw StateError('relay unavailable');
+    return fixture.offerProfile ? null : UserProfile(pubkey: fixture.bound!);
+  }
+
   @override
   Future<void> updateDisplayName(String name) async {
     fixture.profileWrites.add(name);
