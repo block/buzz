@@ -5,7 +5,6 @@ import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_admission.dart';
-import 'package:buzz/shared/hosted/hosted_join_policy.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -102,130 +101,37 @@ void main() {
     expect(request.followRedirects, isFalse);
   });
 
-  test(
-    'fresh policy consent replaces stale web receipt before signed claim',
-    () async {
+  // Wire limits stay focused; consent/claim ordering is covered by the journey.
+  for (final (name, response, status, failure) in [
+    ('redirect', '{}', 302, AccountFailure.denied),
+    ('oversized policy', ' ' * 65537, 200, AccountFailure.invalidResponse),
+    ('invalid JSON', 'not JSON', 200, AccountFailure.invalidResponse),
+    ('wrong shape', '[]', 200, AccountFailure.invalidResponse),
+  ]) {
+    test('$name cannot reach a claim', () async {
       await store.create(keys.nsec);
       await backup();
-      var confirmed = false;
-      final paths = <String>[];
       admission.dispose();
       admission = HostedAdmission(
         account: account,
         store: store,
         probe: (_) async {},
-        confirmPolicy: (policy) async {
-          expect(policy.version, 'v2');
-          expect(policy.ageRequired, isTrue);
-          expect(policy.terms, 'New terms');
-          confirmed = true;
-          return true;
-        },
-        client: MockClient((request) async {
-          paths.add(request.url.path);
-          expect(request.followRedirects, isFalse);
-          if (request.method == 'GET') {
-            return http.Response(
-              jsonEncode({
-                'policy': {
-                  'version': 'v2',
-                  'age_attestation_required': true,
-                  'terms_markdown': 'New terms',
-                },
-              }),
-              200,
-            );
-          }
-          expect(confirmed, isTrue);
-          if (request.url.path.endsWith('accept-policy')) {
-            expect(jsonDecode(request.body), {
-              'code': 'invite',
-              'policy_version': 'v2',
-              'age_confirmed': true,
-            });
-            return http.Response('{"receipt":"fresh"}', 200);
-          }
-          expect(jsonDecode(request.body), {
-            'code': 'invite',
-            'policy_receipt': 'fresh',
-          });
-          expect(request.headers['Authorization'], startsWith('Nostr '));
-          return http.Response('{}', 200);
-        }),
-      );
-      await admission.prepare(invite, 'owner', keys.public);
-      expect(paths, [
-        '/api/join-policy',
-        '/api/invites/accept-policy',
-        '/api/invites/claim',
-      ]);
-    },
-  );
-
-  test('declined or stale consent cannot accept or claim an invite', () async {
-    await store.create(keys.nsec);
-    await backup();
-    for (final stale in [false, true]) {
-      var current = true;
-      admission.dispose();
-      admission = HostedAdmission(
-        account: account,
-        store: store,
-        probe: (_) async {},
-        confirmPolicy: (_) async {
-          if (stale) current = false;
-          return stale;
-        },
         client: MockClient((request) async {
           expect(request.method, 'GET');
-          return http.Response(
-            '{"policy":{"version":"v1","age_attestation_required":false}}',
-            200,
+          expect(request.followRedirects, isFalse);
+          expect(
+            request.headers.containsKey('X-BB-Session-Credential'),
+            isFalse,
           );
+          return http.Response(response, status);
         }),
-      );
-      await expectLater(
-        admission.prepare(
-          invite,
-          'owner',
-          keys.public,
-          isCurrent: () => current,
-        ),
-        throwsA(
-          stale
-              ? AccountFailure.unavailable
-              : HostedInviteFailure.policyRequired,
-        ),
-      );
-    }
-  });
-
-  test('invite rejection reads only supported error codes', () async {
-    await store.create(keys.nsec);
-    await backup();
-    for (final entry in {
-      'invite_expired': HostedInviteFailure.expired,
-      'invite_exhausted': HostedInviteFailure.exhausted,
-      'invite_invalid': HostedInviteFailure.invalid,
-      'join_policy_required': HostedInviteFailure.policyRequired,
-    }.entries) {
-      admission.dispose();
-      admission = HostedAdmission(
-        account: account,
-        store: store,
-        probe: (_) async {},
-        client: MockClient(
-          (request) async => request.method == 'GET'
-              ? http.Response('{}', 200)
-              : http.Response(jsonEncode({'error': entry.key}), 403),
-        ),
       );
       await expectLater(
         admission.prepare(invite, 'owner', keys.public),
-        throwsA(entry.value),
+        throwsA(failure),
       );
-    }
-  });
+    });
+  }
 
   test('cancellation during binding prevents external claim', () async {
     await store.create(keys.nsec);

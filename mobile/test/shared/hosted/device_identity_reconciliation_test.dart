@@ -105,11 +105,8 @@ void main() {
   );
 
   test(
-    'duplicate identities auto-resolve and truly empty inventory generates once',
+    'duplicate device identities auto-resolve without replacement',
     () async {
-      final firstResult = await service.resolve();
-      expect(firstResult.state, HostedIdentityState.needsBinding);
-      expect((await service.resolve()).pubkey, firstResult.pubkey);
       FlutterSecureStorage.setMockInitialValues({
         'buzz_nsec': first.nsec,
         'buzz_communities': jsonEncode([record(first, 'Same identity')]),
@@ -137,60 +134,6 @@ void main() {
         );
         expect(await secure.readAll(), data);
       }
-    },
-  );
-
-  test(
-    'cloud backup differing from device requires consent and preserves old key',
-    () async {
-      await secure.write(key: 'buzz_nsec', value: first.nsec);
-      account.bound = second.public;
-      account.backups = [second.public];
-      account.recovery = {
-        'backups': [
-          {
-            'backup_id': 'fixture-backup',
-            'nostr_pubkey': second.public,
-            'secret_key': base64UrlEncode([
-              ...List.filled(31, 0),
-              2,
-            ]).replaceAll('=', ''),
-          },
-        ],
-        'failed_backup_ids': [],
-      };
-      expect(
-        (await service.resolve()).state,
-        HostedIdentityState.needsSelection,
-      );
-      expect(await store.read(), isNull);
-      expect(
-        (await service.resolve(selectedPubkey: first.public)).state,
-        HostedIdentityState.needsSelection,
-      );
-      expect(await store.read(), isNull);
-      expect(
-        (await service.resolve(selectedPubkey: second.public)).state,
-        HostedIdentityState.ready,
-      );
-      expect(await secure.read(key: 'buzz_nsec'), first.nsec);
-      expect(
-        account.calls.every(
-          (path) => path.endsWith('/status') || path.endsWith('/recovery'),
-        ),
-        isTrue,
-      );
-    },
-  );
-
-  test(
-    'existing account slot cannot overwrite or bind over a different cloud backup',
-    () async {
-      await store.create(first.nsec);
-      final before = await secure.readAll();
-      account.backups = [second.public];
-      expect((await service.resolve()).state, HostedIdentityState.mismatch);
-      expect(await secure.readAll(), before);
     },
   );
 

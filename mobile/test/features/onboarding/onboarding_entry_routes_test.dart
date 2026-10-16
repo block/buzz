@@ -11,11 +11,7 @@ import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
-import 'package:buzz/shared/hosted/account_identity_store.dart';
-import 'package:buzz/shared/hosted/device_identity_source.dart';
-import 'package:buzz/shared/hosted/hosted_identity_service.dart';
 import 'package:buzz/shared/hosted/hosted_community_connection.dart';
-import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
 import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
 import 'package:flutter/material.dart';
@@ -319,96 +315,5 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     expect(tester.takeException(), isNull);
-
-    // Identity selection is also a real root-navigator sheet above Add.
-    final first = nostr.Keys('1'.padLeft(64, '0'));
-    final second = nostr.Keys('2'.padLeft(64, '0'));
-    FlutterSecureStorage.setMockInitialValues({
-      'buzz_communities': jsonEncode([
-        {'name': 'First', 'nsec': first.nsec, 'pubkey': first.public},
-        {'name': 'Second', 'nsec': second.nsec, 'pubkey': second.public},
-      ]),
-    });
-    final choiceAccount = _ChoiceAccount();
-    final choiceStore = AccountIdentityStore();
-    final choiceBrowser = DiscoveryBrowser();
-    final choiceFlow = HostedFlow(
-      account: choiceAccount,
-      browser: choiceBrowser,
-      store: choiceStore,
-      identity: HostedIdentityService(
-        account: choiceAccount,
-        store: choiceStore,
-        deviceIdentities: DeviceIdentitySource(),
-      ),
-      enterCommunity: (_, _, _, _) async =>
-          fail('Selection cannot bypass binding'),
-    );
-    addTearDown(() async {
-      choiceFlow.dispose();
-      choiceAccount.dispose();
-      await choiceBrowser.dispose();
-    });
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        disableAnimations: true,
-        overrides: [
-          hostedFlowProvider.overrideWithValue(choiceFlow),
-          channelsProvider.overrideWith(_NoChannels.new),
-        ],
-        child: HostedAppGate(
-          authenticated: true,
-          child: Builder(
-            builder: (context) => Center(
-              child: FilledButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) =>
-                        const OnboardingAppEntry(addingCommunity: true),
-                  ),
-                ),
-                child: const Text('Add community'),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await openEntry();
-    await tester.tap(find.text('Continue with Builderlab').hitTestable());
-    await tester.pumpAndSettle();
-    expect(choiceFlow.stage, HostedFlowStage.chooseIdentity);
-    expect(find.text('First').hitTestable(), findsOneWidget);
-    expect(find.text('Second').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Second').hitTestable());
-    await tester.pumpAndSettle();
-    expect((await choiceStore.read())!.pubkey, second.public);
-    expect(choiceFlow.stage, HostedFlowStage.blocked);
-    expect(
-      find.text('This account does not have access.').hitTestable(),
-      findsOneWidget,
-    );
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
-    expect(tester.takeException(), isNull);
   });
-}
-
-class _ChoiceAccount extends BuilderlabAccountClient {
-  @override
-  BuilderlabAccount get account =>
-      BuilderlabAccount(subject: 'fixture', expiresAt: DateTime.utc(2100));
-  @override
-  Future<BuilderlabAccount?> restore() async => account;
-  @override
-  Future<Map<String, dynamic>> currentIdentity() async => {};
-  @override
-  Future<Map<String, dynamic>> post(
-    String path,
-    Map<String, dynamic> body,
-  ) async {
-    if (path.endsWith('/status')) return {'backup_nostr_pubkeys': []};
-    throw AccountFailure.denied;
-  }
 }

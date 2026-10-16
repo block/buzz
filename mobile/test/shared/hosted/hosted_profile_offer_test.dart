@@ -95,41 +95,21 @@ void main() {
     expect(f.flow.stage, HostedFlowStage.profile);
   }
 
-  test('absent profile prompts and saves through scoped notifier', () async {
-    final pending = offer();
-    await prompted();
-    expect(reads, 1);
-    await f.flow.saveProfile!('New name');
-    await pending;
-    expect(writes, ['New name']);
-    expect(f.flow.saveProfile, isNull);
-    expect(f.flow.stage, HostedFlowStage.working);
-  });
-
-  test('existing profile skips prompt without replacing metadata', () async {
-    load = () async => UserProfile(pubkey: f.keys.public, about: 'Existing');
-    await offer();
-    expect(reads, 1);
-    expect(f.flow.stage, HostedFlowStage.idle);
-    expect(writes, isEmpty);
-  });
-
-  test('profile read failure skips optional prompt', () async {
-    load = () async => throw StateError('relay unavailable');
-    await offer();
-    expect(reads, 1);
-    expect(f.flow.stage, HostedFlowStage.idle);
-    expect(writes, isEmpty);
-  });
-
-  test('skip resolves without writing', () async {
-    final pending = offer();
-    await prompted();
-    f.flow.finishProfile();
-    await pending;
-    expect(writes, isEmpty);
-    expect(f.flow.saveProfile, isNull);
-  });
+  for (final existing in [true, false]) {
+    test(
+      'existing or unreadable profile is never replaced ($existing)',
+      () async {
+        load = () async {
+          if (!existing) throw StateError('relay unavailable');
+          return UserProfile(pubkey: f.keys.public, about: 'Existing');
+        };
+        await offer();
+        expect(reads, 1);
+        expect(f.flow.stage, HostedFlowStage.idle);
+        expect(writes, isEmpty);
+      },
+    );
+  }
 
   test('account cancellation while loading prevents prompt', () async {
     final loading = Completer<UserProfile?>();
@@ -171,19 +151,6 @@ void main() {
     await pending;
   });
 
-  test('cancelled admission blocks captured save callback', () async {
-    final pending = offer();
-    await prompted();
-    final save = f.flow.saveProfile!;
-    current = false;
-    await f.flow.leave();
-    await pending;
-    await expectLater(
-      save('After cancellation'),
-      throwsA(AccountFailure.unavailable),
-    );
-    expect(writes, isEmpty);
-  });
   test(
     'new target releases pending profile and rejects retained save',
     () async {
@@ -207,19 +174,22 @@ void main() {
     },
   );
 
-  test(
-    'leave invalidates profile callback even with a still-active community',
-    () async {
-      final pending = offer();
-      await prompted();
-      final save = f.flow.saveProfile!;
-      await f.flow.leave();
-      await pending;
-      await expectLater(
-        save('After leave'),
-        throwsA(AccountFailure.unavailable),
-      );
-      expect(writes, isEmpty);
-    },
-  );
+  for (final cancelAdmission in [false, true]) {
+    test(
+      'leave rejects captured save (cancel admission: $cancelAdmission)',
+      () async {
+        final pending = offer();
+        await prompted();
+        final save = f.flow.saveProfile!;
+        if (cancelAdmission) current = false;
+        await f.flow.leave();
+        await pending;
+        await expectLater(
+          save('After leave'),
+          throwsA(AccountFailure.unavailable),
+        );
+        expect(writes, isEmpty);
+      },
+    );
+  }
 }

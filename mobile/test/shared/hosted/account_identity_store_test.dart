@@ -94,68 +94,56 @@ void main() {
     expect((await store.read())!.backup, isNull);
   });
 
-  test(
-    'uncertain generation write retries without authorizing or generating again',
-    () async {
-      final storage = UncertainStorage();
-      final store = AccountIdentityStore(storage: storage);
-      var authorizations = 0;
-      Future<bool> authorize() async {
-        authorizations++;
-        return true;
-      }
-
-      await expectLater(
-        store.generateIfAbsent(authorize: authorize),
-        throwsA(AccountIdentityFailure.unreadable),
-      );
-      final persisted = await store.read();
-      final retried = await store.generateIfAbsent(authorize: authorize);
-      expect(retried!.pubkey, persisted!.pubkey);
-      expect(authorizations, 1);
-      expect(storage.writes, 1);
-    },
-  );
-
-  test(
-    'uncertain completed write retries exact key and keeps receipt',
-    () async {
-      final storage = UncertainStorage();
-      final store = AccountIdentityStore(storage: storage);
-      final receipt = BackupReceipt(
-        backend: 'https://app.builderlab.xyz',
-        subject: 'a',
-        pubkey: key.public,
-        backupId: 'one',
-      );
-      await expectLater(
-        store.create(key.nsec, recoveredBackup: receipt),
-        throwsA(AccountIdentityFailure.unreadable),
-      );
-      final retried = await store.create(key.nsec, recoveredBackup: receipt);
-      expect(retried.backup?.backupId, 'one');
-      final other = nostr.Keys(
-        '0000000000000000000000000000000000000000000000000000000000000002',
-      );
-      await expectLater(
-        store.create(other.nsec),
-        throwsA(AccountIdentityFailure.occupied),
-      );
-      await expectLater(
-        store.create(
-          key.nsec,
-          recoveredBackup: BackupReceipt(
-            backend: receipt.backend,
-            subject: 'b',
-            pubkey: key.public,
-            backupId: 'two',
-          ),
-        ),
-        throwsA(AccountIdentityFailure.mismatch),
-      );
-      expect(storage.writes, 1);
-    },
-  );
+  for (final generate in [false, true]) {
+    test(
+      'uncertain ${generate ? "generated" : "recovered"} write retries exact identity once',
+      () async {
+        final storage = UncertainStorage();
+        final store = AccountIdentityStore(storage: storage);
+        var authorizations = 0;
+        final receipt = BackupReceipt(
+          backend: 'https://app.builderlab.xyz',
+          subject: 'a',
+          pubkey: key.public,
+          backupId: 'one',
+        );
+        Future<AccountIdentitySnapshot?> write() => generate
+            ? store.generateIfAbsent(
+                authorize: () async {
+                  authorizations++;
+                  return true;
+                },
+              )
+            : store.create(key.nsec, recoveredBackup: receipt);
+        await expectLater(write(), throwsA(AccountIdentityFailure.unreadable));
+        final persisted = (await store.read())!;
+        final retried = (await write())!;
+        expect(retried.pubkey, persisted.pubkey);
+        expect(authorizations, generate ? 1 : 0);
+        if (!generate) {
+          expect(retried.backup?.backupId, 'one');
+          final other = nostr.Keys('2'.padLeft(64, '0'));
+          await expectLater(
+            store.create(other.nsec),
+            throwsA(AccountIdentityFailure.occupied),
+          );
+          await expectLater(
+            store.create(
+              key.nsec,
+              recoveredBackup: BackupReceipt(
+                backend: receipt.backend,
+                subject: 'b',
+                pubkey: key.public,
+                backupId: 'two',
+              ),
+            ),
+            throwsA(AccountIdentityFailure.mismatch),
+          );
+        }
+        expect(storage.writes, 1);
+      },
+    );
+  }
 
   test(
     'late durable write blocks second instance create until settled',

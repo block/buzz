@@ -124,61 +124,44 @@ void main() {
     },
   );
 
-  test('existing local identity prevents generating a replacement', () async {
-    storage.data['buzz_nsec'] = key.nsec;
-    final before = Map<String, String>.of(storage.data);
-    await expectLater(
-      prepare(create: true),
-      throwsA(AccountIdentityFailure.absent),
+  for (final source in ['legacy', 'community', 'account']) {
+    test(
+      '$source identity forbids generation; explicit reuse preserves saved keys',
+      () async {
+        if (source == 'account') {
+          await AccountIdentityStore(storage: storage).create(key.nsec);
+        } else if (source == 'legacy') {
+          storage.data['buzz_nsec'] = key.nsec;
+        } else {
+          storage.data['buzz_communities'] = jsonEncode([
+            {'name': 'Saved', 'nsec': key.nsec, 'pubkey': key.public},
+          ]);
+          storage.data['buzz_nsec'] = other.nsec;
+        }
+        final before = Map<String, String>.of(storage.data);
+        final writesBefore = storage.writes;
+        expect(
+          (await entry.choices()).map((choice) => choice.pubkey),
+          contains(key.public),
+        );
+        await expectLater(
+          prepare(create: true),
+          throwsA(AccountIdentityFailure.absent),
+        );
+        expect(storage.writes, writesBefore);
+        expect(probes, isEmpty);
+        expect(storage.data, before);
+        final community = await prepare(savedPubkey: key.public);
+        expect(community.nsec, key.nsec);
+        expect(community.pubkey, key.public);
+        expect(community.relayUrl, relay);
+        for (final saved in before.entries) {
+          expect(storage.data[saved.key], saved.value);
+        }
+        expect(probes, [community]);
+      },
     );
-    expectUntouched();
-    expect(storage.data, before);
-  });
-
-  test(
-    'explicit saved identity reuses key and preserves community records',
-    () async {
-      final raw = jsonEncode([
-        {'name': 'Saved', 'nsec': key.nsec, 'pubkey': key.public},
-      ]);
-      storage.data['buzz_communities'] = raw;
-      storage.data['buzz_nsec'] = other.nsec;
-      final community = await prepare(savedPubkey: key.public);
-      expect(community.nsec, key.nsec);
-      expect(community.pubkey, key.public);
-      expect(community.relayUrl, relay);
-      expect(storage.data['buzz_communities'], raw);
-      expect(storage.data['buzz_nsec'], other.nsec);
-      expect(storage.writes, 1);
-      expect(probes, [community]);
-    },
-  );
-
-  test(
-    'account-only saved identity blocks generation and supports explicit reuse',
-    () async {
-      final accountStore = AccountIdentityStore(storage: storage);
-      await accountStore.create(key.nsec);
-      final before = Map<String, String>.of(storage.data);
-      final writesBefore = storage.writes;
-      final choices = await entry.choices();
-      expect(choices.map((choice) => choice.pubkey), [key.public]);
-      await expectLater(
-        prepare(create: true),
-        throwsA(AccountIdentityFailure.absent),
-      );
-      expect(storage.writes, writesBefore);
-      expect(probes, isEmpty);
-      expect(storage.data, before);
-      final community = await prepare(savedPubkey: key.public);
-      expect(community.pubkey, key.public);
-      expect(community.nsec, key.nsec);
-      expect(
-        storage.data[AccountIdentityStore.storageKey],
-        before[AccountIdentityStore.storageKey],
-      );
-    },
-  );
+  }
 
   test(
     'account and community choices deduplicate the same saved identity',
@@ -227,38 +210,29 @@ void main() {
     },
   );
 
-  test('cancellation before work performs no read, save or probe', () async {
-    current = false;
-    await expectLater(prepare(nsec: key.nsec), throwsStateError);
-    expect(storage.reads, 0);
-    expectUntouched();
-  });
-
-  test('cancellation during read prevents durable save and probe', () async {
-    storage.onRead = () {
-      current = false;
-    };
-    await expectLater(prepare(nsec: key.nsec), throwsStateError);
-    expectUntouched();
-    expect(storage.data, isEmpty);
-  });
-
-  test(
-    'cancellation after durable save keeps key and prevents probe',
-    () async {
-      storage.onWrite = () {
-        current = false;
-      };
-      await expectLater(prepare(nsec: key.nsec), throwsStateError);
-      expect(storage.writes, 1);
-      expect(storage.data.values, contains(key.nsec));
-      expect(probes, isEmpty);
-      current = true;
-      storage.onWrite = null;
-      expect((await prepare()).pubkey, key.public);
-      expect(storage.writes, 1);
-    },
-  );
+  for (final boundary in ['before', 'read', 'write']) {
+    test(
+      'cancellation at $boundary fences probe and preserves any durable key',
+      () async {
+        if (boundary == 'before') current = false;
+        if (boundary == 'read') storage.onRead = () => current = false;
+        if (boundary == 'write') storage.onWrite = () => current = false;
+        await expectLater(prepare(nsec: key.nsec), throwsStateError);
+        expect(probes, isEmpty);
+        expect(storage.writes, boundary == 'write' ? 1 : 0);
+        if (boundary == 'before') expect(storage.reads, 0);
+        if (boundary == 'write') {
+          expect(storage.data.values, contains(key.nsec));
+          current = true;
+          storage.onWrite = null;
+          expect((await prepare()).pubkey, key.public);
+          expect(storage.writes, 1);
+        } else {
+          expect(storage.data, isEmpty);
+        }
+      },
+    );
+  }
 
   test('unconfirmed durable write cannot reach the relay probe', () async {
     storage.dropWrites = true;

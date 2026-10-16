@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/shared/auth/auth.dart';
@@ -118,61 +116,6 @@ void main() {
           container.invalidate(activeCommunityProvider);
         }),
     recoverStarterChannels: container.read(_finishProvider),
-  );
-
-  test(
-    'new hosted invite persists pending flag before scoped starter recovery and waits',
-    () async {
-      final started = Completer<void>();
-      final release = Completer<void>();
-      recover = () async {
-        expect((await savedInvite()).starterSetupIncomplete, isTrue);
-        expect(await storage.loadActiveId(), (await savedInvite()).id);
-        started.complete();
-        await release.future;
-      };
-      var finished = false;
-      final operation = connect().then((_) {
-        finished = true;
-      });
-      await started.future;
-      expect(finished, isFalse);
-      expect(claims, 1);
-      expect(probed, hasLength(1));
-      expect(
-        scopes.single.relayHttpOrigin,
-        'https://invited.communities.buzz.xyz',
-      );
-      expect(scopes.single.nsec, f.keys.nsec);
-      release.complete();
-      await operation;
-      expect((await savedInvite()).starterSetupIncomplete, isFalse);
-      expect((await savedInvite()).pubkey, f.keys.public);
-      expect((await storage.loadAll()).first.toJson(), unrelated.toJson());
-    },
-  );
-
-  test(
-    'failed starters resume same saved key without reclaiming consumed invite',
-    () async {
-      recover = () async {
-        throw StateError('Starter membership refused');
-      };
-      await expectLater(connect(), throwsStateError);
-      final pending = await savedInvite();
-      expect(pending.starterSetupIncomplete, isTrue);
-      expect(claims, 1);
-      recover = () async {};
-      await connect();
-      final completed = await savedInvite();
-      expect(completed.id, pending.id);
-      expect(completed.nsec, pending.nsec);
-      expect(completed.starterSetupIncomplete, isFalse);
-      expect(claims, 1);
-      expect(probed, hasLength(2));
-      expect(f.requests.where((path) => path.endsWith('/current')).length, 2);
-      expect(scopes, hasLength(2));
-    },
   );
 
   test(

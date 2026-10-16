@@ -24,7 +24,8 @@ void main() {
 
   late String? bound;
   late Map<String, dynamic> recovery;
-  late List<String> listedKeys;
+  late List<String>? listedKeys;
+  var statusCode = 200;
   late AccountIdentityStore store;
   late String communityJson;
   late int recoveryCalls;
@@ -32,6 +33,7 @@ void main() {
   Future<void> Function()? duringRecovery;
 
   setUp(() {
+    statusCode = 200;
     bound = null;
     listedKeys = [keys[0].public, keys[1].public];
     recovery = {
@@ -50,7 +52,10 @@ void main() {
     duringRecovery = null;
   });
 
-  Future<HostedIdentityService> service({bool includeDevice = false}) async {
+  Future<HostedIdentityService> service({
+    bool includeDevice = false,
+    Future<bool> Function()? generationGate,
+  }) async {
     final expiry = DateTime.now()
         .toUtc()
         .add(const Duration(hours: 1))
@@ -82,9 +87,9 @@ void main() {
           return http.Response(
             jsonEncode({
               'current_nostr_pubkey': bound,
-              'backup_nostr_pubkeys': listedKeys,
+              'backup_nostr_pubkeys': ?listedKeys,
             }),
-            200,
+            statusCode,
           );
         }
         if (path.endsWith('/recovery')) {
@@ -100,7 +105,7 @@ void main() {
       account: account,
       store: store,
       deviceIdentities: includeDevice ? DeviceIdentitySource() : null,
-      canGenerateAfterLegacyReconciliation: () async => true,
+      canGenerateAfterLegacyReconciliation: generationGate ?? () async => true,
     );
   }
 
@@ -245,6 +250,10 @@ void main() {
     final pending = await resolver.resolve();
     expect(pending.state, HostedIdentityState.needsSelection);
     expect(pending.choices.single.pubkey, keys[1].public);
+    expect(
+      (await resolver.resolve(selectedPubkey: keys[2].public)).state,
+      HostedIdentityState.needsSelection,
+    );
     expect(await store.read(), isNull);
     expect(
       (await resolver.resolve(selectedPubkey: keys[1].public)).state,
@@ -253,45 +262,50 @@ void main() {
     await expectCommunityPreserved();
   });
 
-  test('partial recovery blocks even a valid matching bound backup', () async {
-    bound = keys[1].public;
-    recovery['failed_backup_ids'] = ['unreadable'];
-    expect(
-      (await (await service()).resolve()).state,
-      HostedIdentityState.recoveryBlocked,
-    );
-    expect(await store.read(), isNull);
-  });
-
-  test(
-    'malformed extra backup blocks before saving the valid bound backup',
-    () async {
+  for (final scenario in [
+    'partial',
+    'malformed',
+    'mismatched',
+    'refused',
+    'empty',
+  ]) {
+    test('recovery $scenario never writes or generates', () async {
       bound = keys[0].public;
-      (recovery['backups'] as List)[1]['secret_key'] = 'invalid';
-      await expectLater(
-        (await service()).resolve(),
-        throwsA(AccountFailure.invalidResponse),
-      );
-      expect(await store.read(), isNull);
-    },
-  );
-
-  test(
-    'recovery failure and empty recovery never authorize generation',
-    () async {
+      switch (scenario) {
+        case 'partial':
+          recovery['failed_backup_ids'] = ['unreadable'];
+        case 'malformed':
+          (recovery['backups'] as List)[1]['secret_key'] = 'invalid';
+        case 'mismatched':
+          (recovery['backups'] as List)[1]['nostr_pubkey'] = keys[2].public;
+        case 'refused':
+          recoveryStatus = 403;
+        case 'empty':
+          bound = null;
+          recovery['backups'] = [];
+      }
       final resolver = await service();
-      recoveryStatus = 403;
-      await expectLater(resolver.resolve(), throwsA(isA<AccountFailure>()));
+      if (scenario == 'partial' || scenario == 'empty') {
+        expect(
+          (await resolver.resolve()).state,
+          scenario == 'partial'
+              ? HostedIdentityState.recoveryBlocked
+              : HostedIdentityState.needsAuthoritativeAbsence,
+        );
+      } else {
+        await expectLater(
+          resolver.resolve(),
+          throwsA(
+            scenario == 'refused'
+                ? isA<AccountFailure>()
+                : AccountFailure.invalidResponse,
+          ),
+        );
+      }
       expect(await store.read(), isNull);
-      recoveryStatus = 200;
-      recovery['backups'] = [];
-      expect(
-        (await resolver.resolve()).state,
-        HostedIdentityState.needsAuthoritativeAbsence,
-      );
-      expect(await store.read(), isNull);
-    },
-  );
+      await expectCommunityPreserved();
+    });
+  }
 
   test(
     'occupied account slot is never replaced by a recovered choice',
@@ -324,4 +338,54 @@ void main() {
     );
     expect(await store.read(), isNull);
   });
+  test(
+    'saved identity skips recovery and conflicting binding never replaces it',
+    () async {
+      bound = keys[0].public;
+      listedKeys = [keys[0].public];
+      await store.create(keys[0].nsec);
+      final resolver = await service();
+      expect((await resolver.resolve()).state, HostedIdentityState.needsBackup);
+      bound = keys[1].public;
+      expect((await resolver.resolve()).state, HostedIdentityState.mismatch);
+      expect(recoveryCalls, 0);
+      expect((await store.read())!.pubkey, keys[0].public);
+    },
+  );
+
+  test('authoritative absence generates once only after legacy gate', () async {
+    listedKeys = [];
+    final blocked = await service(generationGate: () async => false);
+    expect(
+      (await blocked.resolve()).state,
+      HostedIdentityState.needsAuthoritativeAbsence,
+    );
+    expect(await store.read(), isNull);
+    final resolver = await service();
+    final first = await resolver.resolve();
+    expect(first.state, HostedIdentityState.needsBinding);
+    expect((await resolver.resolve()).pubkey, first.pubkey);
+    expect(recoveryCalls, 0);
+  });
+
+  for (final scenario in ['403', '404', '500', 'missing', 'cancelled']) {
+    test('unproven absence ($scenario) cannot generate', () async {
+      var current = true;
+      listedKeys = scenario == 'missing' ? null : [];
+      statusCode = int.tryParse(scenario) ?? 200;
+      final resolver = await service(
+        generationGate: () async {
+          current = false;
+          return true;
+        },
+      );
+      await expectLater(
+        resolver.resolve(isCurrent: () => current),
+        throwsA(isA<AccountFailure>()),
+      );
+      expect(await store.read(), isNull);
+      expect(recoveryCalls, 0);
+      await expectCommunityPreserved();
+    });
+  }
 }
