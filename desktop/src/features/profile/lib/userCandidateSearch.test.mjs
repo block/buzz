@@ -48,10 +48,10 @@ test("scoreUserCandidate ranks display labels before pubkeys", () => {
 });
 
 test("scoreUserCandidate matches a profile name that differs from the display name", () => {
-  const user = makeUser({ displayName: "V", name: "Virginia Martin" });
+  const user = makeUser({ displayName: "O", name: "Otter Opus" });
 
-  assert.equal(scoreUserCandidate({ label: "V", query: "virginia", user }), 0);
-  assert.equal(scoreUserCandidate({ label: "V", query: "martin", user }), 1);
+  assert.equal(scoreUserCandidate({ label: "O", query: "Otter", user }), 0);
+  assert.equal(scoreUserCandidate({ label: "O", query: "opus", user }), 1);
 });
 
 test("scoreUserCandidate supports agent labels and empty-query defaults", () => {
