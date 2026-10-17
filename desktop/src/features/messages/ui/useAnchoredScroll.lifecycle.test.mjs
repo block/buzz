@@ -597,3 +597,102 @@ test("mounted virtual target retires bottom intent before direct centering", asy
   assert.equal(bottomWrites.length, 1, "geometry cannot re-pin to bottom");
   await act(async () => root.unmount());
 });
+
+function mountColdVirtualTarget({ knownIds, targetMessageId }) {
+  const content = document.createElement("div");
+  const scroller = document.createElement("div");
+  scroller.appendChild(content);
+  scroller.clientHeight = 400;
+  scroller.scrollHeight = 4_000;
+  scroller.scrollTop = 0;
+  scroller.getBoundingClientRect = () => ({ bottom: 400, top: 0 });
+  const scrollWrites = [];
+  scroller.scrollTo = ({ top }) => {
+    scrollWrites.push(top);
+    scroller.scrollTop = top;
+  };
+  let mountedId = null;
+  scroller.querySelector = (selector) => {
+    if (!mountedId || !selector.includes(mountedId)) return null;
+    return {
+      getBoundingClientRect: () => ({ bottom: 220, height: 40, top: 180 }),
+    };
+  };
+  const calls = { bottom: [], message: [] };
+  let renderVersion = 0;
+  function Harness() {
+    useAnchoredScroll({
+      channelId: "thread",
+      contentRef: { current: content },
+      isLoading: false,
+      messages: [{ id: "reply-201" }, { id: "reply-2419" }],
+      scrollContainerRef: { current: scroller },
+      targetMessageId,
+      virtualScrollToBottom: () => {
+        calls.bottom.push("bottom");
+      },
+      virtualScrollToMessage: (messageId) => {
+        calls.message.push(messageId);
+        return knownIds.has(messageId);
+      },
+      virtualizerOwnsPrependAnchoring: true,
+      virtualizerRenderVersion: renderVersion,
+    });
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  return {
+    calls,
+    mountRow(messageId) {
+      mountedId = messageId;
+      renderVersion += 1;
+    },
+    root,
+    async render() {
+      await act(async () => {
+        root.render(React.createElement(Harness));
+      });
+    },
+    scrollWrites,
+  };
+}
+
+test("cold virtual deep link keeps a known off-screen row until it mounts", async () => {
+  const harness = mountColdVirtualTarget({
+    knownIds: new Set(["reply-201"]),
+    targetMessageId: "reply-201",
+  });
+
+  await harness.render();
+  assert.ok(harness.calls.message.includes("reply-201"));
+  assert.deepEqual(
+    harness.calls.bottom,
+    [],
+    "a known virtual row must not be replaced by the bottom pin",
+  );
+
+  harness.mountRow("reply-201");
+  await harness.render();
+  assert.ok(
+    harness.scrollWrites.length > 0,
+    "the range-change retry centers the row once it mounts",
+  );
+  assert.deepEqual(harness.calls.bottom, []);
+  await act(async () => harness.root.unmount());
+});
+
+test("cold virtual deep link pins to the bottom when the target is unavailable", async () => {
+  const harness = mountColdVirtualTarget({
+    knownIds: new Set(["reply-201"]),
+    targetMessageId: "not-loaded",
+  });
+
+  await harness.render();
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  assert.ok(harness.calls.message.includes("not-loaded"));
+  assert.ok(
+    harness.calls.bottom.length > 0,
+    "an unknown target still opens at the latest reply",
+  );
+  await act(async () => harness.root.unmount());
+});
