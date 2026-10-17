@@ -5345,3 +5345,7 @@ sleep 1"#,
 #[cfg(all(test, unix))]
 #[path = "persona_session_tests.rs"]
 mod persona_session_tests;
+
+#[cfg(all(test, unix))]
+#[path = "persona_steer_tests.rs"]
+mod persona_steer_tests;
