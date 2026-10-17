@@ -51,6 +51,19 @@ pub struct HuddleState {
     /// Root event for the huddle's visible parent-channel thread. Transcript
     /// messages reply here while audio coordination stays ephemeral.
     pub huddle_thread_event_id: Option<String>,
+    /// Explicitly selected share, mirrored into the main and companion windows.
+    pub screen_share: Option<buzz_core_pkg::huddle_screen::ScreenShare>,
+    /// Capture/publication failure, retained until the next share or huddle.
+    pub screen_share_error: Option<String>,
+    /// Native capture source and cancellation fence; never cloned into snapshots.
+    #[serde(skip)]
+    pub screen_capture: Option<Arc<super::screen::ScreenCapture>>,
+    /// Cancels a pending source selection independently of audio reconnects.
+    #[serde(skip)]
+    pub screen_share_revision: u64,
+    /// Cancels the OS source picker if the huddle is retired before consent.
+    #[serde(skip)]
+    pub screen_share_start_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Cancellation token for the audio relay WS task.
     #[serde(skip)]
     pub audio_ws_cancel: Option<tokio_util::sync::CancellationToken>,
@@ -192,6 +205,11 @@ impl Clone for HuddleState {
             parent_channel_id: self.parent_channel_id.clone(),
             ephemeral_channel_id: self.ephemeral_channel_id.clone(),
             huddle_thread_event_id: self.huddle_thread_event_id.clone(),
+            screen_share: self.screen_share.clone(),
+            screen_share_error: self.screen_share_error.clone(),
+            screen_capture: None,
+            screen_share_revision: self.screen_share_revision,
+            screen_share_start_cancel: None,
             audio_ws_cancel: None,    // Never clone handles.
             audio_relay_pcm_tx: None, // Never clone handles.
             participants: self.participants.clone(),
@@ -229,6 +247,11 @@ impl Default for HuddleState {
             parent_channel_id: None,
             ephemeral_channel_id: None,
             huddle_thread_event_id: None,
+            screen_share: None,
+            screen_share_error: None,
+            screen_capture: None,
+            screen_share_revision: 0,
+            screen_share_start_cancel: None,
             audio_ws_cancel: None,
             audio_relay_pcm_tx: None,
             participants: Vec::new(),
@@ -258,6 +281,18 @@ impl Default for HuddleState {
 }
 
 impl HuddleState {
+    /// Stop capture before resetting or replacing the huddle state.
+    pub(crate) fn stop_screen_capture(&mut self) {
+        if let Some(cancel) = self.screen_share_start_cancel.take() {
+            cancel.cancel();
+        }
+        self.screen_share_revision = self.screen_share_revision.wrapping_add(1);
+        if let Some(capture) = self.screen_capture.take() {
+            capture.cancel();
+        }
+        self.screen_share = None;
+    }
+
     pub(crate) fn set_stt_pipeline(&mut self, pipeline: Arc<stt::SttPipeline>) {
         *self
             .remote_stt_pipeline
@@ -346,6 +381,7 @@ impl HuddleState {
     /// Used by start_huddle rollback, join_huddle rollback, and teardown_huddle
     /// to invalidate in-flight transcription tasks without losing the generation.
     pub(crate) fn reset_preserving_generation(&mut self) {
+        self.stop_screen_capture();
         let gen = Arc::clone(&self.session_generation);
         let huddle_generation = self.huddle_generation;
         let tts_enabled = self.tts_enabled;

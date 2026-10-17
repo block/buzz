@@ -899,6 +899,10 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 }
 
+#[cfg(test)]
+#[path = "huddle_screen_tests.rs"]
+mod huddle_screen_tests;
+
 /// Handle ephemeral events (kind 20000–29999) submitted over WebSocket —
 /// never stored. Typing indicators may also arrive over HTTP; see
 /// [`publish_http_typing`].
@@ -918,14 +922,51 @@ async fn handle_ephemeral_event(
 ) -> Result<(), IngestError> {
     let event_clone = event.clone();
     let event_id = event.id.to_hex();
-    let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
+    let verify_result = tokio::task::spawn_blocking(move || {
+        verify_event(&event_clone).map_err(|e| format!("invalid: {e}"))?;
+        if event_kind_u32(&event_clone) == buzz_core::kind::KIND_HUDDLE_SCREEN {
+            buzz_core::huddle_screen::validate_screen_event(
+                &event_clone,
+                nostr::Timestamp::now().as_secs(),
+            )
+            .map(Some)
+        } else {
+            Ok(None)
+        }
+    })
+    .await;
 
-    match verify_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+    let screen_channel = match verify_result {
+        Ok(Ok(channel)) => channel,
+        Ok(Err(e)) => return Err(IngestError::Rejected(e)),
         Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
+    };
+    // Screen media must never take the channel-less/global ephemeral route.
+    if let Some(channel_id) = screen_channel {
+        let channel = state
+            .db
+            .get_channel_for_event_write(conn.tenant.community(), channel_id)
+            .await
+            .map_err(|error| match error {
+                buzz_db::DbError::ChannelNotFound(_) => {
+                    IngestError::Rejected("restricted: screen huddle unavailable".into())
+                }
+                _ => IngestError::Internal("error: screen huddle lookup failed".into()),
+            })?;
+        if channel.channel_type != "stream"
+            || channel.visibility != "private"
+            || channel.ttl_seconds.is_none()
+            || channel.archived_at.is_some()
+            || channel.deleted_at.is_some()
+            || channel
+                .ttl_deadline
+                .is_some_and(|deadline| deadline <= chrono::Utc::now())
+        {
+            return Err(IngestError::Rejected(
+                "restricted: screen sharing requires an active private huddle".into(),
+            ));
+        }
     }
-
     if event_kind_u32(&event) == KIND_AGENT_PRESENCE {
         return set_agent_presence(&state, &conn.tenant, &event, &auth_pubkey).await;
     }
@@ -1142,6 +1183,11 @@ async fn publish_channel_ephemeral(
             .local_event_ids
             .invalidate(&(tenant.community(), event.id.to_bytes()));
         warn!(event_id = %event.id.to_hex(), "Ephemeral publish failed: {e}");
+        if event_kind_u32(&event) == buzz_core::kind::KIND_HUDDLE_SCREEN {
+            return Err(IngestError::Internal(
+                "error: screen delivery unavailable".into(),
+            ));
+        }
     }
 
     // Direct fan-out to local WS subscribers, through the guarded send path

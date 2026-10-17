@@ -1,6 +1,7 @@
 import type * as React from "react";
 import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
 import { HuddleRoomHeader, HuddleStartingView } from "@/features/huddle";
+import { HuddleScreenViewer } from "@/features/huddle/components/HuddleScreenViewer";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -51,6 +52,7 @@ export function AppShellChannelSurface({
           />
         ) : null}
         {isHuddleRoom && !isHuddleRoomStarting ? <HuddleRoomHeader /> : null}
+        {isHuddleRoom && !isHuddleRoomStarting ? <HuddleScreenViewer /> : null}
         <BuzzTheme.ContentSurface terminal={terminal} unframed={isHuddleRoom}>
           {isHuddleRoomStarting ? <HuddleStartingView /> : children}
         </BuzzTheme.ContentSurface>

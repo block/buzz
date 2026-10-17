@@ -17,6 +17,11 @@ case "$platform" in
       dpkg-query -W -f='${Package}=${Version}\n' \
         build-essential libasound2-dev libayatana-appindicator3-dev \
         libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev \
+        libclang-dev libegl1-mesa-dev libgbm-dev libpipewire-0.3-dev \
+        libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+        gstreamer1.0-pipewire gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+        gstreamer1.0-libav \
+        libwayland-dev libxcb1-dev libxcb-randr0-dev \
         libxdo-dev patchelf pkg-config
       gcc -dumpfullversion -dumpversion
       gcc -dumpmachine
