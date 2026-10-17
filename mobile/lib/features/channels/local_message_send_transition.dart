@@ -68,12 +68,39 @@ class LocalMessageSendTransition extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final needsAnimation = useMemoized(
+      () => animate && !reduceMotion,
+      const [],
+    );
+    // Loaded history never needs a ticker, animation builder, or expanding row.
+    // Choose at mount: later claim or accessibility changes must not replay a
+    // settled entrance or remount media, selection, and other message state.
+    if (!needsAnimation) {
+      return LocalSendProgress(progress: 1, widthProgress: 1, child: child);
+    }
+    return _AnimatedLocalMessageSendTransition(transition: this);
+  }
+}
+
+class _AnimatedLocalMessageSendTransition extends HookConsumerWidget {
+  const _AnimatedLocalMessageSendTransition({required this.transition});
+
+  final LocalMessageSendTransition transition;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final animate = transition.animate;
+    final channelId = transition.channelId;
+    final messageId = transition.messageId;
+    final startOffsetFactor = transition.startOffsetFactor;
+    final child = transition.child;
     final origin = useMemoized(
       () => !animate || channelId == null || messageId == null
           ? null
           : ref
-                .read(localMessageSendAnimationProvider(channelId!).notifier)
-                .originFor(messageId!),
+                .read(localMessageSendAnimationProvider(channelId).notifier)
+                .originFor(messageId),
       const [],
     );
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
