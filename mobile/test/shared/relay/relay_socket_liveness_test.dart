@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 /// A server that completes the WS handshake then never speaks again: no pongs,
 /// no close frame. Only a client-side ping timeout can notice.
@@ -49,6 +50,45 @@ void main() {
 
   tearDown(() {
     RelaySocket.debugPingInterval = RelaySocket.pingInterval;
+  });
+
+  test('disconnect completes pending authentication', () async {
+    RelaySocket.debugPingInterval = RelaySocket.pingInterval;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final authReceived = Completer<void>();
+    final disconnectErrors = <Object?>[];
+    WebSocket? peer;
+    server.listen((request) async {
+      final connection = await WebSocketTransformer.upgrade(request);
+      peer = connection;
+      connection.listen((raw) {
+        final frame = jsonDecode(raw as String) as List<dynamic>;
+        if (frame.first == 'AUTH' && !authReceived.isCompleted) {
+          authReceived.complete();
+        }
+      });
+      connection.add(jsonEncode(['AUTH', 'fixture-challenge']));
+    });
+    final socket = RelaySocket(
+      wsUrl: 'ws://127.0.0.1:${server.port}',
+      nsec: nostr.Keys.generate().nsec,
+      onMessage: (_) {},
+      onConnected: () => fail('The peer never acknowledges authentication'),
+      onDisconnected: disconnectErrors.add,
+    );
+    final connecting = socket.connect();
+    try {
+      await authReceived.future;
+      expect(socket.state, SocketState.authenticating);
+      await socket.disconnect();
+      await connecting.timeout(const Duration(seconds: 1));
+      expect(socket.state, SocketState.disconnected);
+      expect(disconnectErrors, isEmpty);
+    } finally {
+      socket.dispose();
+      await peer?.close();
+      await server.close(force: true);
+    }
   });
 
   test('detects a peer that stops answering pings', () async {

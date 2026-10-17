@@ -481,7 +481,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       await storage.save(updated);
       final updatedList = [...current]..[index] = updated;
       state = AsyncData(updatedList);
-      await syncCommunitySnapshot(ref, updatedList);
+      if (enabled) {
+        await syncCommunitySnapshot(ref, updatedList);
+      } else {
+        // Presentation export must not hold up the durably journaled opt-out.
+        unawaited(syncCommunitySnapshot(ref, updatedList));
+      }
       shouldDeactivate =
           !enabled && pushState.pendingTombstoneGeneration != null;
     });
@@ -548,7 +553,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         await storage.save(updated);
         final updatedList = [...current]..[index] = updated;
         state = AsyncData(updatedList);
-        await syncCommunitySnapshot(ref, updatedList);
+        // Disabled communities are absent from the native snapshot. Retrying
+        // changes only the durable generation, so it needs no native export.
       }
       pendingCommunity = updated;
       pendingGeneration = pushState.pendingTombstoneGeneration;
@@ -583,7 +589,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         await storage.save(updated);
         final updatedList = [...current]..[index] = updated;
         state = AsyncData(updatedList);
-        await syncCommunitySnapshot(ref, updatedList);
+        unawaited(syncCommunitySnapshot(ref, updatedList));
       });
 
   Future<void> renameCommunity(String id, String name) async {
