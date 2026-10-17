@@ -4427,13 +4427,29 @@ mod off_mode_precedence_tests {
                 crate::nip_fi_test_hooks::git_membership_hook::arm(tenant.community());
             let (guard, out) = crate::access::tests::capture_scoped();
             tokio::select! {
-                _ = git_request(state, &host, Some(&auth)) => {
+                _ = production_git_request(state, &host, &auth) => {
                     panic!("the membership wait must stall");
                 }
                 arrived = arrived => arrived.expect("request reached the membership wait"),
             }
             drop(guard);
             crate::access::tests::assert_one_aborted_line(&out, &keys.public_key());
+        }
+
+        /// Sends the request through the production router, whose access
+        /// layer owns the line written when the request is dropped.
+        async fn production_git_request(state: Arc<AppState>, host: &str, auth: &str) {
+            let req = axum::http::Request::builder()
+                .method("GET")
+                .uri(GIT_PATH)
+                .header("host", host)
+                .header("authorization", auth)
+                .body(axum::body::Body::empty())
+                .expect("build request");
+            let _ = crate::router::build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router oneshot");
         }
 
         async fn git_request(

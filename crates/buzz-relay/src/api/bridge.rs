@@ -5369,7 +5369,7 @@ pub(crate) mod postgres_tests {
             .collect();
         for line in &lines {
             assert!(
-                line.contains("event=\"auth\"") && line.contains("status="),
+                line.contains("event=\"http\"") && line.contains("status="),
                 "the request's one line carries its login and status: {line}"
             );
         }

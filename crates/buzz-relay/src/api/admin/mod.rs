@@ -1611,6 +1611,21 @@ mod postgres_tests {
         router(state).oneshot(request).await.expect("response")
     }
 
+    /// Sends an admin-relative request to its mounted path on the production
+    /// router, whose access layer writes the request's line.
+    async fn production_status_for(
+        state: Arc<crate::state::AppState>,
+        mut request: Request<Body>,
+    ) -> axum::response::Response {
+        *request.uri_mut() = format!("{ADMIN_API_PREFIX}{}", request.uri())
+            .parse()
+            .expect("mounted uri");
+        crate::router::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("response")
+    }
+
     #[tokio::test]
     async fn every_route_rejects_a_missing_credential_before_database_access() {
         let state = test_state().await;
@@ -1749,7 +1764,7 @@ mod postgres_tests {
     async fn feedback_attachment_rejects_unknown_feedback() {
         let state = test_state().await;
         let (_guard, out) = crate::access::tests::capture_scoped();
-        let response = status_for(
+        let response = production_status_for(
             state,
             status_request(authorized(&format!(
                 "/feedback/{}/attachments/{HASH}",
@@ -1837,7 +1852,7 @@ mod postgres_tests {
                         .header(header::HOST, "admin.example")
                 };
                 let (guard, out) = crate::access::tests::capture_scoped();
-                let response = status_for(state, status_request(request)).await;
+                let response = production_status_for(state, status_request(request)).await;
                 let status = response.status();
                 let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                     .await

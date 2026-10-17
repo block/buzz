@@ -1766,7 +1766,8 @@ mod tests {
         assert_eq!(body_bytes(resp), b"legacy");
     }
 
-    /// Run admission and render the line its note would log.
+    /// Run admission, check it wrote no line itself, and render the line its
+    /// note would log.
     fn admit_logged(
         mode: NipFiMode,
         asserted: PublicKey,
@@ -1774,16 +1775,19 @@ mod tests {
     ) -> (bool, serde_json::Value) {
         let verifier = ScriptedVerifier::new(Ok(Some(asserted)));
         let slot = AccessSlot::default();
-        let admitted = admit_nip_fi_http::<_, (), _>(
-            &slot,
-            &bearer_headers("Bearer a.b.c"),
-            || Ok(Nip98Proof::new(proven, ())),
-            &communities(),
-            Some(&verifier as &dyn VerifyAssertion),
-            mode,
-            &AlwaysAdmitStubDenyMap,
-        )
-        .is_ok();
+        let (admitted, early) = crate::access::tests::capture(|| {
+            admit_nip_fi_http::<_, (), _>(
+                &slot,
+                &bearer_headers("Bearer a.b.c"),
+                || Ok(Nip98Proof::new(proven, ())),
+                &communities(),
+                Some(&verifier as &dyn VerifyAssertion),
+                mode,
+                &AlwaysAdmitStubDenyMap,
+            )
+            .is_ok()
+        });
+        assert!(early.lines().is_empty(), "admission writes no access line");
         let ((), out) = crate::access::tests::capture(|| slot.emit("/test", 200));
         let mut lines = out.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");

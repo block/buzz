@@ -961,7 +961,8 @@ pub(crate) struct BridgeDetail {
 /// The access note of one HTTP request. [`http_access_log`] puts it in the
 /// request's extensions; handlers take it as an extractor (a detached note
 /// when the layer is absent, as in handler unit tests) and pass `&AccessSlot`
-/// to their helpers. The first decision is final.
+/// to their helpers. A refusal is final: a later admission leaves it, and
+/// a later refusal replaces an admission.
 #[derive(Clone, Default)]
 pub struct AccessSlot(Arc<std::sync::Mutex<AccessNote>>);
 
