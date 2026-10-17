@@ -193,7 +193,8 @@ async fn authenticate(
             true, // require_auth_token: always required for control-plane
             require_payload,
         ),
-    )?;
+    )
+    .await?;
     let pubkey = *admission.proven_pubkey();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
 

@@ -403,6 +403,11 @@ pub struct Config {
     /// (`BUZZ_NIP_FI_PROVISION_BINDING`). `None` binds nothing at creation.
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+
+    /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
+    /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
+    /// fails the deploy that sets it, not the later switch to shadow.
+    pub nip_fi_resolver_bounds: crate::nip_fi_resolver::ResolverBounds,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -1377,6 +1382,18 @@ impl Config {
         };
 
         let nip_fi = crate::nip_fi_config::NipFiRelayConfig::from_env()?;
+        let nip_fi_provision_binding = crate::nip_fi_config::parse_provision_binding()?;
+        let nip_fi_resolver_bounds =
+            crate::nip_fi_resolver::ResolverBounds::from_env(db_pool_size)?;
+        if nip_fi.source == crate::nip_fi_config::CommunitySource::Database
+            && nip_fi_provision_binding.is_none()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_NIP_FI_COMMUNITY_SOURCE=database requires BUZZ_NIP_FI_PROVISION_BINDING \
+                 (the suffix and reserved host)"
+                    .into(),
+            ));
+        }
         Ok(Self {
             bind_addr,
             database_url,
@@ -1442,7 +1459,8 @@ impl Config {
             admin,
             web_dir,
             serve_git_web_gui,
-            nip_fi_provision_binding: crate::nip_fi_config::parse_provision_binding()?,
+            nip_fi_provision_binding,
+            nip_fi_resolver_bounds,
             nip_fi,
         })
     }
@@ -1512,6 +1530,83 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
+    }
+
+    // The three `source=database` startup guards. Mutation: dropping any one
+    // lets that configuration start.
+    #[test]
+    fn database_source_config_guards_refuse_startup() {
+        const VARS: [&str; 6] = [
+            "BUZZ_NIP_FI_COMMUNITY_SOURCE",
+            "BUZZ_NIP_FI_COMMUNITIES",
+            "BUZZ_NIP_FI_ISSUERS",
+            "BUZZ_NIP_FI_PROVISION_BINDING",
+            "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
+            "BUZZ_NIP_FI_MODE",
+        ];
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                for v in VARS {
+                    std::env::remove_var(v);
+                }
+            }
+        }
+        let _guards = env_guards();
+        let _clear = Clear;
+        let refusal = || match Config::from_env() {
+            Err(ConfigError::InvalidValue(message)) => message,
+            other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+        };
+
+        std::env::set_var("BUZZ_NIP_FI_COMMUNITY_SOURCE", "ldap");
+        assert!(refusal().contains("must be \"env\" or \"database\""));
+
+        std::env::set_var("BUZZ_NIP_FI_COMMUNITY_SOURCE", "database");
+        std::env::set_var("BUZZ_NIP_FI_COMMUNITIES", "[]");
+        assert!(refusal().contains("BUZZ_NIP_FI_COMMUNITIES is set"));
+
+        std::env::remove_var("BUZZ_NIP_FI_COMMUNITIES");
+        std::env::set_var(
+            "BUZZ_NIP_FI_ISSUERS",
+            serde_json::json!([{
+                "issuer": "https://idp.example.com",
+                "command_audiences": ["https://relay.example.com"],
+                "token_class": "nip-fi+jwt",
+                "algorithms": ["ES256"],
+                "maximum_assertion_age_seconds": 3600,
+                "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+                "jwks_refresh_interval_seconds": 300,
+                "jwks_hard_deadline_seconds": 86400,
+                "maximum_command_age_seconds": 30,
+                "authorized_principals": ["https://idp.example.com/operator"]
+            }])
+            .to_string(),
+        );
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        assert!(refusal().contains("requires BUZZ_NIP_FI_PROVISION_BINDING"));
+
+        std::env::set_var(
+            "BUZZ_NIP_FI_PROVISION_BINDING",
+            r#"{"host_suffix":"communities.example.com","authorized_issuers":["https://idp.example.com"]}"#,
+        );
+        let config = Config::from_env().expect("complete database-source config");
+        assert!(config.nip_fi_provision_binding.is_some());
+    }
+
+    // Mutation: parsing the resolver bounds only when the resolver is built
+    // lets an off-mode deploy carry a value the switch to shadow refuses.
+    #[test]
+    fn resolver_bounds_are_validated_in_off_mode() {
+        let _guards = env_guards();
+        std::env::set_var("BUZZ_NIP_FI_RESOLVER_MAX_INFLIGHT", "0");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_NIP_FI_RESOLVER_MAX_INFLIGHT");
+        assert!(
+            matches!(result, Err(ref e) if e.to_string().contains("BUZZ_NIP_FI_RESOLVER_MAX_INFLIGHT")),
+            "{:?}",
+            result.map(|_| ())
+        );
     }
 
     /// Look up against a fixed set, standing in for process env.

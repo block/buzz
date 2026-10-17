@@ -856,6 +856,36 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             ));
         }
     }
+    // NIP-FI database community source. The startup load runs before any
+    // listener binds, so the pod can never report ready without a snapshot;
+    // a failed load fails startup and the orchestrator retries.
+    if config.nip_fi.builds_resolver() {
+        let step = StepTimer::start(StartupStep::NipFiSnapshotLoad);
+        // `Config::from_env` refuses the database source without it.
+        let policy = config
+            .nip_fi_provision_binding
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("NIP-FI: no provisioning binding policy"))?;
+        let registry = config
+            .nip_fi
+            .registry
+            .all_policies()
+            .map(|p| p.issuer().to_owned())
+            .collect();
+        let resolver = Arc::new(buzz_relay::nip_fi_resolver::DatabaseResolver::new(
+            Arc::new(app_state.db.clone()),
+            policy,
+            registry,
+            config.nip_fi_resolver_bounds.clone(),
+        ));
+        resolver
+            .refresh()
+            .await
+            .map_err(|e| anyhow::anyhow!("NIP-FI: startup binding snapshot load failed: {e:?}"))?;
+        step.finish();
+        info!("NIP-FI: binding snapshot loaded");
+        app_state.nip_fi_resolver = Some(resolver);
+    }
     let state = Arc::new(app_state);
     let has_startup_partition_audit = startup_partition_audit.is_some();
     if let Some(audit) = startup_partition_audit {
@@ -912,6 +942,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // The refresh task is owned: a `CancellationToken` + `JoinHandle` let the
     // process cancel it cleanly on shutdown instead of leaking the task.
     let jwks_refresh_cancel = CancellationToken::new();
+    // The binding refresh loop stops with the JWKS loop on shutdown.
+    if let Some(resolver) = state.nip_fi_resolver.clone() {
+        tokio::spawn(resolver.run_refresh_loop(jwks_refresh_cancel.child_token()));
+    }
     let jwks_refresh_handle = if let Some(jwks_source) = state.nip_fi_jwks_source.clone() {
         let jwks_configs = state.config.nip_fi.jwks_configs.clone();
         info!(
