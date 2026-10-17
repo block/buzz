@@ -17,6 +17,8 @@ type ChooserDialogContentProps = React.ComponentPropsWithoutRef<
   footerClassName?: string;
   footerTestId?: string;
   contentClassName?: string;
+  /** Pinned below the title, outside the scroll area (e.g. a search box). */
+  headerAccessory?: React.ReactNode;
   headerClassName?: string;
   headerSubtitle?: React.ReactNode;
   headerTestId?: string;
@@ -38,6 +40,7 @@ export const ChooserDialogContent = React.forwardRef<
       footer,
       footerClassName,
       footerTestId,
+      headerAccessory,
       headerClassName,
       headerSubtitle,
       headerTestId,
@@ -59,7 +62,11 @@ export const ChooserDialogContent = React.forwardRef<
       {...props}
     >
       <DialogHeader
-        className={cn("shrink-0 px-6 py-5 pr-14", headerClassName)}
+        className={cn(
+          "shrink-0 px-6 py-5 pr-14",
+          headerAccessory && "pb-1",
+          headerClassName,
+        )}
         data-testid={headerTestId}
       >
         <DialogTitle>{title}</DialogTitle>
@@ -67,6 +74,9 @@ export const ChooserDialogContent = React.forwardRef<
           <DialogDescription>{headerSubtitle}</DialogDescription>
         ) : null}
       </DialogHeader>
+      {headerAccessory ? (
+        <div className="shrink-0 px-6 pb-5">{headerAccessory}</div>
+      ) : null}
 
       <div
         className={cn(
