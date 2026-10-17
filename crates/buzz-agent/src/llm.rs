@@ -2644,6 +2644,7 @@ mod tests {
             stop_max_rejections: 0,
             require_reply: false,
             hook_servers: HookServers::None,
+            preturn_hook: false,
             databricks_model_filter: None,
             api_key: "key".into(),
             model: "model".into(),

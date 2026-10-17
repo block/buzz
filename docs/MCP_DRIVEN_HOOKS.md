@@ -43,6 +43,24 @@ injected.
 
 **Use case:** Re-inject todo list state after history is summarized and reset.
 
+### `_PreTurn`
+
+**When:** Once per prompt (turn), after the incoming message is appended to
+history and before the first LLM call of that turn. It does not fire again on
+later tool-loop rounds of the same turn. Off unless
+`BUZZ_AGENT_PRETURN_HOOK=1` (or `true`) is set.
+
+**Input:** `{"prompt": "<first 500 characters of the human's text — a leading <context>…</context> header is skipped>"}`.
+Hooks that do not need the prompt may ignore it.
+
+**Output:** Non-empty text = injected before the first LLM call as a
+JSON-encoded tool-result message (the same untrusted path as `_Stop`
+objections). Empty = nothing injected. Errors and timeouts inject nothing and
+never block the turn.
+
+**Use case:** Assemble this turn's memory context from an external memory
+plugin (recall relevant notes for the incoming message).
+
 ## Agent Sovereignty
 
 Hooks are advisory, not authoritative. The agent enforces:
@@ -61,6 +79,7 @@ These constraints ensure a buggy or malicious hook cannot trap the agent.
 | `MCP_HOOK_SERVERS` | (unset = no hooks) | Allowlist: `*` for all servers, or comma-separated names |
 | `BUZZ_AGENT_HOOK_TIMEOUT_MS` | 2500 | Per-hook call timeout in milliseconds |
 | `BUZZ_AGENT_STOP_MAX_REJECTIONS` | 3 | Per-prompt `_Stop` budget (0 = disable) |
+| `BUZZ_AGENT_PRETURN_HOOK` | (unset = off) | `1` or `true` enables the `_PreTurn` hook (still needs `MCP_HOOK_SERVERS`) |
 
 Hooks are **off by default**. The operator must explicitly opt in via
 `MCP_HOOK_SERVERS`.
@@ -101,7 +120,8 @@ The server returns non-empty text to object, empty string to allow stopping.
 
 Hook naming is aligned with the [Open Plugin Spec](https://open-plugins.com/agent-builders/components/hooks)
 event conventions. `_Stop` corresponds to the `Stop` event; `_PostCompact`
-corresponds to `PostCompact`.
+corresponds to `PostCompact`; `_PreTurn` covers the `UserPromptSubmit` point
+(it fires for every prompt, whoever sent it).
 
 `MCP_HOOK_SERVERS` is a standard env var name intended for cross-agent adoption.
 
@@ -114,11 +134,11 @@ event set:
 |---|---|---|
 | `Stop` | `_Stop` | ✅ Implemented |
 | `PostCompact` | `_PostCompact` | ✅ Implemented |
+| `UserPromptSubmit` | `_PreTurn` | ✅ Implemented (behind `BUZZ_AGENT_PRETURN_HOOK`) |
 | `PreToolUse` | `_PreToolUse` | Deferred (overlaps with MCP Interceptors SEP-2624) |
 | `PostToolUse` | `_PostToolUse` | Deferred (overlaps with MCP Interceptors SEP-2624) |
 | `SessionStart` | `_SessionStart` | Candidate for future revision |
 | `SessionEnd` | `_SessionEnd` | Candidate for future revision |
-| `UserPromptSubmit` | `_UserPromptSubmit` | Candidate for future revision |
 | `SubagentStart` | `_SubagentStart` | Candidate for future revision |
 
 Pre/post tool-call hooks are deferred pending coordination with the MCP
