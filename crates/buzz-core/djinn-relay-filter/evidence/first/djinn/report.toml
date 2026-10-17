@@ -1,0 +1,114 @@
+# Written by `cargo djinn` after every verify. Per declaration: its tokens as
+# verified, what it uses, and the status of each obligation. The `djinn!`
+# macro refuses to compile a `fn` that is not `ok` here or whose tokens (or a
+# used declaration's) differ from this file. Commit it with solution/ and proofs/.
+
+[run]
+time = "2026-10-15 00:17:26 UTC"
+unix_time = 1792023446
+duration_secs = 18
+pass = true
+stage = "done"
+errors = []
+
+[[decl]]
+name = "identities"
+kind = "rel"
+implemented = true
+ok = true
+uses = []
+tokens = "# [ total ] pub rel identities ( ids : Option < Vec < [ u8 ; 32 ] > > , id : & [ u8 ; 32 ] ) - > r : bool { if ids . is_none () { r = = true ; } else { r = = ids . unwrap () . iter () . any ( | value | value = = id ) ; } }"
+
+[decl.obligations]
+exists = "proved"
+wf = "proved"
+
+[[decl]]
+name = "kinds"
+kind = "rel"
+implemented = true
+ok = true
+uses = []
+tokens = "# [ total ] pub rel kinds ( kinds : Option < Vec < u16 > > , kind : u16 ) - > r : bool { if kinds . is_none () { r = = true ; } else { r = = kinds . unwrap () . iter () . any ( | value | value = = kind ) ; } }"
+
+[decl.obligations]
+exists = "proved"
+wf = "proved"
+
+[[decl]]
+name = "since"
+kind = "rel"
+implemented = true
+ok = true
+uses = []
+tokens = "# [ total ] pub rel since ( bound : Option < u64 > , time : u64 ) - > r : bool { if bound . is_none () { r = = true ; } else { r = = ( bound . unwrap () < = time ) ; } }"
+
+[decl.obligations]
+exists = "proved"
+wf = "proved"
+
+[[decl]]
+name = "until"
+kind = "rel"
+implemented = true
+ok = true
+uses = []
+tokens = "# [ total ] pub rel until ( bound : Option < u64 > , time : u64 ) - > r : bool { if bound . is_none () { r = = true ; } else { r = = ( time < = bound . unwrap () ) ; } }"
+
+[decl.obligations]
+exists = "proved"
+wf = "proved"
+
+[[decl]]
+name = "tag_match"
+kind = "rel"
+implemented = true
+ok = true
+uses = []
+tokens = "# [ total ] pub rel tag_match ( tag : & EventTag , key : & [ u8 ] , values : & [ Vec < u8 > ] ) - > r : bool { if tag . value . is_none () { r = = false ; } else { some value : Vec < u8 > { value = = tag . value . unwrap () ; r = = ( tag . key = = key & & values . iter () . any ( | v | v = = value ) ) ; } } }"
+
+[decl.obligations]
+exists = "proved"
+wf = "proved"
+
+[[decl]]
+name = "tag_constraint"
+kind = "rel"
+implemented = true
+ok = true
+uses = ["tag_match"]
+tokens = '# [ total ] pub rel tag_constraint ( query : & TagQuery , event : & EventInput ) - > r : bool { some explicit : bool { if explicit { some tag : EventTag { tag in event . tags ; tag_match ( tag , query . key , query . values ) = = true ; } } else { for tag in event . tags { tag_match ( tag , query . key , query . values ) = = false ; } } if event . channel . is_none () { r = = explicit ; } else { some channel : Vec < u8 > { channel = = event . channel . unwrap () ; r = = ( explicit | | ( query . key = = b"h" & & ! event . tags . iter () . any ( | tag | tag . key = = b"h" ) & & query . values . iter () . any ( | value | value = = channel ) ) ) ; } } } }'
+
+[decl.obligations]
+exists = "proved"
+wf = "proved"
+
+[[decl]]
+name = "one_filter"
+kind = "rel"
+implemented = true
+ok = true
+uses = [
+    "tag_constraint",
+    "identities",
+    "kinds",
+    "since",
+    "until",
+]
+tokens = "# [ total ] pub rel one_filter ( filter : & FilterInput , event : & EventInput ) - > r : bool { some tags_ok : bool { if tags_ok { for query in filter . tags { tag_constraint ( query , event ) = = true ; } } else { some query : TagQuery { query in filter . tags ; tag_constraint ( query , event ) = = false ; } } r = = ( identities ( filter . ids , event . id ) & & identities ( filter . authors , event . author ) & & kinds ( filter . kinds , event . kind ) & & since ( filter . since , event . created_at ) & & until ( filter . until , event . created_at ) & & tags_ok ) ; } }"
+
+[decl.obligations]
+exists = "proved"
+
+[[decl]]
+name = "filters_match"
+kind = "func"
+implemented = true
+ok = true
+uses = ["one_filter"]
+tokens = "pub fn filters_match ( filters : & [ FilterInput ] , event : & EventInput ) - > r : bool { some matched : bool { if matched { some filter : FilterInput { filter in filters ; one_filter ( filter , event ) = = true ; } } else { for filter in filters { one_filter ( filter , event ) = = false ; } } r = = matched ; } }"
+
+[decl.obligations]
+exists = "proved"
+impl_correct = "proved"
+unambiguous = "proved"

@@ -6,14 +6,26 @@ use dashmap::DashMap;
 use nostr::{Alphabet, Filter, Kind, SingleLetterTag};
 use uuid::Uuid;
 
-use buzz_core::{filter::filters_match, CommunityId, StoredEvent};
+use buzz_core::{
+    prepared_filter::{filters_match, prepare_event, prepare_filters, EventInput, FilterInput},
+    CommunityId, StoredEvent,
+};
 
 /// Connection identifier — a UUID assigned to each WebSocket connection.
 pub type ConnId = Uuid;
 /// Subscription identifier — the client-supplied string from a REQ message.
 pub type SubId = String;
-/// Stored subscription entry: filters paired with server-resolved community and optional channel scope.
+/// Original subscription tuple retained for public API compatibility.
 pub type SubEntry = (Vec<Filter>, CommunityId, SubscriptionScope);
+
+/// Original and prepared selectors share the authoritative subscription lifetime.
+#[derive(Debug)]
+struct PreparedEntry {
+    filters: Vec<Filter>,
+    prepared: Vec<FilterInput>,
+    community_id: CommunityId,
+    scope: SubscriptionScope,
+}
 
 /// Server-resolved live-routing scope for a subscription.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +99,7 @@ pub struct SubscriptionRegistry {
     /// Maps conn_id → sub_id → (filters, community_id, channel_id).
     /// Storing scope alongside filters enables O(1) targeted index removal and
     /// gives lifecycle code the exact Redis topic to release.
-    subs: DashMap<ConnId, HashMap<SubId, SubEntry>>,
+    subs: DashMap<ConnId, HashMap<SubId, PreparedEntry>>,
     channel_kind_index: DashMap<(CommunityId, IndexKey), Vec<(ConnId, SubId)>>,
     /// Subscriptions with a channel_id but no kind filter — need to receive ALL kinds.
     channel_wildcard_index: DashMap<(CommunityId, Uuid), Vec<(ConnId, SubId)>>,
@@ -147,11 +159,17 @@ impl SubscriptionRegistry {
         filters: Vec<Filter>,
         scope: SubscriptionScope,
     ) -> Option<RemovedSubscription> {
+        let prepared = prepare_filters(&filters);
         let removed = self.remove_subscription(conn_id, &sub_id);
 
         self.subs.entry(conn_id).or_default().insert(
             sub_id.clone(),
-            (filters.clone(), community_id, scope.clone()),
+            PreparedEntry {
+                filters: filters.clone(),
+                prepared,
+                community_id,
+                scope: scope.clone(),
+            },
         );
         metrics::gauge!("buzz_subscriptions_active").increment(1.0);
 
@@ -253,7 +271,12 @@ impl SubscriptionRegistry {
         F: FnOnce(),
     {
         let mut conn_subs = self.subs.get_mut(&conn_id)?;
-        let (filters, community_id, scope) = conn_subs.remove(sub_id)?;
+        let PreparedEntry {
+            filters,
+            community_id,
+            scope,
+            ..
+        } = conn_subs.remove(sub_id)?;
 
         after_remove();
         self.remove_from_index(conn_id, sub_id, &filters, community_id, &scope);
@@ -271,11 +294,17 @@ impl SubscriptionRegistry {
         let mut removed = Vec::new();
         if let Some((_, conn_subs)) = self.subs.remove(&conn_id) {
             let count = conn_subs.len();
-            for (sub_id, (filters, community_id, scope)) in &conn_subs {
-                self.remove_from_index(conn_id, sub_id, filters, *community_id, scope);
+            for (sub_id, entry) in &conn_subs {
+                self.remove_from_index(
+                    conn_id,
+                    sub_id,
+                    &entry.filters,
+                    entry.community_id,
+                    &entry.scope,
+                );
                 removed.push(RemovedSubscription {
-                    community_id: *community_id,
-                    scope: scope.clone(),
+                    community_id: entry.community_id,
+                    scope: entry.scope.clone(),
                 });
             }
             metrics::gauge!("buzz_subscriptions_active").decrement(count as f64);
@@ -298,9 +327,9 @@ impl SubscriptionRegistry {
             .map(|conn_subs| {
                 conn_subs
                     .iter()
-                    .filter_map(|(sub_id, (_, sub_community_id, scope))| {
-                        (*sub_community_id == community_id
-                            && scope.channel_ids().contains(&channel_id))
+                    .filter_map(|(sub_id, entry)| {
+                        (entry.community_id == community_id
+                            && entry.scope.channel_ids().contains(&channel_id))
                         .then_some(sub_id.clone())
                     })
                     .collect()
@@ -312,11 +341,11 @@ impl SubscriptionRegistry {
             let Some(mut conn_subs) = self.subs.get_mut(&conn_id) else {
                 break;
             };
-            let Some((filters, _, scope)) = conn_subs.get_mut(&sub_id) else {
+            let Some(entry) = conn_subs.get_mut(&sub_id) else {
                 continue;
             };
-            let filters = filters.clone();
-            let SubscriptionScope::Channels(channel_ids) = scope else {
+            let filters = entry.filters.clone();
+            let SubscriptionScope::Channels(channel_ids) = &mut entry.scope else {
                 continue;
             };
             channel_ids.retain(|candidate| *candidate != channel_id);
@@ -383,6 +412,7 @@ impl SubscriptionRegistry {
     ) -> Vec<(ConnId, SubId)> {
         let mut results = Vec::new();
         let mut seen = HashSet::new();
+        let mut projected_event = None;
 
         if let Some(channel_id) = event.channel_id {
             let key = IndexKey {
@@ -396,10 +426,10 @@ impl SubscriptionRegistry {
             {
                 for (conn_id, sub_id) in candidates {
                     self.push_match(
-                        conn_id,
-                        &sub_id,
+                        (conn_id, &sub_id),
                         community_id,
                         event,
+                        &mut projected_event,
                         &mut results,
                         &mut seen,
                     );
@@ -413,10 +443,10 @@ impl SubscriptionRegistry {
             {
                 for (conn_id, sub_id) in wildcards {
                     self.push_match(
-                        conn_id,
-                        &sub_id,
+                        (conn_id, &sub_id),
                         community_id,
                         event,
+                        &mut projected_event,
                         &mut results,
                         &mut seen,
                     );
@@ -439,10 +469,10 @@ impl SubscriptionRegistry {
                 {
                     for (conn_id, sub_id) in candidates {
                         self.push_match(
-                            conn_id,
-                            &sub_id,
+                            (conn_id, &sub_id),
                             community_id,
                             event,
+                            &mut projected_event,
                             &mut results,
                             &mut seen,
                         );
@@ -456,10 +486,10 @@ impl SubscriptionRegistry {
             {
                 for (conn_id, sub_id) in candidates {
                     self.push_match(
-                        conn_id,
-                        &sub_id,
+                        (conn_id, &sub_id),
                         community_id,
                         event,
+                        &mut projected_event,
                         &mut results,
                         &mut seen,
                     );
@@ -473,10 +503,10 @@ impl SubscriptionRegistry {
             {
                 for (conn_id, sub_id) in wildcards {
                     self.push_match(
-                        conn_id,
-                        &sub_id,
+                        (conn_id, &sub_id),
                         community_id,
                         event,
+                        &mut projected_event,
                         &mut results,
                         &mut seen,
                     );
@@ -504,7 +534,7 @@ impl SubscriptionRegistry {
     pub fn get_filters(&self, conn_id: ConnId, sub_id: &str) -> Option<Vec<Filter>> {
         self.subs
             .get(&conn_id)
-            .and_then(|conn_subs| conn_subs.get(sub_id).map(|(filters, _, _)| filters.clone()))
+            .and_then(|conn_subs| conn_subs.get(sub_id).map(|entry| entry.filters.clone()))
     }
 
     /// Return the total number of active subscriptions across all connections.
@@ -525,8 +555,8 @@ impl SubscriptionRegistry {
         let mut counts: std::collections::HashMap<CommunityId, u64> =
             std::collections::HashMap::new();
         for conn_entry in self.subs.iter() {
-            for (_, community_id, _) in conn_entry.value().values() {
-                *counts.entry(*community_id).or_default() += 1;
+            for entry in conn_entry.value().values() {
+                *counts.entry(entry.community_id).or_default() += 1;
             }
         }
         counts
@@ -534,21 +564,25 @@ impl SubscriptionRegistry {
 
     fn push_match(
         &self,
-        conn_id: ConnId,
-        sub_id: &str,
+        candidate: (ConnId, &str),
         community_id: CommunityId,
         event: &StoredEvent,
+        projected_event: &mut Option<EventInput>,
         results: &mut Vec<(ConnId, SubId)>,
         seen: &mut HashSet<(ConnId, SubId)>,
     ) {
+        let (conn_id, sub_id) = candidate;
         if let Some(conn_subs) = self.subs.get(&conn_id) {
-            if let Some((filters, sub_community_id, scope)) = conn_subs.get(sub_id) {
+            if let Some(subscription) = conn_subs.get(sub_id) {
                 // Candidate snapshots can become stale while a same-ID replacement
                 // moves the subscription. Re-check its authoritative scope before
                 // matching so an old index entry cannot deliver across scopes.
-                if *sub_community_id == community_id
-                    && scope.matches_channel(event.channel_id)
-                    && filters_match(filters, event)
+                if subscription.community_id == community_id
+                    && subscription.scope.matches_channel(event.channel_id)
+                    && filters_match(
+                        &subscription.prepared,
+                        projected_event.get_or_insert_with(|| prepare_event(event)),
+                    )
                 {
                     let entry = (conn_id, sub_id.to_string());
                     if seen.insert(entry.clone()) {
@@ -933,12 +967,13 @@ mod tests {
         let event = make_stored_event(Kind::TextNote, Some(channel_a));
         let mut results = Vec::new();
         let mut seen = HashSet::new();
+        let mut projected_event = None;
         for (candidate_conn_id, candidate_sub_id) in candidates {
             registry.push_match(
-                candidate_conn_id,
-                &candidate_sub_id,
+                (candidate_conn_id, &candidate_sub_id),
                 test_community(),
                 &event,
+                &mut projected_event,
                 &mut results,
                 &mut seen,
             );
@@ -948,6 +983,41 @@ mod tests {
             results.is_empty(),
             "replacement on channel B received channel A event through stale snapshot"
         );
+    }
+
+    #[test]
+    fn same_scope_replacement_uses_current_prepared_selectors() {
+        let registry = SubscriptionRegistry::new();
+        let conn = Uuid::new_v4();
+        let community = test_community();
+        let keys = Keys::generate();
+        let tagged = |value: &str| {
+            let event = EventBuilder::new(Kind::TextNote, "test")
+                .tags([Tag::parse(["t", value]).expect("valid t tag")])
+                .sign_with_keys(&keys)
+                .expect("sign");
+            StoredEvent::with_received_at(event, Utc::now(), None, true)
+        };
+        let selector = |value: &str| {
+            vec![
+                serde_json::from_value::<Filter>(serde_json::json!({"kinds":[1],"#t":[value]}))
+                    .expect("valid filter"),
+            ]
+        };
+        let old = tagged("old");
+        let new = tagged("new");
+        registry.register_scoped(community, conn, "same".into(), selector("old"), None);
+        assert_eq!(
+            registry.fan_out_scoped(community, &old),
+            vec![(conn, "same".into())]
+        );
+        registry.register_scoped(community, conn, "same".into(), selector("new"), None);
+        assert!(registry.fan_out_scoped(community, &old).is_empty());
+        assert_eq!(
+            registry.fan_out_scoped(community, &new),
+            vec![(conn, "same".into())]
+        );
+        assert_eq!(registry.get_filters(conn, "same"), Some(selector("new")));
     }
 
     #[test]

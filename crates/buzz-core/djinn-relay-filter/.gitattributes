@@ -1,0 +1,8 @@
+# Collapse generated artifacts and recorded evidence in GitHub diffs.
+djinn/** linguist-generated=true
+evidence/**/*.json linguist-generated=true
+evidence/**/*.log linguist-generated=true
+evidence/*/djinn/** linguist-generated=true
+evidence/first/registry-snapshot.rs linguist-generated=true
+evidence/prior-selected/solution.rs linguist-generated=true
+baseline/src/historical_subscription.rs linguist-generated=true

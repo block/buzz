@@ -1,0 +1,9 @@
+{
+  "djinn/solution/mod.rs": "66704f8413d7476d595c782b4a76f8862b96ead3d0331a333845e1d921e4c50e",
+  "djinn/proofs/RelayFilter/Proofs.lean": "fd277a936deb7787ec2546450449933844f9735bb7492d42d02a9feb67102a50",
+  "djinn/report.toml": "e6b44b5a1b72c6754b48c4f3f156e37337266cca7b0977dd19d0697b9fd35d3b",
+  "djinn/proofs/RelayFilter/Code/Funs.lean": "c3fd6449dc10e0b3f31f11ed23f54ed2e19f714c7d224f94776568ff46be8452",
+  "djinn/proofs/RelayFilter/Code/Types.lean": "3566b8a193afc93761835aedcd1fb8a1ddafb95e05274b99d6853f51cfcf8663",
+  "src/spec.rs": "7470ade85e419bc3196da145c1023d42d6003752e9bf14f8b1b428b904fc33b3",
+  "src/input.rs": "7b382b2f32579fc543c5be2422e9a656b9255fc698db9e1eaf9432af74f96cbf"
+}
