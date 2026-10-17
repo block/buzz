@@ -217,14 +217,18 @@ fn successful_search_payload(upstream: &Value) -> Result<Value, (StatusCode, Jso
 /// Search or browse trending KLIPY GIF metadata for an authenticated member.
 pub async fn search(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    search_inner(state, headers, body).await.into_response()
+    search_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
 async fn search_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, Response> {
@@ -232,7 +236,7 @@ async fn search_inner(
     // check (including provider availability) so the denial contract wins over
     // config or request-validation errors. [FI-TRACE-HTTP-INGRESS]
     let (tenant, pubkey) =
-        bridge::authenticate_member_post(&state, &headers, SEARCH_PATH, &body).await?;
+        bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
 
     let Some(config) = state.config.klipy.as_ref() else {
         return Err(
@@ -293,20 +297,24 @@ async fn search_inner(
 /// Report a selected GIF to KLIPY so the provider can update Recents.
 pub async fn share(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    share_inner(state, headers, body).await.into_response()
+    share_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
 async fn share_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, Response> {
     // Admission first: NIP-98 + NIP-FI must fire before provider availability
     // check. [FI-TRACE-HTTP-INGRESS]
-    bridge::authenticate_member_post(&state, &headers, SHARE_PATH, &body).await?;
+    bridge::authenticate_member_post(&state, &slot, &headers, SHARE_PATH, &body).await?;
 
     let Some(config) = state.config.klipy.as_ref() else {
         return Err(

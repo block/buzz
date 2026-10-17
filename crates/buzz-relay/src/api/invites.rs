@@ -24,6 +24,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::access::AccessSlot;
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
 use crate::nip_fi_http::admit_nip_fi_http_on_state;
 use buzz_core::invite::{
@@ -230,17 +231,11 @@ pub async fn accept_policy(
 /// signature + replay for `path`.
 async fn authenticate(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     path: &'static str,
     body: &[u8],
-) -> Result<
-    (
-        buzz_core::TenantContext,
-        nostr::PublicKey,
-        crate::access::AuthLine<'static>,
-    ),
-    (StatusCode, Json<Value>),
-> {
+) -> Result<(buzz_core::TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -259,27 +254,18 @@ async fn authenticate(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_invite_claim(headers, "POST", &url, Some(body))?;
+    } = bridge::verify_nip98_exempt_invite_claim(slot, headers, "POST", &url, Some(body))?;
     // Claiming an invite is how a non-member joins: replay is the last
-    // admission step, so this line logs the final decision.
-    let mut line = crate::access::AuthLine::new(
-        crate::access::AuthAttempt::http(
-            crate::access::AuthMethod::Nip98,
-            path,
-            Some(pubkey),
-            true,
-        )
-        .in_community(tenant.community()),
-    )
-    .for_request();
-    line.abort_reason("request_ended");
-    line.gate(
+    // admission step, so it decides the request.
+    slot.attempt(crate::access::AuthMethod::Nip98, Some(pubkey), true);
+    slot.in_community(tenant.community());
+    slot.gate(
         bridge::check_nip98_replay(state, &tenant, event_id_bytes).await,
         bridge::ReplayRejection::auth_result,
     )?;
-    line.finish(crate::access::AuthResult::Success);
+    slot.finish(crate::access::AuthResult::Success);
 
-    Ok((tenant, pubkey, line))
+    Ok((tenant, pubkey))
 }
 
 fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
@@ -301,17 +287,19 @@ fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
 /// tenant host.
 pub async fn mint_invite(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     // NIP-FI gate wraps the entire handler so the denial is emitted as exact
     // text/plain bytes. [FI-TRACE-AUTHORITY-UNIFORM]
-    mint_invite_checked(state, headers, body).await
+    mint_invite_checked(state, slot, headers, body).await
 }
 
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn mint_invite_checked(
     state: Arc<AppState>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
@@ -333,8 +321,9 @@ async fn mint_invite_checked(
     let admission = match admit_nip_fi_http_on_state(
         &state,
         &headers,
-        "/api/invites",
+        &slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             "POST",
             url,
@@ -346,7 +335,7 @@ async fn mint_invite_checked(
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    let mut caller = bridge::ProvenCaller::for_request(admission, &tenant);
+    let mut caller = bridge::ProvenCaller::new(admission, &tenant);
     let pubkey = caller.pubkey;
 
     // Replay detection runs after NIP-98+assertion admission (both proofs verified).
@@ -367,16 +356,13 @@ async fn mint_invite_checked(
         return e.into_response();
     }
 
-    // The request's one access line carries the minted invite.
+    // The request's access line carries the minted invite.
     match mint_invite_inner(&state, body, tenant, pubkey).await {
         Ok((json, minted)) => {
-            caller.complete(minted);
+            slot.detail(minted);
             json.into_response()
         }
-        Err(e) => {
-            caller.complete(crate::access::RequestFields::status(e.0.as_u16()));
-            e.into_response()
-        }
+        Err(e) => e.into_response(),
     }
 }
 
@@ -385,7 +371,7 @@ async fn mint_invite_inner(
     body: axum::body::Bytes,
     tenant: buzz_core::TenantContext,
     pubkey: nostr::PublicKey,
-) -> Result<(Json<Value>, crate::access::RequestFields), (StatusCode, Json<Value>)> {
+) -> Result<(Json<Value>, crate::access::Detail), (StatusCode, Json<Value>)> {
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
     let member = state
@@ -429,11 +415,10 @@ async fn mint_invite_inner(
         "http"
     };
 
-    let minted = crate::access::RequestFields {
-        invite_id: Some(invite.invite_id),
-        expires_at: Some(invite.expires_at.timestamp()),
+    let minted = crate::access::Detail::InviteMinted {
+        invite_id: invite.invite_id,
+        expires_at: invite.expires_at.timestamp(),
         max_uses: invite.max_uses,
-        ..crate::access::RequestFields::status(200)
     };
 
     // expires_at as unix seconds for the response contract.
@@ -459,20 +444,19 @@ async fn mint_invite_inner(
 /// code is never fallen back to v1 verification.
 pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey, mut line) =
-        authenticate(&state, &headers, "/api/invites/claim", &body).await?;
-    // The request's one access line carries whether the claim joined.
+    let (tenant, pubkey) =
+        authenticate(&state, &slot, &headers, "/api/invites/claim", &body).await?;
+    // The request's access line carries whether the claim joined.
     let claimed = claim_invite_authed(&state, tenant, pubkey, &body).await;
-    line.complete(match &claimed {
-        Ok(Json(json)) => crate::access::RequestFields {
-            joined: Some(json["status"] == "joined"),
-            ..crate::access::RequestFields::status(200)
-        },
-        Err((status, _)) => crate::access::RequestFields::status(status.as_u16()),
-    });
+    if let Ok(Json(json)) = &claimed {
+        slot.detail(crate::access::Detail::InviteClaimed {
+            joined: json["status"] == "joined",
+        });
+    }
     claimed
 }
 

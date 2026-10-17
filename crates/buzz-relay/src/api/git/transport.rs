@@ -8,7 +8,7 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
-use crate::access::{auth_error_code, AuthAttempt, AuthMethod, AuthResult};
+use crate::access::{auth_error_code, AccessSlot, AuthMethod, AuthResult};
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -103,10 +103,10 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // must be verified against the tenant-bound host, not a process-global
         // domain.
         let mode = state.config.nip_fi.mode;
-        let route = parts.uri.path().to_owned();
+        let slot = AccessSlot::of(parts);
         if !mode.restricts() {
             if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
-                git_header_rejected(&route, &parts.headers, &rejection);
+                git_header_rejected(&slot, &parts.headers);
                 // Off returns `rejection` as is; shadow also records the
                 // enforce verdict for the failed proof, still with no DB work.
                 crate::nip_fi_http::observe_failed_proof(state, &parts.headers);
@@ -155,19 +155,18 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // Token is time-bounded (±60s) and URL-locked — acceptable trade-off.
         let headers_clone = parts.headers.clone();
         let method_str = method.to_owned();
-        let closure_route = route.clone();
+        let proof_slot = slot.clone();
         let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
             state,
             &parts.headers,
-            &route,
-            move || verify_git_proof(&headers_clone, &method_str, &expected_url, &closure_route),
+            &slot,
+            move || verify_git_proof(&headers_clone, &method_str, &expected_url, &proof_slot),
         )?;
 
         let pubkey = *admission.proven_pubkey();
         // Git reuses one signed token per session, so there is no replay
         // step: the membership and ban gates below make the final decision.
-        // `aborted` if the request is dropped during a membership or ban wait.
-        let (mut line, (event, signed_auth_created_at)) = admission.into_line(tenant.community());
+        let (slot, (event, signed_auth_created_at)) = admission.into_line(tenant.community());
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
         // x-auth-tag header through the credential-helper protocol, so agents
@@ -198,7 +197,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         {
             Ok(crate::api::relay_members::MembershipDecision::Denied) => {
                 warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-                line.finish(AuthResult::Denied(
+                slot.finish(AuthResult::Denied(
                     crate::access::AuthReason::NotRelayMember,
                 ));
                 return Err(
@@ -208,7 +207,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             Ok(_) => {}
             Err(e) => {
                 warn!(pubkey = %pubkey.to_hex(), error = %e, "git: relay membership lookup failed");
-                line.finish(AuthResult::Denied(
+                slot.finish(AuthResult::Denied(
                     crate::access::AuthReason::MembershipUnavailable,
                 ));
                 return Err(unavailable(
@@ -231,17 +230,17 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         .await
         .map_err(|denial| {
             if denial.status() == StatusCode::SERVICE_UNAVAILABLE {
-                line.finish(AuthResult::Denied(
+                slot.finish(AuthResult::Denied(
                     crate::access::AuthReason::BanCheckUnavailable,
                 ));
                 unavailable(denial)
             } else {
-                line.finish(AuthResult::Denied(crate::access::AuthReason::Banned));
+                slot.finish(AuthResult::Denied(crate::access::AuthReason::Banned));
                 denial
             }
         })?;
 
-        line.finish(AuthResult::Success);
+        slot.finish(AuthResult::Success);
         Ok(GitAuth { pubkey, tenant })
     }
 }
@@ -334,27 +333,27 @@ fn enforce_git_ban_cascade(
     }
 }
 
-/// Log a rejected git proof with the status of the response it sends.
-fn git_failed(route: &str, reason: &'static str, response: &Response) {
-    AuthAttempt::http(AuthMethod::Nip98, route, None, false)
-        .log_refusal(AuthResult::Failed(reason), response.status().as_u16());
+/// Record a rejected git proof.
+fn git_failed(slot: &AccessSlot, reason: &'static str) {
+    slot.method(AuthMethod::Nip98);
+    slot.finish(AuthResult::Failed(reason));
 }
 
 /// Verify a git request's NIP-98 proof (the admission closure). Each failure
-/// logs one `auth` line with a fixed code, never the error text.
+/// records a fixed code, never the error text.
 #[allow(clippy::result_large_err)]
 fn verify_git_proof(
     headers: &axum::http::HeaderMap,
     method: &str,
     expected_url: &str,
-    route: &str,
+    slot: &AccessSlot,
 ) -> Result<crate::nip_fi_http::Nip98Proof<(nostr::Event, u64)>, Response> {
     // In Off mode `parse_git_auth_header` already ran above and
     // succeeded, so re-parsing here is purely for the return value.
     // In Enforce mode it runs for the first time inside this closure
     // (on the auth-rejection path the NIP-FI layer maps the error).
     let (event_json, method_for_verify) = parse_git_auth_header_full(headers, method)
-        .inspect_err(|r| git_header_rejected(route, headers, r))?;
+        .inspect_err(|_| git_header_rejected(slot, headers))?;
 
     // SECURITY: method intentionally not verified for git routes. The tautological
     // check (event.method == event.method) is deliberate — see comment block above.
@@ -365,9 +364,8 @@ fn verify_git_proof(
             .map_err(|e| {
             // Fixed code only: a URL-mismatch error echoes the
             // client's whole signed `u` tag.
-            let response = (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response();
-            git_failed(route, auth_error_code(&e), &response);
-            response
+            git_failed(slot, auth_error_code(&e));
+            (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response()
         })?;
 
     // NOTE: NIP-98 event-ID dedup intentionally NOT implemented here.
@@ -378,9 +376,8 @@ fn verify_git_proof(
     // replay protection for v1. Per-request signing requires protocol changes.
 
     let event: nostr::Event = serde_json::from_str(&event_json).map_err(|_| {
-        let response = (StatusCode::UNAUTHORIZED, "invalid auth event").into_response();
-        git_failed(route, "nip98_invalid", &response);
-        response
+        git_failed(slot, "nip98_invalid");
+        (StatusCode::UNAUTHORIZED, "invalid auth event").into_response()
     })?;
     let signed_auth_created_at = event.created_at.as_secs();
 
@@ -395,12 +392,12 @@ fn verify_git_proof(
 /// is git's credential-less first request, answered with the 401 challenge
 /// it asks for, so it is `challenged`; a header that is present but bad is a
 /// failed proof.
-fn git_header_rejected(route: &str, headers: &axum::http::HeaderMap, response: &Response) {
+fn git_header_rejected(slot: &AccessSlot, headers: &axum::http::HeaderMap) {
     if headers.contains_key(header::AUTHORIZATION) {
-        git_failed(route, "nip98_invalid", response);
+        git_failed(slot, "nip98_invalid");
     } else {
-        AuthAttempt::http(AuthMethod::Nip98, route, None, false)
-            .log_refusal(AuthResult::Challenged, response.status().as_u16());
+        slot.method(AuthMethod::Nip98);
+        slot.finish(AuthResult::Challenged);
     }
 }
 
@@ -4254,6 +4251,10 @@ mod off_mode_precedence_tests {
                     .body(axum::body::Body::empty())
                     .expect("build request");
                 let resp = git_router(Arc::clone(&state))
+                    .layer(axum::middleware::from_fn_with_state(
+                        Arc::clone(&state),
+                        crate::access::http_access_log,
+                    ))
                     .oneshot(req)
                     .await
                     .expect("router oneshot");
@@ -4374,7 +4375,7 @@ mod off_mode_precedence_tests {
                 let lines: Vec<_> = out
                     .lines()
                     .into_iter()
-                    .filter(|l| l["event"] == "auth")
+                    .filter(|l| l["event"] == "http")
                     .collect();
                 assert_eq!(lines.len(), 1, "{mode:?} {headers:?}: {lines:?}");
                 let line = &lines[0];
@@ -4432,7 +4433,7 @@ mod off_mode_precedence_tests {
                 arrived = arrived => arrived.expect("request reached the membership wait"),
             }
             drop(guard);
-            crate::access::tests::assert_one_aborted_auth_line(&out, &keys.public_key());
+            crate::access::tests::assert_one_aborted_line(&out, &keys.public_key());
         }
 
         async fn git_request(
@@ -5681,7 +5682,7 @@ mod off_mode_precedence_tests {
 mod access_log_tests {
     use super::*;
 
-    // A URL-mismatch failure logs one fixed-code `auth` line; the client's
+    // A URL-mismatch failure logs one fixed-code access line; the client's
     // signed `u` tag (and anything smuggled into it) never reaches the logs.
     #[test]
     fn git_url_mismatch_logs_a_fixed_code_without_the_signed_url() {
@@ -5703,13 +5704,16 @@ mod access_log_tests {
         );
 
         let (refused, out) = crate::access::tests::capture(|| {
-            verify_git_proof(
+            let slot = AccessSlot::default();
+            let refused = verify_git_proof(
                 &headers,
                 "GET",
                 "https://relay.example/git/o/r.git/info/refs",
-                "/git/o/r.git/info/refs",
+                &slot,
             )
-            .is_err()
+            .is_err();
+            slot.emit("/git/{owner}/{repo}/info/refs", 401);
+            refused
         });
         assert!(refused);
         let lines = out.lines();

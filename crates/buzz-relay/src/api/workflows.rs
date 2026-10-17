@@ -44,6 +44,7 @@ fn request_path(path: &str, raw_query: Option<&str>) -> String {
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn authorize_workflow_read(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     path: &str,
     raw_query: Option<&str>,
@@ -71,8 +72,9 @@ async fn authorize_workflow_read(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
-        path,
+        slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             "GET",
             url,
@@ -141,17 +143,19 @@ async fn authorize_workflow_read(
 /// `GET /workflows/{workflow_id}/runs` — one authorized, keyset-paginated page.
 pub async fn workflow_runs(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path(workflow_id): Path<Uuid>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    workflow_runs_inner(state, workflow_id, headers, raw_query)
+    workflow_runs_inner(state, slot, workflow_id, headers, raw_query)
         .await
         .into_response()
 }
 
 async fn workflow_runs_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     workflow_id: Uuid,
     headers: HeaderMap,
     raw_query: Option<String>,
@@ -161,8 +165,15 @@ async fn workflow_runs_inner(
     // over request-validation errors. [FI-TRACE-HTTP-INGRESS]
     // Raw query is preserved here; parsing happens after admission.
     let path = format!("/workflows/{workflow_id}/runs");
-    let tenant =
-        authorize_workflow_read(&state, &headers, &path, raw_query.as_deref(), workflow_id).await?;
+    let tenant = authorize_workflow_read(
+        &state,
+        &slot,
+        &headers,
+        &path,
+        raw_query.as_deref(),
+        workflow_id,
+    )
+    .await?;
 
     // Parse query string after admission so malformed params (e.g. ?limit=abc)
     // cannot 400 before the NIP-FI gate fires.  A parse failure after
@@ -219,22 +230,24 @@ async fn workflow_runs_inner(
 /// `GET /workflows/{workflow_id}/runs/{run_id}/approvals` — approvals for a run.
 pub async fn run_approvals(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((workflow_id, run_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Response {
-    run_approvals_inner(state, workflow_id, run_id, headers)
+    run_approvals_inner(state, slot, workflow_id, run_id, headers)
         .await
         .into_response()
 }
 
 async fn run_approvals_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     workflow_id: Uuid,
     run_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals");
-    let tenant = authorize_workflow_read(&state, &headers, &path, None, workflow_id).await?;
+    let tenant = authorize_workflow_read(&state, &slot, &headers, &path, None, workflow_id).await?;
 
     let run = state
         .db

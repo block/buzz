@@ -94,6 +94,7 @@ fn audio_route(channel_id: Uuid) -> String {
 pub async fn ws_audio_handler(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<Uuid>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
@@ -107,6 +108,7 @@ pub async fn ws_audio_handler(
         let verifier = state.nip_fi_verifier.as_deref();
         let communities = &state.config.nip_fi.communities;
         match check_nip_fi_at_upgrade(
+            &slot,
             crate::nip_fi_session::NipFiWsRoute::Audio,
             &headers,
             communities,

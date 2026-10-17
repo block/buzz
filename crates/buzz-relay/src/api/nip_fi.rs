@@ -2523,9 +2523,12 @@ mod route_integration_tests {
                 .parse()
                 .expect("header value"),
         );
-        crate::nip_fi_http::admit_nip_fi_http_on_state(state, &headers, "/test", || {
-            Ok(crate::nip_fi_http::Nip98Proof::new(*key, ()))
-        })
+        crate::nip_fi_http::admit_nip_fi_http_on_state(
+            state,
+            &headers,
+            &crate::access::AccessSlot::default(),
+            || Ok(crate::nip_fi_http::Nip98Proof::new(*key, ())),
+        )
         .map(|_| ())
     }
 
@@ -2655,7 +2658,7 @@ mod route_integration_tests {
         let admitted = crate::nip_fi_http::admit_nip_fi_http_on_state(
             &state,
             &HeaderMap::new(),
-            "/test",
+            &crate::access::AccessSlot::default(),
             || Ok(crate::nip_fi_http::Nip98Proof::new(key, 7u8)),
         )
         .expect("Off mode admits on NIP-98 success regardless of deny entries");
@@ -2673,7 +2676,7 @@ mod route_integration_tests {
         let resp = crate::nip_fi_http::admit_nip_fi_http_on_state::<(), _>(
             &state,
             &HeaderMap::new(),
-            "/test",
+            &crate::access::AccessSlot::default(),
             || Err(legacy()),
         )
         .err()

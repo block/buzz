@@ -163,6 +163,7 @@ struct SettingsAuth {
 
 async fn authenticate(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     path: &str,
     body: Option<&[u8]>,
@@ -185,8 +186,9 @@ async fn authenticate(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
-        path,
+        slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             method,
             url,
@@ -319,12 +321,13 @@ async fn authorize_management(
 
 async fn get_default_branch(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((owner, repo)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/git/{owner}/{repo}/default-branch");
     let repo_name = validate_repo_id(&owner, &repo)?;
-    let auth = authenticate(&state, &headers, &path, None).await?;
+    let auth = authenticate(&state, &slot, &headers, &path, None).await?;
     authorize_git_read(
         &state.db,
         auth.tenant.community(),
@@ -340,13 +343,14 @@ async fn get_default_branch(
 
 async fn set_default_branch(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((owner, repo)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/git/{owner}/{repo}/default-branch");
     let repo_name = validate_repo_id(&owner, &repo)?;
-    let auth = authenticate(&state, &headers, &path, Some(&body)).await?;
+    let auth = authenticate(&state, &slot, &headers, &path, Some(&body)).await?;
     let announcement = authorize_git_read(
         &state.db,
         auth.tenant.community(),

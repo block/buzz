@@ -18,7 +18,7 @@ use serde_json::Value;
 use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
 use buzz_core::TenantContext;
 
-use crate::access::{AuthLine, AuthResult};
+use crate::access::{AccessSlot, AuthResult};
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
 use crate::state::AppState;
@@ -36,6 +36,7 @@ mod thread_window;
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub(crate) async fn authenticate_member_post(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
@@ -56,8 +57,9 @@ pub(crate) async fn authenticate_member_post(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
-        path,
+        slot,
         make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             "POST",
             expected_url,
@@ -89,45 +91,34 @@ pub(crate) async fn authenticate_member_post(
 
 /// A caller whose NIP-98 proof (and enterprise assertion, when enforced)
 /// passed, before the shared rate limit, replay guard and relay membership
-/// decide whether it is admitted. `line` logs that decision exactly once.
-pub(crate) struct ProvenCaller<'a> {
+/// decide whether it is admitted, recorded on the request's access note.
+pub(crate) struct ProvenCaller {
     pub(crate) pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
     pub(crate) signed_at: Option<u64>,
-    line: AuthLine<'a>,
+    slot: AccessSlot,
 }
 
-impl<'a> ProvenCaller<'a> {
+impl ProvenCaller {
     /// The caller from a NIP-98 admission whose proof closure returned the
     /// proof's event id and its signed `created_at`.
     pub(crate) fn new(
-        admitted: crate::nip_fi_http::AdmittedRequest<'a, ([u8; 32], Option<u64>)>,
+        admitted: crate::nip_fi_http::AdmittedRequest<([u8; 32], Option<u64>)>,
         tenant: &TenantContext,
     ) -> Self {
         let pubkey = *admitted.proven_pubkey();
-        let (line, (event_id_bytes, signed_at)) = admitted.into_line(tenant.community());
+        let (slot, (event_id_bytes, signed_at)) = admitted.into_line(tenant.community());
         Self {
             pubkey,
             event_id_bytes,
             signed_at,
-            line,
+            slot,
         }
     }
 
-    /// [`Self::new`] for a bridge route whose access line also records what
-    /// the request did: one line per request, written when the caller drops.
-    pub(crate) fn for_request(
-        admitted: crate::nip_fi_http::AdmittedRequest<'a, ([u8; 32], Option<u64>)>,
-        tenant: &TenantContext,
-    ) -> Self {
-        let mut caller = Self::new(admitted, tenant);
-        caller.line = caller.line.for_request();
-        caller
-    }
-
     /// Record the filters the request reads.
-    pub(crate) fn read(&mut self, filters: &[nostr::Filter]) {
-        self.line.read(filters);
+    pub(crate) fn read(&self, filters: &[nostr::Filter]) {
+        self.slot.read(filters);
     }
 
     /// Record what an artifact read covered. Only the standard dimensions
@@ -135,7 +126,7 @@ impl<'a> ProvenCaller<'a> {
     /// or client-defined tags) only narrows the read, so it is dropped
     /// before parsing and cannot cancel the summary. A filter whose standard
     /// dimensions do not parse leaves the line without a summary.
-    fn read_artifact(&mut self, raw: &[Value]) {
+    fn read_artifact(&self, raw: &[Value]) {
         const SUMMARIZED: [&str; 9] = [
             "kinds", "authors", "ids", "#h", "#p", "since", "until", "limit", "search",
         ];
@@ -158,13 +149,13 @@ impl<'a> ProvenCaller<'a> {
             .map(|v| serde_json::from_value::<nostr::Filter>(standard(v)))
             .collect::<Result<Vec<_>, _>>()
         {
-            self.line.read(&filters);
+            self.slot.read(&filters);
         }
     }
 
-    /// Record how the request ended.
-    pub(crate) fn complete(&mut self, fields: crate::access::RequestFields) {
-        self.line.complete(fields);
+    /// Record what the request did.
+    pub(crate) fn complete(&self, detail: crate::access::BridgeDetail) {
+        self.slot.detail(crate::access::Detail::Bridge(detail));
     }
 
     /// The shared API rate limit, then the replay guard. A refusal is logged.
@@ -173,7 +164,7 @@ impl<'a> ProvenCaller<'a> {
         state: &AppState,
         tenant: &TenantContext,
     ) -> Result<(), (StatusCode, Json<Value>)> {
-        self.line.gate(
+        self.slot.gate(
             enforce_http_admission(state, tenant, &self.pubkey).await,
             admission_refusal,
         )?;
@@ -186,7 +177,7 @@ impl<'a> ProvenCaller<'a> {
         state: &AppState,
         tenant: &TenantContext,
     ) -> Result<(), (StatusCode, Json<Value>)> {
-        self.line
+        self.slot
             .gate(
                 check_nip98_replay(state, tenant, self.event_id_bytes).await,
                 ReplayRejection::auth_result,
@@ -200,7 +191,7 @@ impl<'a> ProvenCaller<'a> {
         step: Result<T, E>,
         refusal: impl FnOnce(&E) -> AuthResult,
     ) -> Result<T, E> {
-        self.line.gate(step, refusal)
+        self.slot.gate(step, refusal)
     }
 
     /// The result of the route's last admission step (relay membership and
@@ -210,8 +201,8 @@ impl<'a> ProvenCaller<'a> {
         last_step: Result<T, E>,
         refusal: impl FnOnce(&E) -> AuthResult,
     ) -> Result<T, E> {
-        let admitted = self.line.gate(last_step, refusal)?;
-        self.line.finish(AuthResult::Success);
+        let admitted = self.slot.gate(last_step, refusal)?;
+        self.slot.finish(AuthResult::Success);
         Ok(admitted)
     }
 
@@ -294,16 +285,18 @@ type BridgeAuthResult = Result<VerifiedBridgeAuth, (StatusCode, Json<Value>)>;
 /// (explicitly-named exempt paths), or the `pub(crate)` form below for
 /// git-settings and other crate-local specialized handlers.
 pub(crate) fn verify_bridge_auth(
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
     require_auth_token: bool,
 ) -> BridgeAuthResult {
-    verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
+    verify_bridge_auth_with_options(slot, headers, method, url, body, require_auth_token, false)
 }
 
 pub(crate) fn verify_bridge_auth_with_options(
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     url: &str,
@@ -320,16 +313,8 @@ pub(crate) fn verify_bridge_auth_with_options(
         require_payload,
     )
     .map_err(|rejected| {
-        crate::access::AuthAttempt::http(
-            crate::access::AuthMethod::Nip98,
-            url,
-            rejected.claimed,
-            false,
-        )
-        .log_refusal(
-            crate::access::AuthResult::Failed(rejected.reason),
-            StatusCode::UNAUTHORIZED.as_u16(),
-        );
+        slot.attempt(crate::access::AuthMethod::Nip98, rejected.claimed, false);
+        slot.finish(crate::access::AuthResult::Failed(rejected.reason));
         api_error(StatusCode::UNAUTHORIZED, &rejected.message)
     })
 }
@@ -481,6 +466,7 @@ fn check_bridge_proof(
 #[allow(clippy::result_large_err)]
 #[allow(clippy::type_complexity)] // The return type IS the admission closure contract; a type alias cannot name impl Trait
 pub(crate) fn make_nip98_closure_for_admission(
+    slot: AccessSlot,
     headers: HeaderMap,
     method: &'static str,
     url: String,
@@ -491,6 +477,7 @@ pub(crate) fn make_nip98_closure_for_admission(
 {
     move || {
         verify_bridge_auth_with_options(
+            &slot,
             &headers,
             method,
             &url,
@@ -509,13 +496,14 @@ pub(crate) fn make_nip98_closure_for_admission(
 /// structurally outside the NIP-FI state machine. This function makes the
 /// exemption nameable and greppable. [FI-TRACE-AUTHORITY-EXEMPT]
 pub(crate) fn verify_nip98_exempt_invite_claim(
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
 ) -> BridgeAuthResult {
     verify_bridge_auth_with_options(
-        headers, method, url, body,
+        slot, headers, method, url, body,
         true, // invite-claim always requires NIP-98; no X-Pubkey dev fallback
         true, // POST bodies must be covered by a payload tag
     )
@@ -526,12 +514,14 @@ pub(crate) fn verify_nip98_exempt_invite_claim(
 /// Operator endpoints use a separate auth origin and are structurally outside
 /// the per-tenant NIP-FI state machine. [FI-TRACE-AUTHORITY-EXEMPT]
 pub(crate) fn verify_nip98_exempt_operator(
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
 ) -> BridgeAuthResult {
     verify_bridge_auth_with_options(
+        slot,
         headers,
         method,
         url,
@@ -542,8 +532,8 @@ pub(crate) fn verify_nip98_exempt_operator(
 }
 
 /// Check NIP-98 replay and record the event ID atomically. Logs nothing:
-/// replay is never the last admission step on its own, so the caller's
-/// [`AuthLine`](crate::access::AuthLine) logs the request's final decision.
+/// replay is never the last admission step on its own, so the caller records
+/// the request's final decision on its [`AccessSlot`](crate::access::AccessSlot).
 ///
 /// The correctness boundary is the shared, community-scoped Redis seen-set on
 /// `AppState`, not process-local memory. Any Redis/guard error fails closed:
@@ -1224,6 +1214,7 @@ fn reject_code(msg: &str) -> &'static str {
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub async fn submit_event(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, axum::response::Response> {
@@ -1258,8 +1249,9 @@ pub async fn submit_event(
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         bridge_strict_proof(&headers, "POST", &url, Some(&body), true)
     });
-    let admission = admit_nip_fi_http_on_state(&state, &headers, &url, || {
+    let admission = admit_nip_fi_http_on_state(&state, &headers, &slot, || {
         verify_bridge_auth_with_options(
+            &slot,
             &headers,
             "POST",
             &url,
@@ -1270,7 +1262,7 @@ pub async fn submit_event(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let mut caller = ProvenCaller::for_request(admission, &tenant);
+    let mut caller = ProvenCaller::new(admission, &tenant);
 
     // Everything after auth — admission, replay, membership, parse, ingest —
     // runs inside the helper; the caller's access line is the request's one
@@ -1310,53 +1302,46 @@ enum SubmitOutcome {
     },
     /// Any other error (admission, replay, membership, auth, internal) —
     /// only the HTTP status is logged; the response body is returned as-is.
-    Err {
-        status: StatusCode,
-        response: (StatusCode, Json<Value>),
-    },
+    Err { response: (StatusCode, Json<Value>) },
 }
 
 impl SubmitOutcome {
     /// What the request's access line records about this outcome.
-    fn fields(&self) -> crate::access::RequestFields {
-        use crate::access::RequestFields;
+    fn fields(&self) -> crate::access::BridgeDetail {
+        use crate::access::BridgeDetail;
         match self {
             SubmitOutcome::Ok {
                 accepted,
                 kind,
                 event_id,
                 ..
-            } => RequestFields {
+            } => BridgeDetail {
                 accepted: Some(*accepted),
                 kind: Some(*kind),
                 event_id: Some(event_id.clone()),
-                ..RequestFields::status(200)
+                ..BridgeDetail::default()
             },
             SubmitOutcome::ParseFail {
                 category,
                 line,
                 column,
                 ..
-            } => RequestFields {
+            } => BridgeDetail {
                 accepted: Some(false),
                 category: Some(category),
                 line: Some(*line),
                 column: Some(*column),
-                ..RequestFields::status(400)
+                ..BridgeDetail::default()
             },
-            SubmitOutcome::Rejected {
-                kind,
-                reason,
-                response,
-            } => RequestFields {
+            SubmitOutcome::Rejected { kind, reason, .. } => BridgeDetail {
                 accepted: Some(false),
                 kind: Some(*kind),
                 reject_reason: Some(reason),
-                ..RequestFields::status(response.0.as_u16())
+                ..BridgeDetail::default()
             },
-            SubmitOutcome::Err { status, .. } => RequestFields {
+            SubmitOutcome::Err { .. } => BridgeDetail {
                 accepted: Some(false),
-                ..RequestFields::status(status.as_u16())
+                ..BridgeDetail::default()
             },
         }
     }
@@ -1380,15 +1365,12 @@ async fn submit_event_authed(
     tenant: &TenantContext,
     headers: &HeaderMap,
     body: &[u8],
-    caller: &mut ProvenCaller<'_>,
+    caller: &mut ProvenCaller,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
     if let Err(e) = caller.rate_limit_and_replay(state, tenant).await {
-        return SubmitOutcome::Err {
-            status: e.0,
-            response: e,
-        };
+        return SubmitOutcome::Err { response: e };
     }
     let (pubkey, signed_auth_created_at) = (caller.pubkey, caller.signed_at);
     let pubkey_bytes = pubkey.to_bytes().to_vec();
@@ -1456,10 +1438,7 @@ async fn submit_event_authed(
             }
         }),
         Err(e) => {
-            return SubmitOutcome::Err {
-                status: e.0,
-                response: e,
-            };
+            return SubmitOutcome::Err { response: e };
         }
     };
     if let Some(owner) = nip_oa_owner {
@@ -1527,18 +1506,12 @@ async fn submit_event_authed(
         Err(IngestError::AuthFailed(msg)) => {
             crate::handlers::ingest::reject_with_transport("http", "auth");
             let e = api_error(StatusCode::FORBIDDEN, &msg);
-            SubmitOutcome::Err {
-                status: e.0,
-                response: e,
-            }
+            SubmitOutcome::Err { response: e }
         }
         Err(IngestError::Internal(msg)) => {
             crate::handlers::ingest::reject_with_transport("http", "error");
             let e = internal_error(&msg);
-            SubmitOutcome::Err {
-                status: e.0,
-                response: e,
-            }
+            SubmitOutcome::Err { response: e }
         }
     }
 }
@@ -1549,6 +1522,7 @@ async fn submit_event_authed(
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub async fn query_events(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, axum::response::Response> {
@@ -1581,8 +1555,9 @@ pub async fn query_events(
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         bridge_strict_proof(&headers, "POST", &url, Some(&body), true)
     });
-    let admission = admit_nip_fi_http_on_state(&state, &headers, &url, || {
+    let admission = admit_nip_fi_http_on_state(&state, &headers, &slot, || {
         verify_bridge_auth_with_options(
+            &slot,
             &headers,
             "POST",
             &url,
@@ -1593,20 +1568,18 @@ pub async fn query_events(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let mut caller = ProvenCaller::for_request(admission, &tenant);
+    let mut caller = ProvenCaller::new(admission, &tenant);
 
     // Admission, replay, membership, and filter execution all run inside the
     // helper; the caller's access line is the request's one line, covering
     // every outcome including a refused login.
     let result = query_events_authed(&state, &tenant, &headers, &body, &mut caller).await;
-    caller.complete(match &result {
-        Ok(Json(Value::Array(events))) => crate::access::RequestFields {
+    if let Ok(Json(Value::Array(events))) = &result {
+        caller.complete(crate::access::BridgeDetail {
             result_count: Some(events.len() as u64),
-            ..crate::access::RequestFields::status(200)
-        },
-        Ok(_) => crate::access::RequestFields::status(200),
-        Err((status, _)) => crate::access::RequestFields::status(status.as_u16()),
-    });
+            ..Default::default()
+        });
+    }
     Ok(result.into_response())
 }
 
@@ -1618,7 +1591,7 @@ async fn query_events_authed(
     tenant: &TenantContext,
     headers: &HeaderMap,
     body: &[u8],
-    caller: &mut ProvenCaller<'_>,
+    caller: &mut ProvenCaller,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     caller.rate_limit_and_replay(state, tenant).await?;
     let pubkey = caller.pubkey;
@@ -2200,6 +2173,7 @@ pub(crate) async fn repair_requested_channel_access(
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub async fn count_events(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, axum::response::Response> {
@@ -2231,8 +2205,9 @@ pub async fn count_events(
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         bridge_strict_proof(&headers, "POST", &url, Some(&body), true)
     });
-    let admission = admit_nip_fi_http_on_state(&state, &headers, &url, || {
+    let admission = admit_nip_fi_http_on_state(&state, &headers, &slot, || {
         verify_bridge_auth_with_options(
+            &slot,
             &headers,
             "POST",
             &url,
@@ -2243,19 +2218,18 @@ pub async fn count_events(
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
     })?;
-    let mut caller = ProvenCaller::for_request(admission, &tenant);
+    let mut caller = ProvenCaller::new(admission, &tenant);
 
     // Admission, replay, membership, and count execution all run inside the
     // helper; the caller's access line is the request's one line, covering
     // every outcome including a refused login.
     let result = count_events_authed(&state, &tenant, &headers, &body, &mut caller).await;
-    caller.complete(match &result {
-        Ok(Json(value)) => crate::access::RequestFields {
+    if let Ok(Json(value)) = &result {
+        caller.complete(crate::access::BridgeDetail {
             result_count: value.get("count").and_then(Value::as_u64),
-            ..crate::access::RequestFields::status(200)
-        },
-        Err((status, _)) => crate::access::RequestFields::status(status.as_u16()),
-    });
+            ..Default::default()
+        });
+    }
     Ok(result.into_response())
 }
 
@@ -2267,7 +2241,7 @@ async fn count_events_authed(
     tenant: &TenantContext,
     headers: &HeaderMap,
     body: &[u8],
-    caller: &mut ProvenCaller<'_>,
+    caller: &mut ProvenCaller,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     caller.rate_limit_and_replay(state, tenant).await?;
     let pubkey = caller.pubkey;
@@ -3021,6 +2995,7 @@ async fn synthesize_presence(
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn authorize_moderation_read(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     path: &str,
     raw_query: Option<&str>,
@@ -3049,8 +3024,9 @@ async fn authorize_moderation_read(
     crate::nip_fi_shadow::observe_strict_proof(state, headers, "bridge", || {
         bridge_strict_proof(headers, "GET", &url, None, false)
     });
-    let admission = admit_nip_fi_http_on_state(state, headers, &url, || {
+    let admission = admit_nip_fi_http_on_state(state, headers, slot, || {
         verify_bridge_auth(
+            slot,
             headers,
             "GET",
             &url,
@@ -3128,11 +3104,13 @@ fn clamp_limit(requested: Option<i64>) -> i64 {
 /// `GET /moderation/reports` — the moderation queue (NIP-98 + mod-authz).
 pub async fn moderation_reports(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let tenant = match authorize_moderation_read(
         &state,
+        &slot,
         &headers,
         "/moderation/reports",
         raw_query.as_deref(),
@@ -3168,11 +3146,13 @@ pub async fn moderation_reports(
 /// `GET /moderation/audit` — the moderation audit log (NIP-98 + mod-authz).
 pub async fn moderation_audit(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let tenant = match authorize_moderation_read(
         &state,
+        &slot,
         &headers,
         "/moderation/audit",
         raw_query.as_deref(),
@@ -3203,10 +3183,13 @@ pub async fn moderation_audit(
 /// `GET /moderation/restricted` — currently banned/timed-out members.
 pub async fn moderation_restricted(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
 ) -> Response {
     let tenant =
-        match authorize_moderation_read(&state, &headers, "/moderation/restricted", None).await {
+        match authorize_moderation_read(&state, &slot, &headers, "/moderation/restricted", None)
+            .await
+        {
             Ok(t) => t,
             Err(r) => return r,
         };
@@ -3598,22 +3581,19 @@ pub(crate) mod postgres_tests {
         }
     }
 
-    /// Drive one request's line through the replay step the way
-    /// [`ProvenCaller`] does, then end the request without a decision.
+    /// Drive one request's note through the replay step the way
+    /// [`ProvenCaller`] does, then write its line as the layer would.
     async fn replay_auth_lines(answer: Option<bool>) -> Vec<serde_json::Value> {
         let (_guard, out) = crate::access::tests::capture_scoped();
         let tenant = fresh_tenant("relay-a.example");
-        let mut line = AuthLine::new(
-            crate::access::AuthAttempt::http(
-                crate::access::AuthMethod::Nip98,
-                "/query?secret=1",
-                Some(Keys::generate().public_key()),
-                true,
-            )
-            .in_community(tenant.community()),
+        let slot = AccessSlot::default();
+        slot.attempt(
+            crate::access::AuthMethod::Nip98,
+            Some(Keys::generate().public_key()),
+            true,
         );
-        line.abort_reason("request_ended");
-        let checked = line.gate(
+        slot.in_community(tenant.community());
+        let checked = slot.gate(
             check_nip98_replay_with_guard(
                 &FixedReplayGuard(answer),
                 &tenant,
@@ -3622,31 +3602,29 @@ pub(crate) mod postgres_tests {
             .await,
             ReplayRejection::auth_result,
         );
-        if checked.is_ok() {
-            assert!(out.lines().is_empty(), "a passed replay check logs nothing");
-        }
-        drop(line);
+        assert!(out.lines().is_empty(), "only the layer writes the line");
+        slot.emit("/query", if checked.is_ok() { 200 } else { 401 });
         out.lines()
     }
 
-    /// Replay never logs success on its own: a refusal is the request's one
-    /// line, and a pass leaves the decision to the later admission steps
-    /// (here none run, so the request ends `aborted`).
+    /// Replay never decides success on its own: a refusal is final, and a
+    /// pass leaves the decision to the later admission steps (here none
+    /// run, so the line stays `undecided`).
     #[tokio::test(flavor = "current_thread")]
     async fn nip98_replay_check_logs_only_its_refusal() {
         for (answer, outcome, reason) in [
-            (Some(true), "aborted", "request_ended"),
-            (Some(false), "failed", "nip98_replay"),
-            (None, "denied", "replay_check_unavailable"),
+            (Some(true), "undecided", None),
+            (Some(false), "failed", Some("nip98_replay")),
+            (None, "denied", Some("replay_check_unavailable")),
         ] {
             let lines = replay_auth_lines(answer).await;
             assert_eq!(lines.len(), 1, "{answer:?}: {lines:?}");
             let line = &lines[0];
-            assert_eq!(line["event"], "auth");
+            assert_eq!(line["event"], "http");
             assert_eq!(line["method"], "nip98");
             assert_eq!(line["outcome"], outcome);
-            assert_eq!(line["reason"], reason);
-            assert_eq!(line["route"], "/query", "query string must not be logged");
+            assert_eq!(line["reason"].as_str(), reason);
+            assert_eq!(line["route"], "/query");
             assert!(line["community"].is_string());
             assert!(!line.to_string().contains("simulated outage"));
         }
@@ -3779,11 +3757,18 @@ pub(crate) mod postgres_tests {
         let tenant_b = fresh_tenant("host-b.example");
         let expected_url = nip98_expected_url(config_relay_url, &tenant_b, "/events");
 
-        let (status, body) = verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
-            .expect_err(
-                "cross-host NIP-98 event MUST be rejected — row 44: `u` URL host \
+        let (status, body) = verify_bridge_auth(
+            &crate::access::AccessSlot::default(),
+            &headers,
+            "POST",
+            &expected_url,
+            Some(b""),
+            true,
+        )
+        .expect_err(
+            "cross-host NIP-98 event MUST be rejected — row 44: `u` URL host \
                  must match req.community",
-            );
+        );
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
@@ -3808,6 +3793,7 @@ pub(crate) mod postgres_tests {
         let headers = nip98_auth_headers(&event_json);
 
         let (status, body) = verify_bridge_auth_with_options(
+            &crate::access::AccessSlot::default(),
             &headers,
             "POST",
             signed_url,
@@ -3849,8 +3835,15 @@ pub(crate) mod postgres_tests {
             pubkey,
             signed_created_at,
             ..
-        } = verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
-            .expect("matching-host NIP-98 event must verify");
+        } = verify_bridge_auth(
+            &crate::access::AccessSlot::default(),
+            &headers,
+            "POST",
+            &expected_url,
+            Some(b""),
+            true,
+        )
+        .expect("matching-host NIP-98 event must verify");
         assert_eq!(
             pubkey,
             keys.public_key(),
@@ -3901,9 +3894,15 @@ pub(crate) mod postgres_tests {
             Some("limit=20&status=open"),
         );
 
-        let VerifiedBridgeAuth { pubkey, .. } =
-            verify_bridge_auth(&headers, "GET", &expected_url, None, true)
-                .expect("query-bearing moderation read must verify against the same query");
+        let VerifiedBridgeAuth { pubkey, .. } = verify_bridge_auth(
+            &crate::access::AccessSlot::default(),
+            &headers,
+            "GET",
+            &expected_url,
+            None,
+            true,
+        )
+        .expect("query-bearing moderation read must verify against the same query");
         assert_eq!(pubkey, keys.public_key());
     }
 
@@ -3927,8 +3926,15 @@ pub(crate) mod postgres_tests {
             None,
         );
 
-        let (status, body) = verify_bridge_auth(&headers, "GET", &bare_url, None, true)
-            .expect_err("query-signed event MUST NOT match a bare-path expected URL");
+        let (status, body) = verify_bridge_auth(
+            &crate::access::AccessSlot::default(),
+            &headers,
+            "GET",
+            &bare_url,
+            None,
+            true,
+        )
+        .expect_err("query-signed event MUST NOT match a bare-path expected URL");
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let msg = body
             .get("error")
@@ -3958,9 +3964,15 @@ pub(crate) mod postgres_tests {
             Some("limit=20"),
         );
 
-        let VerifiedBridgeAuth { pubkey, .. } =
-            verify_bridge_auth(&headers, "GET", &expected_url, None, true)
-                .expect("audit query-bearing read must verify");
+        let VerifiedBridgeAuth { pubkey, .. } = verify_bridge_auth(
+            &crate::access::AccessSlot::default(),
+            &headers,
+            "GET",
+            &expected_url,
+            None,
+            true,
+        )
+        .expect("audit query-bearing read must verify");
         assert_eq!(pubkey, keys.public_key());
     }
 
@@ -3983,9 +3995,15 @@ pub(crate) mod postgres_tests {
         );
         assert_eq!(expected_url, "https://host-a.example/moderation/restricted");
 
-        let VerifiedBridgeAuth { pubkey, .. } =
-            verify_bridge_auth(&headers, "GET", &expected_url, None, true)
-                .expect("query-less restricted read must verify against the bare path");
+        let VerifiedBridgeAuth { pubkey, .. } = verify_bridge_auth(
+            &crate::access::AccessSlot::default(),
+            &headers,
+            "GET",
+            &expected_url,
+            None,
+            true,
+        )
+        .expect("query-less restricted read must verify against the bare path");
         assert_eq!(pubkey, keys.public_key());
     }
 
@@ -5918,7 +5936,7 @@ pub(crate) mod postgres_tests {
         let lines = out
             .lines()
             .into_iter()
-            .filter(|line| line["event"] == "auth")
+            .filter(|line| line["event"] == "http")
             .collect();
         (status, lines)
     }
@@ -5928,7 +5946,7 @@ pub(crate) mod postgres_tests {
         outcome: &str,
         reason: Option<&str>,
     ) -> serde_json::Value {
-        assert_eq!(lines.len(), 1, "exactly one auth line: {lines:?}");
+        assert_eq!(lines.len(), 1, "exactly one access line: {lines:?}");
         let line = &lines[0];
         assert_eq!(line["outcome"], outcome, "{line}");
         match reason {
@@ -6009,7 +6027,7 @@ pub(crate) mod postgres_tests {
         let lines: Vec<_> = out
             .lines()
             .into_iter()
-            .filter(|line| line["event"] == "auth")
+            .filter(|line| line["event"] == "http")
             .collect();
         assert_eq!(lines.len(), 2, "one line per request: {lines:?}");
         assert_eq!(lines[0]["outcome"], "success", "{lines:?}");
@@ -6039,7 +6057,7 @@ pub(crate) mod postgres_tests {
         assert_eq!(lines.len(), 1, "one line per request: {lines:?}");
         let line = &lines[0];
         assert_eq!(line["level"], "INFO", "{line}");
-        assert_eq!(line["event"], "auth", "{line}");
+        assert_eq!(line["event"], "http", "{line}");
         assert_eq!(line["outcome"], "success", "{line}");
         assert_eq!(line["method"], "nip98", "{line}");
         assert_eq!(line["pubkey"], keys.public_key().to_hex(), "{line}");
@@ -9601,12 +9619,7 @@ pub(crate) mod postgres_tests {
                     pubkey: agent.public_key(),
                     event_id_bytes: fresh_nip98_event_id_bytes(),
                     signed_at: Some(nostr::Timestamp::now().as_secs()),
-                    line: AuthLine::new(crate::access::AuthAttempt::http(
-                        crate::access::AuthMethod::Nip98,
-                        "/api/events",
-                        Some(agent.public_key()),
-                        true,
-                    )),
+                    slot: AccessSlot::default(),
                 },
             )
             .await;

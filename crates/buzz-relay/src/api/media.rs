@@ -26,7 +26,7 @@ use buzz_media::{
     BlobDescriptor, BlossomDenialKind, MediaError, UploadAttribution, UploadNetworkInfo,
 };
 
-use crate::access::{AuthAttempt, AuthLine, AuthMethod, AuthResult};
+use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use crate::state::AppState;
 
 /// Lightweight pre-auth upload context: tenant + route mode only.
@@ -318,6 +318,7 @@ fn serving_lease_lost(error: anyhow::Error) -> MediaError {
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum closures
 pub(crate) async fn upload_blob(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     ctx: UploadContext,
     headers: HeaderMap,
     body: axum::body::Body,
@@ -340,20 +341,13 @@ pub(crate) async fn upload_blob(
         buzz_media::auth::verify_blossom_auth_event(&event, Some(&tenant_host), strict)
             .map_err(drop)
     });
-    let route = match ctx.route_mode {
-        UploadRouteMode::Upload => "/upload",
-        UploadRouteMode::LegacyMedia => "/media/upload",
-    };
     let headers_clone = headers.clone();
-    // The closure logs its own rejected proof; the helper logs only its
-    // enterprise-assertion refusals, so exactly one of them writes the line.
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, route, move || {
+    let proof_slot = slot.clone();
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, &slot, move || {
         let reject = |e: MediaError, claimed: Option<nostr::PublicKey>| {
-            let code = blossom_proof_code(&e);
-            let response = e.into_response();
-            AuthAttempt::http(AuthMethod::Blossom, route, claimed, false)
-                .log_refusal(AuthResult::Failed(code), response.status().as_u16());
-            response
+            proof_slot.attempt(AuthMethod::Blossom, claimed, false);
+            proof_slot.finish(AuthResult::Failed(blossom_proof_code(&e)));
+            e.into_response()
         };
         let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| reject(e, None))?;
         // Pre-body check: freshness, cardinality, and server tag. The x-tag
@@ -366,10 +360,9 @@ pub(crate) async fn upload_blob(
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    // One line from here on: a refusal at any admission step below, success
-    // once the concurrency permit is held, or `aborted` if the request ends
-    // before either.
-    let (mut line, auth_event) = admission
+    // A refusal at any admission step below, or success once the
+    // concurrency permit is held.
+    let (slot, auth_event) = admission
         .proved_by(AuthMethod::Blossom)
         .into_line(ctx.tenant.community());
 
@@ -379,7 +372,7 @@ pub(crate) async fn upload_blob(
     let claimed_hash = match headers.get("x-sha-256").and_then(|v| v.to_str().ok()) {
         Some(h) => h.to_owned(),
         None => {
-            line.finish(AuthResult::Failed("missing_hash"));
+            slot.finish(AuthResult::Failed("missing_hash"));
             return media_denial(MediaError::MissingTag("x-sha-256"), strictness).into_response();
         }
     };
@@ -392,7 +385,7 @@ pub(crate) async fn upload_blob(
             .iter()
             .any(|tag| tag.kind().to_string() == "x" && (tag.content() == Some(&claimed_hash)));
     if !hash_bound {
-        line.finish(AuthResult::Failed("hash_mismatch"));
+        slot.finish(AuthResult::Failed("hash_mismatch"));
         return media_denial(MediaError::HashMismatch, strictness).into_response();
     }
 
@@ -406,7 +399,7 @@ pub(crate) async fn upload_blob(
         Some(auth_event.created_at.as_secs()),
     )
     .await;
-    if let Err(e) = line.gate(
+    if let Err(e) = slot.gate(
         membership,
         crate::api::relay_members::MembershipRefusal::auth_result,
     ) {
@@ -417,7 +410,7 @@ pub(crate) async fn upload_blob(
     if upload_rate_limited(&state, ctx.tenant.community(), &auth_event.pubkey) {
         metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
             .increment(1);
-        line.finish(AuthResult::Denied(crate::access::AuthReason::QuotaExceeded));
+        slot.finish(AuthResult::Denied(crate::access::AuthReason::QuotaExceeded));
         return MediaError::UploadRateLimitExceeded.into_response();
     }
     let upload_permit = match acquire_upload_permit(
@@ -431,13 +424,13 @@ pub(crate) async fn upload_blob(
     }) {
         Ok(p) => p,
         Err(e) => {
-            line.finish(AuthResult::Denied(
+            slot.finish(AuthResult::Denied(
                 crate::access::AuthReason::ConcurrencyLimit,
             ));
             return e.into_response();
         }
     };
-    line.finish(AuthResult::Success);
+    slot.finish(AuthResult::Success);
 
     let auth = AuthenticatedUpload {
         auth_event,
@@ -716,7 +709,7 @@ async fn enforce_blossom_read_membership(
     auth_event: &nostr::Event,
     headers: &HeaderMap,
     strictness: BlossomStrictness,
-    line: &mut AuthLine<'_>,
+    slot: &AccessSlot,
 ) -> Result<(), MediaDenial> {
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
     let membership = crate::api::relay_members::enforce_relay_membership(
@@ -727,18 +720,14 @@ async fn enforce_blossom_read_membership(
         Some(auth_event.created_at.as_secs()),
     )
     .await;
-    line.gate(
+    slot.gate(
         membership,
         crate::api::relay_members::MembershipRefusal::auth_result,
     )
     .map_err(|e| membership_denial(e, strictness))?;
-    line.finish(AuthResult::Success);
+    slot.finish(AuthResult::Success);
     Ok(())
 }
-
-/// Route recorded on Blossom read (GET/HEAD) access lines. The hash itself
-/// is not logged.
-const BLOB_ROUTE: &str = "/<sha256>";
 
 fn blob_cache_control() -> &'static str {
     "private, max-age=31536000, immutable"
@@ -826,6 +815,7 @@ const MAX_RANGE_CHUNK: u64 = 16 * 1024 * 1024;
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub(crate) async fn get_blob(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     Path(sha256_ext): Path<String>,
     req_headers: HeaderMap,
 ) -> Result<Response, MediaDenial> {
@@ -855,19 +845,18 @@ pub(crate) async fn get_blob(
         )
         .map(drop)
     });
-    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, BLOB_ROUTE, move || {
+    let proof_slot = slot.clone();
+    let admission = match admit_nip_fi_http_on_state(&state, &req_headers, &slot, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness).map_err(|e| {
-            let code = blossom_proof_code(&e);
-            let response = e.into_response();
-            AuthAttempt::http(AuthMethod::Blossom, BLOB_ROUTE, None, false)
-                .log_refusal(AuthResult::Failed(code), response.status().as_u16());
-            response
+            proof_slot.method(AuthMethod::Blossom);
+            proof_slot.finish(AuthResult::Failed(blossom_proof_code(&e)));
+            e.into_response()
         })
     }) {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
-    let (mut line, auth_event) = admission
+    let (slot, auth_event) = admission
         .proved_by(AuthMethod::Blossom)
         .into_line(tenant.community());
     // Post-admission: membership gate.
@@ -877,7 +866,7 @@ pub(crate) async fn get_blob(
         &auth_event,
         &req_headers,
         strictness,
-        &mut line,
+        &slot,
     )
     .await?;
     serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers)
@@ -1143,6 +1132,7 @@ fn parse_byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub(crate) async fn head_blob(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaDenial> {
@@ -1164,30 +1154,22 @@ pub(crate) async fn head_blob(
         extract_blossom_read_proof(&headers, &sha256, &tenant_host, BlossomStrictness::Strict)
             .map(drop)
     });
-    let admission = match admit_nip_fi_http_on_state(&state, &headers, BLOB_ROUTE, move || {
+    let proof_slot = slot.clone();
+    let admission = match admit_nip_fi_http_on_state(&state, &headers, &slot, move || {
         extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness).map_err(|e| {
-            let code = blossom_proof_code(&e);
-            let response = e.into_response();
-            AuthAttempt::http(AuthMethod::Blossom, BLOB_ROUTE, None, false)
-                .log_refusal(AuthResult::Failed(code), response.status().as_u16());
-            response
+            proof_slot.method(AuthMethod::Blossom);
+            proof_slot.finish(AuthResult::Failed(blossom_proof_code(&e)));
+            e.into_response()
         })
     }) {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
-    let (mut line, auth_event) = admission
+    let (slot, auth_event) = admission
         .proved_by(AuthMethod::Blossom)
         .into_line(tenant.community());
-    enforce_blossom_read_membership(
-        &state,
-        &tenant,
-        &auth_event,
-        &headers,
-        strictness,
-        &mut line,
-    )
-    .await?;
+    enforce_blossom_read_membership(&state, &tenant, &auth_event, &headers, strictness, &slot)
+        .await?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
@@ -2712,7 +2694,7 @@ mod tests {
         }
 
         /// Run an upload with access lines captured; return the response and
-        /// the `event=auth` lines.
+        /// the `event=http` lines.
         fn upload_auth_lines(
             rt: &tokio::runtime::Runtime,
             state: &Arc<AppState>,
@@ -2726,7 +2708,7 @@ mod tests {
             let lines = out
                 .lines()
                 .into_iter()
-                .filter(|l| l["event"] == "auth")
+                .filter(|l| l["event"] == "http")
                 .collect();
             (status, lines)
         }
@@ -2737,7 +2719,7 @@ mod tests {
             outcome: &str,
             reason: Option<&str>,
         ) {
-            assert_eq!(lines.len(), 1, "exactly one auth line: {lines:?}");
+            assert_eq!(lines.len(), 1, "exactly one access line: {lines:?}");
             let line = &lines[0];
             assert_eq!(line["method"], method, "{line}");
             assert_eq!(line["outcome"], outcome, "{line}");
@@ -2837,14 +2819,20 @@ mod tests {
                 let lines: Vec<_> = out
                     .lines()
                     .into_iter()
-                    .filter(|l| l["event"] == "auth")
+                    .filter(|l| l["event"] == "http")
                     .collect();
                 assert_eq!(lines.len(), 1, "{method}: {lines:?}");
                 let line = &lines[0];
                 assert_eq!(line["outcome"], "failed", "{method}: {line}");
                 assert_eq!(line["level"], "WARN", "{method}: {line}");
                 assert_eq!(line["status"], 403, "{method}: {line}");
-                assert_eq!(line["route"], "/<sha256>", "{method}: {line}");
+                assert_eq!(line["route"], "/media/{sha256_ext}", "{method}: {line}");
+                // The hash never reaches any field of the line.
+                assert!(
+                    !out.raw().contains(&"d".repeat(64)),
+                    "{method}: {}",
+                    out.raw()
+                );
             }
         }
 
@@ -3529,12 +3517,12 @@ mod tests {
             let auth: Vec<_> = out
                 .lines()
                 .into_iter()
-                .filter(|l| l["event"] == "auth")
+                .filter(|l| l["event"] == "http")
                 .collect();
             assert_eq!(auth.len(), 1, "{auth:?}");
             assert_eq!(auth[0]["method"], "blossom");
             assert_eq!(auth[0]["outcome"], "failed");
-            assert_eq!(auth[0]["route"], "/<sha256>");
+            assert_eq!(auth[0]["route"], "/media/{sha256_ext}");
 
             assert_eq!(
                 status,

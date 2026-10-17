@@ -38,7 +38,7 @@
 //! [`AdminAccess::operator`] refuse with 403; an anonymous caller is never given
 //! a principal.
 
-use crate::access::{auth_error_code, AuthAttempt, AuthLine, AuthMethod, AuthResult};
+use crate::access::{auth_error_code, AccessSlot, AuthMethod, AuthResult};
 use axum::http::{header, HeaderMap, Method, Uri};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -205,6 +205,7 @@ fn method_has_body(method: &str) -> bool {
 /// authentication or authorization failed.
 pub async fn authorize(
     state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     path_and_query: &str,
     method: &str,
@@ -216,103 +217,52 @@ pub async fn authorize(
         .as_ref()
         .ok_or_else(ApiError::not_found)?;
 
-    let full_path = admin_full_path(path_and_query);
-    authorize_at(state, headers, config, &full_path, method, raw_body, None).await
+    let full_path = format!("{ADMIN_API_PREFIX}{path_and_query}");
+    authorize_at(state, slot, headers, config, &full_path, method, raw_body).await
 }
 
-/// The admin path a NIP-98 client signs for `path_and_query`.
-pub(crate) fn admin_full_path(path_and_query: &str) -> String {
-    format!("{ADMIN_API_PREFIX}{path_and_query}")
-}
-
-/// [`authorize_read`] for a route whose access line also records what the
-/// request did: the returned line is written when the caller drops it.
-/// A network-trusted read has no proof, so its line carries no key.
-/// `full_path` is [`admin_full_path`] of the request target.
-pub(crate) async fn authorize_read_held<'a>(
+/// The admin decision, recorded on `slot`. With auth disabled the request
+/// is network-trusted: it carries no key, and only the Host and Origin
+/// checks can refuse it.
+async fn authorize_at(
     state: &AppState,
-    headers: &HeaderMap,
-    method: &Method,
-    full_path: &'a str,
-) -> Result<(AdminAccess, AuthLine<'a>), ApiError> {
-    let config = state
-        .config
-        .admin
-        .as_ref()
-        .ok_or_else(ApiError::not_found)?;
-    let mut held = None;
-    let access = authorize_at(
-        state,
-        headers,
-        config,
-        full_path,
-        method.as_str(),
-        None,
-        Some(&mut held),
-    )
-    .await?;
-    let line = held.unwrap_or_else(|| {
-        let attempt = AuthAttempt::http(AuthMethod::NetworkTrusted, full_path, None, false);
-        let mut line = AuthLine::new(attempt).for_request();
-        line.finish(AuthResult::Success);
-        line
-    });
-    Ok((access, line))
-}
-
-/// One access line per NIP-98 attempt, logged once the decision is final,
-/// or `aborted` if the request is dropped during a roster or replay wait.
-/// With `held`, an admitted request's line is handed back instead, to be
-/// written with the request's outcome.
-async fn authorize_at<'a>(
-    state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     config: &AdminConfig,
-    full_path: &'a str,
+    full_path: &str,
     method: &str,
     raw_body: Option<&[u8]>,
-    held: Option<&mut Option<AuthLine<'a>>>,
 ) -> Result<AdminAccess, ApiError> {
-    match config.auth {
-        AdminAuth::Nip98 => {}
-        AdminAuth::Disabled => {
-            return check_admin_origin(state, headers, config)
-                .map(|()| AdminAccess::NetworkTrusted)
-                .map_err(|(e, _)| e);
+    let decided = match config.auth {
+        AdminAuth::Nip98 => {
+            slot.method(AuthMethod::Nip98);
+            authorize_staff(state, slot, headers, config, full_path, method, raw_body).await
         }
-    }
-    let mut line = AuthLine::new(AuthAttempt::http(AuthMethod::Nip98, full_path, None, false));
-    if held.is_some() {
-        line = line.for_request();
-    }
-    line.abort_reason("request_ended");
-    let decided = authorize_staff(
-        state, headers, config, full_path, method, raw_body, &mut line,
-    )
-    .await;
-    line.finish(match &decided {
+        AdminAuth::Disabled => {
+            slot.method(AuthMethod::NetworkTrusted);
+            check_admin_origin(state, headers, config).map(|()| AdminAccess::NetworkTrusted)
+        }
+    };
+    slot.finish(match &decided {
         Ok(_) => AuthResult::Success,
         Err((_, result)) => *result,
     });
-    if let (Ok(_), Some(held)) = (&decided, held) {
-        *held = Some(line);
-    }
     decided.map_err(|(e, _)| e)
 }
 
 /// An admin auth refusal and its access-log result.
 type AdminRefusal = (ApiError, AuthResult);
 
-/// The NIP-98 admin decision. Records the key on `line` once the signature
-/// verifies; the caller logs the decision.
+/// The NIP-98 admin decision. Records the key on `slot` once the signature
+/// verifies; the caller records the decision.
 async fn authorize_staff(
     state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     config: &AdminConfig,
     full_path: &str,
     method: &str,
     raw_body: Option<&[u8]>,
-    line: &mut AuthLine<'_>,
 ) -> Result<AdminAccess, AdminRefusal> {
     // Credential check first: an unauthenticated caller learns nothing about
     // which Host or Origin the deployment expects.
@@ -320,7 +270,7 @@ async fn authorize_staff(
         .await
         .map_err(|(e, code)| (e, AuthResult::Failed(code)))?;
     if let Ok(pubkey) = nostr::PublicKey::from_slice(&pubkey_bytes) {
-        line.proven(pubkey);
+        slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
     }
     // Resolve the roster grant BEFORE claiming the replay ID: an
     // unrostered-but-validly-signing key (e.g. any WARP-admitted laptop)
@@ -380,11 +330,20 @@ fn check_admin_origin(
 /// `"GET"` would reject a correctly signed `HEAD`.
 pub async fn authorize_read(
     state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &Method,
     uri: &Uri,
 ) -> Result<AdminAccess, ApiError> {
-    authorize(state, headers, request_target(uri), method.as_str(), None).await
+    authorize(
+        state,
+        slot,
+        headers,
+        request_target(uri),
+        method.as_str(),
+        None,
+    )
+    .await
 }
 
 /// [`authorize`] for a mutation, bound to the request's real method and full
@@ -393,6 +352,7 @@ pub async fn authorize_read(
 /// contract: the buffered body bytes, or `None` only for a bodyless `DELETE`.
 pub async fn authorize_write(
     state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &Method,
     uri: &Uri,
@@ -400,6 +360,7 @@ pub async fn authorize_write(
 ) -> Result<AdminAccess, ApiError> {
     authorize(
         state,
+        slot,
         headers,
         request_target(uri),
         method.as_str(),
@@ -409,7 +370,7 @@ pub async fn authorize_write(
 }
 
 /// The full request target NIP-98 clients sign: path plus any query string.
-pub(crate) fn request_target(uri: &Uri) -> &str {
+fn request_target(uri: &Uri) -> &str {
     uri.path_and_query()
         .map_or_else(|| uri.path(), |pq| pq.as_str())
 }
@@ -926,19 +887,20 @@ mod tests {
             format!("Nostr {credential}").parse().unwrap(),
         );
 
+        let slot = crate::access::AccessSlot::default();
         let (guard, out) = crate::access::tests::capture_scoped();
         tokio::select! {
-            _ = authorize(&state, &headers, "/users", "GET", None) => {
+            _ = authorize(&state, &slot, &headers, "/users", "GET", None) => {
                 panic!("the replay check must stall");
             }
             () = replay.arrived.notified() => {}
         }
+        slot.abandon(&format!("{ADMIN_API_PREFIX}/users"));
         drop(guard);
-        let line = crate::access::tests::assert_one_aborted_auth_line(&out, &keys.public_key());
-        assert_eq!(line["route"], format!("{ADMIN_API_PREFIX}/users"));
+        crate::access::tests::assert_one_aborted_line(&out, &keys.public_key());
     }
 
-    // A refused admin request logs exactly one `auth` line with a fixed code,
+    // A refused admin request logs exactly one access line with a fixed code,
     // and the query string never reaches it.
     #[tokio::test(flavor = "current_thread")]
     async fn admin_refusal_logs_one_auth_line() {
@@ -950,15 +912,18 @@ mod tests {
             web_dir: None,
         });
         state.config = std::sync::Arc::new(config);
+        let slot = crate::access::AccessSlot::default();
         let (guard, out) = crate::access::tests::capture_scoped();
         let refused = crate::api::admin::auth::authorize(
             &state,
+            &slot,
             &axum::http::HeaderMap::new(),
             "/users?q=secret",
             "GET",
             None,
         )
         .await;
+        slot.emit("/api/admin/users", 401);
         drop(guard);
         assert!(refused.is_err());
         let lines = out.lines();
@@ -966,5 +931,58 @@ mod tests {
         assert_eq!(lines[0]["outcome"], "failed");
         assert_eq!(lines[0]["reason"], "nip98_missing");
         assert!(!out.raw().contains("secret"));
+    }
+
+    // With admin auth disabled, the network-trusted admission and the
+    // Host/Origin refusal each record their outcome on the request's line.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disabled_admin_records_admission_and_refusal() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Disabled,
+            web_dir: None,
+        });
+        state.config = std::sync::Arc::new(config);
+        let cases = [
+            ("admin.example.com", None, "success", None),
+            (
+                "tenant.example.com",
+                None,
+                "denied",
+                Some("admin_host_mismatch"),
+            ),
+            (
+                "admin.example.com",
+                Some("https://evil.example"),
+                "denied",
+                Some("origin_mismatch"),
+            ),
+        ];
+        for (host, origin, outcome, reason) in cases {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, origin.parse().unwrap());
+            }
+            let slot = crate::access::AccessSlot::default();
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let decided = authorize(&state, &slot, &headers, "/users", "GET", None).await;
+            slot.emit("/api/admin/users", if decided.is_ok() { 200 } else { 403 });
+            drop(guard);
+            assert_eq!(decided.is_ok(), outcome == "success", "{host} {origin:?}");
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["method"], "network_trusted", "{line}");
+            assert_eq!(line["outcome"], outcome, "{line}");
+            assert_eq!(
+                line.get("reason").and_then(|r| r.as_str()),
+                reason,
+                "{line}"
+            );
+            assert!(line.get("pubkey").is_none(), "{line}");
+        }
     }
 }

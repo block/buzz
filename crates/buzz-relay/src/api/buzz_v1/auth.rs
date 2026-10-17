@@ -83,6 +83,7 @@ pub(super) struct Principal {
 
 pub(super) async fn authorize(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     uri: &Uri,
     method: &'static str,
@@ -101,8 +102,9 @@ pub(super) async fn authorize(
     let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
         state,
         headers,
-        uri.path(),
+        slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             method,
             url,

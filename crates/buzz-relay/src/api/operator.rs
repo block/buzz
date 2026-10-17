@@ -4,7 +4,7 @@
 //! request signing and replay protection, but they do not run through event
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
-use crate::access::{AuthAttempt, AuthLine, AuthMethod, AuthResult};
+use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use std::sync::Arc;
 
 use axum::{
@@ -189,6 +189,7 @@ fn verify_registration_proof(
 /// or an inbound proxy `Host` header.
 async fn authorize_operator_request(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     path: &str,
@@ -209,9 +210,9 @@ async fn authorize_operator_request(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_operator(headers, method, &url, body)?;
-    let mut line = operator_auth_line(path, pubkey);
-    check_operator_replay(state, event_id_bytes, &mut line).await?;
+    } = bridge::verify_nip98_exempt_operator(slot, headers, method, &url, body)?;
+    slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    check_operator_replay(state, event_id_bytes, slot).await?;
 
     let pubkey_hex = pubkey.to_hex();
     if !state
@@ -220,13 +221,13 @@ async fn authorize_operator_request(
         .iter()
         .any(|pk| pk == &pubkey_hex)
     {
-        line.finish(AuthResult::Denied(crate::access::AuthReason::NotOperator));
+        slot.finish(AuthResult::Denied(crate::access::AuthReason::NotOperator));
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "actor not authorized: not a relay operator",
         ));
     }
-    line.finish(AuthResult::Success);
+    slot.finish(AuthResult::Success);
     Ok(pubkey)
 }
 
@@ -234,6 +235,7 @@ async fn authorize_operator_request(
 /// identity and a NIP-98 request signature.
 async fn authorize_operator_listener_request(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     path: &str,
@@ -249,15 +251,15 @@ async fn authorize_operator_listener_request(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_operator(headers, method, &url, Some(body))?;
-    let mut line = operator_auth_line(path, pubkey);
-    check_operator_replay(state, event_id_bytes, &mut line).await?;
+    } = bridge::verify_nip98_exempt_operator(slot, headers, method, &url, Some(body))?;
+    slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    check_operator_replay(state, event_id_bytes, slot).await?;
     if !state
         .config
         .operator_listener_delivery_urls
         .contains_key(&pubkey.to_hex())
     {
-        line.finish(AuthResult::Denied(
+        slot.finish(AuthResult::Denied(
             crate::access::AuthReason::NotOperatorListener,
         ));
         return Err(api_error(
@@ -265,19 +267,26 @@ async fn authorize_operator_listener_request(
             "actor not authorized: not a configured operator listener",
         ));
     }
-    line.finish(AuthResult::Success);
+    slot.finish(AuthResult::Success);
     Ok(pubkey)
 }
 
 /// Register target pubkeys for the authenticated operator listener.
 pub async fn register_listener_pubkeys(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let listener =
-        authorize_operator_listener_request(&state, &headers, "POST", LISTENER_PUBKEYS_PATH, &body)
-            .await?;
+    let listener = authorize_operator_listener_request(
+        &state,
+        &slot,
+        &headers,
+        "POST",
+        LISTENER_PUBKEYS_PATH,
+        &body,
+    )
+    .await?;
     let origin = state
         .config
         .relay_operator_api_origin
@@ -300,11 +309,13 @@ pub async fn register_listener_pubkeys(
 /// Remove target pubkeys for the authenticated operator listener.
 pub async fn remove_listener_pubkeys(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let listener = authorize_operator_listener_request(
         &state,
+        &slot,
         &headers,
         "DELETE",
         LISTENER_PUBKEYS_PATH,
@@ -320,24 +331,10 @@ pub async fn remove_listener_pubkeys(
     Ok(Json(serde_json::json!({})))
 }
 
-/// The access line for an operator request whose signature proved `pubkey`:
-/// it logs the final decision once, or `aborted` if the request is dropped
-/// during the replay wait.
-fn operator_auth_line(path: &str, pubkey: nostr::PublicKey) -> AuthLine<'_> {
-    let mut line = AuthLine::new(AuthAttempt::http(
-        AuthMethod::Nip98,
-        path,
-        Some(pubkey),
-        true,
-    ));
-    line.abort_reason("request_ended");
-    line
-}
-
 async fn check_operator_replay(
     state: &AppState,
     event_id_bytes: [u8; 32],
-    line: &mut AuthLine<'_>,
+    slot: &AccessSlot,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let event_id = nostr::EventId::from_byte_array(event_id_bytes);
     match state
@@ -351,14 +348,14 @@ async fn check_operator_replay(
     {
         Ok(true) => Ok(()),
         Ok(false) => {
-            line.finish(AuthResult::Failed("nip98_replay"));
+            slot.finish(AuthResult::Failed("nip98_replay"));
             Err(api_error(
                 StatusCode::UNAUTHORIZED,
                 "NIP-98: replay detected",
             ))
         }
         Err(error) => {
-            line.finish(AuthResult::Denied(
+            slot.finish(AuthResult::Denied(
                 crate::access::AuthReason::ReplayCheckUnavailable,
             ));
             tracing::warn!(
@@ -388,11 +385,13 @@ async fn check_operator_replay(
 /// authority for this deployment-root control-plane surface.
 pub async fn provision_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let pubkey = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "POST",
         "/operator/communities",
@@ -455,11 +454,12 @@ pub struct DeleteCommunityRequest {
 /// Idempotently archive a community owned by the asserted end-user identity.
 pub async fn archive_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/archive";
-    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body)).await?;
     let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -520,11 +520,12 @@ pub async fn archive_community(
 /// Idempotently restore an archived community owned by the asserted end-user identity.
 pub async fn unarchive_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/unarchive";
-    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body)).await?;
     let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -606,12 +607,14 @@ pub async fn unarchive_community(
 /// that upstream ceremony, not verified as cryptographic owner consent.
 pub async fn delete_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/delete";
     let operator =
-        authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+        authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body))
+            .await?;
     let request: DeleteCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         coded_api_error(
             StatusCode::BAD_REQUEST,
@@ -717,12 +720,14 @@ pub async fn delete_community(
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<ListCommunitiesQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities",
@@ -772,11 +777,13 @@ pub async fn list_owned_communities(
 /// NIP-43 membership list is best-effort, matching the provision path.
 pub async fn transfer_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _pubkey = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "POST",
         "/operator/communities/transfer",
@@ -900,12 +907,14 @@ pub async fn transfer_community(
 /// normalized authority used by create.
 pub async fn community_availability(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<CommunityAvailabilityQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities/availability",
@@ -1374,7 +1383,7 @@ mod postgres_tests {
             () = replay.arrived.notified() => {}
         }
         drop(guard);
-        let line = crate::access::tests::assert_one_aborted_auth_line(&out, &operator.public_key());
+        let line = crate::access::tests::assert_one_aborted_line(&out, &operator.public_key());
         assert_eq!(line["route"], "/operator/communities");
     }
 

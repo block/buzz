@@ -60,6 +60,7 @@ impl NipFiUpgradeOutcome {
 /// denied" would be false. "authorization unavailable, retry after repair" is
 /// the accurate and correct signal. [FI-TRACE-DENIAL-ORACLE]
 pub(crate) fn check_nip_fi_at_upgrade(
+    slot: &crate::access::AccessSlot,
     route: crate::nip_fi_session::NipFiWsRoute,
     headers: &HeaderMap,
     communities: &NipFiCommunities,
@@ -91,10 +92,10 @@ pub(crate) fn check_nip_fi_at_upgrade(
         return NipFiUpgradeOutcome::NotRequired;
     }
 
-    use crate::access::{AuthAttempt, AuthMethod, AuthReason, AuthResult};
-    let attempt = AuthAttempt::http(AuthMethod::NipFi, route.path(), None, false);
+    use crate::access::{AuthMethod, AuthReason, AuthResult};
+    slot.method(AuthMethod::NipFi);
     if mode.denies_unconditionally() {
-        attempt.log(AuthResult::Denied(AuthReason::AuthorizationUnavailable));
+        slot.finish(AuthResult::Denied(AuthReason::AuthorizationUnavailable));
         return NipFiUpgradeOutcome::Denied(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
@@ -102,14 +103,14 @@ pub(crate) fn check_nip_fi_at_upgrade(
     let community = match resolve_community(headers, communities) {
         Ok(community) => community,
         Err(class) => {
-            attempt.log(AuthResult::Failed("community_unresolved"));
+            slot.finish(AuthResult::Failed("community_unresolved"));
             return NipFiUpgradeOutcome::Denied(http_denial(class));
         }
     };
     match evaluate_attached_assertion(headers, community, verifier) {
         Ok(assertion) => NipFiUpgradeOutcome::Admitted(assertion),
         Err(rejection) => {
-            attempt.log(rejection.auth_result());
+            slot.finish(rejection.auth_result());
             NipFiUpgradeOutcome::Denied(http_denial(rejection.denial_class()))
         }
     }
@@ -390,6 +391,7 @@ mod tests {
             axum::http::HeaderValue::from_static("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
         );
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &h,
             &communities(),
@@ -410,6 +412,7 @@ mod tests {
     fn enforce_missing_header_returns_401_exact_bytes() {
         let headers = host_headers();
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers,
             &communities(),
@@ -440,6 +443,7 @@ mod tests {
     fn off_mode_returns_not_required() {
         let headers = host_headers(); // no assertion header
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers,
             &communities(),
@@ -469,6 +473,7 @@ mod tests {
         let headers = host_headers();
         let (_, out) = crate::access::tests::capture(|| {
             check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers,
                 &communities(),
@@ -486,6 +491,7 @@ mod tests {
     fn deny_protected_returns_503_authorization_unavailable() {
         let headers = host_headers();
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers,
             &communities(),
@@ -540,6 +546,7 @@ mod tests {
         for (err, status, body) in rows {
             let verifier = ScriptedVerifier::new(Err(err));
             let (got_status, got_body) = denied_parts(check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers_with("Bearer a.b.c"),
                 &communities(),
@@ -556,6 +563,7 @@ mod tests {
     #[test]
     fn characterize_upgrade_transport_precedes_verifier_presence() {
         let (status, body) = denied_parts(check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers_with("junk"),
             &communities(),
@@ -573,6 +581,7 @@ mod tests {
     fn characterize_upgrade_admits_claimless_assertion_for_later_pairing() {
         let verifier = ScriptedVerifier::new(Ok(None));
         match check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers_with("Bearer a.b.c"),
             &communities(),
@@ -596,6 +605,7 @@ mod tests {
         let headers = headers_with("Bearer a.b.c");
         assert!(matches!(
             check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers,
                 &communities(),
@@ -605,6 +615,7 @@ mod tests {
             NipFiUpgradeOutcome::NotRequired
         ));
         let (status, _) = denied_parts(check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers,
             &communities(),
@@ -625,6 +636,7 @@ mod tests {
         let headers = headers_with("Bearer a.b.c");
         let check = || {
             check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers,
                 &communities(),
@@ -637,6 +649,7 @@ mod tests {
         };
         assert_eq!(verifier.calls(), 1, "shadow must evaluate the assertion");
         let Ok((None, None)) = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &host_headers(),
             &communities(),
@@ -662,6 +675,7 @@ mod tests {
                 for headers in [host_headers(), headers_with("Bearer a.b.c")] {
                     let verifier = Some(&rejecting as &dyn VerifyAssertion);
                     let outcome = check_nip_fi_at_upgrade(
+                        &crate::access::AccessSlot::default(),
                         route,
                         &headers,
                         &communities(),

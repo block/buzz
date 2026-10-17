@@ -6,15 +6,14 @@
 //! event content, tokens, and assertions are never recorded: filters are
 //! reduced to a [`FilterSummary`], and failures to fixed reason codes.
 //!
-//! `event=auth` lines cover every Nostr-key login: WebSocket AUTH (root and
-//! audio), NIP-98 signed HTTP requests, enterprise assertions, and Blossom
-//! uploads. Each attempt writes exactly one line, except a successful root
-//! WebSocket login, which the connection's `close` line carries instead. On
-//! the HTTP bridge (`/query`, `/count`, `/events`) the `auth` line is the
-//! request's only line and also records what the request did. Three machine-to-machine
-//! checks are not Nostr-key logins and write no auth line: the command-token
-//! disconnect endpoint (`/api/nip-fi/disconnect`), the workflow webhook
-//! secret, and the git server's internal signed callback.
+//! `event=auth` lines cover WebSocket AUTH (root and audio): one line per
+//! attempt, except a successful root login, which the connection's `close`
+//! line carries instead. `event=http` lines come from [`http_access_log`]:
+//! one per HTTP request, with what the handler proved and decided recorded
+//! through its [`AccessSlot`]. Every matched route is logged except public
+//! documents and probes; a request that matched no route is logged only at
+//! status 400 or above, as `route="<unmatched>"`. `route` is the matched
+//! template, never the raw path.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -548,81 +547,14 @@ impl AuthResult {
     }
 }
 
-/// One auth attempt whose exits are spread across a long handler: it logs
-/// exactly once, at [`AuthLine::finish`], or on drop as `aborted` if the
-/// handler returned (cancellation, teardown, a request error before the
-/// decision) without deciding.
+/// One WebSocket auth attempt (NIP-42 or audio) whose exits are spread
+/// across a long handler: it logs exactly once, at [`AuthLine::finish`], or
+/// on drop as `aborted` if the handler returned (cancellation, teardown)
+/// without deciding. HTTP requests use [`AccessSlot`] instead.
 pub(crate) struct AuthLine<'a> {
     attempt: AuthAttempt<'a>,
     abort_reason: &'static str,
     done: bool,
-    /// Set for an HTTP request's line ([`AuthLine::for_request`]): the
-    /// decision waits for the request's outcome, and both are written as one
-    /// line when the line drops.
-    request: Option<HeldRequest>,
-}
-
-/// A request line's decision, held until the request ends.
-struct HeldRequest {
-    decision: Option<AuthResult>,
-    /// What the request did; `None` until [`AuthLine::complete`].
-    fields: Option<RequestFields>,
-    summary: Option<FilterSummary>,
-}
-
-/// What an admitted HTTP request did, written on the request's access line.
-#[derive(Debug, Default)]
-pub(crate) struct RequestFields {
-    pub(crate) status: Option<u16>,
-    pub(crate) result_count: Option<u64>,
-    pub(crate) accepted: Option<bool>,
-    pub(crate) kind: Option<u32>,
-    /// The id of the event a write stored or rejected.
-    pub(crate) event_id: Option<String>,
-    /// A body that failed to parse: its error category and position.
-    pub(crate) category: Option<&'static str>,
-    pub(crate) line: Option<usize>,
-    pub(crate) column: Option<usize>,
-    /// An ingest rejection's fixed code, never its message.
-    pub(crate) reject_reason: Option<&'static str>,
-    /// A minted invite: its id, expiry, and use limit (absent: unlimited).
-    /// Never its code.
-    pub(crate) invite_id: Option<Uuid>,
-    pub(crate) expires_at: Option<i64>,
-    pub(crate) max_uses: Option<i32>,
-    /// An invite claim: whether it added the member (`false`: already one).
-    pub(crate) joined: Option<bool>,
-    /// An admin feedback attachment read.
-    pub(crate) feedback_id: Option<Uuid>,
-    pub(crate) attachment_sha256: Option<String>,
-}
-
-impl RequestFields {
-    const EMPTY: Self = Self {
-        status: None,
-        result_count: None,
-        accepted: None,
-        kind: None,
-        event_id: None,
-        category: None,
-        line: None,
-        column: None,
-        reject_reason: None,
-        invite_id: None,
-        expires_at: None,
-        max_uses: None,
-        joined: None,
-        feedback_id: None,
-        attachment_sha256: None,
-    };
-
-    /// The response status alone.
-    pub(crate) fn status(status: u16) -> Self {
-        Self {
-            status: Some(status),
-            ..Self::default()
-        }
-    }
 }
 
 impl<'a> AuthLine<'a> {
@@ -631,35 +563,6 @@ impl<'a> AuthLine<'a> {
             attempt,
             abort_reason: "connection_closed",
             done: false,
-            request: None,
-        }
-    }
-
-    /// This line, written once when the request ends, carrying both the auth
-    /// decision and what [`AuthLine::complete`] and [`AuthLine::read`]
-    /// recorded about the request.
-    pub(crate) fn for_request(mut self) -> Self {
-        self.request = Some(HeldRequest {
-            decision: None,
-            fields: None,
-            summary: None,
-        });
-        self
-    }
-
-    /// Record what the request read, for a request line.
-    pub(crate) fn read(&mut self, filters: &[Filter]) {
-        if let Some(held) = &mut self.request {
-            if tracing::enabled!(target: TARGET, Level::INFO) {
-                held.summary = Some(FilterSummary::new(filters));
-            }
-        }
-    }
-
-    /// Record how the request ended, for a request line.
-    pub(crate) fn complete(&mut self, fields: RequestFields) {
-        if let Some(held) = &mut self.request {
-            held.fields = Some(fields);
         }
     }
 
@@ -669,16 +572,6 @@ impl<'a> AuthLine<'a> {
         self.attempt.pubkey_verified = true;
     }
 
-    /// Bind the line to `community`.
-    pub(crate) fn in_community(&mut self, community: CommunityId) {
-        self.attempt.community = Some(community);
-    }
-
-    /// Replace the undecided attempt, keeping its line.
-    pub(crate) fn retarget(&mut self, attempt: AuthAttempt<'a>) {
-        self.attempt = attempt;
-    }
-
     /// The `aborted` reason logged if the line is dropped undecided.
     pub(crate) fn abort_reason(&mut self, reason: &'static str) {
         self.abort_reason = reason;
@@ -686,84 +579,16 @@ impl<'a> AuthLine<'a> {
 
     /// Log the final decision; later calls are no-ops.
     pub(crate) fn finish(&mut self, result: AuthResult) {
-        if let Some(held) = &mut self.request {
-            held.decision.get_or_insert(result);
-        } else if !std::mem::replace(&mut self.done, true) {
+        if !std::mem::replace(&mut self.done, true) {
             self.attempt.log(result);
         }
-    }
-
-    /// Pass `checked` through, finishing the line with `refusal`'s result
-    /// when it is an error. An admission step's refusal is final.
-    pub(crate) fn gate<T, E>(
-        &mut self,
-        checked: Result<T, E>,
-        refusal: impl FnOnce(&E) -> AuthResult,
-    ) -> Result<T, E> {
-        if let Err(e) = &checked {
-            self.finish(refusal(e));
-        }
-        checked
     }
 }
 
 impl Drop for AuthLine<'_> {
     fn drop(&mut self) {
-        let aborted = AuthResult::Aborted(self.abort_reason);
-        match self.request.take() {
-            Some(held) => self.attempt.log_request(
-                held.decision.unwrap_or(aborted),
-                held.fields.as_ref(),
-                held.summary.as_ref(),
-            ),
-            None => self.finish(aborted),
-        }
+        self.finish(AuthResult::Aborted(self.abort_reason));
     }
-}
-
-/// A refusal logged inside a [`refusal_scope`], waiting for the scope to
-/// learn the request's route and final status.
-struct HeldRefusal {
-    method: AuthMethod,
-    route: Option<String>,
-    pubkey: Option<PublicKey>,
-    pubkey_verified: bool,
-    result: AuthResult,
-    status: u16,
-}
-
-thread_local! {
-    /// `Some` while a [`refusal_scope`] runs on this thread.
-    static REFUSAL_SCOPE: std::cell::RefCell<Option<Option<HeldRefusal>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Run `admit`, an HTTP admission whose verifiers log their refusal before
-/// the route and the final status are known (Enforce mode can remap a
-/// proof's 401 to 403). A refusal logged inside is held and written once
-/// when `admit` returns, carrying `route` and, on `Err`, the response's
-/// actual status.
-#[allow(clippy::result_large_err)] // the admission's own error type
-pub(crate) fn refusal_scope<T>(
-    route: &str,
-    admit: impl FnOnce() -> Result<T, axum::response::Response>,
-) -> Result<T, axum::response::Response> {
-    let outer = REFUSAL_SCOPE.with(|s| s.borrow_mut().replace(None));
-    let result = admit();
-    let held = REFUSAL_SCOPE.with(|s| std::mem::replace(&mut *s.borrow_mut(), outer));
-    if let Some(Some(held)) = held {
-        let status = result
-            .as_ref()
-            .err()
-            .map_or(held.status, |r| r.status().as_u16());
-        let route = held.route.as_deref().unwrap_or(route);
-        AuthAttempt::http(held.method, route, held.pubkey, held.pubkey_verified).log_request(
-            held.result,
-            Some(&RequestFields::status(status)),
-            None,
-        );
-    }
-    result
 }
 
 /// A fixed code for a rejected proof. `Nip98Invalid` and `Internal` carry
@@ -812,19 +637,6 @@ impl AuthAttempt<'_> {
         }
     }
 
-    /// An enterprise-assertion admission check. It runs before a community
-    /// id is bound, so the line carries none.
-    pub(crate) fn nip_fi(pubkey: Option<PublicKey>, pubkey_verified: bool) -> Self {
-        Self {
-            method: AuthMethod::NipFi,
-            community: None,
-            conn_id: None,
-            route: None,
-            pubkey,
-            pubkey_verified,
-        }
-    }
-
     /// An HTTP signed-request attempt on `route` (a URL path, never a query).
     pub(crate) fn http<'r>(
         method: AuthMethod,
@@ -836,7 +648,7 @@ impl AuthAttempt<'_> {
             method,
             community: None,
             conn_id: None,
-            route: Some(url_path(route)),
+            route: Some(route),
             pubkey,
             pubkey_verified,
         }
@@ -879,28 +691,6 @@ impl AuthAttempt<'_> {
         }
     }
 
-    /// Log a refusal that ends the request with `status`. Inside a
-    /// [`refusal_scope`] the line is held so the scope can stamp the route
-    /// and the status actually sent.
-    pub(crate) fn log_refusal(&self, result: AuthResult, status: u16) {
-        let held = REFUSAL_SCOPE.with(|s| {
-            let mut scope = s.borrow_mut();
-            let slot = scope.as_mut()?;
-            slot.get_or_insert(HeldRefusal {
-                method: self.method,
-                route: self.route.map(str::to_owned),
-                pubkey: self.pubkey,
-                pubkey_verified: self.pubkey_verified,
-                result,
-                status,
-            });
-            Some(())
-        });
-        if held.is_none() {
-            self.log_request(result, Some(&RequestFields::status(status)), None);
-        }
-    }
-
     pub(crate) fn log(&self, result: AuthResult) {
         crate::connection::note_auth_line_written();
         let (level, outcome, reason) = result.parts();
@@ -916,72 +706,6 @@ impl AuthAttempt<'_> {
             pubkey_verified = pubkey.is_some().then_some(self.pubkey_verified),
             outcome,
             reason,
-            "access"
-        );
-    }
-
-    /// The single line of an HTTP request: its auth decision and, once
-    /// admitted, what the request did. An admitted request that never
-    /// completed (cancelled, or a route that forgot) logs
-    /// `request=aborted` and no status. WARN on a refusal, an error status,
-    /// or an aborted request.
-    fn log_request(
-        &self,
-        result: AuthResult,
-        req: Option<&RequestFields>,
-        s: Option<&FilterSummary>,
-    ) {
-        let aborted = req.is_none() && matches!(result, AuthResult::Success);
-        let (level, outcome, reason) = result.parts();
-        let req = req.unwrap_or(&RequestFields::EMPTY);
-        // A challenge is git's normal first step, so its 401 stays INFO.
-        let challenged = matches!(result, AuthResult::Challenged);
-        let level = if aborted || (!challenged && req.status.is_some_and(|s| s >= 400)) {
-            Level::WARN
-        } else {
-            level
-        };
-        let pubkey = self.pubkey.as_ref().map(PublicKey::to_hex);
-        emit!(
-            level,
-            event = "auth",
-            method = self.method.as_str(),
-            community = self.community.map(tracing::field::display),
-            route = self.route,
-            pubkey = pubkey.as_deref(),
-            pubkey_verified = pubkey.is_some().then_some(self.pubkey_verified),
-            outcome,
-            reason,
-            request = aborted.then_some("aborted"),
-            status = req.status,
-            result_count = req.result_count,
-            accepted = req.accepted,
-            kind = req.kind,
-            event_id = req.event_id.as_deref(),
-            category = req.category,
-            line = req.line,
-            column = req.column,
-            reject_reason = req.reject_reason,
-            invite_id = req.invite_id.map(tracing::field::display),
-            expires_at = req.expires_at,
-            max_uses = req.max_uses,
-            joined = req.joined,
-            feedback_id = req.feedback_id.map(tracing::field::display),
-            attachment_sha256 = req.attachment_sha256.as_deref(),
-            filters = s.map(|s| s.filters),
-            kinds = s.and_then(|s| s.kinds.as_deref()),
-            kind_count = s.map(|s| s.kind_count),
-            channel_ids = s.and_then(|s| s.channel_ids.as_deref()),
-            channel_count = s.map(|s| s.channel_count),
-            authors = s.and_then(|s| s.authors.as_deref()),
-            author_count = s.map(|s| s.author_count),
-            p_tags = s.and_then(|s| s.p_tags.as_deref()),
-            p_count = s.map(|s| s.p_count),
-            ids = s.map(|s| s.ids),
-            since = s.and_then(|s| s.since),
-            until = s.and_then(|s| s.until),
-            limit = s.and_then(|s| s.limit),
-            search = s.map(|s| s.search),
             "access"
         );
     }
@@ -1167,12 +891,333 @@ impl Drop for CloseLine {
     }
 }
 
-/// The path of a request URL, without scheme, host, or query string. The
-/// query is dropped because it can carry client-chosen text.
-pub(crate) fn url_path(url: &str) -> &str {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let path = after_scheme.find('/').map_or("/", |i| &after_scheme[i..]);
-    path.split(['?', '#']).next().unwrap_or(path)
+/// The `event` value of every HTTP request line.
+pub(crate) const HTTP_EVENT: &str = "http";
+
+/// The `route` of a logged request that matched no route.
+const UNMATCHED_ROUTE: &str = "<unmatched>";
+
+/// Matched routes that never get a line: public documents and probes.
+/// `/` is listed only for requests that are not WebSocket upgrades.
+const EXCLUDED_ROUTES: [&str; 5] = [
+    "/info",
+    "/.well-known/nostr.json",
+    "/health",
+    "/_liveness",
+    "/_readiness",
+];
+
+/// What one HTTP request proved and what was decided about it, written by
+/// handlers through [`AccessSlot`] and logged once by [`http_access_log`].
+#[derive(Default)]
+struct AccessNote {
+    method: Option<AuthMethod>,
+    community: Option<CommunityId>,
+    pubkey: Option<PublicKey>,
+    pubkey_verified: bool,
+    decision: Option<AuthResult>,
+    summary: Option<FilterSummary>,
+    detail: Option<Detail>,
+}
+
+/// What a route did, beyond its auth decision. Each identifier lives only in
+/// the variant of the route that logs it; invite codes, tokens and Blossom
+/// hashes have no field.
+#[derive(Debug)]
+pub(crate) enum Detail {
+    /// An HTTP bridge read or write.
+    Bridge(BridgeDetail),
+    /// A minted invite: its id, expiry, and use limit (absent: unlimited).
+    InviteMinted {
+        invite_id: Uuid,
+        expires_at: i64,
+        max_uses: Option<i32>,
+    },
+    /// An invite claim: whether it added the member (`false`: already one).
+    InviteClaimed { joined: bool },
+    /// An admin feedback attachment read.
+    Attachment {
+        feedback_id: Uuid,
+        attachment_sha256: String,
+    },
+}
+
+/// What a bridge request read or wrote.
+#[derive(Debug, Default)]
+pub(crate) struct BridgeDetail {
+    pub(crate) result_count: Option<u64>,
+    pub(crate) accepted: Option<bool>,
+    pub(crate) kind: Option<u32>,
+    /// The id of the event a write stored or rejected.
+    pub(crate) event_id: Option<String>,
+    /// A body that failed to parse: its error category and position.
+    pub(crate) category: Option<&'static str>,
+    pub(crate) line: Option<usize>,
+    pub(crate) column: Option<usize>,
+    /// An ingest rejection's fixed code, never its message.
+    pub(crate) reject_reason: Option<&'static str>,
+}
+
+/// The access note of one HTTP request. [`http_access_log`] puts it in the
+/// request's extensions; handlers take it as an extractor (a detached note
+/// when the layer is absent, as in handler unit tests) and pass `&AccessSlot`
+/// to their helpers. The first decision is final.
+#[derive(Clone, Default)]
+pub struct AccessSlot(Arc<std::sync::Mutex<AccessNote>>);
+
+impl AccessSlot {
+    fn note(&self) -> std::sync::MutexGuard<'_, AccessNote> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The credential presented and the key it claims. A proven key is
+    /// never replaced by a claimed one.
+    pub(crate) fn attempt(&self, method: AuthMethod, pubkey: Option<PublicKey>, verified: bool) {
+        let mut note = self.note();
+        note.method = Some(method);
+        if verified || !note.pubkey_verified {
+            note.pubkey = pubkey.or(note.pubkey);
+            note.pubkey_verified = verified;
+        }
+    }
+
+    /// The credential presented, keeping any key already recorded.
+    pub(crate) fn method(&self, method: AuthMethod) {
+        self.note().method = Some(method);
+    }
+
+    pub(crate) fn in_community(&self, community: CommunityId) {
+        self.note().community = Some(community);
+    }
+
+    /// The note of the request `parts` belongs to.
+    pub(crate) fn of(parts: &axum::http::request::Parts) -> Self {
+        parts.extensions.get::<Self>().cloned().unwrap_or_default()
+    }
+
+    /// Record the decision. A refusal is final; a later refusal replaces an
+    /// earlier admission, never the reverse.
+    pub(crate) fn finish(&self, result: AuthResult) {
+        let mut note = self.note();
+        if matches!(note.decision, None | Some(AuthResult::Success)) {
+            note.decision = Some(result);
+        }
+    }
+
+    /// Pass `checked` through, finishing with `refusal`'s result when it is
+    /// an error.
+    pub(crate) fn gate<T, E>(
+        &self,
+        checked: Result<T, E>,
+        refusal: impl FnOnce(&E) -> AuthResult,
+    ) -> Result<T, E> {
+        if let Err(e) = &checked {
+            self.finish(refusal(e));
+        }
+        checked
+    }
+
+    /// Record the filters the request reads.
+    pub(crate) fn read(&self, filters: &[Filter]) {
+        if tracing::enabled!(target: TARGET, Level::INFO) {
+            self.note().summary = Some(FilterSummary::new(filters));
+        }
+    }
+
+    pub(crate) fn detail(&self, detail: Detail) {
+        self.note().detail = Some(detail);
+    }
+
+    /// Write this note's line as the layer would for `route` answered with
+    /// `status`.
+    #[cfg(test)]
+    pub(crate) fn emit(&self, route: &str, status: u16) {
+        drop(HttpLine {
+            slot: self.clone(),
+            route: Some(route.to_owned()),
+            http_method: axum::http::Method::POST,
+            peer_addr: None,
+            started: std::time::Instant::now(),
+            status: Some(axum::http::StatusCode::from_u16(status).unwrap()),
+        });
+    }
+
+    /// Write this note's line as the layer would for a `route` request
+    /// dropped before its response was ready.
+    #[cfg(test)]
+    pub(crate) fn abandon(&self, route: &str) {
+        drop(HttpLine {
+            slot: self.clone(),
+            route: Some(route.to_owned()),
+            http_method: axum::http::Method::GET,
+            peer_addr: None,
+            started: std::time::Instant::now(),
+            status: None,
+        });
+    }
+}
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for AccessSlot {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self::of(parts))
+    }
+}
+
+/// Middleware: one access line per HTTP request, written when the response
+/// is ready, or as `request=aborted` if the request is dropped first. Public
+/// documents, probes, SPA pages and static files are skipped; a request
+/// that matched no route is logged only at status 400 or above.
+pub(crate) async fn http_access_log(
+    axum::extract::State(state): axum::extract::State<Arc<crate::state::AppState>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let route = match req.extensions().get::<axum::extract::MatchedPath>() {
+        Some(m) if excluded_route(m.as_str(), &req) => return next.run(req).await,
+        Some(m) => Some(m.as_str().to_owned()),
+        None if crate::router::is_document_request(&state, &req) => return next.run(req).await,
+        None => None,
+    };
+    let slot = AccessSlot::default();
+    req.extensions_mut().insert(slot.clone());
+    let mut line = HttpLine {
+        slot,
+        route,
+        http_method: req.method().clone(),
+        peer_addr: req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|c| c.0),
+        started: std::time::Instant::now(),
+        status: None,
+    };
+    let response = next.run(req).await;
+    line.status = Some(response.status());
+    response
+}
+
+/// Whether a matched route is never logged.
+fn excluded_route(route: &str, req: &axum::extract::Request) -> bool {
+    let upgrade = req.headers().contains_key(axum::http::header::UPGRADE)
+        || req.method() == axum::http::Method::CONNECT;
+    EXCLUDED_ROUTES.contains(&route) || (route == "/" && !upgrade)
+}
+
+/// A request's pending line, written on drop.
+struct HttpLine {
+    slot: AccessSlot,
+    /// The matched template; `None` for a request that matched no route.
+    route: Option<String>,
+    http_method: axum::http::Method,
+    peer_addr: Option<SocketAddr>,
+    started: std::time::Instant,
+    /// `None` until the response is ready.
+    status: Option<axum::http::StatusCode>,
+}
+
+impl Drop for HttpLine {
+    fn drop(&mut self) {
+        let status = self.status.map(|s| s.as_u16());
+        let skip = match (&self.route, status) {
+            // A successful upgrade: the connection's own lines cover it.
+            (_, Some(101)) => true,
+            (None, Some(s)) => s < 400,
+            (None, None) => true,
+            (Some(_), _) => false,
+        };
+        if skip {
+            return;
+        }
+        let note = self.slot.note();
+        let aborted = status.is_none();
+        let (level, outcome, reason) = note.decision.map_or((Level::INFO, None, None), |d| {
+            let (level, outcome, reason) = d.parts();
+            (level, Some(outcome), reason)
+        });
+        // A challenge is git's normal first step, so its 401 stays INFO.
+        let challenged = matches!(note.decision, Some(AuthResult::Challenged));
+        let level = if aborted || (!challenged && status.is_some_and(|s| s >= 400)) {
+            Level::WARN
+        } else {
+            level
+        };
+        let pubkey = note.pubkey.as_ref().map(PublicKey::to_hex);
+        let s = note.summary.as_ref();
+        let bridge = match &note.detail {
+            Some(Detail::Bridge(b)) => Some(b),
+            _ => None,
+        };
+        let (invite_id, expires_at, max_uses) = match &note.detail {
+            Some(Detail::InviteMinted {
+                invite_id,
+                expires_at,
+                max_uses,
+            }) => (Some(invite_id), Some(*expires_at), *max_uses),
+            _ => (None, None, None),
+        };
+        let (feedback_id, attachment_sha256) = match &note.detail {
+            Some(Detail::Attachment {
+                feedback_id,
+                attachment_sha256,
+            }) => (Some(feedback_id), Some(attachment_sha256.as_str())),
+            _ => (None, None),
+        };
+        let joined = match &note.detail {
+            Some(Detail::InviteClaimed { joined }) => Some(*joined),
+            _ => None,
+        };
+        emit!(
+            level,
+            event = HTTP_EVENT,
+            route = self.route.as_deref().unwrap_or(UNMATCHED_ROUTE),
+            http_method = %self.http_method,
+            peer_addr = self.peer_addr.map(tracing::field::display),
+            method = note.method.map(AuthMethod::as_str),
+            community = note.community.map(tracing::field::display),
+            pubkey = pubkey.as_deref(),
+            pubkey_verified = pubkey.is_some().then_some(note.pubkey_verified),
+            outcome = outcome.unwrap_or("undecided"),
+            reason,
+            request = aborted.then_some("aborted"),
+            status,
+            time_to_response_ms =
+                u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            result_count = bridge.and_then(|b| b.result_count),
+            accepted = bridge.and_then(|b| b.accepted),
+            kind = bridge.and_then(|b| b.kind),
+            event_id = bridge.and_then(|b| b.event_id.as_deref()),
+            category = bridge.and_then(|b| b.category),
+            line = bridge.and_then(|b| b.line),
+            column = bridge.and_then(|b| b.column),
+            reject_reason = bridge.and_then(|b| b.reject_reason),
+            invite_id = invite_id.map(tracing::field::display),
+            expires_at,
+            max_uses,
+            joined,
+            feedback_id = feedback_id.map(tracing::field::display),
+            attachment_sha256,
+            filters = s.map(|s| s.filters),
+            kinds = s.and_then(|s| s.kinds.as_deref()),
+            kind_count = s.map(|s| s.kind_count),
+            channel_ids = s.and_then(|s| s.channel_ids.as_deref()),
+            channel_count = s.map(|s| s.channel_count),
+            authors = s.and_then(|s| s.authors.as_deref()),
+            author_count = s.map(|s| s.author_count),
+            p_tags = s.and_then(|s| s.p_tags.as_deref()),
+            p_count = s.map(|s| s.p_count),
+            ids = s.map(|s| s.ids),
+            since = s.and_then(|s| s.since),
+            until = s.and_then(|s| s.until),
+            limit = s.and_then(|s| s.limit),
+            search = s.map(|s| s.search),
+            "access"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1259,21 +1304,15 @@ pub(crate) mod tests {
         }
     }
 
-    /// Assert `out` holds exactly one auth line, the `aborted` line of a
-    /// request by `pubkey` dropped before its decision, and return it.
-    pub(crate) fn assert_one_aborted_auth_line(
-        out: &Captured,
-        pubkey: &PublicKey,
-    ) -> serde_json::Value {
-        let lines: Vec<_> = out
-            .lines()
-            .into_iter()
-            .filter(|l| l["event"] == "auth")
-            .collect();
-        assert_eq!(lines.len(), 1, "exactly one auth line: {lines:?}");
+    /// The one line of a request dropped mid-flight: aborted at WARN, with
+    /// the proven caller it had recorded.
+    pub(crate) fn assert_one_aborted_line(out: &Captured, pubkey: &PublicKey) -> serde_json::Value {
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "exactly one access line: {lines:?}");
         let line = lines[0].clone();
-        assert_eq!(line["outcome"], "aborted", "{line}");
-        assert_eq!(line["reason"], "request_ended", "{line}");
+        assert_eq!(line["event"], HTTP_EVENT, "{line}");
+        assert_eq!(line["request"], "aborted", "{line}");
+        assert_eq!(line["level"], "WARN", "{line}");
         assert_eq!(line["pubkey"], pubkey.to_hex(), "{line}");
         assert_eq!(line["pubkey_verified"], true, "{line}");
         line
@@ -1289,21 +1328,16 @@ pub(crate) mod tests {
         nostr::Keys::generate().public_key().to_hex()
     }
 
-    /// A request line admitted but never completed (its future dropped
-    /// mid-request, or a route that forgot `complete`) keeps its login and
-    /// says the request aborted, with no status.
+    /// A request dropped before its response is ready keeps its login and
+    /// says the request aborted, at WARN, with no status.
     #[test]
     fn admitted_request_never_completed_logs_aborted() {
         let key = nostr::Keys::generate().public_key();
         let (_, out) = capture(|| {
-            let mut line = AuthLine::new(AuthAttempt::http(
-                AuthMethod::Nip98,
-                "/query",
-                Some(key),
-                true,
-            ))
-            .for_request();
-            line.finish(AuthResult::Success);
+            let slot = AccessSlot::default();
+            slot.attempt(AuthMethod::Nip98, Some(key), true);
+            slot.finish(AuthResult::Success);
+            slot.abandon("/query");
         });
         let lines = out.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
@@ -1319,15 +1353,15 @@ pub(crate) mod tests {
     #[test]
     fn admitted_request_completed_logs_no_abort() {
         let (_, out) = capture(|| {
-            let mut line =
-                AuthLine::new(AuthAttempt::http(AuthMethod::Nip98, "/query", None, false))
-                    .for_request();
-            line.finish(AuthResult::Success);
-            line.complete(RequestFields::status(200));
+            let slot = AccessSlot::default();
+            slot.attempt(AuthMethod::Nip98, None, false);
+            slot.finish(AuthResult::Success);
+            slot.emit("/query", 200);
         });
         let line = &out.lines()[0];
         assert!(line.get("request").is_none(), "{line}");
         assert_eq!(line["status"], 200, "{line}");
+        assert_eq!(line["level"], "INFO", "{line}");
     }
 
     #[test]
@@ -1550,10 +1584,159 @@ pub(crate) mod tests {
         assert_eq!(outcomes, ["denied", "aborted"]);
     }
 
+    /// Lines the layer writes for `req` through a router with one protected
+    /// template, the excluded documents, and a fallback answering `fallback`.
+    async fn layer_lines(
+        state: Arc<crate::state::AppState>,
+        fallback: axum::http::StatusCode,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> Vec<serde_json::Value> {
+        use axum::routing::get;
+        use tower::ServiceExt as _;
+        let ok = || async { "ok" };
+        let router = axum::Router::new()
+            .route("/x/{id}", get(ok))
+            .route("/", get(ok))
+            .route("/info", get(ok))
+            .route("/health", get(ok))
+            .route("/.well-known/nostr.json", get(ok))
+            .fallback(move || async move { fallback })
+            .layer(axum::middleware::from_fn_with_state(state, http_access_log));
+        let (guard, out) = capture_scoped();
+        router.oneshot(req).await.expect("router oneshot");
+        drop(guard);
+        out.lines()
+    }
+
+    fn get_req(path: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::get(path)
+            .header("host", "relay.test")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    /// A matched route no handler annotated still gets a line: its template,
+    /// no identity, and an undecided outcome.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unannotated_matched_route_logs_an_empty_note() {
+        let state = crate::state::tests::test_state().await;
+        let lines = layer_lines(
+            state,
+            axum::http::StatusCode::NOT_FOUND,
+            get_req("/x/secret-id"),
+        )
+        .await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert_eq!(line["event"], HTTP_EVENT, "{line}");
+        assert_eq!(line["route"], "/x/{id}", "{line}");
+        assert_eq!(line["outcome"], "undecided", "{line}");
+        assert_eq!(line["status"], 200, "{line}");
+        assert!(line.get("pubkey").is_none(), "{line}");
+        assert!(line["time_to_response_ms"].is_u64(), "{line}");
+        assert!(!line.to_string().contains("secret-id"), "{line}");
+    }
+
+    /// Public documents and probes never get a line.
+    #[tokio::test(flavor = "current_thread")]
+    async fn excluded_routes_log_nothing() {
+        let state = crate::state::tests::test_state().await;
+        for path in ["/", "/info", "/health", "/.well-known/nostr.json"] {
+            let lines = layer_lines(
+                state.clone(),
+                axum::http::StatusCode::NOT_FOUND,
+                get_req(path),
+            )
+            .await;
+            assert!(lines.is_empty(), "{path}: {lines:?}");
+        }
+    }
+
+    /// An unmatched request is logged at 400 and above as `<unmatched>`,
+    /// never with its path, and skipped below 400.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unmatched_request_logs_only_an_error_without_its_path() {
+        let state = crate::state::tests::test_state().await;
+        let lines = layer_lines(
+            state.clone(),
+            axum::http::StatusCode::NOT_FOUND,
+            get_req("/invite/INVITECODE123/extra?token=TOKEN456"),
+        )
+        .await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["route"], UNMATCHED_ROUTE, "{}", lines[0]);
+        assert_eq!(lines[0]["status"], 404, "{}", lines[0]);
+        let raw = lines[0].to_string();
+        assert!(
+            !raw.contains("INVITECODE123") && !raw.contains("TOKEN456"),
+            "{raw}"
+        );
+
+        let lines = layer_lines(state, axum::http::StatusCode::OK, get_req("/anything")).await;
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    /// With a web bundle configured, SPA documents are skipped even when
+    /// the fallback answers an error, ahead of the unmatched rule.
+    #[tokio::test(flavor = "current_thread")]
+    async fn spa_document_logs_nothing_at_any_status() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.web_dir = Some(std::env::temp_dir());
+        state.config = Arc::new(config);
+        let state = Arc::new(state);
+        for status in [
+            axum::http::StatusCode::OK,
+            axum::http::StatusCode::NOT_FOUND,
+        ] {
+            let lines = layer_lines(state.clone(), status, get_req("/channels/general")).await;
+            assert!(lines.is_empty(), "{status}: {lines:?}");
+        }
+    }
+
+    /// A request dropped before its response is ready is logged once as
+    /// `request=aborted` by the layer itself.
+    #[tokio::test(flavor = "current_thread")]
+    async fn layer_logs_a_dropped_request_as_aborted() {
+        use axum::routing::get;
+        use tower::ServiceExt as _;
+        let state = crate::state::tests::test_state().await;
+        let router = axum::Router::new()
+            .route("/x/{id}", get(std::future::pending::<&'static str>))
+            .layer(axum::middleware::from_fn_with_state(state, http_access_log));
+        let (guard, out) = capture_scoped();
+        let call = router.oneshot(get_req("/x/1"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), call)
+                .await
+                .is_err()
+        );
+        drop(guard);
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["request"], "aborted", "{}", lines[0]);
+        assert_eq!(lines[0]["route"], "/x/{id}", "{}", lines[0]);
+        assert!(lines[0].get("status").is_none(), "{}", lines[0]);
+    }
+
+    /// A refusal is final: a later admission cannot replace it, while a
+    /// later refusal replaces an admission.
     #[test]
-    fn url_path_drops_host_and_query() {
-        assert_eq!(url_path("https://relay.example/query?search=hi"), "/query");
-        assert_eq!(url_path("https://relay.example"), "/");
-        assert_eq!(url_path("/events#x"), "/events");
+    fn refusal_is_final_and_overrides_an_admission() {
+        let slot = AccessSlot::default();
+        slot.finish(AuthResult::Denied(AuthReason::Banned));
+        slot.finish(AuthResult::Success);
+        assert_eq!(
+            slot.note().decision,
+            Some(AuthResult::Denied(AuthReason::Banned))
+        );
+
+        let slot = AccessSlot::default();
+        slot.finish(AuthResult::Success);
+        slot.finish(AuthResult::Failed("nip98_replay"));
+        assert_eq!(
+            slot.note().decision,
+            Some(AuthResult::Failed("nip98_replay"))
+        );
     }
 }

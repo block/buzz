@@ -76,21 +76,25 @@ fn parse_request(body: &[u8]) -> Result<Search, (StatusCode, Json<Value>)> {
 /// member. Responds with one page of signed kind:0 events, best match first.
 pub async fn search(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    search_inner(state, headers, body).await.into_response()
+    search_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
 async fn search_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, Response> {
     // Admission first so the denial contract wins over request validation.
     // [FI-TRACE-HTTP-INGRESS]
     let (tenant, pubkey) =
-        bridge::authenticate_member_post(&state, &headers, SEARCH_PATH, &body).await?;
+        bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
     let (query, limit, page) = parse_request(&body).map_err(IntoResponse::into_response)?;
 
     let hits = state
