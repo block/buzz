@@ -4305,7 +4305,15 @@ mod off_mode_precedence_tests {
                     ))
                 }
             }
-            let cases: [(buzz_auth::NipFiMode, &[(&str, &str)], u16, &str, &str); 3] = [
+            /// Mode, request headers, then the expected status, outcome and level.
+            type Case = (
+                buzz_auth::NipFiMode,
+                &'static [(&'static str, &'static str)],
+                u16,
+                &'static str,
+                &'static str,
+            );
+            let cases: [Case; 3] = [
                 (
                     buzz_auth::NipFiMode::Enforce,
                     &[],
