@@ -107,15 +107,32 @@ async fn publish_presence(
     keys: &nostr::Keys,
     status: &str,
 ) -> Result<(), relay::RelayError> {
+    publisher.publish_event(presence_event(keys, status)?).await
+}
+
+/// Publish `offline` and wait for the relay's `OK` before the caller closes
+/// the socket. The relay authenticates each EVENT when its handler runs, so a
+/// close sent right behind an unacknowledged publish revokes the session first
+/// and the relay drops the presence as unauthenticated — clearing Redis on
+/// disconnect without any live fan-out, which leaves watchers showing the
+/// agent online until they re-query.
+async fn publish_offline_presence(
+    publisher: &relay::RelayEventPublisher,
+    keys: &nostr::Keys,
+) -> Result<relay::PublishAck, relay::RelayError> {
+    publisher
+        .publish_event_acked(presence_event(keys, "offline")?)
+        .await
+}
+
+fn presence_event(keys: &nostr::Keys, status: &str) -> Result<nostr::Event, relay::RelayError> {
     use buzz_core::kind::KIND_PRESENCE_UPDATE;
     use nostr::{EventBuilder, Kind};
 
-    let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+    EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
         .tags([])
         .sign_with_keys(keys)
-        .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
-    publisher.publish_event(event).await?;
-    Ok(())
+        .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))
 }
 
 fn emit_runtime_lifecycle(
@@ -2442,6 +2459,34 @@ fn idle_pool_sleep_due(
 }
 
 #[cfg(test)]
+mod offline_presence_tests {
+    use super::*;
+    use nostr::Keys;
+
+    /// Shutdown closes the socket right after this returns, so it must go
+    /// through the acknowledged publish: a fire-and-forget send would return
+    /// before the relay has processed the event and lose the race to the close.
+    #[tokio::test]
+    async fn offline_presence_waits_for_the_relay_verdict() {
+        let (publisher, mut published_rx) = relay::RelayEventPublisher::test_pair();
+        let keys = Keys::generate();
+
+        let ack = publish_offline_presence(&publisher, &keys)
+            .await
+            .expect("acknowledged publish resolves");
+        assert!(ack.accepted);
+
+        let event = published_rx.recv().await.expect("offline was published");
+        assert_eq!(
+            event.kind.as_u16() as u32,
+            buzz_core::kind::KIND_PRESENCE_UPDATE
+        );
+        assert_eq!(event.content, "offline");
+        assert_eq!(event.pubkey, keys.public_key());
+    }
+}
+
+#[cfg(test)]
 mod inactivity_tests {
     use super::*;
 
@@ -4381,11 +4426,12 @@ async fn run_harness(
     if config.presence_enabled {
         match tokio::time::timeout(
             Duration::from_secs(2),
-            publish_presence(&presence_publisher, &presence_keys, "offline"),
+            publish_offline_presence(&presence_publisher, &presence_keys),
         )
         .await
         {
-            Ok(Ok(_)) => tracing::info!("presence set to offline"),
+            Ok(Ok(ack)) if ack.accepted => tracing::info!("presence set to offline"),
+            Ok(Ok(ack)) => tracing::warn!("relay refused offline presence: {}", ack.message),
             Ok(Err(e)) => tracing::warn!("failed to set offline presence: {e}"),
             Err(_) => tracing::warn!("offline presence timed out"),
         }
