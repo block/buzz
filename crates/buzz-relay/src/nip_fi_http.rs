@@ -63,7 +63,8 @@ use std::fmt;
 
 use crate::nip_fi_core::ResolvedCommunity;
 use crate::nip_fi_core::{
-    asserted_key_matches, evaluate_attached_assertion, http_denial, AssertionRejection, Communities,
+    asserted_key_matches, assertion_denied, evaluate_attached_assertion, http_denial,
+    AssertionRejection, Communities,
 };
 use buzz_auth::CommunityBinding;
 
@@ -489,9 +490,10 @@ where
         return Err((Stage::Pairing, DenialClass::AuthorizationDenied));
     }
 
-    // Step 7: deny-map check — (iss, pubkey) must not be in an active deny
-    // window.  Private-state denial.  [FI-INV-14] [NIP-FI.md:624-627]
-    if deny_map.is_denied(assertion.identity().issuer(), &proof.pubkey, Utc::now()) {
+    // Step 7: deny-map check — (iss, pubkey) and, for an agent assertion,
+    // (iss, owner) must not be in an active deny window.  Private-state
+    // denial.  [FI-INV-14] [NIP-FI.md:624-627]
+    if assertion_denied(deny_map, &assertion, Utc::now()) {
         return Err((Stage::DenySet, DenialClass::AuthorizationDenied));
     }
 
@@ -1500,6 +1502,66 @@ mod tests {
             admission.assertion().and_then(|a| a.asserted_key()),
             Some(proven)
         );
+    }
+
+    // Pins: step 7 reads the owner of an agent assertion. With the owner's
+    // deny entry live, enforce denies the agent with the deny-map row and
+    // shadow records the would-deny; without it, enforce admits and the
+    // admission carries the owner. Mutation: dropping the owner arm of
+    // `assertion_denied` admits the agent and records an admit.
+    #[test]
+    fn owner_deny_entry_denies_agent_assertion() {
+        use buzz_auth::{IssuerCapacity, NipFiDenyMap, VerifiedAssertion};
+        struct AgentVerifier(VerifiedAssertion);
+        impl VerifyAssertion for AgentVerifier {
+            fn verify_assertion(
+                &self,
+                _token: &str,
+                _community: &buzz_auth::CommunityBinding,
+            ) -> Result<VerifiedAssertion, buzz_auth::VerifierError> {
+                Ok(self.0.clone())
+            }
+        }
+        let (agent, owner) = (any_pubkey(), any_pubkey());
+        let verifier = AgentVerifier(crate::nip_fi_shadow_session::tests::owned_assertion(
+            agent, owner,
+        ));
+        let map = NipFiDenyMap::new(
+            8,
+            vec![IssuerCapacity {
+                issuer: "test-issuer".to_owned(),
+                capacity: 8,
+            }],
+        );
+        let headers = bearer_headers("Bearer a.b.c");
+        let admit = |mode, map: &NipFiDenyMap| {
+            admit_nip_fi_http(
+                &headers,
+                || Ok(Nip98Proof::new(agent, ())),
+                &communities(),
+                Some(&verifier as &dyn VerifyAssertion),
+                mode,
+                map,
+            )
+            .now_or_never()
+            .expect("env resolution never waits")
+        };
+
+        let admission = match admit(NipFiMode::Enforce, &map) {
+            Ok(admission) => admission,
+            Err(resp) => panic!("a clean owner admits its agent, got {}", resp.status()),
+        };
+        assert_eq!(admission.assertion().and_then(|a| a.owner()), Some(owner));
+
+        let now = Utc::now();
+        map.merge_cross_pod_deny("test-issuer", &owner, now + chrono::Duration::hours(1), now);
+        let (status, body) = denial_parts(admit(NipFiMode::Enforce, &map));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, b"authorization denied\n");
+        let records = crate::nip_fi_shadow_session::tests::shadow_records(async {
+            assert!(admit(NipFiMode::Shadow, &map).is_ok(), "shadow admits");
+        });
+        assert_eq!(records, ["deny_set/denied"]);
     }
 
     // Pins: NIP-98 proof runs before assertion extraction. A failed NIP-98

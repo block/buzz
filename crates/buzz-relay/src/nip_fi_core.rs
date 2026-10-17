@@ -182,6 +182,51 @@ pub(crate) fn asserted_key_matches(
     assertion.asserted_key() == Some(proven_pubkey)
 }
 
+/// Whether the deny set holds `(iss, k)` or, for an agent assertion,
+/// `(iss, owner)` (NIP-FI.md, admission step 7).
+pub(crate) fn assertion_denied(
+    deny_map: &impl crate::nip_fi_http::HttpDenyMap,
+    assertion: &VerifiedAssertion,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let issuer = assertion.identity().issuer();
+    [assertion.asserted_key(), assertion.owner()]
+        .into_iter()
+        .flatten()
+        .any(|key| deny_map.is_denied(issuer, &key, now))
+}
+
+/// The NIP-FI facts a live session is registered under: its admitting issuer
+/// and, for an agent assertion, the verified owner.
+#[derive(Clone)]
+pub(crate) struct NipFiSession {
+    issuer: String,
+    owner: Option<[u8; 32]>,
+}
+
+impl NipFiSession {
+    pub(crate) fn new(issuer: impl Into<String>, owner: Option<[u8; 32]>) -> Self {
+        Self {
+            issuer: issuer.into(),
+            owner,
+        }
+    }
+
+    pub(crate) fn from_assertion(assertion: &VerifiedAssertion) -> Self {
+        Self::new(
+            assertion.identity().issuer(),
+            assertion.owner().map(|owner| owner.to_bytes()),
+        )
+    }
+
+    /// An admin disconnect of `(issuer, target)` reaches this session when
+    /// its proven key or its recorded owner is `target`.
+    pub(crate) fn matches(&self, issuer: &str, proven: &[u8], target: &[u8]) -> bool {
+        self.issuer == issuer
+            && (proven == target || self.owner.is_some_and(|owner| owner[..] == *target))
+    }
+}
+
 // ── Transport extraction ──────────────────────────────────────────────────────
 
 /// Extract the single `Bearer <token>` from the `Nostr-Federated-Identity`
@@ -317,6 +362,71 @@ pub(crate) mod tests {
                 .resolve(super::test_support::TEST_HOST)
                 .expect("mapped"),
         )
+    }
+
+    /// An agent assertion for `agent` owned by `owner`, from `test-issuer`.
+    fn agent_assertion(agent: nostr::PublicKey, owner: nostr::PublicKey) -> VerifiedAssertion {
+        VerifiedAssertion::for_test(
+            Some(agent),
+            vec![chrono::Utc::now() + chrono::Duration::seconds(300)],
+        )
+        .with_owner_for_test(owner)
+    }
+
+    fn deny_map_denying(key: &nostr::PublicKey) -> buzz_auth::NipFiDenyMap {
+        let map = buzz_auth::NipFiDenyMap::new(
+            16,
+            vec![buzz_auth::IssuerCapacity {
+                issuer: "test-issuer".to_owned(),
+                capacity: 16,
+            }],
+        );
+        let now = chrono::Utc::now();
+        map.merge_cross_pod_deny("test-issuer", key, now + chrono::Duration::seconds(60), now);
+        map
+    }
+
+    #[test]
+    fn deny_entry_for_the_owner_denies_its_agent_assertion() {
+        let agent = nostr::Keys::generate().public_key();
+        let owner = nostr::Keys::generate().public_key();
+        let unrelated = nostr::Keys::generate().public_key();
+        let assertion = agent_assertion(agent, owner);
+        let now = chrono::Utc::now();
+        assert!(assertion_denied(&deny_map_denying(&owner), &assertion, now));
+        assert!(assertion_denied(&deny_map_denying(&agent), &assertion, now));
+        assert!(!assertion_denied(
+            &deny_map_denying(&unrelated),
+            &assertion,
+            now
+        ));
+    }
+
+    #[test]
+    fn owner_deny_entry_does_not_reach_an_ownerless_assertion() {
+        let key = nostr::Keys::generate().public_key();
+        let other = nostr::Keys::generate().public_key();
+        let assertion = VerifiedAssertion::for_test(
+            Some(key),
+            vec![chrono::Utc::now() + chrono::Duration::seconds(300)],
+        );
+        assert!(!assertion_denied(
+            &deny_map_denying(&other),
+            &assertion,
+            chrono::Utc::now()
+        ));
+    }
+
+    #[test]
+    fn session_matches_disconnect_of_its_key_or_owner_under_its_issuer() {
+        let (agent, owner, other) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let session = NipFiSession::new("test-issuer", Some(owner));
+        assert!(session.matches("test-issuer", &agent, &agent));
+        assert!(session.matches("test-issuer", &agent, &owner));
+        assert!(!session.matches("test-issuer", &agent, &other));
+        assert!(!session.matches("other-issuer", &agent, &owner));
+        let human = NipFiSession::new("test-issuer", None);
+        assert!(!human.matches("test-issuer", &agent, &owner));
     }
 
     /// Verifier returning a fixed result and counting calls.

@@ -706,12 +706,9 @@ async fn nip11_or_ws_handler(
     // `asserted_key` is `None` → no key to check → pass through.
     // [FI-TRACE-DENY-SET]
     if let Some(assertion) = &nip_fi_assertion {
-        if let Some(key) = assertion.asserted_key() {
-            if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-                if deny_map.is_denied(assertion.identity().issuer(), &key, chrono::Utc::now()) {
-                    return http_denial(buzz_auth::DenialClass::AuthorizationDenied)
-                        .into_response();
-                }
+        if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+                return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
             }
         }
     }
@@ -2171,6 +2168,7 @@ mod tests {
             registry: IssuerRegistry::new(),
             jwks_configs: vec![],
             max_connection_lifetime_secs: 3600,
+            agent_assertions: false,
             command_configs: Vec::new(),
             communities: crate::nip_fi_core::test_support::any_host("https://relay.example"),
         };
@@ -3960,6 +3958,7 @@ mod tests {
             command_configs: vec![],
             communities: crate::nip_fi_core::test_support::any_host(DENY_TEST_AUD),
             max_connection_lifetime_secs: 3600,
+            agent_assertions: false,
         };
 
         // 100ms acquire timeout: the port-1 stub must fail fast instead of
