@@ -611,37 +611,44 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // seeding an empty-host community that no request can ever resolve to.
     let mut step = StepTimer::start(StartupStep::MembershipBootstrap);
     let deployment_community = {
+        use buzz_relay::handlers::community_provisioning::{
+            ensure_deployment_community, verify_reserved_hosts_unbound,
+        };
+        if let Some(policy) = config.nip_fi_provision_binding.as_ref() {
+            verify_reserved_hosts_unbound(&db, policy).await?;
+        }
         let host = buzz_relay::tenant::relay_url_authority(&config.relay_url);
-        if host.is_empty() {
-            if config.require_relay_membership {
-                return Err(anyhow::anyhow!(
-                    "Cannot derive a community host from BUZZ_RELAY_URL ({:?}); a resolvable host is required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true",
-                    config.relay_url
-                ));
+        if host.is_empty() && config.require_relay_membership {
+            return Err(anyhow::anyhow!(
+                "Cannot derive a community host from BUZZ_RELAY_URL ({:?}); a resolvable host is required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true",
+                config.relay_url
+            ));
+        }
+        match ensure_deployment_community(&db, config.nip_fi_provision_binding.as_ref(), &host)
+            .await
+        {
+            Ok(Some(record)) => {
+                info!(host = %record.host, community = %record.id, "Deployment community ensured");
+                Some(record.id)
             }
-            step.degrade();
-            error!(
-                relay_url = %config.relay_url,
-                "Could not derive a community host from relay_url; skipping membership backfill/bootstrap (non-fatal, membership not required)"
-            );
-            None
-        } else {
-            match db.ensure_configured_community_for_bootstrap(&host).await {
-                Ok(record) => {
-                    info!(host = %record.host, community = %record.id, "Deployment community ensured");
-                    Some(record.id)
+            Ok(None) => {
+                step.degrade();
+                error!(
+                    relay_url = %config.relay_url,
+                    "Could not derive a community host from relay_url; skipping membership backfill/bootstrap (non-fatal, membership not required)"
+                );
+                None
+            }
+            Err(e) => {
+                if config.require_relay_membership {
+                    error!("Fatal: failed to ensure deployment community with membership enforcement enabled: {e}");
+                    return Err(anyhow::anyhow!(
+                        "Failed to ensure deployment community (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
+                    ));
                 }
-                Err(e) => {
-                    if config.require_relay_membership {
-                        error!("Fatal: failed to ensure deployment community with membership enforcement enabled: {e}");
-                        return Err(anyhow::anyhow!(
-                            "Failed to ensure deployment community (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
-                        ));
-                    }
-                    step.degrade();
-                    error!("Failed to ensure deployment community (non-fatal, membership not required): {e}");
-                    None
-                }
+                step.degrade();
+                error!("Failed to ensure deployment community (non-fatal, membership not required): {e}");
+                None
             }
         }
     };

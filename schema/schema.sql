@@ -106,6 +106,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/moderation_actions.sql
 \i tables/public/moderation_reports.sql
 \i tables/public/community_bans.sql
+\i tables/public/community_nip_fi_issuers.sql
 \i tables/public/_operator_global_tables.sql
 \i tables/public/git_repo_names.sql
 \i tables/public/parameterized_event_watermarks.sql
@@ -153,6 +154,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i triggers/audit_log.sql
 \i triggers/channel_members.sql
 \i triggers/community_bans.sql
+\i triggers/community_nip_fi_issuers.sql
 \i triggers/delivery_log.sql
 \i triggers/event_mentions.sql
 \i triggers/git_repo_names.sql

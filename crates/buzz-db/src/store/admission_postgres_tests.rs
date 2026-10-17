@@ -1,55 +1,11 @@
 //! Live writer-admission regressions. A one-connection pool runs with ordinary
 //! PostgreSQL triggers disabled, so a missing application check is observable.
 
-use crate::{Db, DbConfig, DbError};
+use crate::{Db, DbError};
 use buzz_core::CommunityId;
 use uuid::Uuid;
 
-async fn fixture() -> (Db, [CommunityId; 3]) {
-    let config = DbConfig {
-        database_url: crate::test_support::database_url(),
-        max_connections: 1,
-        min_connections: 1,
-        ..DbConfig::default()
-    };
-    let db = Db::new(&config).await.expect("connect test database");
-    let pool = &db.pool;
-    let mut communities = [CommunityId::from_uuid(Uuid::nil()); 3];
-    for community in &mut communities {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(id)
-            .bind(format!("admission-{id}.example"))
-            .execute(pool)
-            .await
-            .expect("create community");
-        *community = CommunityId::from_uuid(id);
-    }
-    crate::test_support::set_deletion_state(pool, *communities[1].as_uuid(), "quiescing").await;
-    crate::test_support::set_deletion_state(pool, *communities[2].as_uuid(), "fenced").await;
-
-    // One physical session serves every test API call. PostgreSQL's replica
-    // role skips the 32 community-write triggers as well as other ordinary
-    // triggers; the application precheck remains fully active.
-    sqlx::query("SET session_replication_role = replica")
-        .execute(pool)
-        .await
-        .expect("disable ordinary triggers on the test session");
-    let role: String = sqlx::query_scalar("SHOW session_replication_role")
-        .fetch_one(pool)
-        .await
-        .expect("read replication role");
-    assert_eq!(role, "replica");
-    // Witness that the database backstop is truly bypassed: this raw fenced
-    // insert would be rejected with the community-write trigger enabled.
-    sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
-        .bind(communities[2].as_uuid())
-        .bind(vec![0xfe_u8; 32])
-        .execute(pool)
-        .await
-        .expect("raw fenced insert succeeds with triggers disabled");
-    (db, communities)
-}
+use crate::test_support::admission_fixture as fixture;
 
 fn assert_fenced(error: DbError) {
     assert!(
@@ -798,4 +754,553 @@ async fn owner_mutations_report_pending_deletion_when_admission_refuses() {
     );
     assert_eq!(count_relay_members(&db, quiescing).await, 0);
     assert_eq!(count_relay_members(&db, fenced).await, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invite_sweep_admits_active_tenant_and_skips_quiescing_tenant() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let cutoff = chrono::Utc::now();
+    for (index, community) in communities[..2].iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO relay_invites (community_id, token_hash, expires_at, created_by) \
+             VALUES ($1, $2, $3, 'test')",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![index as u8; 32])
+        .bind(cutoff - chrono::Duration::minutes(1))
+        .execute(&db.pool)
+        .await
+        .expect("seed invite");
+    }
+    assert_eq!(
+        super::relay_invite::reap_expired_relay_invites(&db.pool, cutoff)
+            .await
+            .unwrap(),
+        1
+    );
+    for (community, expected) in [(communities[0], 0), (communities[1], 1)] {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM relay_invites WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, expected, "invite state for {community}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_prune_admits_active_tenant_and_skips_quiescing_tenant() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let cutoff = chrono::Utc::now();
+    for community in &communities[..2] {
+        sqlx::query(
+            "INSERT INTO scheduled_workflow_fires \
+             (community_id, workflow_id, scheduled_for, claimed_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(community.as_uuid())
+        .bind(Uuid::new_v4())
+        .bind(cutoff - chrono::Duration::hours(2))
+        .bind(cutoff - chrono::Duration::hours(1))
+        .execute(&db.pool)
+        .await
+        .expect("seed fire");
+    }
+    assert_eq!(
+        super::workflow::prune_scheduled_workflow_fires_before(&db.pool, cutoff)
+            .await
+            .unwrap(),
+        1
+    );
+    for (community, expected) in [(communities[0], 0), (communities[1], 1)] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM scheduled_workflow_fires WHERE community_id = $1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, expected, "fire state for {community}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_reap_admits_active_tenant_and_skips_quiescing_tenant() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    for community in &communities[..2] {
+        sqlx::query(
+            "INSERT INTO channels (community_id, name, created_by, ttl_seconds, ttl_deadline) \
+             VALUES ($1, 'expired', $2, 60, now() - interval '1 minute')",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![1_u8; 32])
+        .execute(&db.pool)
+        .await
+        .expect("seed channel");
+    }
+    let reaped = super::channel::reap_expired_ephemeral_channels(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(reaped[0].community_id, communities[0]);
+    for (community, expected) in [(communities[0], true), (communities[1], false)] {
+        let archived: bool = sqlx::query_scalar(
+            "SELECT archived_at IS NOT NULL FROM channels WHERE community_id = $1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(archived, expected, "archive state for {community}");
+    }
+}
+
+/// Keep every failure-injection object, including the ALWAYS trigger's table,
+/// in this call's shadow schema so a shared-database run cannot leak it.
+async fn fail_tenant_mutations(pool: &sqlx::PgPool, schema: &str, table: &str, id: Uuid) {
+    // Dynamic identifiers come only from our UUID schema and literal table names.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {schema}.{table} (LIKE public.{table} INCLUDING ALL)"
+    )))
+    .execute(pool)
+    .await
+    .expect("create test-local serving table");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE {schema}.fail_tenant (id uuid PRIMARY KEY)"
+    )))
+    .execute(pool)
+    .await
+    .expect("create failure target");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO {schema}.fail_tenant (id) VALUES ($1)"
+    )))
+    .bind(id)
+    .execute(pool)
+    .await
+    .expect("select failing tenant");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {schema}.fail_tenant_mutation() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN \
+           IF EXISTS (SELECT 1 FROM {schema}.fail_tenant \
+                      WHERE id = COALESCE(NEW.community_id, OLD.community_id)) \
+           THEN RAISE EXCEPTION 'tenant mutation failed'; END IF; \
+           IF TG_OP = 'DELETE' THEN RETURN OLD; END IF; RETURN NEW; END $$",
+    )))
+    .execute(pool)
+    .await
+    .expect("create failure trigger function");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER fail_tenant_mutation BEFORE UPDATE OR DELETE ON {schema}.{table} \
+         FOR EACH ROW EXECUTE FUNCTION {schema}.fail_tenant_mutation()",
+    )))
+    .execute(pool)
+    .await
+    .expect("create test-local failure trigger");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.{table} ENABLE ALWAYS TRIGGER fail_tenant_mutation"
+    )))
+    .execute(pool)
+    .await
+    .expect("enable trigger with replica role");
+}
+
+async fn two_active_tenants(db: &Db, first: CommunityId) -> [Uuid; 2] {
+    let extra = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+        .bind(extra)
+        .bind(format!("admission-extra-{extra}.example"))
+        .execute(&db.pool)
+        .await
+        .expect("seed second active tenant");
+    let mut ids = [*first.as_uuid(), extra];
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_reap_returns_committed_rows_after_earlier_tenant_error() {
+    let (db, communities) = fixture().await;
+    let schema = crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let ids = two_active_tenants(&db, communities[0]).await;
+    fail_tenant_mutations(&db.pool, &schema, "channels", ids[0]).await;
+    for id in ids {
+        sqlx::query(
+            "INSERT INTO channels (community_id, name, created_by, ttl_seconds, ttl_deadline) \
+             VALUES ($1, 'expired', $2, 60, now() - interval '1 minute')",
+        )
+        .bind(id)
+        .bind(vec![1_u8; 32])
+        .execute(&db.pool)
+        .await
+        .expect("seed expired channel");
+    }
+    let reaped = super::channel::reap_expired_ephemeral_channels(&db.pool)
+        .await
+        .expect("tenant failure must not stop the fleet sweep");
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(*reaped[0].community_id.as_uuid(), ids[1]);
+    for (id, expected) in [(ids[0], false), (ids[1], true)] {
+        let archived: bool = sqlx::query_scalar(
+            "SELECT archived_at IS NOT NULL FROM channels WHERE community_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read archive state");
+        assert_eq!(archived, expected, "archive state for {id}");
+    }
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM {schema}.fail_tenant"
+    )))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let retried = super::channel::reap_expired_ephemeral_channels(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(*retried[0].community_id.as_uuid(), ids[0]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fleet_sweep_returns_committed_results_when_database_drops_mid_page() {
+    let (db, communities) = fixture().await;
+    let [first, second] = two_active_tenants(&db, communities[0]).await;
+    let candidates = [first, second, Uuid::new_v4()];
+    let pulled = std::cell::Cell::new(0);
+    let pool = db.pool.clone();
+    let committed = crate::sweep_admitted_communities(
+        &db.pool,
+        candidates
+            .iter()
+            .copied()
+            .inspect(|_| pulled.set(pulled.get() + 1)),
+        crate::observability::WriterOperation::Maintenance,
+        "test_sweep",
+        |id, tx| {
+            let pool = pool.clone();
+            async move {
+                tx.commit().await?;
+                pool.close().await;
+                Ok(id)
+            }
+        },
+    )
+    .await;
+    assert_eq!(committed, vec![first], "rows committed before the outage");
+    assert_eq!(
+        pulled.get(),
+        2,
+        "the sweep must stop at the unavailable tenant"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn d_tag_backfill_admits_active_tenant_and_skips_quiescing_tenant() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    for (index, community) in communities[..2].iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             VALUES ($1, $2, $3, to_timestamp(1), 30023, '[[\"d\",\"tag\"]]'::jsonb, '', $4)",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![index as u8; 32])
+        .bind(vec![2_u8; 32])
+        .bind(vec![3_u8; 64])
+        .execute(&db.pool)
+        .await
+        .expect("seed addressable event");
+    }
+    assert_eq!(db.backfill_d_tags().await.unwrap(), 1);
+    let active: Option<String> =
+        sqlx::query_scalar("SELECT d_tag FROM events WHERE community_id = $1")
+            .bind(communities[0].as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let quiescing: Option<String> =
+        sqlx::query_scalar("SELECT d_tag FROM events WHERE community_id = $1")
+            .bind(communities[1].as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(active.as_deref(), Some("tag"));
+    assert_eq!(quiescing, None);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn match_claim_admits_active_tenant_and_skips_quiescing_tenant() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    for (index, community) in communities[..2].iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO push_match_queue (community_id, event_id, next_attempt_at) \
+             VALUES ($1, $2, now() - make_interval(mins => $3))",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![index as u8; 32])
+        .bind(if index == 0 { 1 } else { 2 })
+        .execute(&db.pool)
+        .await
+        .expect("seed match job");
+    }
+    // The production claim is exercised; absent source events are its normal
+    // terminal cleanup case, so it returns None after claiming and pruning.
+    assert!(super::push::claim_due_match_batch(
+        &db.pool,
+        8,
+        chrono::Utc::now() + chrono::Duration::minutes(1)
+    )
+    .await
+    .unwrap()
+    .is_none());
+    for (community, expected) in [(communities[0], 0), (communities[1], 1)] {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_match_queue WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, expected, "match job for {community}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn match_reap_admits_active_tenant_and_skips_quiescing_tenant() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    for (index, community) in communities[..2].iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO push_match_queue (community_id, event_id, attempts) VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![index as u8; 32])
+        .bind(super::push::MAX_MATCH_ATTEMPTS)
+        .execute(&db.pool)
+        .await
+        .expect("seed exhausted match job");
+    }
+    assert_eq!(
+        super::push::reap_exhausted_matches(&db.pool).await.unwrap(),
+        1
+    );
+    for (community, expected) in [(communities[0], 0), (communities[1], 1)] {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_match_queue WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, expected, "exhausted job for {community}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invite_sweep_rechecks_admission_after_candidate_read() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let community = communities[0];
+    let cutoff = chrono::Utc::now();
+    sqlx::query(
+        "INSERT INTO relay_invites (community_id, token_hash, expires_at, created_by) \
+         VALUES ($1, $2, $3, 'test')",
+    )
+    .bind(community.as_uuid())
+    .bind(vec![0_u8; 32])
+    .bind(cutoff - chrono::Duration::minutes(1))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let pool = db.pool.clone();
+    let reaped = crate::test_support::fence_while_sweep_waits(community, async move {
+        super::relay_invite::reap_expired_relay_invites(&pool, cutoff).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(reaped, 0);
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM relay_invites WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "newly fenced tenant's invite must remain");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_reap_rechecks_admission_after_candidate_read() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let community = communities[0];
+    sqlx::query(
+        "INSERT INTO channels (community_id, name, created_by, ttl_seconds, ttl_deadline) \
+         VALUES ($1, 'expired', $2, 60, now() - interval '1 minute')",
+    )
+    .bind(community.as_uuid())
+    .bind(vec![1_u8; 32])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let pool = db.pool.clone();
+    let reaped = crate::test_support::fence_while_sweep_waits(community, async move {
+        super::channel::reap_expired_ephemeral_channels(&pool).await
+    })
+    .await
+    .unwrap();
+    assert!(reaped.is_empty());
+    let archived: bool =
+        sqlx::query_scalar("SELECT archived_at IS NOT NULL FROM channels WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !archived,
+        "newly fenced tenant's channel must remain unarchived"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn match_claim_rechecks_admission_and_continues_after_candidate_read() {
+    let (db, communities) = fixture().await;
+    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+    let ids = two_active_tenants(&db, communities[0]).await;
+    for (index, id) in ids.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO push_match_queue (community_id, event_id, next_attempt_at) \
+             VALUES ($1, $2, now() - make_interval(mins => $3))",
+        )
+        .bind(id)
+        .bind(vec![index as u8; 32])
+        .bind(if index == 0 { 2 } else { 1 })
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let pool = db.pool.clone();
+    // Missing source events take the production claim's terminal cleanup path.
+    crate::test_support::fence_while_sweep_waits(CommunityId::from_uuid(ids[0]), async move {
+        super::push::claim_due_match_batch(
+            &pool,
+            8,
+            chrono::Utc::now() + chrono::Duration::minutes(1),
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    for (id, expected) in [(ids[0], 1), (ids[1], 0)] {
+        let state: Vec<(String, i32)> =
+            sqlx::query_as("SELECT state, attempts FROM push_match_queue WHERE community_id = $1")
+                .bind(id)
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(state.len(), expected, "queue state for {id}");
+        if expected == 1 {
+            assert_eq!(state[0], ("pending".to_owned(), 0));
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn periodic_reaps_continue_after_tenant_error_and_retry_retained_rows() {
+    for table in [
+        "relay_invites",
+        "scheduled_workflow_fires",
+        "push_match_queue",
+    ] {
+        let (db, communities) = fixture().await;
+        let schema = crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
+        let ids = two_active_tenants(&db, communities[0]).await;
+        fail_tenant_mutations(&db.pool, &schema, table, ids[0]).await;
+        let cutoff = chrono::Utc::now();
+        for id in ids {
+            match table {
+                "relay_invites" => {
+                    sqlx::query(
+                        "INSERT INTO relay_invites (community_id, token_hash, expires_at, created_by) \
+                         VALUES ($1, $2, $3, 'test')",
+                    )
+                    .bind(id).bind(vec![1_u8; 32])
+                    .bind(cutoff - chrono::Duration::minutes(if id == ids[0] { 2 } else { 1 }))
+                    .execute(&db.pool).await.unwrap();
+                }
+                "scheduled_workflow_fires" => {
+                    sqlx::query(
+                        "INSERT INTO scheduled_workflow_fires \
+                         (community_id, workflow_id, scheduled_for, claimed_at) \
+                         VALUES ($1, $2, $3, $3)",
+                    )
+                    .bind(id)
+                    .bind(Uuid::new_v4())
+                    .bind(cutoff - chrono::Duration::hours(1))
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                }
+                "push_match_queue" => {
+                    sqlx::query(
+                        "INSERT INTO push_match_queue (community_id, event_id, attempts) \
+                         VALUES ($1, $2, $3)",
+                    )
+                    .bind(id)
+                    .bind(vec![1_u8; 32])
+                    .bind(super::push::MAX_MATCH_ATTEMPTS)
+                    .execute(&db.pool)
+                    .await
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        for retry in [false, true] {
+            if retry {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DELETE FROM {schema}.fail_tenant"
+                )))
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            }
+            let count = match table {
+                "relay_invites" => {
+                    super::relay_invite::reap_expired_relay_invites(&db.pool, cutoff).await
+                }
+                "scheduled_workflow_fires" => {
+                    super::workflow::prune_scheduled_workflow_fires_before(&db.pool, cutoff).await
+                }
+                "push_match_queue" => super::push::reap_exhausted_matches(&db.pool).await,
+                _ => unreachable!(),
+            }
+            .expect("per-tenant failures must not stop recurring sweeps");
+            assert_eq!(count, 1, "{table}, retry={retry}");
+            for (id, expected) in [(ids[0], i64::from(!retry)), (ids[1], 0)] {
+                let remaining: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table} WHERE community_id = $1",
+                )))
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+                assert_eq!(remaining, expected, "{table} state for {id}, retry={retry}");
+            }
+        }
+    }
 }

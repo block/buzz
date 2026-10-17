@@ -1,6 +1,7 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -12,6 +13,35 @@ Border? _appBarBorder(WidgetTester tester) {
 }
 
 void main() {
+  testWidgets('unbounded reversed scroll depth stays finite for native bar', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: FrostedScaffold(
+          appBar: FrostedAppBar(title: Text('Conversation')),
+          body: SizedBox(key: ValueKey('timeline')),
+        ),
+      ),
+    );
+    final source = tester.element(find.byKey(const ValueKey('timeline')));
+    final offset = IosNavigationScrollScope.maybeOf(source)!;
+    ScrollUpdateNotification(
+      metrics: FixedScrollMetrics(
+        minScrollExtent: 0,
+        maxScrollExtent: double.infinity,
+        pixels: 0,
+        viewportDimension: 600,
+        axisDirection: AxisDirection.up,
+        devicePixelRatio: 1,
+      ),
+      context: source,
+      scrollDelta: 0,
+    ).dispatch(source);
+    await tester.pump();
+    expect(offset.value, 600);
+  });
+
   testWidgets('foreground paints above header and leaves body interactive', (
     tester,
   ) async {

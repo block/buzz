@@ -60,16 +60,16 @@ pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionO
 pub const DB_CONNECTION_RAW_SERIES_PER_POD: usize = runtime::CONNECTION_RAW_SERIES_PER_POD;
 pub(crate) use runtime::{
     begin_community_event_write_transaction,
-    begin_community_event_write_transaction_with_legacy_metrics, begin_community_write_transaction,
-    insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
-    RoutePredicate,
+    begin_community_event_write_transaction_with_legacy_metrics, begin_community_sweep_transaction,
+    begin_community_write_transaction, insert_mentions_in_transaction, observability, route_proof,
+    sweep_admitted_communities, ReadSessionInner, RouteDecision, RoutePredicate,
 };
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, channel,
-    channel_members, community, deletion, dm, event, feed, git_repo, moderation, operator_listener,
-    partition, personal_read, product_feedback, push, reaction, read_state, relay_admin_actions,
-    relay_invite, relay_members, relay_operators, reminder, replaceable, storage_accounting,
-    thread, thread_window, usage, user, workflow,
+    channel_members, community, deletion, dm, event, feed, git_repo, moderation, nip_fi_binding,
+    operator_listener, partition, personal_read, product_feedback, push, reaction, read_state,
+    relay_admin_actions, relay_invite, relay_members, relay_operators, reminder, replaceable,
+    storage_accounting, thread, thread_window, usage, user, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
@@ -82,6 +82,7 @@ pub use community::{
 pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
+pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
 pub use usage::UsageMetricsLeader;

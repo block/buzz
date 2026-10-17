@@ -264,7 +264,7 @@ fn ensure_not_deployment_host(host: &str, deployment_host: &str) -> Result<()> {
     Ok(())
 }
 
-fn normalize_host_authority(host: &str) -> Result<String, String> {
+pub(crate) fn normalize_host_authority(host: &str) -> Result<String, String> {
     if host.is_empty() {
         return Err("host is empty".to_string());
     }

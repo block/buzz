@@ -259,6 +259,9 @@ async fn replace_parameterized_event_in_transaction_impl(
         .execute(tx.conn())
         .await?;
     let written: Result<bool> = async {
+        let tags_json = serde_json::to_value(&event.tags)?;
+        crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
+            .await?;
         if existing.is_some() {
             let previous_nip_rs_hard_delete: Option<String> = if is_nip_rs {
                 sqlx::query_scalar(
@@ -309,7 +312,6 @@ async fn replace_parameterized_event_in_transaction_impl(
         }
 
         let sig_bytes = event.sig.serialize();
-        let tags_json = serde_json::to_value(&event.tags)?;
         let insert_result = sqlx::query(
             "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
@@ -485,6 +487,12 @@ impl Db {
                     }
                 }
 
+                let tags_json = serde_json::to_value(&event.tags)?;
+                crate::channel_members::guard_channel_roster_event(
+                    &mut tx, kind_i32, channel_id, &tags_json,
+                )
+                .await?;
+
                 // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
                 sqlx::query(
                     "UPDATE events SET deleted_at = NOW() \
@@ -501,7 +509,6 @@ impl Db {
 
                 // Insert the new event inside the same transaction.
                 let sig_bytes = event.sig.serialize();
-                let tags_json = serde_json::to_value(&event.tags)?;
                 let received_at = chrono::Utc::now();
                 let d_tag = crate::event::extract_d_tag(event);
 
@@ -921,25 +928,61 @@ mod postgres_tests {
             .await
             .expect("commit B and release locks");
 
-        // The legacy canonical path takes the replacement key, soft-deletes B,
-        // then attempts its newer-timestamp stale A. Migration 0032 rejects the
-        // INSERT; transaction rollback must restore B. A one-connection pool
-        // proves the lock order does not turn this compatibility path into a
-        // self-deadlock.
-        let error = tokio::time::timeout(
-            Duration::from_secs(3),
-            db.replace_addressable_event(community, &stale_a, Some(channel)),
-        )
+        // Reproduce the old binary on one connection: replacement key ->
+        // old-head UPDATE -> raw INSERT. Do not use the app API, whose guard
+        // rejects before the retained trigger can exercise this legacy fence.
+        // A size-one pool and bounded attempt also catch self-deadlock.
+        let error = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut tx = pool.begin().await.expect("begin legacy replacement");
+            let relay_pubkey = relay_keys.public_key().to_bytes();
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(crate::store::replaceable::event_replacement_lock_key(
+                    community,
+                    39002,
+                    &relay_pubkey,
+                    Some(channel.as_bytes().as_slice()),
+                ))
+                .execute(&mut *tx)
+                .await
+                .expect("legacy replacement key");
+            let deleted = sqlx::query(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id=$1 AND kind=39002 AND pubkey=$2 \
+                 AND channel_id=$3 AND deleted_at IS NULL",
+            )
+            .bind(community_uuid)
+            .bind(relay_pubkey.as_slice())
+            .bind(channel)
+            .execute(&mut *tx)
+            .await
+            .expect("legacy soft-delete of current head");
+            assert_eq!(deleted.rows_affected(), 1, "legacy path must delete the live head");
+            let result = sqlx::query(
+                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+                 VALUES ($1, $2, $3, $4, 39002, $5, $6, $7, NOW(), $8, $9)",
+            )
+            .bind(community_uuid)
+            .bind(stale_a.id.as_bytes().as_slice())
+            .bind(relay_pubkey.as_slice())
+            .bind(chrono::DateTime::from_timestamp(stale_a.created_at.as_secs() as i64, 0).expect("timestamp"))
+            .bind(serde_json::to_value(&stale_a.tags).expect("tags"))
+            .bind(&stale_a.content)
+            .bind(stale_a.sig.serialize().as_slice())
+            .bind(channel)
+            .bind(channel.to_string())
+            .execute(&mut *tx)
+            .await;
+            tx.rollback().await.expect("restore live head after legacy attempt");
+            result
+        })
         .await
         .expect("legacy replacement must not deadlock")
         .expect_err("stale captured roster A must be rejected");
         assert!(
-            matches!(
-                error,
-                DbError::Sqlx(sqlx::Error::Database(ref db_error))
-                    if db_error.code().as_deref() == Some("23514")
-            ),
-            "expected roster fence check violation, got {error:?}"
+            matches!(error, sqlx::Error::Database(ref db_error)
+                if db_error.code().as_deref() == Some("23514")
+                && db_error.message() == "kind 39002 roster does not match canonical channel membership"),
+            "expected trigger roster fence check violation, got {error:?}"
         );
 
         let live_ids: Vec<Vec<u8>> = sqlx::query_scalar(
