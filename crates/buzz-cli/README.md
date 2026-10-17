@@ -32,6 +32,9 @@ export BUZZ_RELAY_URL="https://relay.example.com"
 buzz messages send --channel <uuid> --content "Hello"
 buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
+`--content -` is the preferred path for multiline Markdown. For shell-generated
+content, an unescaped `\n` in `--content` is converted to a real line feed;
+double the backslash to preserve a literal `\n`.
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
