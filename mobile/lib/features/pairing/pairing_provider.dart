@@ -8,6 +8,8 @@ import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
+import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
@@ -737,19 +739,6 @@ class PairingNotifier extends Notifier<PairingState> {
       _validateRelayUrl(relayUrl);
       state = state.copyWith(destinationRelayUrl: relayUrl);
 
-      // Validate credentials against the relay via NIP-42 WS handshake.
-      final credentialValidator = _credentialValidator ?? _validateCredentials;
-      await credentialValidator(relayUrl: relayUrl, nsec: nsec);
-      if (pairingGeneration != _pairingGeneration ||
-          state.status != PairingStatus.storing ||
-          _sendIdentityToSource) {
-        return;
-      }
-
-      // Send complete only after credentials are validated.
-      _sendComplete(true);
-
-      // Store as community and switch to it.
       final community = Community.create(
         name: Community.nameFromUrl(relayUrl),
         relayUrl: relayUrl,
@@ -759,15 +748,31 @@ class PairingNotifier extends Notifier<PairingState> {
             ? SensitiveActionPolicy.enabled
             : SensitiveActionPolicy.disabledByUser,
       );
-      await ref
-          .read(authProvider.notifier)
-          .authenticateWithCommunity(community);
-      if (pairingGeneration != _pairingGeneration ||
-          state.status != PairingStatus.storing ||
-          _sendIdentityToSource) {
+      bool current() =>
+          pairingGeneration == _pairingGeneration &&
+          state.status == PairingStatus.storing &&
+          !_sendIdentityToSource;
+      if (HostedEnvironment.isReservedHost(Uri.parse(relayUrl).host)) {
+        final flow = ref.read(hostedFlowProvider);
+        await flow.stagePairedCommunity(community, isCurrent: current);
+        if (!current()) return;
+        // NIP-AB complete acknowledges durable transfer, not hosted admission.
+        _sendComplete(true);
+        _cleanup();
+        state = const PairingState();
+        unawaited(flow.retry());
         return;
       }
+      final credentialValidator = _credentialValidator ?? _validateCredentials;
+      await credentialValidator(relayUrl: relayUrl, nsec: nsec);
+      if (!current()) return;
+      await ref
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(community, shouldContinue: current);
+      if (!current()) return;
 
+      // A validated transfer is not successful admission until storage succeeds.
+      _sendComplete(true);
       _cleanup();
       state = state.copyWith(status: PairingStatus.success);
       ref.read(pairedCommunityLandingProvider.notifier).request(community);
@@ -864,13 +869,29 @@ class PairingNotifier extends Notifier<PairingState> {
 
     try {
       final community = _parseLegacyInput(rawInput);
+      if (HostedEnvironment.isReservedHost(
+        Uri.parse(community.relayUrl).host,
+      )) {
+        final flow = ref.read(hostedFlowProvider);
+        await flow.stagePairedCommunity(
+          community,
+          isCurrent: () => generation == _pairingGeneration,
+        );
+        if (generation != _pairingGeneration) return;
+        state = const PairingState();
+        unawaited(flow.retry());
+        return;
+      }
       final validator = _credentialValidator ?? _validateCredentials;
       await validator(relayUrl: community.relayUrl, nsec: community.nsec);
 
       if (generation != _pairingGeneration) return;
       await ref
           .read(authProvider.notifier)
-          .authenticateWithCommunity(community);
+          .authenticateWithCommunity(
+            community,
+            shouldContinue: () => generation == _pairingGeneration,
+          );
       if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.success,

@@ -5,6 +5,12 @@ Flutter mobile client for Buzz.
 See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
 architecture.
 
+## Hosted relay authentication
+
+`--dart-define=BUZZ_HOSTED_RELAY_AUTH=true` enables Builderlab relay assertions
+and reconnect sign-in. It defaults off: configure backend assertion issuance
+before enabling mobile authentication, and enable relay enforcement last.
+
 ## Setup
 
 Use the Flutter SDK pinned by the repository. Activate Hermit from the repo

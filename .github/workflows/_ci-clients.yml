@@ -212,6 +212,7 @@ jobs:
             -configuration Debug -destination "platform=iOS Simulator,id=$device" \
             -parallel-testing-enabled NO \
             -only-testing:RunnerTests/BuzzPushNavigationBridgeTests \
+            -only-testing:RunnerTests/IdentityFilePluginTests \
             CODE_SIGNING_ALLOWED=NO test
       - name: Build complete unsigned iOS release
         if: matrix.lane == 'release'

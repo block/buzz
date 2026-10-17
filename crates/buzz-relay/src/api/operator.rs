@@ -41,6 +41,12 @@ pub struct ListCommunitiesQuery {
     owner_pubkey: String,
 }
 
+/// Query parameters for joined-community discovery by an authenticated operator.
+#[derive(Debug, Deserialize)]
+pub struct JoinedCommunitiesQuery {
+    member_pubkey: String,
+}
+
 /// Query parameters for `GET /operator/communities/availability`.
 #[derive(Debug, Deserialize)]
 pub struct CommunityAvailabilityQuery {
@@ -686,6 +692,41 @@ pub async fn delete_community(
             "status": accepted.stage.to_string(),
         })),
     ))
+}
+
+/// Return active memberships for the session identity supplied by Builderlab.
+pub async fn list_joined_communities(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<JoinedCommunitiesQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_operator_request(
+        &state,
+        &headers,
+        "GET",
+        "/operator/communities/joined",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+    let pubkey = validate_pubkey_hex(&query.member_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid member_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let communities = state
+        .db
+        .list_communities_joined_by(&pubkey)
+        .await
+        .map_err(|e| internal_error(&format!("list joined communities: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "member_pubkey": pubkey,
+        "communities": communities.into_iter().map(|row| serde_json::json!({
+            "community_id": row.id.to_string(), "host": row.host,
+        })).collect::<Vec<_>>()
+    })))
 }
 
 /// List communities where a pubkey currently holds the `owner` role.

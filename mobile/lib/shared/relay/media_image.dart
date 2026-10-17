@@ -6,13 +6,14 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+import '../hosted/hosted_relay_auth.dart';
 import 'media_auth.dart';
 
 /// Shared, keep-alive HTTP client for media fetches. One client per container
 /// so TLS connections are reused across images instead of re-handshaking per
 /// fetch. Override in tests to stub the network.
 final mediaHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
 });

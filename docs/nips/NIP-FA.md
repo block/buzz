@@ -24,15 +24,15 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ## Browser login
 
-The client MUST generate a high-entropy handoff secret, start a loopback callback listener, and open:
+The client MUST generate a high-entropy handoff secret, prepare its callback receiver, and open:
 
 ```text
 GET {adapter_base}/v1/login/start?return_to={callback_url}&handoff_challenge={base64url(sha256(handoff_secret))}&handoff_challenge_method=S256
 ```
 
-The client's `callback_url` MUST use the `http` scheme with a loopback IP literal host (`127.0.0.1` or `[::1]`), as defined in [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3).
+Desktop clients use an `http` callback with a loopback IP literal host (`127.0.0.1` or `[::1]`), as defined in [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3). An adapter MAY additionally support an explicitly registered mobile private-use callback as defined in RFC 8252 §7.1. Mobile destinations MUST match the adapter's exact allowlist; arbitrary schemes, authorities, paths, fragments, and query parameters MUST be rejected. An adapter MAY allow a single `state` query parameter to preserve an existing login across email-verification retries.
 
-The adapter authenticates the user however the operator chooses, binds the completed browser login to `handoff_challenge`, and redirects to the exact `return_to` loopback callback. Adapters SHOULD accept loopback callbacks on any port, as recommended by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3), and MUST reject any `return_to` whose host is not exactly `127.0.0.1` or `[::1]`, including `localhost` and other `127.0.0.0/8` addresses. Success redirects to:
+The adapter authenticates the user however the operator chooses, binds the completed browser login to `handoff_challenge`, and redirects to the validated `return_to` callback. Adapters SHOULD accept loopback callbacks on any port, as recommended by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3). For loopback callbacks, adapters MUST reject hosts other than exactly `127.0.0.1` or `[::1]`, including `localhost` and other `127.0.0.0/8` addresses. Mobile callbacks require a valid S256 challenge before admission and the matching secret at exchange. A private-use scheme can be intercepted by another app; the scheme name alone does not authenticate the client or guarantee delivery. Clients SHOULD use platform browser authentication sessions and MUST validate per-attempt callback state before exchanging a code. Success adds `code` to the callback query:
 
 ```text
 {callback_url}?code={single_use_code}

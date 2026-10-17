@@ -291,6 +291,40 @@ impl Db {
         .transpose()
     }
 
+    /// Active communities the identity has joined, regardless of role.
+    /// Operator-plane callers must authenticate before exposing this cross-tenant read.
+    #[datastore_span(name = "list_communities_joined_by", system = "postgresql")]
+    pub async fn list_communities_joined_by(&self, pubkey: &str) -> Result<Vec<CommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT c.id, c.host FROM communities c
+            JOIN relay_members rm ON rm.community_id = c.id
+            WHERE rm.pubkey = $1 AND c.archived_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM community_deletion_requests request
+                  WHERE request.community_id = c.id AND request.stage <> 'aborted'
+              )
+            ORDER BY c.created_at ASC, c.host ASC
+            "#,
+        )
+        .bind(pubkey.to_ascii_lowercase())
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CommunityRecord {
+                    id: CommunityId::from_uuid(row.try_get("id")?),
+                    host: row.try_get("host")?,
+                })
+            })
+            .collect()
+    }
+
     /// Lists communities where `owner_pubkey` currently holds the `owner` role.
     ///
     /// This is an operator-plane helper, not a tenant-scoped data-plane read:
@@ -1587,6 +1621,28 @@ mod postgres_tests {
             crate::relay_members::max_communities_per_owner()
         );
         assert!(owned.can_create);
+
+        // Discovery includes every membership role, while management remains owner-only.
+        let community_d = CommunityId::from_uuid(make_community(&db.pool).await);
+        db.add_relay_member(community_d, owner, "member", None)
+            .await
+            .expect("member D");
+        let joined = db
+            .list_communities_joined_by(&owner.to_uppercase())
+            .await
+            .expect("joined");
+        let ids: Vec<_> = joined.iter().map(|row| row.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&community_a));
+        assert!(ids.contains(&community_c));
+        assert!(ids.contains(&community_d));
+        assert!(!ids.contains(&community_b));
+        sqlx::query("UPDATE communities SET archived_at = NOW() WHERE id = $1")
+            .bind(community_d.as_uuid())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(db.list_communities_joined_by(owner).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
