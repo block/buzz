@@ -63,6 +63,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     late final ChannelSectionsManager manager;
     manager = ChannelSectionsManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),

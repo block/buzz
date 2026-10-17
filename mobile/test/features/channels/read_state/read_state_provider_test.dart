@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -20,16 +23,21 @@ void main() {
   final otherMsgKey = msgContextKey('msg-2');
 
   late ProviderContainer container;
+  late _FakeRelayConfig config;
 
-  Future<ReadStateNotifier> pumpNotifier() async {
-    SharedPreferences.setMockInitialValues({});
+  Future<ReadStateNotifier> pumpNotifier({
+    Map<String, Object> Function(String pubkey)? stored,
+  }) async {
+    final keys = nostr.Keys.generate();
+    SharedPreferences.setMockInitialValues(stored?.call(keys.public) ?? {});
     final prefs = await SharedPreferences.getInstance();
-    final nsec = nostr.Keys.generate().nsec;
+    final nsec = keys.nsec;
+    config = _FakeRelayConfig(nsec);
 
     container = ProviderContainer(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
-        relayConfigProvider.overrideWith(() => _FakeRelayConfig(nsec)),
+        relayConfigProvider.overrideWith(() => config),
         relaySessionProvider.overrideWith(_FakeRelaySession.new),
         activeCommunityProvider.overrideWith((ref) async => null),
         appLifecycleProvider.overrideWith(_FakeAppLifecycle.new),
@@ -49,6 +57,54 @@ void main() {
   }
 
   ReadStateState state() => container.read(readStateProvider);
+
+  Future<void> settle() async {
+    for (var i = 0; i < 10 && !state().isReady; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(state().isReady, isTrue);
+  }
+
+  test('read marks stay with the community they were made in', () async {
+    // Recent, so the saved copy keeps message marks.
+    final readAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final at = unixSecondsToDateTime(readAt).toIso8601String();
+    final catchUp = activityContextKey(channelId);
+    // Upgrading from the identity-wide marks: the first community to open
+    // takes them all, kept locally.
+    final notifier = await pumpNotifier(
+      stored: (pubkey) => {
+        'buzz.channel-read-state.v2:$pubkey': jsonEncode({
+          channelId: at,
+          catchUp: at,
+          otherMsgKey: at,
+        }),
+      },
+    );
+    expect(state().effectiveTimestamp(channelId), readAt);
+    expect(state().effectiveTimestamp(catchUp), readAt);
+    notifier.markContextRead(msgKey, readAt);
+
+    // A second community may have a channel with the same id, so it takes
+    // only the shared marks keyed by event id, and none of the first
+    // community's own, which it would otherwise publish to its relay.
+    config.switchTo('http://localhost:2');
+    container.read(readStateProvider);
+    await settle();
+    expect(state().effectiveTimestamp(channelId), isNull);
+    expect(state().effectiveTimestamp(catchUp), isNull);
+    expect(state().effectiveTimestamp(otherMsgKey), readAt);
+    expect(state().effectiveTimestamp(msgKey), isNull);
+    container
+        .read(readStateProvider.notifier)
+        .markContextRead(channelId, readAt + 5);
+
+    config.switchTo('http://localhost:1');
+    container.read(readStateProvider);
+    await settle();
+    expect(state().effectiveTimestamp(msgKey), readAt);
+    expect(state().effectiveTimestamp(channelId), readAt);
+  });
 
   test('message unread → read → unread round-trips through the real '
       'notifier', () async {
@@ -147,6 +203,9 @@ class _FakeRelayConfig extends RelayConfigNotifier {
 
   @override
   RelayConfig build() => RelayConfig(baseUrl: 'http://localhost:1', nsec: nsec);
+
+  void switchTo(String baseUrl) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
 }
 
 /// Relay session that never connects and returns no history, keeping the

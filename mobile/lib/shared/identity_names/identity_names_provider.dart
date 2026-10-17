@@ -37,8 +37,8 @@ void loadIdentityNameOwners(Ref ref, IdentityNames names) {
 }
 
 /// Labels for a displayed collection with no channel context, such as search
-/// results, a Pulse timeline, or a picker's choices. [candidates] is that
-/// collection; keys outside it resolve against it plus themselves.
+/// results or a picker's choices. [candidates] is that collection; keys
+/// outside it resolve against it plus themselves.
 ///
 /// Uncached profiles are loaded for the identities in [shown] (default: all
 /// [candidates]). Pass [shown] when the context also holds identities that are
