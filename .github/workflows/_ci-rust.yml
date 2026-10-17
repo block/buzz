@@ -138,7 +138,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+          for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
             touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
           done
       - name: Clippy (workspace)
@@ -203,6 +203,14 @@ jobs:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Test (Tauri crate)
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      - name: Check (Tauri crate with mesh-llm)
+        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --package buzz-desktop --all-targets --target $env:TARGET --features mesh-llm
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      - name: Test (Tauri crate with mesh-llm)
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --package buzz-desktop --target $env:TARGET --features mesh-llm --lib
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
