@@ -243,6 +243,16 @@ pub fn run() {
                 tray_menu::init(&app_handle)?;
                 macos_notifications::init(&app_handle)?;
             }
+            // tauri.conf.json ships `"title": ""` for the macOS custom title bar.
+            // Elsewhere the caption is what the Windows taskbar labels the app
+            // with (#6295) and what Linux tilers/docks key on (an untitled
+            // window is treated as a popup and floated), so name it.
+            #[cfg(not(target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window.set_title("Buzz") {
+                    eprintln!("buzz-desktop: failed to set main window title: {error}");
+                }
+            }
 
             // Initialise the no-redirect admin HTTP client singleton before any
             // admin command can be invoked. Must run before setup completes.
