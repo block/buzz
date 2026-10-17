@@ -82,8 +82,9 @@ pub(crate) fn parse_query_or_400<T: serde::de::DeserializeOwned + Default>(
 pub mod relay_members {
     use axum::{
         http::{HeaderMap, StatusCode},
-        response::Json,
+        response::{IntoResponse, Json, Response},
     };
+    use buzz_auth::DenialClass;
     use buzz_core::{tenant::CommunityId, TenantContext};
     use tracing::{debug, info};
 
@@ -100,6 +101,43 @@ pub mod relay_members {
         ViaOwner(nostr::PublicKey),
         /// Caller is not admitted.
         Denied,
+    }
+
+    /// An HTTP relay-membership refusal.
+    #[derive(Debug)]
+    pub enum MembershipRefusal {
+        /// The relay's own JSON refusal.
+        Api((StatusCode, Json<serde_json::Value>)),
+        /// NIP-FI's fixed denial. A request carrying a verified agent token
+        /// gets only this, so the response never shows which step refused it
+        /// or whether the agent already has a stored owner.
+        NipFi(DenialClass),
+    }
+
+    impl MembershipRefusal {
+        /// The response status.
+        pub fn status(&self) -> StatusCode {
+            match self {
+                Self::Api((status, _)) => *status,
+                Self::NipFi(class) => StatusCode::from_u16(class.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
+    }
+
+    impl From<(StatusCode, Json<serde_json::Value>)> for MembershipRefusal {
+        fn from(refusal: (StatusCode, Json<serde_json::Value>)) -> Self {
+            Self::Api(refusal)
+        }
+    }
+
+    impl IntoResponse for MembershipRefusal {
+        fn into_response(self) -> Response {
+            match self {
+                Self::Api(refusal) => refusal.into_response(),
+                Self::NipFi(class) => crate::nip_fi_core::http_denial(class),
+            }
+        }
     }
 
     /// Return the sole NIP-OA credential header, if one was supplied.
@@ -120,12 +158,15 @@ pub mod relay_members {
     /// scoped to it so admitting a pubkey to community A never admits it to B.
     /// A NIP-OA credential is usable only when `signed_auth_created_at` came
     /// from the already-verified authentication event carrying that request.
+    /// `token_owner` is the owner named by the request's verified NIP-FI agent
+    /// assertion; when present it is the only owner considered.
     pub async fn check_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
     ) -> Result<MembershipDecision, String> {
         check_membership(
             state,
@@ -133,6 +174,7 @@ pub mod relay_members {
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
             false,
         )
         .await
@@ -147,6 +189,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
     ) -> Result<MembershipDecision, String> {
         check_membership(
             state,
@@ -154,6 +197,7 @@ pub mod relay_members {
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
             true,
         )
         .await
@@ -178,6 +222,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
         writer: bool,
     ) -> Result<MembershipDecision, String> {
         if !state.config.require_relay_membership {
@@ -190,6 +235,20 @@ pub mod relay_members {
             .map_err(|e| format!("relay membership check failed: {e}"))?;
         if is_member {
             return Ok(MembershipDecision::Member);
+        }
+
+        // A verified agent assertion's issuer already passed this community's
+        // NIP-FI binding check, so its owner's membership admits the agent
+        // without NIP-OA.
+        if let Some(owner) = token_owner {
+            let owner_is_member = read_membership(state, community, &owner.to_hex(), writer)
+                .await
+                .map_err(|e| format!("relay membership check (token owner) failed: {e}"))?;
+            return Ok(if owner_is_member {
+                MembershipDecision::ViaOwner(owner)
+            } else {
+                MembershipDecision::Denied
+            });
         }
 
         if state.config.allow_nip_oa_auth {
@@ -243,17 +302,19 @@ pub mod relay_members {
     /// no NIP-OA tag is present/applicable (open relay without auth tag).
     pub async fn enforce_relay_membership(
         state: &AppState,
-        community: CommunityId,
+        tenant: &TenantContext,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
         enforce_membership(
             state,
-            community,
+            tenant,
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
             false,
         )
         .await
@@ -265,75 +326,117 @@ pub mod relay_members {
     /// Every other HTTP request reads ban state fresh.
     pub async fn enforce_relay_membership_ephemeral(
         state: &AppState,
-        community: CommunityId,
+        tenant: &TenantContext,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
         enforce_membership(
             state,
-            community,
+            tenant,
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
             true,
         )
         .await
     }
 
+    /// With a verified agent token, every refusal is NIP-FI's fixed denial.
     async fn enforce_membership(
         state: &AppState,
-        community: CommunityId,
+        tenant: &TenantContext,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
+        cached_ban: bool,
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
+        admit_member(
+            state,
+            tenant,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            token_owner,
+            cached_ban,
+        )
+        .await
+        .map_err(|refusal| match token_owner {
+            None => MembershipRefusal::Api(refusal),
+            Some(_) if refusal.0.is_server_error() => {
+                MembershipRefusal::NipFi(DenialClass::AuthorizationUnavailable)
+            }
+            Some(_) => MembershipRefusal::NipFi(DenialClass::AuthorizationDenied),
+        })
+    }
+
+    async fn admit_member(
+        state: &AppState,
+        tenant: &TenantContext,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
         cached_ban: bool,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(
+        let community = tenant.community();
+        let owner = match check_relay_membership(
             state,
             community,
             pubkey_bytes,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
         )
         .await
         {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
-                deny_banned(
-                    state,
-                    community,
-                    pubkey_bytes,
-                    auth_tag_header,
-                    signed_auth_created_at,
-                    cached_ban,
-                )
-                .await?;
-                Ok(None)
+            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => None,
+            Ok(MembershipDecision::ViaOwner(owner)) => Some(owner),
+            Ok(MembershipDecision::Denied) => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "relay_membership_required",
+                        "message": "You must be a relay member to access this relay"
+                    })),
+                ))
             }
-            Ok(MembershipDecision::ViaOwner(owner)) => {
-                deny_banned(
-                    state,
-                    community,
-                    pubkey_bytes,
-                    auth_tag_header,
-                    signed_auth_created_at,
-                    cached_ban,
-                )
-                .await?;
-                Ok(Some(owner))
-            }
-            Ok(MembershipDecision::Denied) => Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "relay_membership_required",
-                    "message": "You must be a relay member to access this relay"
-                })),
-            )),
             Err(e) => {
                 tracing::error!("relay membership check errored: {e}");
-                Err(super::internal_error(&e))
+                return Err(super::internal_error(&e));
+            }
+        };
+        deny_banned(
+            state,
+            community,
+            pubkey_bytes,
+            auth_tag_header,
+            signed_auth_created_at,
+            token_owner,
+            cached_ban,
+        )
+        .await?;
+        if let Some(token_owner) = token_owner {
+            let Ok(agent) = nostr::PublicKey::from_slice(pubkey_bytes) else {
+                return Err(super::internal_error("invalid pubkey for owner link"));
+            };
+            match link_agent_owner(state, tenant, &agent, &token_owner).await {
+                OwnerLink::Linked => {}
+                OwnerLink::Conflict => {
+                    return Err(super::api_error(StatusCode::FORBIDDEN, OWNER_MISMATCH))
+                }
+                OwnerLink::Unavailable => {
+                    return Err(super::api_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        crate::handlers::auth::OWNER_LINK_ERROR,
+                    ))
+                }
             }
         }
+        Ok(owner)
     }
 
     /// Refuse a community-banned principal (own ban or its agent owner's) on
@@ -345,6 +448,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
         cached: bool,
     ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
         let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
@@ -356,6 +460,7 @@ pub mod relay_members {
             pubkey,
             auth_tag_header,
             signed_auth_created_at,
+            token_owner,
             cached,
         )
         .await
@@ -415,13 +520,39 @@ pub mod relay_members {
         agent: &nostr::PublicKey,
         owner: &nostr::PublicKey,
     ) -> bool {
+        link_agent_owner(state, tenant, agent, owner).await == OwnerLink::Linked
+    }
+
+    /// Refusal when a verified agent assertion names an owner other than the
+    /// one already stored for the agent (NIP-FI agent keys).
+    pub(crate) const OWNER_MISMATCH: &str = "restricted: agent owner mismatch";
+
+    /// Result of recording an agent's owner.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OwnerLink {
+        /// The stored owner is now `owner`.
+        Linked,
+        /// The agent already has a different stored owner.
+        Conflict,
+        /// The link could not be read or written.
+        Unavailable,
+    }
+
+    /// [`materialize_nip_oa_owner`], distinguishing a different stored owner
+    /// from a failed read or write.
+    pub async fn link_agent_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+        owner: &nostr::PublicKey,
+    ) -> OwnerLink {
         let owner_key = (
             tenant.community(),
             agent.to_bytes().to_vec(),
             owner.to_bytes().to_vec(),
         );
         if state.observer_owner_cache.get(&owner_key) == Some(true) {
-            return true;
+            return OwnerLink::Linked;
         }
         for (role, pubkey) in [("agent", agent), ("owner", owner)] {
             match state
@@ -439,12 +570,12 @@ pub mod relay_members {
                 Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(%role, error = %e, "ensure_user failed during NIP-OA backfill");
-                    return false;
+                    return OwnerLink::Unavailable;
                 }
             }
         }
 
-        let materialized = match state
+        let link = match state
             .db
             .set_agent_owner_for_authorization(
                 tenant.community(),
@@ -458,26 +589,33 @@ pub mod relay_members {
                 // without it would only be found by an owner-to-agent lookup
                 // at revoke time; make them reconnect with the owner attached.
                 state.disconnect_unowned_agent_clusterwide(tenant, &agent.to_bytes());
-                true
+                OwnerLink::Linked
             }
-            Ok(false) => state
+            Ok(false) => match state
                 .db
                 .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
                 .await
-                .unwrap_or(false),
+            {
+                Ok(true) => OwnerLink::Linked,
+                Ok(false) => OwnerLink::Conflict,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read agent_owner_pubkey");
+                    OwnerLink::Unavailable
+                }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "failed to backfill agent_owner_pubkey");
-                false
+                OwnerLink::Unavailable
             }
         };
 
-        if materialized {
+        if link == OwnerLink::Linked {
             state
                 .author_type_cache
                 .insert((tenant.community(), agent.to_bytes().to_vec()), true);
             state.observer_owner_cache.insert(owner_key, true);
         }
-        materialized
+        link
     }
 
     #[cfg(test)]

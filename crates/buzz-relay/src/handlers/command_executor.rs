@@ -1427,6 +1427,7 @@ mod postgres_tests {
             }
             Err(IngestError::AuthFailed(message)) => panic!("unexpected auth failure: {message}"),
             Err(IngestError::Internal(message)) => panic!("unexpected internal failure: {message}"),
+            Err(error @ IngestError::Ban { .. }) => panic!("unexpected ban refusal: {error:?}"),
             Ok(_) => panic!("expected revision parsing to fail"),
         }
     }
