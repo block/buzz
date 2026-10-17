@@ -1306,7 +1306,7 @@ pub(crate) mod tests {
     }
 
     /// The one line of a request dropped mid-flight: aborted at WARN, with
-    /// the proven caller it had recorded.
+    /// the proven caller it had recorded and no status.
     pub(crate) fn assert_one_aborted_line(out: &Captured, pubkey: &PublicKey) -> serde_json::Value {
         let lines = out.lines();
         assert_eq!(lines.len(), 1, "exactly one access line: {lines:?}");
@@ -1316,6 +1316,7 @@ pub(crate) mod tests {
         assert_eq!(line["level"], "WARN", "{line}");
         assert_eq!(line["pubkey"], pubkey.to_hex(), "{line}");
         assert_eq!(line["pubkey_verified"], true, "{line}");
+        assert!(line.get("status").is_none(), "{line}");
         line
     }
 
