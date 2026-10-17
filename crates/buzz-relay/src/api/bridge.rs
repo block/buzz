@@ -63,7 +63,8 @@ pub(crate) async fn authenticate_member_post(
             true,
             true,
         ),
-    )?;
+    )
+    .await?;
     let pubkey = *admission.proven_pubkey();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
 
@@ -1004,7 +1005,8 @@ pub async fn submit_event(
     // only available through the returned NipFiAdmission. [FI-TRACE-AUTHORITY-UNIFORM]
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
-    });
+    })
+    .await;
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
         verify_bridge_auth_with_options(
             &headers,
@@ -1016,7 +1018,8 @@ pub async fn submit_event(
         )
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
-    })?;
+    })
+    .await?;
     let pubkey = *admission.proven_pubkey();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
     let pubkey_hex = pubkey.to_hex();
@@ -1356,7 +1359,8 @@ pub async fn query_events(
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
-    });
+    })
+    .await;
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
         verify_bridge_auth_with_options(
             &headers,
@@ -1368,7 +1372,8 @@ pub async fn query_events(
         )
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
-    })?;
+    })
+    .await?;
     let pubkey = *admission.proven_pubkey();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
     let pubkey_hex = pubkey.to_hex();
@@ -2031,7 +2036,8 @@ pub async fn count_events(
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
-    });
+    })
+    .await;
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
         verify_bridge_auth_with_options(
             &headers,
@@ -2043,7 +2049,8 @@ pub async fn count_events(
         )
         .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
         .map_err(|e| e.into_response())
-    })?;
+    })
+    .await?;
     let pubkey = *admission.proven_pubkey();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
     let pubkey_hex = pubkey.to_hex();
@@ -2873,7 +2880,8 @@ async fn authorize_moderation_read(
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     crate::nip_fi_shadow::observe_strict_proof(state, headers, "bridge", || {
         verify_bridge_auth(headers, "GET", &url, None, true).map(drop)
-    });
+    })
+    .await;
     let admission = admit_nip_fi_http_on_state(state, headers, || {
         verify_bridge_auth(
             headers,
@@ -2884,7 +2892,8 @@ async fn authorize_moderation_read(
         )
         .map(|auth| auth.proof(auth.event_id_bytes))
         .map_err(|e| e.into_response())
-    })?;
+    })
+    .await?;
     let pubkey = *admission.proven_pubkey();
     let event_id_bytes = admission.into_extra();
 

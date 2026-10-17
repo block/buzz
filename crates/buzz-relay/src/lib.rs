@@ -52,6 +52,7 @@ pub mod nip_fi_config;
 /// NIP-FI HTTP ingress enforcement: assertion extraction, verification,
 /// key-pairing check, and deny-map gate for every protected HTTP surface.
 pub(crate) mod nip_fi_http;
+pub mod nip_fi_resolver;
 /// Deployment-global operator-listener mention delivery worker.
 pub mod operator_listener;
 /// NIP-01 client/relay message parsing.

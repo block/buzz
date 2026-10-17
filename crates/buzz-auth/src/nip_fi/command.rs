@@ -1214,6 +1214,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn until_at_maximum_assertion_lifetime_is_accepted_and_one_second_more_is_not() {
+        // An issuer's `until` is the expiry of the last assertion it issued, so
+        // a maximum-lifetime assertion minted now (exp = now + max_age) must
+        // fit the ceiling now + skew + max_age, both at issue time and on a
+        // re-send just before that deadline. The test policy is skew 30 s,
+        // maximum assertion age 3600 s.
+        let cv = test_command_verifier();
+        let target = target_key();
+        let now = Utc::now();
+        for until_offset in [3600, 30 + 3600, 1] {
+            let token = mint_cmd_jwt(&target, until_offset, serde_json::json!({}));
+            assert_eq!(
+                cv.verify_at(&token, METHOD, PATH, &target, now).map(|_| ()),
+                Ok(()),
+                "until = now + {until_offset}s must fit the ceiling"
+            );
+        }
+        let token = mint_cmd_jwt(&target, 30 + 3600 + 1, serde_json::json!({}));
+        assert_eq!(
+            cv.verify_at(&token, METHOD, PATH, &target, now).map(|_| ()),
+            Err(CommandError::UntilExceedsCeiling),
+        );
+    }
+
     // ── jti is the LAST step ─────────────────────────────────────────────────
 
     #[test]

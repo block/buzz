@@ -32,6 +32,7 @@
 //! backward-compatible until an operator explicitly enables enforcement.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use buzz_auth::nip_fi::provision::canonical_authority;
@@ -179,17 +180,17 @@ pub(super) struct CommunityEnvConfig {
 /// no database access. Empty unless the mode is `enforce`.
 #[derive(Debug, Clone, Default)]
 pub struct NipFiCommunities {
-    by_host: BTreeMap<String, CommunityBinding>,
+    by_host: BTreeMap<String, Arc<CommunityBinding>>,
     /// Test-only: one community served at every Host, for fixtures that
     /// exercise enforce-mode handlers on per-test unique Hosts.
     #[cfg(test)]
-    any_host: Option<CommunityBinding>,
+    any_host: Option<Arc<CommunityBinding>>,
 }
 
 impl NipFiCommunities {
     /// The community served at `raw_host`, matched after the same
     /// normalization the tenant binder applies.
-    pub fn resolve(&self, raw_host: &str) -> Option<&CommunityBinding> {
+    pub fn resolve(&self, raw_host: &str) -> Option<&Arc<CommunityBinding>> {
         #[cfg(test)]
         if let Some(binding) = &self.any_host {
             return Some(binding);
@@ -231,7 +232,7 @@ impl NipFiCommunities {
                 .map_err(|e| format!("community at index {idx}: {e}"))?;
             // One Host per canonical URI, so a unique Host also means a
             // unique `aud`.
-            if by_host.insert(host, binding).is_some() {
+            if by_host.insert(host, Arc::new(binding)).is_some() {
                 return Err(format!(
                     "community at index {idx}: canonical_uri maps to the same \
                      Host as an earlier community"
@@ -245,13 +246,9 @@ impl NipFiCommunities {
         })
     }
 
-    /// Every community `aud` that authorizes `issuer`.
-    fn audiences_authorizing(&self, issuer: &str) -> Vec<String> {
-        self.by_host
-            .values()
-            .filter(|c| c.authorizes(issuer))
-            .map(|c| c.expected_aud().to_owned())
-            .collect()
+    /// Whether any community authorizes `issuer`.
+    fn authorizes_anywhere(&self, issuer: &str) -> bool {
+        self.by_host.values().any(|c| c.authorizes(issuer))
     }
 }
 
@@ -274,6 +271,8 @@ pub fn parse_provision_binding() -> Result<Option<buzz_auth::ProvisionBindingPol
 pub struct NipFiRelayConfig {
     /// The enforcement mode selected by `BUZZ_NIP_FI_MODE`.
     pub mode: NipFiMode,
+    /// Where community bindings come from (`BUZZ_NIP_FI_COMMUNITY_SOURCE`).
+    pub source: CommunitySource,
     /// Validated per-issuer assertion-policy registry.
     pub registry: IssuerRegistry,
     /// Host → community map consulted before every enforce-mode verification.
@@ -296,10 +295,27 @@ impl NipFiRelayConfig {
     /// missing or invalid (fail-closed: no token is accepted until this passes).
     pub fn from_env() -> Result<Self, ConfigError> {
         let mode = parse_mode()?;
+        let source = parse_community_source()?;
+        if source == CommunitySource::Database
+            && !std::env::var("BUZZ_NIP_FI_COMMUNITIES")
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_NIP_FI_COMMUNITY_SOURCE=database but BUZZ_NIP_FI_COMMUNITIES is set; \
+                 database-sourced communities are read from community_nip_fi_issuers"
+                    .to_string(),
+            ));
+        }
 
-        if !mode.evaluates() {
+        // The issuer registry is required whenever admission evaluates, and
+        // with the database source in every mode: provisioning, bootstrap and
+        // the resolver's registry filter all read it.
+        if !mode.evaluates() && source == CommunitySource::Env {
             return Ok(Self {
                 mode,
+                source,
                 registry: IssuerRegistry::new(),
                 communities: NipFiCommunities::default(),
                 jwks_configs: Vec::new(),
@@ -346,18 +362,21 @@ impl NipFiRelayConfig {
         // duplicate that could disagree with the per-issuer value is a config-drift
         // trap — removed in this PR.
 
-        let max_connection_lifetime_secs = parse_u64_bounded(
+        let max_connection_lifetime_secs = match parse_u64_bounded(
             "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
             1,
             MAX_CONNECTION_LIFETIME_SECS,
-        )?
-        .ok_or_else(|| {
-            mode_requires(
-                mode,
-                "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
-                 every enforce deployment must configure a positive finite value",
-            )
-        })?;
+        )? {
+            Some(secs) => secs,
+            None if !mode.evaluates() => 0,
+            None => {
+                return Err(mode_requires(
+                    mode,
+                    "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
+                     every enforce deployment must configure a positive finite value",
+                ))
+            }
+        };
 
         let mut policies = Vec::with_capacity(issuer_entries.len());
         let mut jwks_configs = Vec::with_capacity(issuer_entries.len());
@@ -452,30 +471,45 @@ impl NipFiRelayConfig {
             }
         }
 
-        let configured: BTreeSet<&str> = policies.iter().map(IssuerPolicy::issuer).collect();
-        let communities = parse_communities(mode, &configured)?;
-        // Fold each issuer's community allowlist into its policy ID
-        // (NIP-FI.md:145), and reject an issuer no community authorizes
-        // (NIP-FI.md:183).
         let mut registry = IssuerRegistry::new();
-        for (issuer_idx, policy) in policies.into_iter().enumerate() {
-            let audiences = communities.audiences_authorizing(policy.issuer());
-            if audiences.is_empty() {
-                return Err(ConfigError::InvalidValue(format!(
-                    "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx} is not \
-                     authorized by any community in BUZZ_NIP_FI_COMMUNITIES"
-                )));
+        let communities = match source {
+            CommunitySource::Env => {
+                let configured: BTreeSet<&str> =
+                    policies.iter().map(IssuerPolicy::issuer).collect();
+                let communities = parse_communities(mode, &configured)?;
+                // Reject an issuer no community authorizes (NIP-FI.md:183).
+                for (issuer_idx, policy) in policies.iter().enumerate() {
+                    if !communities.authorizes_anywhere(policy.issuer()) {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx} is not \
+                             authorized by any community in BUZZ_NIP_FI_COMMUNITIES"
+                        )));
+                    }
+                }
+                communities
             }
-            registry.insert(policy.authorized_for_communities(audiences));
+            // An issuer no community row references grants nothing:
+            // authorization still needs a per-community binding.
+            CommunitySource::Database => NipFiCommunities::default(),
+        };
+        for policy in policies {
+            registry.insert(policy);
         }
 
         // Delegate final validation to buzz-auth startup gate.
-        validate_nip_fi_config(mode, &registry, &jwks_configs).map_err(
+        // The database source validates the registry in every mode, since
+        // creation paths bind against it even while admission is off.
+        let validation_mode = match source {
+            CommunitySource::Database if !mode.evaluates() => NipFiMode::Enforce,
+            _ => mode,
+        };
+        validate_nip_fi_config(validation_mode, &registry, &jwks_configs).map_err(
             |e: NipFiStartupError| ConfigError::InvalidValue(format!("NIP-FI config invalid: {e}")),
         )?;
 
         Ok(Self {
             mode,
+            source,
             registry,
             communities,
             jwks_configs,
@@ -512,6 +546,30 @@ fn parse_communities(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Where the Host → community bindings come from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommunitySource {
+    /// The static `BUZZ_NIP_FI_COMMUNITIES` map (the default).
+    #[default]
+    Env,
+    /// The `community_nip_fi_issuers` table, via the snapshot resolver.
+    Database,
+}
+
+fn parse_community_source() -> Result<CommunitySource, ConfigError> {
+    match std::env::var("BUZZ_NIP_FI_COMMUNITY_SOURCE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") | Some("env") => Ok(CommunitySource::Env),
+        Some("database") => Ok(CommunitySource::Database),
+        Some(other) => Err(ConfigError::InvalidValue(format!(
+            "BUZZ_NIP_FI_COMMUNITY_SOURCE must be \"env\" or \"database\"; got {other:?}"
+        ))),
+    }
+}
+
 fn parse_mode() -> Result<NipFiMode, ConfigError> {
     match std::env::var("BUZZ_NIP_FI_MODE")
         .ok()
@@ -542,7 +600,11 @@ fn mode_requires(mode: NipFiMode, missing: &str) -> ConfigError {
 
 /// Parse an optional positive `u64` env var bounded to `[min_val, max_val]`.
 /// Returns `None` when the variable is absent or empty.
-fn parse_u64_bounded(name: &str, min_val: u64, max_val: u64) -> Result<Option<u64>, ConfigError> {
+pub(crate) fn parse_u64_bounded(
+    name: &str,
+    min_val: u64,
+    max_val: u64,
+) -> Result<Option<u64>, ConfigError> {
     match std::env::var(name) {
         Err(_) => Ok(None),
         Ok(raw) if raw.trim().is_empty() => Ok(None),
@@ -654,6 +716,13 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
 // ── Duration helpers ──────────────────────────────────────────────────────────
 
 impl NipFiRelayConfig {
+    /// Whether startup builds the database resolver: only for the `database`
+    /// source in a mode that evaluates evidence. Off and deny-protected never
+    /// resolve a community, so they load no snapshot.
+    pub fn builds_resolver(&self) -> bool {
+        self.source == CommunitySource::Database && self.mode.evaluates()
+    }
+
     /// Returns the configured `max_connection_lifetime` as a `Duration`.
     /// Returns `None` in `Off`/`DenyProtected` mode (sentinel value 0).
     pub fn max_connection_lifetime(&self) -> Option<Duration> {
@@ -674,12 +743,20 @@ impl NipFiRelayConfig {
 impl NipFiCommunities {
     /// One community at `canonical_uri` authorizing `issuers`.
     pub(crate) fn for_test(canonical_uri: &str, issuers: &[&str]) -> Self {
-        let entries = vec![CommunityEnvConfig {
-            canonical_uri: canonical_uri.to_owned(),
-            authorized_issuers: issuers.iter().map(|i| (*i).to_owned()).collect(),
-        }];
+        Self::for_test_many(&[canonical_uri], issuers)
+    }
+
+    /// One community per entry of `canonical_uris`, each authorizing `issuers`.
+    pub(crate) fn for_test_many(canonical_uris: &[&str], issuers: &[&str]) -> Self {
+        let entries = canonical_uris
+            .iter()
+            .map(|uri| CommunityEnvConfig {
+                canonical_uri: (*uri).to_owned(),
+                authorized_issuers: issuers.iter().map(|i| (*i).to_owned()).collect(),
+            })
+            .collect();
         Self::from_entries(entries, &issuers.iter().copied().collect())
-            .expect("valid test community")
+            .expect("valid test communities")
     }
 
     /// One community, expecting `aud` and authorizing `issuers`, served at
@@ -689,7 +766,7 @@ impl NipFiCommunities {
             CommunityBinding::new(aud.to_owned(), issuers.iter().map(|i| (*i).to_owned()))
                 .expect("valid test community");
         Self {
-            any_host: Some(binding),
+            any_host: Some(Arc::new(binding)),
             ..Self::default()
         }
     }
@@ -916,8 +993,6 @@ mod tests {
         for policy in [public_policy, mesh_policy] {
             assert_eq!(policy.command_audiences().len(), 1);
             assert_eq!(policy.command_audiences()[0], "https://relay.test");
-            assert_eq!(policy.community_audiences().len(), 1);
-            assert_eq!(policy.community_audiences()[0], "https://relay.test");
         }
         assert_eq!(cfg.jwks_configs.len(), 2);
         assert_eq!(cfg.jwks_configs[0].contract, public_contract);
@@ -1892,6 +1967,33 @@ mod tests {
                      every enforce deployment must configure a positive finite value"
                 )
             );
+        }
+    }
+
+    // Mutation: building the resolver for the database source in every mode
+    // loads a snapshot that off and deny-protected never read.
+    #[test]
+    fn only_evaluating_modes_with_the_database_source_build_a_resolver() {
+        let base = {
+            let _guard = super::NIP_FI_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _env = EnvGuard::new(NIP_FI_VARS);
+            NipFiRelayConfig::from_env().expect("off config")
+        };
+        for (mode, source, expected) in [
+            (NipFiMode::Off, CommunitySource::Database, false),
+            (NipFiMode::DenyProtected, CommunitySource::Database, false),
+            (NipFiMode::Shadow, CommunitySource::Database, true),
+            (NipFiMode::Enforce, CommunitySource::Database, true),
+            (NipFiMode::Enforce, CommunitySource::Env, false),
+        ] {
+            let config = NipFiRelayConfig {
+                mode,
+                source,
+                ..base.clone()
+            };
+            assert_eq!(config.builds_resolver(), expected, "{mode:?} {source:?}");
         }
     }
 }

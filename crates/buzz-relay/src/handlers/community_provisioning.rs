@@ -229,6 +229,18 @@ async fn publish_membership_snapshot_if_required(
     }
 }
 
+/// After a committed creation that bound issuers, drop this pod's cached
+/// "not found" for the host so the creator's first login looks it up.
+pub(crate) fn record_binding_creation(
+    resolver: Option<&crate::nip_fi_resolver::DatabaseResolver>,
+    host: &str,
+    issuers: &[String],
+) {
+    if let (Some(resolver), false) = (resolver, issuers.is_empty()) {
+        resolver.record_creation(host);
+    }
+}
+
 /// Validate and execute a relay-operator community provisioning request.
 ///
 /// The caller is an HTTP operator endpoint, not the Nostr event ingest path.
@@ -309,6 +321,11 @@ pub async fn provision_community(
             owner = %owner_hex,
             "community created via operator endpoint"
         );
+        record_binding_creation(
+            state.nip_fi_resolver.as_deref(),
+            &record.host,
+            nip_fi_issuers,
+        );
         publish_membership_snapshot_if_required(state, record.id, &record.host).await;
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
@@ -326,6 +343,13 @@ pub async fn provision_community(
         .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
         .await
         .map_err(|e| format!("failed to create community: {e}"))?;
+    if record.created {
+        record_binding_creation(
+            state.nip_fi_resolver.as_deref(),
+            &record.host,
+            nip_fi_issuers,
+        );
+    }
 
     if let Some(owner_hex) = &initial_owner {
         match state
