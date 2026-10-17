@@ -549,6 +549,8 @@ pub struct SteerRequest {
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum SteerError {
+    /// Buzz on_message rejected this message before any wire write. Do not retry it.
+    PersonaHookRejected,
     /// The agent returned a JSON-RPC error response to the steer request.
     ///
     /// `code` is the JSON-RPC error code:
@@ -887,6 +889,10 @@ impl ChannelInfoResolver {
 }
 
 pub struct PromptContext {
+    pub claude_plugins: Vec<String>,
+    /// Session-local roots scanned by Codex through native additionalDirectories.
+    pub codex_skill_roots: Vec<String>,
+    pub persona_on_message: Option<String>,
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
@@ -1623,9 +1629,12 @@ async fn create_session_and_apply_model(
         ctx.session_title.as_deref(),
     );
 
+    agent
+        .acp
+        .set_persona_message_hook(ctx.persona_on_message.clone(), ctx.cwd.clone());
     let resp = agent
         .acp
-        .session_new_full(
+        .session_new_with_plugins(
             &ctx.cwd,
             mcp_servers,
             session_new_system_prompt(
@@ -1635,6 +1644,8 @@ async fn create_session_and_apply_model(
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
+            &ctx.claude_plugins,
+            &ctx.codex_skill_roots,
         )
         .await?;
 
@@ -3610,7 +3621,10 @@ pub async fn run_prompt_task(
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
-            if !matches!(e, AcpError::AgentError { .. }) {
+            if !matches!(
+                e,
+                AcpError::AgentError { .. } | AcpError::PersonaHookRejected(_)
+            ) {
                 agent.state.invalidate(&source);
             }
             let usage = agent.acp.take_turn_usage();
@@ -10448,6 +10462,9 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     ) -> PromptContext {
         use crate::relay::RestClient;
         PromptContext {
+            claude_plugins: Vec::new(),
+            codex_skill_roots: Vec::new(),
+            persona_on_message: None,
             mcp_servers: vec![],
             initial_message: None,
             idle_timeout: Duration::from_secs(60),

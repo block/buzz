@@ -167,6 +167,7 @@ export type EncodedTeamSnapshotPayload = {
 };
 
 export type TeamSnapshotMemberPreview = {
+  capabilities?: import("./personaTypes").PersonaCapabilities;
   displayName: string;
   systemPrompt: string | null;
   avatarUrl: string | null;

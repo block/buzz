@@ -11,6 +11,7 @@ const TEST_RELAY: &str = "ws://example.com:3000";
 
 fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: id.to_string(),
@@ -40,6 +41,7 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
 
 fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: String::new(),

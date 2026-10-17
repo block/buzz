@@ -332,6 +332,7 @@ mod tests {
             format: FORMAT_DISCRIMINATOR.to_string(),
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
+                capabilities: Default::default(),
                 session_policy: Default::default(),
                 acp_command: None,
                 name: "Locked Test".to_string(),
@@ -368,6 +369,7 @@ mod tests {
     /// pubkey/nsec pair matters here.
     fn record_with_keys(pubkey: String, private_key_nsec: String) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            capabilities: Default::default(),
             session_policy: Default::default(),
             description: None,
             pubkey,

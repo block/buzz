@@ -1,3 +1,4 @@
+mod fixtures;
 use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
     apply_agent_command_update, apply_env_vars_then_effort_transition, classify_runtime,
@@ -9,6 +10,7 @@ use super::{
     CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
+use fixtures::{persona_with_runtime, record_with};
 use std::path::PathBuf;
 
 #[test]
@@ -166,34 +168,6 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     assert_eq!(cmd.as_deref(), Some("codex-acp"));
     assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
 }
-fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
-    crate::managed_agents::AgentDefinition {
-        session_policy: Default::default(),
-        description: None,
-        id: id.to_string(),
-        display_name: id.to_string(),
-        avatar_url: None,
-        system_prompt: String::new(),
-        acp_command: None,
-        runtime: runtime.map(str::to_string),
-        model: None,
-        provider: None,
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        team_catalog_source: None,
-        env_vars: std::collections::BTreeMap::new(),
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        parallelism: None,
-        created_at: "2026-06-09T00:00:00Z".to_string(),
-        updated_at: "2026-06-09T00:00:00Z".to_string(),
-    }
-}
 
 #[test]
 fn effective_agent_command_explicit_override_wins() {
@@ -203,73 +177,6 @@ fn effective_agent_command_explicit_override_wins() {
         effective_agent_command(Some("p1"), &personas, Some("codex-acp")),
         "codex-acp"
     );
-}
-/// Minimal record for `record_agent_command` tests; only resolution inputs vary.
-fn record_with(
-    runtime: Option<&str>,
-    persona_id: Option<&str>,
-    override_cmd: Option<&str>,
-) -> crate::managed_agents::types::ManagedAgentRecord {
-    crate::managed_agents::types::ManagedAgentRecord {
-        session_policy: Default::default(),
-        description: None,
-        pubkey: String::new(),
-        name: "r".to_string(),
-        persona_id: persona_id.map(str::to_string),
-        private_key_nsec: String::new(),
-        auth_tag: None,
-        relay_url: String::new(),
-        avatar_url: None,
-        acp_command: String::new(),
-        agent_command: String::new(),
-        agent_command_override: override_cmd.map(str::to_string),
-        agent_args: vec![],
-        mcp_command: String::new(),
-        turn_timeout_seconds: 0,
-        idle_timeout_seconds: None,
-        max_turn_duration_seconds: None,
-        parallelism: 1,
-        system_prompt: None,
-        model: None,
-        provider: None,
-        persona_source_version: None,
-        start_on_app_launch: false,
-        auto_restart_on_config_change: true,
-        runtime_pid: None,
-        backend: Default::default(),
-        backend_agent_id: None,
-        provider_policy_pending: false,
-        provider_binary_path: None,
-        team_id: None,
-        persona_team_dir: None,
-        persona_name_in_team: None,
-        env_vars: std::collections::BTreeMap::new(),
-        created_at: String::new(),
-        updated_at: String::new(),
-        last_started_at: None,
-        last_stopped_at: None,
-        last_exit_code: None,
-        last_error: None,
-        last_error_code: None,
-        respond_to: Default::default(),
-        respond_to_allowlist: vec![],
-        display_name: None,
-        slug: None,
-        runtime: runtime.map(str::to_string),
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        team_catalog_source: None,
-        definition_respond_to: None,
-        definition_respond_to_allowlist: Vec::new(),
-        definition_parallelism: None,
-        relay_mesh: None,
-        effort_level: None,
-    }
 }
 
 #[test]

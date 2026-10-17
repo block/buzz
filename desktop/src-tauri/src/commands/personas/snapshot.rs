@@ -16,7 +16,7 @@ use crate::{
     managed_agents::{
         agent_snapshot::{
             build_snapshot, encode_snapshot_json, encode_snapshot_png, AgentSnapshotMemoryEntry,
-            MemoryLevel,
+            MemoryLevel, SnapshotAudience,
         },
         load_agent_definitions, load_managed_agents, ManagedAgentRecord,
     },
@@ -68,10 +68,14 @@ pub(crate) fn materialize_snapshot_description(
         return;
     }
     if let Some(persona_id) = record.persona_id.as_deref() {
-        record.description = definitions
+        let definition = definitions
             .iter()
-            .find(|definition| definition.slug.as_deref() == Some(persona_id))
-            .and_then(|definition| definition.description.clone());
+            .find(|definition| definition.slug.as_deref() == Some(persona_id));
+        // An orphaned instance keeps its own stored assignments.
+        if let Some(definition) = definition {
+            record.capabilities = definition.capabilities.clone();
+        }
+        record.description = definition.and_then(|definition| definition.description.clone());
     }
 }
 
@@ -246,12 +250,16 @@ fn materialize_portable_runtime_defaults(
 /// **Invariants preserved (identical for both callers):**
 /// - JSON/PNG format selection from the parsed `is_png` flag (magic-byte sniffing is import-only)
 /// - Memory-source pubkey validation
-/// - Secret exclusion (env_vars never enter the manifest via `build_snapshot`)
+/// - Secret exclusion (env_vars never enter the manifest via `build_snapshot`;
+///   local capability assignments are kept only for the owner's own file)
 /// - Output filename derived from the agent display name
+// Each argument is a distinct export choice made by the two Tauri commands.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn materialize_snapshot_bytes(
     id: String,
     memory_source_pubkey: Option<String>,
     memory_level: MemoryLevel,
+    audience: SnapshotAudience,
     is_png: bool,
     avatar_png_data_url: Option<String>,
     app: AppHandle,
@@ -324,7 +332,8 @@ pub(crate) async fn materialize_snapshot_bytes(
         memory_level,
         memory_entries,
         avatar_bytes.as_deref(),
-    );
+    )
+    .for_audience(audience);
 
     // ── Encode ───────────────────────────────────────────────────────────────
     let slug = crate::util::slugify(&display_name, "agent", 50);
@@ -389,6 +398,7 @@ pub async fn export_agent_snapshot(
         id,
         memory_source_pubkey,
         memory_level,
+        SnapshotAudience::Owner,
         is_png,
         avatar_png_data_url,
         app.clone(),
@@ -452,6 +462,7 @@ pub async fn encode_agent_snapshot_for_send(
         id,
         memory_source_pubkey,
         memory_level,
+        SnapshotAudience::Shared,
         is_png,
         avatar_png_data_url,
         app,
@@ -498,6 +509,7 @@ mod png_body_tests {
             format: crate::managed_agents::agent_snapshot::FORMAT_DISCRIMINATOR.to_string(),
             version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
             definition: crate::managed_agents::agent_snapshot::AgentSnapshotDefinition {
+                capabilities: Default::default(),
                 session_policy: Default::default(),
                 acp_command: None,
                 name: "Agent".to_string(),

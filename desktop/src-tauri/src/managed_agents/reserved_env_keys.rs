@@ -41,6 +41,8 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    "BUZZ_ACP_PERSONA_CAPABILITIES",
+    "AGENT_CWD",
     "BUZZ_ACP_LAUNCH_PREFIX",
     // Control-plane parallelism: the Desktop resolves the effective
     // worker-pool size (applying any per-harness cap) and writes it into

@@ -79,6 +79,12 @@ pub fn apply_persona_behavior(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePersonaRequest {
+    /// Skills, MCP assignments and Buzz lifecycle configuration.
+    #[serde(
+        default,
+        skip_serializing_if = "buzz_persona_pkg::capabilities::PersonaCapabilities::is_empty"
+    )]
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     pub display_name: String,
     pub avatar_url: Option<String>,
     /// Optional short, PUBLIC description (max 280 chars).
@@ -110,6 +116,9 @@ pub struct CreatePersonaRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdatePersonaRequest {
+    /// Replace local capability assignments; omitted means unchanged.
+    #[serde(default)]
+    pub capabilities: Option<buzz_persona_pkg::capabilities::PersonaCapabilities>,
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
@@ -298,6 +307,7 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            capabilities: Default::default(),
             session_policy: Default::default(),
             description: None,
             id: "p-1".to_string(),

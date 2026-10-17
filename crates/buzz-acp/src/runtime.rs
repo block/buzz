@@ -18,14 +18,40 @@ pub(crate) enum SessionMode {
 pub(crate) struct AgentRuntime {
     config: Config,
     _git_environment: git::GitEnvironment,
+    delivery: crate::persona_capabilities::Delivery,
 }
 
 impl AgentRuntime {
     pub(crate) fn prepare(mut config: Config) -> Result<Self> {
+        let cwd = crate::persona_capabilities::resolve_cwd(&config.persona_capabilities)?;
+        let mut delivery = crate::persona_capabilities::Delivery::prepare(
+            &config.persona_capabilities,
+            &config.agent_command,
+            &cwd,
+        )?;
+        for server in &mut config.persona_capabilities.mcp_servers {
+            for value in server.env.values_mut() {
+                if let Some(name) = value.strip_prefix("${").and_then(|v| v.strip_suffix('}')) {
+                    *value = std::env::var(name).map_err(|_| {
+                        anyhow::anyhow!("required MCP environment variable is unavailable: {name}")
+                    })?;
+                }
+            }
+        }
+        if let Some(root) = &delivery.opencode_skill_root {
+            config
+                .persona_env_vars
+                .push(("BUZZ_ACP_OPENCODE_SKILL_ROOT".into(), root.clone()));
+        }
         let git_environment = git::GitEnvironment::for_config(&mut config)?;
+        delivery.started = true;
+        if let Some(path) = delivery.hooks.as_ref().and_then(|h| h.on_start.as_deref()) {
+            crate::persona_capabilities::run_hook(path, "on_start", &delivery.cwd, b"")?;
+        }
         Ok(Self {
             config,
             _git_environment: git_environment,
+            delivery,
         })
     }
 
@@ -43,7 +69,16 @@ impl AgentRuntime {
         channels: HashMap<Uuid, relay::ChannelInfo>,
         mode: SessionMode,
     ) -> Result<PromptContext> {
-        make_prompt_context(&self.config, rest, channels, mode)
+        let mut ctx = make_prompt_context(&self.config, rest, channels, mode)?;
+        ctx.cwd = self.delivery.cwd.clone();
+        ctx.claude_plugins = self.delivery.plugins.clone();
+        ctx.codex_skill_roots = self.delivery.codex_roots.clone();
+        ctx.persona_on_message = self
+            .delivery
+            .hooks
+            .as_ref()
+            .and_then(|h| h.on_message.clone());
+        Ok(ctx)
     }
 }
 
@@ -83,6 +118,9 @@ fn make_prompt_context(
     let base_prompt_content = config.base_prompt_content.as_ref();
     let cwd = current_working_directory()?;
     Ok(PromptContext {
+        claude_plugins: Vec::new(),
+        codex_skill_roots: Vec::new(),
+        persona_on_message: None,
         mcp_servers: build_mcp_servers(config),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),

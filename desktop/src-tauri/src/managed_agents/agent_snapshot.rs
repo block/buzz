@@ -97,6 +97,12 @@ pub enum MemoryLevel {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSnapshotDefinition {
+    /// Skills, MCP assignments and Buzz lifecycle configuration.
+    #[serde(
+        default,
+        skip_serializing_if = "buzz_persona_pkg::capabilities::PersonaCapabilities::is_empty"
+    )]
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     pub name: String,
     /// Portable source classification for import-preview metadata. Imported
     /// definitions are still created as custom agents with fresh identities.
@@ -197,6 +203,27 @@ pub struct AgentSnapshot {
 /// `memory_level` controls what ends up in the `memory` section. `avatar_bytes`
 /// is the raw image for the agent (loaded from disk or fetched); when `None`
 /// or too large, falls back to the `avatar_url` string on the record.
+/// Who can read encoded snapshot bytes. Local execution assignments (MCP
+/// commands and environment values, hook scripts, skill and folder paths) stay
+/// with the owner, like `env_vars`, and never enter bytes shared over a relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotAudience {
+    /// A file saved locally, or a card encrypted to the owner/agent pair.
+    Owner,
+    /// Bytes uploaded to relay media or sent to a channel or DM in the clear.
+    Shared,
+}
+
+impl AgentSnapshot {
+    /// Remove local execution assignments from a snapshot read by others.
+    pub fn for_audience(mut self, audience: SnapshotAudience) -> Self {
+        if audience == SnapshotAudience::Shared {
+            self.definition.capabilities = Default::default();
+        }
+        self
+    }
+}
+
 pub fn build_snapshot(
     record: &ManagedAgentRecord,
     memory_level: MemoryLevel,
@@ -208,6 +235,7 @@ pub fn build_snapshot(
     // portability — instance-level equivalents are spawn-time snapshots and
     // would be stale.
     let definition = AgentSnapshotDefinition {
+        capabilities: record.capabilities.clone(),
         name: record
             .display_name
             .clone()
@@ -413,6 +441,7 @@ pub(crate) fn validate_snapshot(snapshot: &AgentSnapshot) -> Result<(), String> 
             snapshot.version
         ));
     }
+    snapshot.definition.capabilities.validate()?;
     super::validate_portable_acp_command(snapshot.definition.acp_command.as_deref())?;
     if snapshot.definition.name.trim().is_empty() {
         return Err("Snapshot definition.name is empty".to_string());

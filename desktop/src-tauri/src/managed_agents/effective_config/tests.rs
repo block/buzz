@@ -8,6 +8,7 @@ fn definition(
     prompt: &str,
 ) -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: id.to_string(),
@@ -43,6 +44,7 @@ fn record(
 ) -> ManagedAgentRecord {
     use crate::managed_agents::{BackendKind, RespondTo};
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: "agent-pk".to_string(),
@@ -109,6 +111,35 @@ fn global(model: Option<&str>, provider: Option<&str>) -> GlobalAgentConfig {
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
         ..Default::default()
+    }
+}
+
+#[test]
+fn legacy_global_settings_do_not_create_persona_assignments() {
+    let mut defaults: GlobalAgentConfig = serde_json::from_value(serde_json::json!({
+        "model": "existing-model", "provider": "anthropic",
+        "preferred_runtime": "goose", "env_vars": {"EXISTING_SETTING": "value"}
+    }))
+    .unwrap();
+    for linked in [false, true] {
+        let rec = record(linked.then_some("d1"), None, None, None);
+        let defs = [definition("d1", None, None, "role")];
+        let cfg = resolve_effective_config(&rec, &defs, &defaults)
+            .require_resolved()
+            .unwrap();
+        assert!(cfg.capabilities.is_empty());
+        assert_eq!(cfg.model.value.as_deref(), Some("existing-model"));
+        assert_eq!(cfg.provider.value.as_deref(), Some("anthropic"));
+    }
+    // Only an explicit new assignment enters the remote-delivery refusal gate.
+    defaults.capabilities.skills.push("new-assignment".into());
+    for linked in [false, true] {
+        let rec = record(linked.then_some("d1"), None, None, None);
+        let cfg =
+            resolve_effective_config(&rec, &[definition("d1", None, None, "role")], &defaults)
+                .require_resolved()
+                .unwrap();
+        assert_eq!(cfg.capabilities.skills, ["new-assignment"]);
     }
 }
 
@@ -882,4 +913,25 @@ fn linked_record_with_legacy_bytes_inherits_global_not_mesh() {
     assert_eq!(cfg.provider.value.as_deref(), Some("openai"));
     assert_eq!(cfg.model.value.as_deref(), Some("gpt-5"));
     assert_eq!(cfg.relay_mesh_model_id(), None);
+}
+
+#[test]
+fn persona_assignments_survive_record_storage_and_use_live_definition_over_stale_instance() {
+    let mut def = definition("d1", Some("selected-model"), None, "role instructions");
+    def.capabilities = serde_json::from_value(serde_json::json!({"skills":["review"],"mcp_servers":[{"name":"probe","command":"node","args":["review.mjs"],"env":{"ROLE":"reviewer"}}],"hooks":{"on_message":"message.sh"},"working_directory":"/tmp"})).unwrap();
+    let disk_record = def.clone().into_agent_record();
+    let stored = serde_json::to_vec(&disk_record).unwrap();
+    let reloaded: ManagedAgentRecord = serde_json::from_slice(&stored).unwrap();
+    let reloaded = reloaded.to_definition_view().unwrap();
+    assert_eq!(reloaded.capabilities, def.capabilities);
+    let mut rec = record(Some("d1"), Some("stale"), None, None);
+    rec.capabilities.skills.push("stale-instance".into());
+    let mut defaults = global(None, None);
+    defaults.capabilities.skills.push("baseline".into());
+    let cfg = resolve_effective_config(&rec, &[reloaded], &defaults)
+        .require_resolved()
+        .unwrap();
+    assert_eq!(cfg.capabilities.skills, ["baseline", "review"]);
+    assert_eq!(cfg.model.value.as_deref(), Some("selected-model"));
+    assert_eq!(cfg.capabilities.mcp_servers[0].env["ROLE"], "reviewer");
 }

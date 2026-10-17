@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 fn make_definition(slug: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: String::new(),
@@ -81,6 +82,7 @@ fn make_snapshot(
         format: FORMAT_DISCRIMINATOR.to_string(),
         version: FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            capabilities: Default::default(),
             session_policy: Default::default(),
             acp_command: None,
             name: "Test Agent".to_string(),
@@ -275,4 +277,25 @@ fn import_unlocked_card_uses_manifest_avatar_not_card_artwork() {
     assert_eq!(imported.to_rgba8().get_pixel(0, 0).0, [23, 91, 177, 255]);
     // The live kind:0 URL fallback survives untouched.
     assert_eq!(decoded.profile.avatar_url, snapshot.profile.avatar_url);
+}
+
+#[test]
+fn persona_capabilities_portable_json_and_png_roundtrip_and_invalid_import() {
+    let mut snapshot = make_snapshot(MemoryLevel::None, vec![]);
+    snapshot.definition.capabilities = serde_json::from_value(serde_json::json!({"skills":["skills/日本語"],"mcp_servers":[{"name":"probe","command":"node","args":["probe.mjs"],"env":{"ROLE":"operator","TOKEN":"${SERVICE_TOKEN}"}}],"hooks":{"on_start":"start.sh","on_message":"message.sh","on_stop":"stop.sh"}})).unwrap();
+    for bytes in [
+        encode_snapshot_json(&snapshot).unwrap(),
+        encode_snapshot_png(&snapshot, None).unwrap(),
+    ] {
+        let restored = decode_snapshot_from_bytes(&bytes).unwrap();
+        assert_eq!(
+            restored.definition.capabilities,
+            snapshot.definition.capabilities
+        );
+    }
+    snapshot.definition.capabilities.working_directory = Some("relative".into());
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    assert!(decode_snapshot_from_bytes(&bytes)
+        .unwrap_err()
+        .contains("absolute"));
 }

@@ -599,10 +599,12 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         nvm_bin,
     );
 
+    effective_cfg.capabilities.validate()?;
+    let default_cwd = path::default_or_inherited_workdir(super::default_agent_workdir())
+        .map_err(|e| format!("Cannot resolve agent working directory: {e}"))?;
+    let persona_cwd = effective_cfg.capabilities.resolve_cwd(&default_cwd)?;
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    command.current_dir(&persona_cwd);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
@@ -669,6 +671,21 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         command.env_remove("BUZZ_ACP_TEAM_INSTRUCTIONS");
     }
 
+    // An explicit workspace must not hide Buzz's built-in CLI skill. Deliver
+    // the existing nest reference through the same native skill delivery path.
+    let mut launch_capabilities = effective_cfg.capabilities.clone();
+    if persona_cwd != default_cwd {
+        let baseline = default_cwd.join(".agents/skills/buzz-cli");
+        if !baseline.join("SKILL.md").is_file() {
+            return Err("Buzz baseline skill is missing from the development nest".into());
+        }
+        let baseline = baseline.to_string_lossy().into_owned();
+        if !launch_capabilities.skills.contains(&baseline) {
+            launch_capabilities.skills.insert(0, baseline);
+        }
+    }
+    let persona_capabilities_json = serde_json::to_string(&launch_capabilities)
+        .map_err(|_| "Cannot serialize persona capabilities")?;
     // Prompt, model, and provider all come from the single `effective_cfg`
     // resolved at the top of this function — the SAME resolve the spawn-config
     // snapshot reads, so env write and restart badge cannot disagree. Linked
@@ -785,6 +802,8 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     let acp_session_policy = super::effective_acp_session_policy(record, &personas);
     super::apply_acp_session_policy_env(&mut command, acp_session_policy);
 
+    command.env("BUZZ_ACP_PERSONA_CAPABILITIES", persona_capabilities_json);
+    command.env("AGENT_CWD", &persona_cwd);
     crate::build_identity::apply_demo_config_home(&mut command)?;
     // Publish-first replay floor: written AFTER the `descriptor.env` loop, the
     // same post-loop authority ordering the A1 model write uses. This send's
@@ -827,6 +846,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     let spawn_config = super::spawn_snapshot::SpawnConfigSnapshot::from_inputs(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
+            capabilities: &effective_cfg.capabilities,
             descriptor: &descriptor,
             relay_url: &effective_relay_url,
             team_instructions: team_instructions.as_deref(),

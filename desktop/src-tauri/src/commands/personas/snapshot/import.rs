@@ -52,6 +52,8 @@ pub(super) fn reject_legacy_persona_filename(file_name: &str) -> Result<(), Stri
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSnapshotImportPreview {
+    /// Local execution settings requiring review before import.
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     /// Agent display name from the snapshot.
     pub display_name: String,
     /// Whether the exported source definition was built in. This is display
@@ -412,6 +414,7 @@ pub(crate) fn build_agent_snapshot_import_preview(
     let source_allowlist = snapshot.definition.respond_to_allowlist.clone();
 
     Ok(AgentSnapshotImportPreview {
+        capabilities: snapshot.definition.capabilities.clone(),
         display_name: snapshot.profile.display_name.clone(),
         is_builtin: snapshot.definition.source_is_builtin,
         model: snapshot.definition.model.clone(),
@@ -559,6 +562,7 @@ pub async fn confirm_agent_snapshot_import(
         let persona_id = uuid::Uuid::new_v4().to_string();
         // Build persona from snapshot definition.
         let persona = AgentDefinition {
+            capabilities: snapshot.definition.capabilities.clone(),
             id: persona_id.clone(),
             display_name: display_name.clone(),
             avatar_url: effective_avatar.clone(),
@@ -599,6 +603,7 @@ pub async fn confirm_agent_snapshot_import(
         // Build the managed agent record — no machine-local commands, no
         // secrets, no lineage from the snapshot.
         let record = ManagedAgentRecord {
+            capabilities: snapshot.definition.capabilities.clone(),
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,

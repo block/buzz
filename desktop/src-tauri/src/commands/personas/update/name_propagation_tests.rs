@@ -5,6 +5,7 @@ use super::*;
 
 fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: format!("pubkey-{name}"),

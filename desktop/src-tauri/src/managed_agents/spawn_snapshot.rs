@@ -65,6 +65,7 @@ pub(crate) fn effective_team_instructions(
 /// between spawn's resolution and the stamp can no longer suppress the badge.
 pub(crate) struct SpawnConfigInputs<'a> {
     pub record: &'a ManagedAgentRecord,
+    pub capabilities: &'a buzz_persona_pkg::capabilities::PersonaCapabilities,
     pub descriptor: &'a EffectiveHarnessDescriptor,
     /// Resolved workspace/pair relay — never the record's legacy pin.
     pub relay_url: &'a str,
@@ -100,6 +101,7 @@ pub(crate) struct SpawnConfigInputs<'a> {
 /// [`ManagedAgentProcess`]: super::ManagedAgentProcess
 #[derive(Clone, Serialize)]
 pub(crate) struct SpawnConfigSnapshot {
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     /// The ACP harness binary the desktop launches (`buzz-acp`).
     pub acp_command: String,
     /// The effective agent command the harness drives.
@@ -183,6 +185,7 @@ impl SpawnConfigSnapshot {
         let SpawnConfigInputs {
             record,
             descriptor,
+            capabilities,
             relay_url,
             team_instructions,
             system_prompt,
@@ -194,6 +197,7 @@ impl SpawnConfigSnapshot {
         let (respond_to, respond_to_allowlist) =
             super::projected_access_with_policy(record, enforced_owner_only);
         Self {
+            capabilities: capabilities.clone(),
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
@@ -329,15 +333,22 @@ pub(crate) fn prospective_spawn_config_snapshot(
     // definition) resolves as if all three were absent: `spawn_agent_child`
     // refuses to spawn an orphan regardless, and `eligible_restart_diff`
     // suppresses the badge for one.
-    let (prompt, model, provider) = match resolve_effective_config(record, personas, global) {
-        EffectiveConfigResult::Resolved(cfg) => {
-            (cfg.system_prompt.value, cfg.model.value, cfg.provider.value)
-        }
-        EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
-    };
+    let (prompt, model, provider, capabilities) =
+        match resolve_effective_config(record, personas, global) {
+            EffectiveConfigResult::Resolved(cfg) => (
+                cfg.system_prompt.value,
+                cfg.model.value,
+                cfg.provider.value,
+                cfg.capabilities,
+            ),
+            EffectiveConfigResult::OrphanedInstance { .. } => {
+                (None, None, None, Default::default())
+            }
+        };
 
     SpawnConfigSnapshot::from_inputs(SpawnConfigInputs {
         record,
+        capabilities: &capabilities,
         descriptor: &descriptor,
         // Resolved, not stored: every record spawns on the workspace relay
         // (legacy pins ignored), so a workspace relay change must badge.

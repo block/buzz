@@ -906,6 +906,7 @@ export type ChannelMessagesPageResponse = {
  * Precedence: baked floor < global < persona < per-agent.
  */
 export type GlobalAgentConfig = {
+  capabilities?: import("./personaTypes").PersonaCapabilities;
   /** Global env vars injected into all agents unconditionally. */
   env_vars: Record<string, string>;
   /** Global fallback provider (e.g. "anthropic", "databricks_v2"). Null = no global default. */

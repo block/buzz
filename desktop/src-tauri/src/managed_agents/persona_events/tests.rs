@@ -5,6 +5,7 @@ use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 /// state right after creation, before any snapshot apply.
 pub(super) fn sample_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: "p".repeat(64),
@@ -146,6 +147,7 @@ fn preview_passes_through_unchanged_when_persona_missing() {
 
 pub(super) fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: "test-persona".to_string(),
@@ -392,6 +394,7 @@ fn content_matches_nip_ap_vector() {
     // signed content, so a second implementer following the spec computes
     // the same NIP-01 id.
     let record = AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: "test-agent".to_string(),
@@ -427,6 +430,7 @@ fn content_matches_nip_ap_vector() {
 #[test]
 fn round_trip_minimal_persona() {
     let record = AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: "minimal".to_string(),
@@ -528,6 +532,7 @@ fn behavioral_defaults_survive_record_round_trip() {
 #[test]
 fn quad_absent_definition_hash_stable_across_activation() {
     let record = AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: "quad-absent".to_string(),
@@ -577,6 +582,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
 /// way `persona_from_event` maps fields, without needing a signed event.
 fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: content.session_policy,
         description: content.description,
         id: "staged".to_string(),

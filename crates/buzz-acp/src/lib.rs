@@ -11,6 +11,7 @@ mod engram_fetch;
 mod filter;
 mod isolated_execution;
 mod observer;
+mod persona_capabilities;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
@@ -4140,6 +4141,9 @@ async fn run_harness(
                 //     the withheld event in `withheld_native_steer`.
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
                     Ok(pool::SteerAck::Success { .. }) => (false, true, false),
+                    Ok(pool::SteerAck::Err(pool::SteerError::PersonaHookRejected)) => {
+                        (false, true, false)
+                    }
                     // -32601 = method_not_found: agent does not implement the
                     // steer extension. Fire cancel+merge so the message still
                     // reaches the agent.
@@ -5370,6 +5374,14 @@ fn handle_prompt_result(
                     to apply the new configuration, then re-send your request."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(acp::AcpError::PersonaHookRejected(_))
+            ) {
+                // Hook failures are local, deterministic dispatch refusals. A
+                // retry must not turn a dropped message into a later delivery.
+                tracing::warn!(channel_id = %batch.channel_id, "dropping batch rejected by persona on_message hook");
+                spawn_failure_notice(rest_client, &batch, "The persona's before-message script failed or timed out. The message was not sent to the model. Review the script before sending again.".into());
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -6451,6 +6463,32 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    let mut servers = build_baseline_mcp_servers(config);
+    servers.extend(
+        config
+            .persona_capabilities
+            .mcp_servers
+            .iter()
+            .map(|server| {
+                let env: std::collections::BTreeMap<_, _> = server.env.iter().collect();
+                McpServer {
+                    name: server.name.clone(),
+                    command: server.command.clone(),
+                    args: server.args.clone(),
+                    env: env
+                        .into_iter()
+                        .map(|(name, value)| EnvVar {
+                            name: name.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                }
+            }),
+    );
+    servers
+}
+
+fn build_baseline_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
     }
@@ -10100,6 +10138,7 @@ mod build_mcp_servers_tests {
 
     pub(super) fn test_config() -> Config {
         Config {
+            persona_capabilities: Default::default(),
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
@@ -10454,6 +10493,19 @@ mod build_mcp_servers_tests {
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
         );
+    }
+
+    #[test]
+    fn persona_mcp_payload_keeps_arguments_environment_and_baseline() {
+        let mut config = test_config();
+        config.persona_capabilities = serde_json::from_value(serde_json::json!({"mcp_servers":[{"name":"probe","command":"node","args":["probe.mjs","two words"],"env":{"ROLE":"analyst"}}]})).unwrap();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].args, ["probe.mjs", "two words"]);
+        assert_eq!(servers[1].env.len(), 1);
+        assert_eq!(servers[1].env[0].name, "ROLE");
+        assert_eq!(servers[1].env[0].value, "analyst");
     }
 
     #[test]
@@ -11194,6 +11246,7 @@ mod error_outcome_emission_tests {
 
     fn test_config() -> Config {
         Config {
+            persona_capabilities: Default::default(),
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
             // `true` exits cleanly, so the async respawn fails fast and
@@ -12890,6 +12943,23 @@ mod error_outcome_emission_tests {
     /// rather than after 10 futile retries.
     #[tokio::test]
     async fn auth_error_dead_letters_immediately_without_requeueing() {
+        assert_nonretryable_error_is_not_requeued(acp::AcpError::AgentError {
+            code: -32000,
+            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
+                .into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn persona_message_hook_failure_is_not_requeued() {
+        assert_nonretryable_error_is_not_requeued(acp::AcpError::PersonaHookRejected(
+            "exit 7".into(),
+        ))
+        .await;
+    }
+
+    async fn assert_nonretryable_error_is_not_requeued(error: acp::AcpError) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
             .sign_with_keys(&keys)
@@ -12906,12 +12976,6 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
-        };
-
-        let auth_error = acp::AcpError::AgentError {
-            code: -32000,
-            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
-                .to_string(),
         };
 
         let agent = dummy_agent(0).await;
@@ -12945,7 +13009,7 @@ mod error_outcome_emission_tests {
             agent,
             source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
             turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(auth_error),
+            outcome: PromptOutcome::Error(error),
             batch: Some(batch),
         };
         handle_prompt_result(
@@ -12967,12 +13031,12 @@ mod error_outcome_emission_tests {
         assert_eq!(
             queue.pending_channels(),
             0,
-            "auth error must dead-letter immediately — batch must not be requeued"
+            "non-retryable error must dead-letter immediately — batch must not be requeued"
         );
         assert_eq!(
             queue.queued_event_count(channel_id),
             0,
-            "auth error must dead-letter immediately — no events should be pending"
+            "non-retryable error must dead-letter immediately — no events should be pending"
         );
     }
 

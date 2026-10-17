@@ -272,6 +272,10 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Structured persona skill, MCP, workspace and lifecycle configuration.
+    #[arg(long, env = "BUZZ_ACP_PERSONA_CAPABILITIES", hide_env_values = true)]
+    pub persona_capabilities: Option<String>,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -545,6 +549,7 @@ pub struct ChannelFilter {
 
 #[derive(Debug)]
 pub struct Config {
+    pub persona_capabilities: buzz_persona::capabilities::PersonaCapabilities,
     pub keys: Keys,
     pub relay_url: String,
     pub agent_command: String,
@@ -1157,7 +1162,32 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let persona_capabilities: buzz_persona::capabilities::PersonaCapabilities = args
+            .persona_capabilities
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| ConfigError::ConfigFile("invalid persona capabilities JSON".into()))?
+            .unwrap_or_default();
+        persona_capabilities
+            .validate()
+            .map_err(ConfigError::ConfigFile)?;
+        let baseline_name = std::path::Path::new(&args.mcp_command)
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("mcp");
+        if !args.mcp_command.is_empty()
+            && persona_capabilities
+                .mcp_servers
+                .iter()
+                .any(|s| s.name == baseline_name)
+        {
+            return Err(ConfigError::ConfigFile(
+                "persona MCP assignment conflicts with the Buzz baseline server".into(),
+            ));
+        }
         let config = Config {
+            persona_capabilities,
             keys,
             relay_url: args.relay_url,
             agent_command,
@@ -1544,6 +1574,7 @@ mod tests {
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
+            persona_capabilities: Default::default(),
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),

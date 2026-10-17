@@ -8,6 +8,7 @@ const RELAY_WITH_TOKEN: &str = "wss://relay.example/ws?token=SENTINEL";
 /// coverage guard below sees the full serialized key set.
 fn base() -> SpawnConfigSnapshot {
     SpawnConfigSnapshot {
+        capabilities: Default::default(),
         acp_command: "buzz-acp".into(),
         command: "goose".into(),
         args: vec!["--mode".into(), "acp".into()],
@@ -50,6 +51,9 @@ type Mutation = (&'static str, fn(&mut SpawnConfigSnapshot));
 
 fn mutations() -> Vec<Mutation> {
     vec![
+        ("capabilities.skills", |s| {
+            s.capabilities.skills.push("skill".into())
+        }),
         ("acp_command", |s| s.acp_command = "other-acp".into()),
         ("command", |s| s.command = "claude".into()),
         ("args", |s| s.args = vec!["--other".into()]),
@@ -628,4 +632,20 @@ fn restart_restamps_effort_and_clears_the_badge() {
     let (needs_restart, entries) = eligible(false, &restamped, &current, None, None);
     assert!(!needs_restart);
     assert!(entries.is_empty());
+}
+
+#[test]
+fn persona_mcp_arguments_and_environment_are_redacted_in_restart_diff_and_debug() {
+    let mut before = base();
+    before.capabilities = serde_json::from_value(serde_json::json!({"mcp_servers":[{"name":"probe","command":"node","args":["secret-before"],"env":{"TOKEN":"token-before"}}]})).unwrap();
+    let mut after = before.clone();
+    after.capabilities.mcp_servers[0].args[0] = "secret-after".into();
+    let entries = diff(&before, &after);
+    assert!(matches!(
+        change_at(&entries, "capabilities.mcp_servers"),
+        RestartChange::Masked { .. }
+    ));
+    let shown = format!("{after:?} {entries:?}");
+    assert!(!shown.contains("secret-after"));
+    assert!(!shown.contains("token-before"));
 }

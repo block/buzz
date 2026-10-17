@@ -121,6 +121,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
     BUILT_IN_PERSONAS
         .iter()
         .map(|persona| AgentDefinition {
+            capabilities: Default::default(),
             id: persona.id.to_string(),
             display_name: persona.display_name.to_string(),
             avatar_url: persona.avatar_url.map(|s| s.to_string()),

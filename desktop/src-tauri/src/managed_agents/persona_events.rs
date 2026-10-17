@@ -251,6 +251,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
     let created_at = event.created_at.to_human_datetime();
 
     Ok(AgentDefinition {
+        capabilities: Default::default(),
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
@@ -638,6 +639,7 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
     record.session_policy = persona.session_policy;
+    record.capabilities = persona.capabilities.clone();
     // Drop a stale create-time harness pin when the definition switches to a
     // different known runtime (builtin, static preset, or loaded custom). A pin
     // that names an unknown/custom command is always kept.

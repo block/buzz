@@ -1,3 +1,4 @@
+pub mod capabilities;
 pub mod manifest;
 pub mod merge;
 pub mod pack;

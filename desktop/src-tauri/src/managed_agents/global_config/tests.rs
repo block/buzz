@@ -263,6 +263,7 @@ fn default_config_is_all_none_empty() {
 #[test]
 fn roundtrip_serialization() {
     let config = GlobalAgentConfig {
+        capabilities: Default::default(),
         env_vars: BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
@@ -299,6 +300,7 @@ fn default_global_config_serializes_all_fields() {
 
 fn bare_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: "agent".to_string(),
@@ -362,6 +364,7 @@ fn bare_record() -> ManagedAgentRecord {
 
 fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: id.to_string(),
@@ -687,6 +690,7 @@ fn resolve_each_field_resolves_independently_through_tiers() {
 #[test]
 fn populated_global_config_round_trips() {
     let original = GlobalAgentConfig {
+        capabilities: Default::default(),
         env_vars: [("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]
             .into_iter()
             .collect(),
@@ -719,6 +723,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     record.persona_id = Some("p1".to_string());
 
     let persona = AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: "p1".to_string(),

@@ -16,7 +16,9 @@ use crate::{
         encode_team_snapshot_json, encode_team_snapshot_png, TeamSnapshot,
     },
     managed_agents::{
-        agent_snapshot::{build_snapshot, AgentSnapshot, AgentSnapshotMemoryEntry, MemoryLevel},
+        agent_snapshot::{
+            build_snapshot, AgentSnapshot, AgentSnapshotMemoryEntry, MemoryLevel, SnapshotAudience,
+        },
         load_managed_agents, load_personas, load_teams, load_teams_readonly, save_managed_agents,
         save_personas, save_teams, AgentDefinition, ManagedAgentRecord, TeamRecord,
     },
@@ -119,6 +121,7 @@ fn definition_from_snapshot(
         .then(|| behavior.respond_to.as_str().to_string());
 
     Ok(AgentDefinition {
+        capabilities: member.definition.capabilities.clone(),
         id: Uuid::new_v4().to_string(),
         display_name: member.profile.display_name.trim().to_string(),
         avatar_url: effective_avatar(member),
@@ -194,6 +197,7 @@ pub(crate) fn build_import_team(
 
 fn member_preview(member: &AgentSnapshot) -> TeamSnapshotMemberPreview {
     TeamSnapshotMemberPreview {
+        capabilities: member.definition.capabilities.clone(),
         display_name: member.profile.display_name.clone(),
         system_prompt: member.definition.system_prompt.clone(),
         avatar_url: effective_avatar(member),
@@ -206,6 +210,7 @@ fn member_preview(member: &AgentSnapshot) -> TeamSnapshotMemberPreview {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamSnapshotMemberPreview {
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     pub display_name: String,
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
@@ -325,6 +330,7 @@ async fn materialize_team_snapshot_bytes(
     id: String,
     is_png: bool,
     memory_level: MemoryLevel,
+    audience: SnapshotAudience,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<EncodedTeamSnapshotPayload, String> {
@@ -383,13 +389,18 @@ async fn materialize_team_snapshot_bytes(
         }
     }
 
-    let snapshot = build_team_export_snapshot(
+    let mut snapshot = build_team_export_snapshot(
         &team,
         &personas,
         &records,
         effective_memory_level,
         &memory_entries_by_persona,
     )?;
+    snapshot.members = snapshot
+        .members
+        .into_iter()
+        .map(|member| member.for_audience(audience))
+        .collect();
     let slug = crate::util::slugify(&team.name, "team", 50);
     let (file_bytes, file_name) = if is_png {
         let bytes = encode_team_snapshot_png(&snapshot)
@@ -427,8 +438,15 @@ pub async fn export_team_snapshot(
 ) -> Result<bool, String> {
     let is_png = parse_format_is_png(&format)?;
     let memory_level = parse_memory_level(&memory_level)?;
-    let payload =
-        materialize_team_snapshot_bytes(id, is_png, memory_level, app.clone(), state).await?;
+    let payload = materialize_team_snapshot_bytes(
+        id,
+        is_png,
+        memory_level,
+        SnapshotAudience::Owner,
+        app.clone(),
+        state,
+    )
+    .await?;
     if is_png {
         save_bytes_with_dialog(
             &app,
@@ -460,8 +478,15 @@ pub async fn encode_team_snapshot_for_send(
     state: State<'_, AppState>,
 ) -> Result<EncodedTeamSnapshotPayload, String> {
     let memory_level = parse_memory_level(&memory_level)?;
-    materialize_team_snapshot_bytes(id, parse_format_is_png(&format)?, memory_level, app, state)
-        .await
+    materialize_team_snapshot_bytes(
+        id,
+        parse_format_is_png(&format)?,
+        memory_level,
+        SnapshotAudience::Shared,
+        app,
+        state,
+    )
+    .await
 }
 
 /// Decode a team snapshot into a confirmation preview without writing anything.
@@ -561,6 +586,7 @@ pub async fn confirm_team_snapshot_import(
 
         // Build the ManagedAgentRecord for this member.
         let record = ManagedAgentRecord {
+            capabilities: definition.capabilities.clone(),
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,

@@ -204,6 +204,10 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+            if let Some(capabilities) = input.capabilities {
+                capabilities.validate()?;
+                persona.capabilities = capabilities;
+            }
             if let Some(env_vars) = input.env_vars {
                 crate::managed_agents::validate_user_env_keys(&env_vars)?;
                 persona.env_vars = env_vars;
