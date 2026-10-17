@@ -182,6 +182,10 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // pre-existing definition slugs exist for collision checks) and before event
     // sync republishes — the backfilled link flips the 30177 projection.
     backfill_standalone_agents(app);
+    // Lift an instance-only custom ACP command into its definition BEFORE any
+    // start path resolves the command from the definition, and before event
+    // sync republishes, so the relay receives the adopted command.
+    lift_instance_acp_commands(app);
     // Repair dropped team↔member links, then detach directory-backed teams,
     // gated on a clean repair so a failure preserves `source_dir` for a retry.
     team_membership::repair_then_detach_teams(app);
@@ -1391,6 +1395,8 @@ pub use materialize::materialize_agent_runtimes;
 mod fold;
 pub use fold::fold_personas_into_agent_store;
 use fold::load_persona_runtimes;
+mod acp_command_lift;
+use acp_command_lift::lift_instance_acp_commands;
 mod backfill;
 pub use backfill::backfill_standalone_agents;
 mod detach;
