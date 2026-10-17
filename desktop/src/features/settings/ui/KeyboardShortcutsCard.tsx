@@ -10,11 +10,34 @@ import {
 } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
+// Split a key-combo string on "+" separators. A "+" is a separator unless it
+// directly follows another "+" (so "⌘++" keeps "+" as a key) or only
+// whitespace remains after it (so a trailing "+" stays attached). Mirrors the
+// previous /(?<!\+)\+(?!\s*$)/ split without lookbehind/lookahead.
+function splitKeyCombo(keys: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  for (let i = 0; i < keys.length; i++) {
+    const ch = keys[i];
+    const isSeparator =
+      ch === "+" && keys[i - 1] !== "+" && keys.slice(i + 1).trim() !== "";
+    if (isSeparator) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
 function KeyCombo({ shortcut }: { shortcut: KeyboardShortcut }) {
   const keys = getPlatformKeys(shortcut);
-  // Split on "+" but keep "+" as a standalone key (e.g. for zoom-in "⌘+")
-  const parts = keys
-    .split(/(?<!\+)\+(?!\s*$)/)
+  // Split on "+" but keep "+" as a standalone key (e.g. for zoom-in "⌘+").
+  // Implemented without RegExp lookbehind so the bundle parses on macOS 12's
+  // system WebKit (Safari 16.4 feature). See block/buzz#3295.
+  const parts = splitKeyCombo(keys)
     .map((p) => p.trim())
     .filter(Boolean);
 
