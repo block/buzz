@@ -11627,6 +11627,46 @@ done"#
     }
 
     #[tokio::test]
+    async fn session_creation_passes_configured_permission_deadline() {
+        let script = r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"sess-1","modes":{"availableModes":[{"id":"bypassPermissions"}]}}}'
+  else
+    sleep 1
+  fi
+done"#;
+        let acp = AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+            .await
+            .unwrap();
+        let mut agent = effort_agent(acp, None);
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.permission_mode = PermissionMode::BypassPermissions;
+        ctx.permission_mode_timeout = Duration::from_millis(25);
+        let result = tokio::time::timeout(
+            Duration::from_millis(400),
+            create_session_and_apply_model(
+                &mut agent,
+                &ctx,
+                None,
+                NewSessionChannelContext {
+                    huddle_instructions: None,
+                    canvas: None,
+                    name: None,
+                    scope: None,
+                    channel_type: None,
+                },
+            ),
+        )
+        .await
+        .expect("configured deadline must finish session creation");
+        assert!(
+            matches!(result, Err(AcpError::Timeout(value)) if value == ctx.permission_mode_timeout)
+        );
+    }
+
+    #[tokio::test]
     async fn test_rejected_effort_retains_captured_current_value() {
         // Adapter answers the effort set with a JSON-RPC error → AgentError →
         // application-level rejection: non-fatal, capture keeps the default.
