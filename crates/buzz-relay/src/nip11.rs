@@ -189,6 +189,8 @@ pub(crate) struct RelayCapabilityFlags {
     pub advertise_nip43: bool,
     /// Whether NIP-FI (federated identity) is advertised.
     pub advertise_fi: bool,
+    /// Whether NIP-FI `agent_assertions: true` is advertised.
+    pub advertise_agent_assertions: bool,
 }
 
 impl RelayInfo {
@@ -231,6 +233,7 @@ impl RelayInfo {
         let RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
+            advertise_agent_assertions,
         } = flags;
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
@@ -264,13 +267,17 @@ impl RelayInfo {
         // URLs, audiences, claim names, or per-tenant details. Only the
         // capability fact (core transport profile + freshness class) is public.
         let federated_identity = advertise_fi.then(|| {
-            serde_json::json!({
+            let mut descriptor = serde_json::json!({
                 "core": "client-attached",
                 "assertion_freshness": {
                     "class": "offline-jwt",
                     "maximum_residual_upstream_revocation_seconds": null
                 }
-            })
+            });
+            if advertise_agent_assertions {
+                descriptor["agent_assertions"] = serde_json::Value::Bool(true);
+            }
+            descriptor
         });
 
         Self {
@@ -381,6 +388,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
+            advertise_agent_assertions: state.config.nip_fi.agent_assertions,
         },
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
@@ -823,6 +831,7 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
+                advertise_agent_assertions: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -845,12 +854,41 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
+                advertise_agent_assertions: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,
             None,
             None,
         );
+    }
+
+    /// `agent_assertions` appears only when configured, inside the NIP-FI
+    /// discovery object, and is otherwise absent rather than `false`.
+    #[test]
+    fn build_advertises_agent_assertions_only_when_configured() {
+        let descriptor = |advertise_agent_assertions| {
+            RelayInfo::build(
+                None,
+                None,
+                RelayCapabilityFlags {
+                    advertise_nip43: false,
+                    advertise_fi: true,
+                    advertise_agent_assertions,
+                },
+                DEFAULT_MAX_FRAME_BYTES,
+                None,
+                None,
+                None,
+            )
+            .federated_identity
+            .expect("NIP-FI advertised")
+        };
+        assert_eq!(
+            descriptor(true)["agent_assertions"],
+            serde_json::json!(true)
+        );
+        assert!(descriptor(false).get("agent_assertions").is_none());
     }
 
     fn admin_config(host: &str) -> crate::config::AdminConfig {

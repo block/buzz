@@ -90,6 +90,10 @@ pub(crate) const TRANSPORT_CONTRACT_VERSION: u32 = 1;
 /// "Assertion validation"). Not configurable: other encodings and aliases deny.
 pub const NOSTR_PUBKEY_CLAIM: &str = "nostr_pubkey";
 
+/// The fixed name of the owner-key claim on an agent assertion (NIP-FI.md,
+/// "Agent keys"). Same encoding as [`NOSTR_PUBKEY_CLAIM`].
+pub const NOSTR_OWNER_PUBKEY_CLAIM: &str = "nostr_owner_pubkey";
+
 /// The fixed identity-subject claim. Identity is the exact tuple `(iss, sub)`
 /// (NIP-FI.md:35-41), so the subject coordinate is always the JWT `sub` claim
 /// and is never deployment-configurable: an operator cannot seal a mutable

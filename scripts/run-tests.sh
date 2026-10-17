@@ -361,6 +361,7 @@ run_unit_tests() {
     state::tests::conn_manager_disconnect_nip_fi_is_issuer_scoped
     state::tests::conn_manager_disconnect_nip_fi_sets_authorization_denied_reason
     state::tests::nip_fi_disconnect_audio_is_issuer_scoped
+    state::tests::nip_fi_owner_disconnect_closes_owned_agent_sockets_on_root_and_audio
     state::tests::nip_fi_disconnect_closes_proven_audio_socket_and_sends_policy_close_reason
     state::tests::nip_fi_disconnect_closes_target_audio_only_and_preserves_collocated_peer
     state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket

@@ -563,7 +563,7 @@ fn parse_operator_listener_delivery_urls(
     Ok(endpoints)
 }
 
-fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
+pub(crate) fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
     match std::env::var(name) {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(ConfigError::InvalidValue(format!(

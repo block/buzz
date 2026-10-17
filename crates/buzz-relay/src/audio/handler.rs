@@ -426,16 +426,16 @@ where
     }
 }
 
-/// Records the NIP-42-proven pubkey and its admitting NIP-FI issuer on an audio
+/// Records the NIP-42-proven pubkey and its admitting NIP-FI session on an audio
 /// control after successful auth so the issuer-scoped NIP-FI disconnect scan
 /// can reach audio sockets alongside relay peers.  Shared by the handler and
 /// tests that register audio sockets through the production seam.
 pub(crate) fn audio_post_auth_register(
     control: &CommunityConnectionControl,
     pubkey_bytes: Vec<u8>,
-    nip_fi_issuer: Option<String>,
+    nip_fi: Option<crate::nip_fi_core::NipFiSession>,
 ) {
-    control.set_proven_identity(pubkey_bytes, nip_fi_issuer);
+    control.set_proven_identity(pubkey_bytes, nip_fi);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -703,19 +703,13 @@ pub(crate) async fn handle_active_audio_connection(
         pubkey_bytes.clone(),
         nip_fi_assertion
             .as_ref()
-            .map(|a| a.identity().issuer().to_owned()),
+            .map(crate::nip_fi_core::NipFiSession::from_assertion),
     );
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_deny_set_check(tenant.community()).await;
     if let Some(assertion) = &nip_fi_assertion {
-        if let (Some(asserted_key), Some(deny_map)) =
-            (assertion.asserted_key(), state.nip_fi_deny_map.as_deref())
-        {
-            if deny_map.is_denied(
-                assertion.identity().issuer(),
-                &asserted_key,
-                chrono::Utc::now(),
-            ) {
+        if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
                 warn!(
                     channel_id = %channel_id,
                     pubkey = %pubkey_hex,
@@ -4372,7 +4366,11 @@ mod tests {
         let control = CommunityConnectionControl::new(CancellationToken::new());
         let (terminal_tx, mut terminal_rx) = mpsc::channel::<WsMessage>(1);
         control.set_terminal_frame_sender(terminal_tx);
-        audio_post_auth_register(&control, key.clone(), Some("test-issuer".to_owned()));
+        audio_post_auth_register(
+            &control,
+            key.clone(),
+            Some(crate::nip_fi_core::NipFiSession::new("test-issuer", None)),
+        );
         let _guard = registry.register(uuid::Uuid::new_v4(), community, control.clone());
 
         let mut wire = Vec::new();
@@ -6891,16 +6889,34 @@ mod tests {
 
     #[tokio::test]
     async fn w_audio_deny_active_key_refused_at_post_registration_check() {
+        w_audio_deny_active_refused_body(None).await;
+    }
+
+    // An owner-only deny entry refuses the agent's audio AUTH at the same
+    // check. Mutation: dropping the owner arm of `assertion_denied` admits it.
+    #[tokio::test]
+    async fn w_audio_owner_deny_refuses_agent_at_post_registration_check() {
+        w_audio_deny_active_refused_body(Some(nostr::Keys::generate())).await;
+    }
+
+    async fn w_audio_deny_active_refused_body(owner: Option<nostr::Keys>) {
         use buzz_auth::VerifiedAssertion;
         use chrono::{Duration, Utc};
         use std::sync::Arc;
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        // Assertion with "test-issuer"; the key IS in the deny map.
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        // Assertion with "test-issuer"; the key, or the agent's owner, IS in
+        // the deny map.
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let target = owner
+            .as_ref()
+            .map_or(key.public_key(), nostr::Keys::public_key);
+        if owner.is_some() {
+            assertion = assertion.with_owner_for_test(target);
+        }
 
-        let state = audio_deny_state(Some(&key.public_key())).await;
+        let state = audio_deny_state(Some(&target)).await;
 
         let tenant = buzz_core::tenant::TenantContext::resolved(
             buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
@@ -7044,6 +7060,20 @@ mod tests {
 
     #[tokio::test]
     async fn w_audio_deny_straddle_entry_inserted_between_registration_and_check_is_caught() {
+        w_audio_deny_straddle_body(None).await;
+    }
+
+    // The owner's disconnect in the same window: the close scan finds the
+    // agent's audio socket by its recorded owner, and the check refuses it on
+    // the owner's entry. Mutation: dropping the owner in
+    // `NipFiSession::from_assertion`, or the owner arm of the audio
+    // registry's match, leaves the scan at 0.
+    #[tokio::test]
+    async fn w_audio_owner_straddle_closes_agent_and_refuses_admission() {
+        w_audio_deny_straddle_body(Some(nostr::Keys::generate())).await;
+    }
+
+    async fn w_audio_deny_straddle_body(owner: Option<nostr::Keys>) {
         // Arms `before_deny_set_check` — fires AFTER audio_post_auth_register and
         // BEFORE the is_denied call. Entry starts absent; inserted during the window.
         // The deny check finds it and closes the connection.
@@ -7053,7 +7083,14 @@ mod tests {
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        // The deny and the close scan target the owner when there is one.
+        let target = owner
+            .as_ref()
+            .map_or(key.public_key(), nostr::Keys::public_key);
+        if owner.is_some() {
+            assertion = assertion.with_owner_for_test(target);
+        }
 
         // Build state with empty deny map (key not denied yet).
         let deny_map = Arc::new(buzz_auth::NipFiDenyMap::new(
@@ -7189,12 +7226,8 @@ mod tests {
 
         // Insert the deny entry — handler is between registration and check.
         let until = Utc::now() + Duration::seconds(3600);
-        let merge = deny_map_for_insert.merge_cross_pod_deny(
-            "test-issuer",
-            &key.public_key(),
-            until,
-            Utc::now(),
-        );
+        let merge =
+            deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
         assert!(
             matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
             "W_audio_deny_straddle: deny entry must be inserted during hook window"
@@ -7210,7 +7243,7 @@ mod tests {
         // Mutation evidence (Mut-C: move hook before audio_post_auth_register):
         //   disconnect_nip_fi returns 0 (not yet registered) → assertion panics.
         //   Causally falsifies the registration-before-check invariant.
-        let pubkey_bytes = key.public_key().to_bytes().to_vec();
+        let pubkey_bytes = target.to_bytes().to_vec();
         let closed = state
             .community_connections
             .disconnect_nip_fi("test-issuer", &pubkey_bytes);

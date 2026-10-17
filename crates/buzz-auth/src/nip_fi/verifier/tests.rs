@@ -745,6 +745,58 @@ fn absent_nostr_pubkey_claim_denies() {
     );
 }
 
+// ---- Agent assertions (`nostr_owner_pubkey`) -------------------------------
+
+fn owner_claim_token(owner: &str) -> String {
+    mint(
+        Some("at+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "client_id": "a", "sub_type": "user", NOSTR_OWNER_PUBKEY_CLAIM: owner }),
+    )
+}
+
+#[test]
+fn owner_claim_is_sealed_when_agent_assertions_are_admitted() {
+    let verifier = verifier_with(access_token_policy()).with_agent_assertions(true);
+    let owner = nostr::Keys::generate().public_key();
+    let assertion = verifier
+        .verify_for_aud(&owner_claim_token(&owner.to_hex()), AUDIENCE)
+        .expect("verifies");
+    assert_eq!(assertion.owner(), Some(owner));
+}
+
+#[test]
+fn token_without_owner_claim_has_no_owner() {
+    let verifier = verifier_with(access_token_policy()).with_agent_assertions(true);
+    let token = mint(Some("at+jwt"), TEST_KID, resource_owner_claims());
+    let assertion = verifier.verify_for_aud(&token, AUDIENCE).expect("verifies");
+    assert_eq!(assertion.owner(), None);
+}
+
+#[test]
+fn owner_claim_denies_without_agent_assertions() {
+    let verifier = verifier_with(access_token_policy());
+    let owner = nostr::Keys::generate().public_key().to_hex();
+    let err = verifier
+        .verify_for_aud(&owner_claim_token(&owner), AUDIENCE)
+        .unwrap_err();
+    assert_eq!(err, VerifierError::ClaimRejected);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+}
+
+#[test]
+fn malformed_or_self_equal_owner_claim_denies() {
+    let verifier = verifier_with(access_token_policy()).with_agent_assertions(true);
+    let upper = nostr::Keys::generate().public_key().to_hex().to_uppercase();
+    for owner in [upper.as_str(), "", "not-hex", TEST_NOSTR_PUBKEY] {
+        let err = verifier
+            .verify_for_aud(&owner_claim_token(owner), AUDIENCE)
+            .unwrap_err();
+        assert_eq!(err, VerifierError::ClaimRejected, "owner {owner:?}");
+        assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+    }
+}
+
 // ---- Time bounds ----------------------------------------------------------
 
 #[test]

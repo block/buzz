@@ -661,15 +661,16 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     .conn_manager
                     .set_admitted_owner(conn_id, owner.to_bytes());
             }
-            // The bind carries the admitting NIP-FI issuer, so a concurrent
-            // `disconnect_nip_fi` scan that sees the pubkey also sees its
-            // issuer; the deny-set check after `authenticate` closes the rest.
+            // The bind carries the admitting NIP-FI issuer and agent owner, so
+            // a concurrent `disconnect_nip_fi` scan that sees the pubkey also
+            // sees its session; the deny-set check after `authenticate` closes
+            // the rest.
             state.conn_manager.set_authenticated_identity(
                 conn_id,
                 pubkey.to_bytes().to_vec(),
                 conn.nip_fi_assertion
                     .as_ref()
-                    .map(|a| a.identity().issuer().to_owned()),
+                    .map(crate::nip_fi_core::NipFiSession::from_assertion),
             );
             match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
                 Ok(Some(owner)) => state.conn_manager.set_admitted_owner(conn_id, owner),
@@ -716,14 +717,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             crate::nip_fi_test_hooks::before_deny_set_check(conn.tenant.community()).await;
             // [FI-TRACE-DENY-SET]
             if let Some(assertion) = &conn.nip_fi_assertion {
-                if let (Some(asserted_key), Some(deny_map)) =
-                    (assertion.asserted_key(), state.nip_fi_deny_map.as_deref())
-                {
-                    if deny_map.is_denied(
-                        assertion.identity().issuer(),
-                        &asserted_key,
-                        chrono::Utc::now(),
-                    ) {
+                if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+                    if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
+                    {
                         warn!(
                             conn_id = %conn_id,
                             pubkey = %pubkey.to_hex(),
@@ -1406,7 +1402,7 @@ mod tests {
         state.conn_manager.set_authenticated_identity(
             conn.conn_id,
             pubkey.clone(),
-            Some("test-issuer".to_owned()),
+            Some(crate::nip_fi_core::NipFiSession::new("test-issuer", None)),
         );
         assert_eq!(
             state.conn_manager.disconnect_nip_fi("test-issuer", &pubkey),
@@ -2220,7 +2216,22 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w_deny_straddle_entry_inserted_between_registration_and_check_is_caught() {
-            w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body().await;
+            w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body(None)
+                .await;
+        }
+
+        // The owner's disconnect in the same window: the close scan finds the
+        // agent's socket by its recorded owner, and the check refuses it on
+        // the owner's entry. Mutation: dropping the owner in
+        // `NipFiSession::from_assertion`, or the owner arm of the root
+        // registry's match, leaves the scan at 0.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_deny_owner_straddle_closes_agent_and_refuses_admission() {
+            w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body(Some(
+                Keys::generate(),
+            ))
+            .await;
         }
 
         // ── W_deny_straddle: deny entry inserted in window between registration and check
@@ -2248,7 +2259,9 @@ mod tests {
         //      Causally falsifies the registration-before-check invariant.
         //
         // Runs in PG lane on wrapper DB (same constraint as W1: ban-check is fail-closed).
-        async fn w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body() {
+        async fn w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body(
+            owner: Option<Keys>,
+        ) {
             use buzz_auth::{IssuerCapacity, NipFiDenyMap, VerifiedAssertion};
             use chrono::{Duration, Utc};
             use std::collections::HashMap;
@@ -2261,7 +2274,12 @@ mod tests {
             let key = Keys::generate();
             let deadline = Utc::now() + Duration::hours(1);
             // `for_test` produces issuer = "test-issuer".
-            let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            // The deny and the close scan target the owner when there is one.
+            let target = owner.as_ref().map_or(key.public_key(), Keys::public_key);
+            if owner.is_some() {
+                assertion = assertion.with_owner_for_test(target);
+            }
 
             let challenge = "w-deny-straddle-challenge".to_string();
             let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
@@ -2363,12 +2381,8 @@ mod tests {
             // Handler is now AFTER set_authenticated_pubkey (registered) and BEFORE
             // the deny check. Insert the deny entry into the live map.
             let until = Utc::now() + Duration::seconds(3600);
-            let merge = deny_map_for_insert.merge_cross_pod_deny(
-                "test-issuer",
-                &key.public_key(),
-                until,
-                Utc::now(),
-            );
+            let merge =
+                deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
             assert!(
                 matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
                 "W_deny_straddle: deny entry must be inserted during the hook window"
@@ -2379,7 +2393,7 @@ mod tests {
             // to the concurrent close scan — the normative invariant [FI-TRACE-DENY-SET].
             // With the deny entry live, the scan finds exactly one session matching this
             // pubkey and closes it.
-            let pubkey_bytes = key.public_key().to_bytes().to_vec();
+            let pubkey_bytes = target.to_bytes().to_vec();
             let closed = state
                 .conn_manager
                 .disconnect_nip_fi("test-issuer", &pubkey_bytes);
@@ -2619,13 +2633,22 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w_deny_pre_registration_denied_by_handler_check() {
-            w_deny_pre_registration_body(true).await;
+            w_deny_pre_registration_body(true, None).await;
+        }
+
+        // An owner-only deny entry refuses the agent at the handler's check.
+        // Mutation: dropping the owner arm of `assertion_denied` admits the
+        // agent with OK(true).
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_deny_pre_registration_owner_denied_by_handler_check() {
+            w_deny_pre_registration_body(true, Some(Keys::generate())).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w_deny_pre_registration_clean_key_admitted() {
-            w_deny_pre_registration_body(false).await;
+            w_deny_pre_registration_body(false, None).await;
         }
 
         // ── W_deny_pre_registration: the deny entry exists BEFORE the connection
@@ -2637,7 +2660,7 @@ mod tests {
         //
         // Mutation: bypass the `[FI-TRACE-DENY-SET]` check in `handle_auth` →
         // the denied case sends OK(true), stays uncancelled, enqueues no frame.
-        async fn w_deny_pre_registration_body(deny_self: bool) {
+        async fn w_deny_pre_registration_body(deny_self: bool, owner: Option<Keys>) {
             use buzz_auth::{IssuerCapacity, NipFiDenyMap, VerifiedAssertion};
             use chrono::{Duration, Utc};
             use std::collections::HashMap;
@@ -2649,7 +2672,12 @@ mod tests {
             let key = Keys::generate();
             let deadline = Utc::now() + Duration::hours(1);
             // `for_test` produces issuer = "test-issuer".
-            let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            // An agent assertion's deny entry targets its owner.
+            let target = owner.as_ref().map_or(key.public_key(), Keys::public_key);
+            if owner.is_some() {
+                assertion = assertion.with_owner_for_test(target);
+            }
 
             let challenge = "w-deny-pre-registration-challenge".to_string();
             let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
@@ -2693,7 +2721,7 @@ mod tests {
                 }],
             ));
             let denied_key = if deny_self {
-                key.public_key()
+                target
             } else {
                 Keys::generate().public_key()
             };

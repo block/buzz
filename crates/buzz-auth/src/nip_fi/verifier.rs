@@ -30,8 +30,8 @@ use super::community::CommunityBinding;
 use super::config::{
     is_asymmetric_algorithm, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerRegistry,
     SubjectClass, TokenClass, TransportContractId, MAX_CLIENT_ID_BYTES, MAX_JWKS_KEYS,
-    MAX_KID_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
-    SUBJECT_CLAIM,
+    MAX_KID_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES, NOSTR_OWNER_PUBKEY_CLAIM,
+    NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM, SUBJECT_CLAIM,
 };
 use super::denial::DenialClass;
 use chrono::{DateTime, TimeZone, Utc};
@@ -312,6 +312,7 @@ pub struct FederatedAssertionVerifier<S: IssuerKeySource> {
     registry: IssuerRegistry,
     key_source: S,
     transport_contract_id: TransportContractId,
+    agent_assertions: bool,
 }
 
 impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
@@ -322,7 +323,17 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             registry,
             key_source,
             transport_contract_id: TransportContractId::core_client_attached(),
+            agent_assertions: false,
         }
+    }
+
+    /// Admit agent assertions (NIP-FI.md, "Agent keys"): a verified
+    /// `nostr_owner_pubkey` is sealed as the assertion's owner. Without this,
+    /// any token carrying the claim is rejected evidence.
+    #[must_use]
+    pub const fn with_agent_assertions(mut self, agent_assertions: bool) -> Self {
+        self.agent_assertions = agent_assertions;
+        self
     }
 
     /// Test shorthand: verify for a community whose expected `aud` is `aud`
@@ -440,6 +451,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
 
         let subject = claim_string(&claims, SUBJECT_CLAIM, MAX_SUBJECT_BYTES)?;
         let asserted_key = parse_nostr_pubkey_claim(&claims)?;
+        let owner = self.parse_owner_claim(&claims, asserted_key)?;
 
         let now = Utc::now();
         let deadlines = self.check_time_and_deadlines(policy, &key_set, &claims, now)?;
@@ -461,6 +473,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             policy.issuer().to_owned(),
             subject,
             asserted_key,
+            owner,
             capabilities,
             deadlines,
             policy.id_for_community(community.expected_aud()),
@@ -472,6 +485,27 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
                 token.to_owned(),
             ),
         ))
+    }
+
+    /// The optional `nostr_owner_pubkey` claim: absent is no owner; present is
+    /// rejected unless this relay admits agent assertions, and must then be a
+    /// canonical key distinct from the asserted key.
+    fn parse_owner_claim(
+        &self,
+        claims: &Map<String, Value>,
+        asserted_key: Option<PublicKey>,
+    ) -> Result<Option<PublicKey>, VerifierError> {
+        let Some(value) = claims.get(NOSTR_OWNER_PUBKEY_CLAIM) else {
+            return Ok(None);
+        };
+        if !self.agent_assertions {
+            return Err(VerifierError::ClaimRejected);
+        }
+        let owner = parse_lowercase_hex_key(value)?;
+        if Some(owner) == asserted_key {
+            return Err(VerifierError::ClaimRejected);
+        }
+        Ok(Some(owner))
     }
 
     fn unverified_issuer(&self, token: &str) -> Result<String, VerifierError> {
@@ -802,21 +836,23 @@ fn enforce_claim_semantics(
 fn parse_nostr_pubkey_claim(
     claims: &Map<String, Value>,
 ) -> Result<Option<PublicKey>, VerifierError> {
-    match claims.get(NOSTR_PUBKEY_CLAIM) {
-        None => Err(VerifierError::ClaimRejected),
-        Some(value) => {
-            let raw = value.as_str().ok_or(VerifierError::ClaimRejected)?;
-            if raw.len() != 64
-                || !raw
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            {
-                return Err(VerifierError::ClaimRejected);
-            }
-            let key = PublicKey::from_hex(raw).map_err(|_| VerifierError::ClaimRejected)?;
-            Ok(Some(key))
-        }
+    let value = claims
+        .get(NOSTR_PUBKEY_CLAIM)
+        .ok_or(VerifierError::ClaimRejected)?;
+    parse_lowercase_hex_key(value).map(Some)
+}
+
+/// Lowercase hex of exactly one 32-byte key; any other encoding denies.
+fn parse_lowercase_hex_key(value: &Value) -> Result<PublicKey, VerifierError> {
+    let raw = value.as_str().ok_or(VerifierError::ClaimRejected)?;
+    if raw.len() != 64
+        || !raw
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(VerifierError::ClaimRejected);
     }
+    PublicKey::from_hex(raw).map_err(|_| VerifierError::ClaimRejected)
 }
 
 /// Capture only the claim names the policy reads into a canonical set. The
