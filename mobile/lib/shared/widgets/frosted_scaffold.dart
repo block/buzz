@@ -175,8 +175,14 @@ class FrostedScaffold extends HookWidget {
         if (!nativePinned && depth == 0 && metrics.axis == Axis.vertical) {
           // Keep real depth so a later UIKit metrics update (Dynamic Type or
           // rotation) can apply its new collapse range without another scroll.
-          final next = topContentDepth.clamp(0.0, double.infinity);
-          if ((scrollOffset.value - next).abs() > 0.1) {
+          // Lazy reversed lists can report an unbounded extentAfter. The
+          // visible viewport is enough depth for UIKit's collapsed state,
+          // while infinity is not a valid UIScrollView content offset.
+          final finiteDepth = topContentDepth.isFinite
+              ? topContentDepth
+              : metrics.viewportDimension;
+          final next = finiteDepth.clamp(0.0, double.infinity);
+          if (next.isFinite && (scrollOffset.value - next).abs() > 0.1) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (context.mounted) scrollOffset.value = next;
             });

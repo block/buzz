@@ -405,6 +405,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::community_availability),
         )
         .route(
+            "/operator/communities/nip-fi-binding",
+            get(api::operator::community_nip_fi_binding),
+        )
+        .route(
             "/operator/communities/transfer",
             post(api::operator::transfer_community),
         )

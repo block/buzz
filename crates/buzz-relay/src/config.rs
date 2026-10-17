@@ -398,6 +398,11 @@ pub struct Config {
     /// the enforce verdict but admits exactly as `off`. `Off` (the default)
     /// leaves all identity enforcement to NIP-42 alone.
     pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
+
+    /// Issuer binding written to communities created under a host suffix
+    /// (`BUZZ_NIP_FI_PROVISION_BINDING`). `None` binds nothing at creation.
+    /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
+    pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -1371,6 +1376,7 @@ impl Config {
             _ => buzz_db::personal_read::DEFAULT_RETENTION_SECONDS,
         };
 
+        let nip_fi = crate::nip_fi_config::NipFiRelayConfig::from_env()?;
         Ok(Self {
             bind_addr,
             database_url,
@@ -1436,7 +1442,8 @@ impl Config {
             admin,
             web_dir,
             serve_git_web_gui,
-            nip_fi: crate::nip_fi_config::NipFiRelayConfig::from_env()?,
+            nip_fi_provision_binding: crate::nip_fi_config::parse_provision_binding()?,
+            nip_fi,
         })
     }
 

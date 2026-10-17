@@ -450,14 +450,32 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
+        self.ensure_configured_community_with_nip_fi_issuers(normalized_host, &[])
+            .await
+    }
+
+    /// Like [`Db::ensure_configured_community`], binding `nip_fi_issuers` to
+    /// the community in the same transaction when this call creates its row.
+    /// An existing row keeps its bindings unchanged.
+    #[datastore_span(
+        name = "ensure_configured_community_with_nip_fi_issuers",
+        system = "postgresql"
+    )]
+    pub async fn ensure_configured_community_with_nip_fi_issuers(
+        &self,
+        normalized_host: &str,
+        nip_fi_issuers: &[String],
+    ) -> Result<EnsuredCommunityRecord> {
         self.ensure_configured_community_with_operation(
             normalized_host,
+            nip_fi_issuers,
             crate::observability::WriterOperation::Authorization,
         )
         .await
     }
 
-    /// Ensure the deployment-configured community during process bootstrap.
+    /// Ensure the deployment-configured community during process bootstrap,
+    /// binding `nip_fi_issuers` when this call creates its row.
     #[datastore_span(
         name = "ensure_configured_community_for_bootstrap",
         system = "postgresql"
@@ -465,9 +483,11 @@ impl Db {
     pub async fn ensure_configured_community_for_bootstrap(
         &self,
         normalized_host: &str,
+        nip_fi_issuers: &[String],
     ) -> Result<EnsuredCommunityRecord> {
         self.ensure_configured_community_with_operation(
             normalized_host,
+            nip_fi_issuers,
             crate::observability::WriterOperation::Bootstrap,
         )
         .await
@@ -476,9 +496,11 @@ impl Db {
     async fn ensure_configured_community_with_operation(
         &self,
         normalized_host: &str,
+        nip_fi_issuers: &[String],
         operation: crate::observability::WriterOperation,
     ) -> Result<EnsuredCommunityRecord> {
-        let mut connection = crate::observability::acquire_writer(&self.pool, operation).await?;
+        let connection = crate::observability::acquire_writer(&self.pool, operation).await?;
+        let mut connection = sqlx::Transaction::begin(connection, None).await?;
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -498,15 +520,16 @@ impl Db {
             ))
         })?;
 
-        let id: Uuid = row.try_get("id")?;
+        let id = CommunityId::from_uuid(row.try_get("id")?);
         let host: String = row.try_get("host")?;
         let created: bool = row.try_get("created")?;
+        if created {
+            self.insert_nip_fi_issuers_in_transaction(&mut connection, id, nip_fi_issuers)
+                .await?;
+        }
+        connection.commit().await?;
 
-        Ok(EnsuredCommunityRecord {
-            id: CommunityId::from_uuid(id),
-            host,
-            created,
-        })
+        Ok(EnsuredCommunityRecord { id, host, created })
     }
 
     /// Atomically creates a community and its initial owner.
@@ -519,6 +542,23 @@ impl Db {
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
+    ) -> Result<CreateCommunityWithOwnerResult> {
+        self.create_community_with_owner_and_nip_fi_issuers(normalized_host, owner_pubkey, &[])
+            .await
+    }
+
+    /// Like [`Db::create_community_with_owner`], binding `nip_fi_issuers` to
+    /// the new community in the same transaction. Identical retries return the
+    /// original record without touching its bindings.
+    #[datastore_span(
+        name = "create_community_with_owner_and_nip_fi_issuers",
+        system = "postgresql"
+    )]
+    pub async fn create_community_with_owner_and_nip_fi_issuers(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+        nip_fi_issuers: &[String],
     ) -> Result<CreateCommunityWithOwnerResult> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let connection = crate::observability::acquire_writer(
@@ -575,6 +615,12 @@ impl Db {
             .bind(id)
             .bind(&owner_pubkey)
             .execute(&mut *tx)
+            .await?;
+            self.insert_nip_fi_issuers_in_transaction(
+                &mut tx,
+                CommunityId::from_uuid(id),
+                nip_fi_issuers,
+            )
             .await?;
             (id, host)
         } else {

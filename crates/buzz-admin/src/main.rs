@@ -22,6 +22,7 @@
 
 mod communities;
 mod deletions;
+mod nip_fi;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -110,6 +111,11 @@ enum Command {
         #[command(subcommand)]
         command: communities::CommunitiesCommand,
     },
+    /// NIP-FI community issuer bindings.
+    NipFi {
+        #[command(subcommand)]
+        command: nip_fi::NipFiCommand,
+    },
     /// Durable CLI-only whole-community deletion control plane.
     Deletions {
         #[command(subcommand)]
@@ -191,6 +197,7 @@ async fn run(cli: Cli) -> Result<i32> {
         } => cmd_list_product_feedback(limit).await,
         Command::Communities { command } => communities::run(command).await,
         Command::Deletions { command } => deletions::run(command).await,
+        Command::NipFi { command } => nip_fi::run(command).await,
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)

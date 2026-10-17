@@ -144,6 +144,9 @@ run_unit_tests() {
   run_test_step "buzz-admin partition audit outcome contract test" \
     cargo test -p buzz-admin tests::partition_audit_outcomes_keep_their_json_names_and_exit_codes -- --exact --nocapture
 
+  run_test_step "buzz-admin NIP-FI binding command tests" \
+    cargo test -p buzz-admin nip_fi::tests -- --nocapture
+
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \

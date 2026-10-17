@@ -17,6 +17,7 @@ pub mod denial;
 pub mod deny_map;
 pub mod discovery;
 pub mod jwks;
+pub mod provision;
 pub mod startup;
 pub mod verifier;
 
@@ -52,6 +53,7 @@ pub use jwks::{
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use jwks::ToggleJwksFetcher;
+pub use provision::{BindRefusal, ProvisionBindingError, ProvisionBindingPolicy};
 pub use startup::{validate_nip_fi_config, NipFiMode, NipFiStartupError};
 pub use verifier::{
     AssertionKeySet, FederatedAssertionVerifier, IssuerKeySource, VerifierError, VerifyAssertion,

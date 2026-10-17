@@ -22,6 +22,8 @@ pub mod dm;
 pub mod event;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
 pub(crate) mod event_follow_up;
+/// Per-community NIP-FI issuer bindings.
+pub mod nip_fi_binding;
 
 #[cfg(test)]
 mod event_follow_up_postgres_tests;

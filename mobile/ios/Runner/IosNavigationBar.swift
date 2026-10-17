@@ -530,6 +530,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   private func setScrollOffset(_ value: CGFloat) {
+    guard value.isFinite else { return }
     offset = max(0, value)
     material.alpha = alwaysFrosted ? 1 : min(1, offset / 12)
     applyScroll()

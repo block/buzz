@@ -439,7 +439,9 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 
     let relay_main = include_str!("../../buzz-relay/src/main.rs");
     assert!(relay_main.contains("pool_state.db.refresh_pool_waiter_metrics();"));
-    assert!(relay_main.contains(".ensure_configured_community_for_bootstrap("));
+    assert!(relay_main.contains("ensure_deployment_community(&db,"));
+    let provisioning = include_str!("../../buzz-relay/src/handlers/community_provisioning.rs");
+    assert!(provisioning.contains(".ensure_configured_community_for_bootstrap("));
 
     let runtime = include_str!("../src/runtime/mod.rs");
     assert!(runtime.contains("observability::refresh_pool_waiters(self.read_pool.is_some())"));
