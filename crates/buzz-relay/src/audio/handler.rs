@@ -92,14 +92,14 @@ pub async fn ws_audio_handler(
     req: axum::extract::Request,
 ) -> impl IntoResponse {
     // NIP-FI assertion check at upgrade — before tenant lookup and before the
-    // WebSocket handshake. Running pre-lookup means a denied request pays zero
-    // DB cost and the gate is reachable in tests without a live community.
+    // WebSocket handshake. Running pre-lookup means a denied request skips the tenant
+    // lookup (a resolver miss costs one bounded binding lookup) and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let (nip_fi_assertion, shadow_assertion) = {
+    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
         let mode = state.config.nip_fi.mode;
         let verifier = state.nip_fi_verifier.as_deref();
-        let communities = &state.config.nip_fi.communities;
+        let communities = state.nip_fi_communities();
         match check_nip_fi_at_upgrade(
             crate::nip_fi_session::NipFiWsRoute::Audio,
             &headers,
@@ -107,6 +107,7 @@ pub async fn ws_audio_handler(
             verifier,
             mode,
         )
+        .await
         .into_assertions()
         {
             Ok(assertions) => assertions,
@@ -134,6 +135,16 @@ pub async fn ws_audio_handler(
         }
     };
 
+    // The tenant lookup awaited since the community resolved; a snapshot
+    // that went stale meanwhile accepts no socket.
+    if let Err(class) = nip_fi_deadline.check() {
+        return crate::nip_fi_core::http_denial(class).into_response();
+    }
+    let shadow_assertion = crate::nip_fi_upgrade::observe_deadline(
+        crate::nip_fi_session::NipFiWsRoute::Audio,
+        shadow_assertion,
+    );
+
     let ws = match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => ws,
         Err(e) => return e.into_response(),
@@ -158,11 +169,11 @@ pub async fn ws_audio_handler(
     // so the NIP-FI session partition is rooted at the HTTP handshake, not the
     // post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
     let connection_time = chrono::Utc::now();
-    let shadow = shadow_assertion.map(|a| {
+    let shadow = shadow_assertion.map(|(a, community)| {
         crate::nip_fi_shadow_session::ShadowSession::start(
             &state,
             "audio",
-            &headers,
+            community,
             a,
             connection_time,
         )
@@ -3533,6 +3544,89 @@ async fn emit_participant_event(
     }
 }
 
+/// Drives one audio socket through the production NIP-42 and deny-set path.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    use super::*;
+
+    /// Whether the audio deny-set check refuses a session admitted on
+    /// `assertion` and authenticated by `key`: `true` on the denial frame,
+    /// `false` once the handler passes the check.
+    pub(crate) async fn deny_set_refuses(
+        state: Arc<AppState>,
+        assertion: VerifiedAssertion,
+        key: &nostr::Keys,
+    ) -> bool {
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "audio-deny.test".to_owned());
+        let relay_url =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
+        let (passed, release) =
+            crate::nip_fi_test_hooks::audio_after_deny_check_passed_hook::arm(community);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(move |socket| {
+                    handle_active_audio_connection(
+                        socket,
+                        state,
+                        tenant,
+                        Uuid::new_v4(),
+                        CommunityConnectionControl::new(CancellationToken::new()),
+                        Some(assertion),
+                        chrono::Utc::now(),
+                        None,
+                    )
+                })
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
+        let challenge = match client.next().await {
+            Some(Ok(Message::Text(text))) => {
+                let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+                json["challenge"].as_str().unwrap().to_owned()
+            }
+            other => panic!("expected the AUTH challenge, got {other:?}"),
+        };
+        let auth = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+            .tag(nostr::Tag::parse(["relay", &relay_url]).unwrap())
+            .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+            .sign_with_keys(key)
+            .unwrap();
+        let auth = serde_json::json!({"type": "auth", "event": auth}).to_string();
+        client.send(Message::Text(auth.into())).await.unwrap();
+
+        let denial = serde_json::json!({
+            "type": "restricted",
+            "message": buzz_auth::DenialClass::AuthorizationDenied.nostr_text(),
+        })
+        .to_string();
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                frame = client.next() => match frame {
+                    Some(Ok(Message::Text(text))) if text.as_str() == denial => true,
+                    other => panic!("expected the denial frame, got {other:?}"),
+                },
+                arrived = passed => {
+                    arrived.expect("hook");
+                    false
+                }
+            }
+        })
+        .await
+        .expect("audio session reached neither outcome");
+        release.notify_one();
+        server.abort();
+        refused
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -5994,7 +6088,7 @@ mod tests {
         crate::nip_fi_shadow_session::ShadowSession::start(
             state,
             "audio",
-            &axum::http::HeaderMap::new(),
+            crate::nip_fi_shadow::BOUND.into(),
             assertion,
             Utc::now(),
         )

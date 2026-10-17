@@ -368,10 +368,6 @@ pub struct IssuerPolicy {
     /// Accepted `aud` values for S4 command JWTs only. Assertion `aud` comes
     /// from the per-community [`super::CommunityBinding`], never from here.
     command_audiences: Vec<String>,
-    /// Expected `aud` of every community authorizing this issuer — the
-    /// issuer's side of the community allowlist (NIP-FI.md:145). Empty until
-    /// [`IssuerPolicy::authorized_for_communities`] sets it.
-    community_audiences: Vec<String>,
     token_class: TokenClass,
     freshness: FreshnessClass,
     algorithms: Vec<Algorithm>,
@@ -488,7 +484,6 @@ impl IssuerPolicy {
         let mut policy = Self {
             issuer,
             command_audiences: canonical_set(command_audiences),
-            community_audiences: Vec::new(),
             token_class,
             freshness,
             algorithms: canonical_algorithm_set(algorithms),
@@ -503,15 +498,18 @@ impl IssuerPolicy {
         Ok(policy)
     }
 
-    /// Record the expected `aud` of every community that authorizes this
-    /// issuer and re-derive the policy ID over it, so changing the community
-    /// allowlist moves the ID (NIP-FI.md:145). Set-valued: order and
-    /// duplicates do not affect the ID.
-    #[must_use]
-    pub fn authorized_for_communities(mut self, community_audiences: Vec<String>) -> Self {
-        self.community_audiences = canonical_set(community_audiences);
-        self.id = derive_assertion_policy_id(&self);
-        self
+    /// The policy ID an assertion verified for the community expecting
+    /// `community_aud` carries: `H(base policy contract, community aud)`. The
+    /// base contract already commits to the issuer. The verifier mints it
+    /// only after the community's allowlist admitted this issuer, so it moves
+    /// exactly when this community's association or the base policy changes,
+    /// never when an unrelated community is added (NIP-FI.md:145).
+    pub fn id_for_community(&self, community_aud: &str) -> AssertionPolicyId {
+        let mut hasher = Sha256::new();
+        hasher.update(b"buzz:nip-fi:community-assertion-policy:v1\0");
+        hasher.update(self.id.0);
+        hash_field(&mut hasher, community_aud.as_bytes());
+        AssertionPolicyId(hasher.finalize().into())
     }
 
     /// The exact `iss` value this policy is selected by.
@@ -522,11 +520,6 @@ impl IssuerPolicy {
     /// The accepted command-JWT audiences; at least one must match its `aud`.
     pub fn command_audiences(&self) -> &[String] {
         &self.command_audiences
-    }
-
-    /// The expected `aud` of each community authorizing this issuer.
-    pub fn community_audiences(&self) -> &[String] {
-        &self.community_audiences
     }
 
     /// The single accepted token class.
@@ -668,7 +661,6 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
     let IssuerPolicy {
         issuer,
         command_audiences,
-        community_audiences,
         token_class,
         freshness,
         algorithms,
@@ -699,10 +691,6 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
     }
     hash_field(&mut hasher, issuer.as_bytes());
     hash_seq(&mut hasher, command_audiences.iter().map(String::as_bytes));
-    hash_seq(
-        &mut hasher,
-        community_audiences.iter().map(String::as_bytes),
-    );
     hash_field(&mut hasher, token_class.discriminant().as_bytes());
     match token_class {
         TokenClass::AccessTokenAtJwt { subject_class } => {
@@ -804,7 +792,7 @@ mod jwks_transport_identity_tests {
 
         assert_eq!(
             hex::encode(policy(contract).id().as_bytes()),
-            "1f904aaaad1c1db3a22ae50bd2d24cdf7181d5d0b8c5006cc1ae9ac1107f9832",
+            "fae0dd479d79306c5eef135594f678a5cdf3a2ee45770e20a7e83395fc76857f",
             "public_https mode omits the mesh transport tag"
         );
     }
@@ -820,7 +808,7 @@ mod jwks_transport_identity_tests {
 
         assert_eq!(
             hex::encode(policy(contract).id().as_bytes()),
-            "33e4cf02148ca494c12ffc49cd0bb223e0e007de4084ac5b406f2742bbb91c0a",
+            "dca3e998388ae75bdea6bb2070c8f28b8d389a8b874de96e7852dd1f71b14bcd",
             "mesh transport is part of policy identity"
         );
     }

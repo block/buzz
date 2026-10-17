@@ -82,7 +82,7 @@ pub use community::{
 pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
-pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind};
+pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
 pub use usage::UsageMetricsLeader;

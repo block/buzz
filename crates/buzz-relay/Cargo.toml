@@ -78,6 +78,8 @@ rand            = { workspace = true }
 hex             = { workspace = true }
 url             = { workspace = true }
 moka            = { workspace = true }
+arc-swap        = { workspace = true }
+lru             = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }

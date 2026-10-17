@@ -1424,6 +1424,7 @@ name = "buzz-relay"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-compression",
  "async-trait",
  "axum",
@@ -1454,6 +1455,7 @@ dependencies = [
  "http-body-util",
  "infer",
  "jsonwebtoken",
+ "lru 0.16.4",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
@@ -5182,6 +5184,9 @@ name = "lru"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
+dependencies = [
+ "hashbrown 0.16.1",
+]
 
 [[package]]
 name = "lru"
