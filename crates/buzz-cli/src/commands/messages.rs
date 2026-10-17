@@ -618,6 +618,19 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    // Fail fast on empty text with nothing attached. The classic producer of
+    // this state is a stdin pipe that delivered zero bytes (`--content -`
+    // after the upstream command died or the heredoc was mangled) — before
+    // this guard, "" sailed through every gate and published a blank message
+    // the author believed was real content.
+    if p.content.trim().is_empty() && p.files.is_empty() {
+        return Err(CliError::Usage(
+            "refusing to send an empty message: content is empty or \
+             whitespace-only and no --files are attached (if you piped \
+             content via '--content -', the pipe delivered zero bytes)"
+                .into(),
+        ));
+    }
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
