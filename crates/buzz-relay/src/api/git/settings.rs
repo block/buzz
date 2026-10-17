@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -167,13 +167,9 @@ async fn authenticate(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<SettingsAuth, Response> {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, host)
+    let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .map_err(|_| error(StatusCode::NOT_FOUND, "repository not found"))?;
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "repository not found"))?;
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
     let method = if body.is_some() { "POST" } else { "GET" };
     let require_payload = body.is_some();

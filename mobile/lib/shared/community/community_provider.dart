@@ -130,13 +130,11 @@ Future<void> _deactivateCommunityPushLease(
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
   final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
-  final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
+  final descriptor = await fetchBuzzPushLeaseDescriptor(
+    canonicalBuzzPushRelayHttpUrl(community.relayUrl),
+  );
   final matchingGrant = (await readBuzzPushEndpointGrants())
-      .where(
-        (grant) =>
-            grant.relayOrigin == descriptor.origin &&
-            grant.appProfile == buzzDevPushAppProfile,
-      )
+      .where((grant) => grant.relayOrigin == descriptor.origin)
       .firstOrNull;
   if (matchingGrant == null) {
     throw StateError('No endpoint grant exists for push lease tombstone.');
@@ -618,21 +616,11 @@ final activeCommunityProvider = FutureProvider<Community?>((ref) async {
 
   if (communities.isEmpty) return null;
 
-  if (activeId == null) {
-    // No active ID stored but communities exist — fall back to first.
-    await storage.saveActiveId(communities.first.id);
-    return communities.first;
-  }
-
-  try {
-    return communities.firstWhere((w) => w.id == activeId);
-  } on StateError {
-    // Active ID points to a community that no longer exists.
-    // Fall back to first community.
-    if (communities.isNotEmpty) {
-      await storage.saveActiveId(communities.first.id);
-      return communities.first;
-    }
-    return null;
-  }
+  // This projection can outlive the list it captured above. Never persist a
+  // fallback here: a newer authentication may already have selected a community
+  // absent from that list. Authentication owns durable active-ID repair.
+  return communities.firstWhere(
+    (community) => community.id == activeId,
+    orElse: () => communities.first,
+  );
 });

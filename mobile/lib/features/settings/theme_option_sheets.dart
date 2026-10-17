@@ -3,15 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
 
 const appearanceModeOptions = <({ThemeMode mode, String label, IconData icon})>[
-  (mode: ThemeMode.light, label: 'Light', icon: LucideIcons.sun),
-  (mode: ThemeMode.dark, label: 'Dark', icon: LucideIcons.moon),
-  (mode: ThemeMode.system, label: 'System', icon: LucideIcons.sunMoon),
+  (mode: ThemeMode.light, label: 'Light', icon: BuzzIcons.sun),
+  (mode: ThemeMode.dark, label: 'Dark', icon: BuzzIcons.moon),
+  (mode: ThemeMode.system, label: 'System', icon: BuzzIcons.sunMoon),
 ];
 
 String appearanceModeLabel(ThemeMode mode) =>
@@ -36,7 +36,7 @@ Future<void> showAccentColorPickerSheet({
   required ValueChanged<int> onSelected,
 }) => showBuzzModalBottomSheet<void>(
   context: context,
-  title: 'Accent color',
+  title: 'Chat color',
   showDragHandle: true,
   builder: (_) => _AccentColorPicker(
     colorScheme: colorScheme,
@@ -204,10 +204,10 @@ class _AccentColorPicker extends HookWidget {
             crossAxisSpacing: Grid.xxs,
             mainAxisSpacing: Grid.xs,
           ),
-          itemCount: accentColors.length,
+          itemCount: chatColorChoices.length,
           itemBuilder: (context, index) => _AccentSheetOption(
             index: index,
-            color: accentColorForScheme(colorScheme, index),
+            color: chatColorForScheme(colorScheme, index),
             selected: selected.value == index,
             onTap: () {
               unawaited(HapticFeedback.selectionClick());
@@ -236,7 +236,7 @@ class _AccentSheetOption extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Semantics(
-    label: '${accentColors[index].name} accent color',
+    label: '${chatColorChoices[index].name} chat color',
     button: true,
     selected: selected,
     child: InkResponse(

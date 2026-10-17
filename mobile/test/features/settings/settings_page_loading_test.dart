@@ -45,13 +45,12 @@ void main() {
           ),
           home: SettingsPage(
             profileHeader: const SizedBox.shrink(),
-            invitePageBuilder: (_) => const SizedBox.shrink(),
             identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
           ),
         ),
       ),
     );
-    expect(find.text('Invite to community'), findsOneWidget);
+    expect(find.text('Invite to community'), findsNothing);
 
     expect(find.text('v0.16.0 (432)'), findsNothing);
     expect(find.byTooltip('Close settings'), findsOneWidget);

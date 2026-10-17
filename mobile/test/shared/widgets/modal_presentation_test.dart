@@ -8,6 +8,88 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final titled in [false, true]) {
+      for (final ownSafeArea in [false, true]) {
+        testWidgets(
+          'fixed bottom clearance $platform titled=$titled ownSafeArea=$ownSafeArea',
+          (tester) async {
+            debugDefaultTargetPlatformOverride = platform;
+            tester.view.physicalSize = const Size(390, 844);
+            tester.view.devicePixelRatio = 1;
+            final systemInset = platform == TargetPlatform.iOS ? 34.0 : 24.0;
+            tester.view.padding = FakeViewPadding(bottom: systemInset);
+            tester.view.viewPadding = FakeViewPadding(bottom: systemInset);
+            addTearDown(() {
+              tester.view.reset();
+              debugDefaultTargetPlatformOverride = null;
+            });
+            try {
+              double? contentInset;
+              await tester.pumpWidget(
+                MaterialApp(
+                  theme: AppTheme.light(),
+                  home: Builder(
+                    builder: (context) => Scaffold(
+                      body: TextButton(
+                        onPressed: () => showBuzzModalBottomSheet<void>(
+                          context: context,
+                          title: titled ? 'People' : null,
+                          showCloseButton: titled,
+                          isScrollControlled: true,
+                          builder: (context) {
+                            contentInset = MediaQuery.paddingOf(context).bottom;
+                            final list = SizedBox(
+                              height: 300,
+                              child: ListView.builder(
+                                key: const ValueKey('clearance-scroll'),
+                                padding: EdgeInsets.zero,
+                                itemCount: 30,
+                                itemBuilder: (_, index) => SizedBox(
+                                  height: 48,
+                                  child: Text('Person $index'),
+                                ),
+                              ),
+                            );
+                            return ownSafeArea
+                                ? SafeArea(top: false, child: list)
+                                : list;
+                          },
+                        ),
+                        child: const Text('Open'),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+              await tester.tap(find.text('Open'));
+              await tester.pumpAndSettle();
+              final list = find.byKey(const ValueKey('clearance-scroll'));
+              final viewportBottom = tester.getRect(list).bottom;
+              // This is outside the scrolling viewport, not trailing list space.
+              expect(
+                viewportBottom,
+                lessThanOrEqualTo(844 - systemInset - Grid.half),
+              );
+              expect(contentInset, 0);
+              await tester.drag(list, const Offset(0, -2000));
+              await tester.pumpAndSettle();
+              expect(find.text('Person 29'), findsOneWidget);
+              expect(tester.getRect(list).bottom, viewportBottom);
+              expect(
+                tester.getRect(find.text('Person 29')).bottom,
+                lessThanOrEqualTo(viewportBottom),
+              );
+              expect(tester.takeException(), isNull);
+            } finally {
+              debugDefaultTargetPlatformOverride = null;
+            }
+          },
+        );
+      }
+    }
+  }
+
   Border sheetHeaderBorder(WidgetTester tester) {
     final decoration =
         tester

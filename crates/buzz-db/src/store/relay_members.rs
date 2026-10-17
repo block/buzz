@@ -150,8 +150,12 @@ pub async fn add_relay_member(
     role: &str,
     added_by: Option<&str>,
 ) -> Result<bool> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, pubkey) DO NOTHING",
@@ -160,8 +164,9 @@ pub async fn add_relay_member(
     .bind(pubkey)
     .bind(role)
     .bind(added_by)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -177,9 +182,12 @@ pub async fn claim_relay_membership(
     role: &str,
     policy_version: Option<&str>,
 ) -> Result<bool> {
-    let connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, $3, 'invite') \
@@ -188,7 +196,7 @@ pub async fn claim_relay_membership(
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(role)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .rows_affected()
         > 0;
@@ -201,7 +209,7 @@ pub async fn claim_relay_membership(
         .bind(community.as_uuid())
         .bind(pubkey)
         .bind(version)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -243,39 +251,76 @@ pub enum RemoveResult {
     RoleMismatch,
 }
 
+/// Deletes a membership and its join-policy acceptances inside the caller's
+/// admitted transaction.
+///
+/// With `expected_role`, only a member holding exactly that role is removed;
+/// without it, any non-owner is. The member row is locked under that predicate
+/// first, so a concurrent acceptance insert (which must lock the member row for
+/// its foreign key) either commits before the child delete sees it or fails.
+/// Children go before the parent so no foreign-key action is needed. The
+/// caller commits.
+async fn delete_member_with_acceptances(
+    tx: &mut crate::AdmittedTx,
+    pubkey: &str,
+    expected_role: Option<&str>,
+) -> Result<bool> {
+    let community = tx.community();
+    let locked = sqlx::query(
+        "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 \
+         AND CASE WHEN $3::text IS NULL THEN role <> 'owner' ELSE role = $3 END \
+         FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(expected_role)
+    .fetch_optional(tx.conn())
+    .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM join_policy_acceptances WHERE community_id = $1 AND pubkey = $2")
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .execute(tx.conn())
+        .await?;
+    sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .execute(tx.conn())
+        .await?;
+    Ok(true)
+}
+
 /// Removes a relay member atomically, refusing to delete the owner.
 ///
-/// Uses a single conditional `DELETE … WHERE role <> 'owner'` so the
-/// owner-protection check and the deletion are one atomic operation —
-/// no TOCTOU race between a separate read and delete.
+/// The owner-protection check and the deletion run in one transaction under a
+/// row lock, so there is no TOCTOU race between a separate read and delete.
 pub async fn remove_relay_member(
     pool: &PgPool,
     community: CommunityId,
     pubkey: &str,
 ) -> Result<RemoveResult> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let result = sqlx::query(
-        "DELETE FROM relay_members \
-         WHERE community_id = $1 AND pubkey = $2 AND role <> 'owner'",
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
     )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .execute(&mut *connection)
     .await?;
-
-    if result.rows_affected() > 0 {
+    if delete_member_with_acceptances(&mut tx, pubkey, None).await? {
+        tx.commit().await?;
         return Ok(RemoveResult::Removed);
     }
 
-    // rows_affected == 0: either not found or is owner.  One cheap read to
+    // Nothing was locked: either not found or is owner. One cheap read to
     // distinguish the two cases so callers can return the right error message.
     let exists = sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
         .bind(pubkey)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
+    tx.commit().await?;
     if exists.is_some() {
         Ok(RemoveResult::IsOwner)
     } else {
@@ -285,9 +330,8 @@ pub async fn remove_relay_member(
 
 /// Removes a relay member only if their current role matches `expected_role`.
 ///
-/// The delete and the role check are collapsed into a single
-/// `DELETE … WHERE pubkey = $1 AND role = $2`, making the operation atomic —
-/// no TOCTOU race between a prior read and this delete.
+/// The role check and the delete run in one transaction under a row lock, so
+/// there is no TOCTOU race between a prior read and this delete.
 ///
 /// Returns:
 /// - `Removed` — row was deleted.
@@ -302,29 +346,26 @@ pub async fn remove_relay_member_if_role(
     pubkey: &str,
     expected_role: &str,
 ) -> Result<RemoveResult> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let result = sqlx::query(
-        "DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2 AND role = $3",
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
     )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .bind(expected_role)
-    .execute(&mut *connection)
     .await?;
-
-    if result.rows_affected() > 0 {
+    if delete_member_with_acceptances(&mut tx, pubkey, Some(expected_role)).await? {
+        tx.commit().await?;
         return Ok(RemoveResult::Removed);
     }
 
-    // rows_affected == 0: either not found or role changed. One cheap read to
+    // Nothing was locked: either not found or role changed. One cheap read to
     // distinguish the cases so callers can return the right error message.
     let row = sqlx::query("SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
         .bind(pubkey)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
+    tx.commit().await?;
     match row {
         None => Ok(RemoveResult::NotFound),
         Some(r) => {
@@ -349,8 +390,12 @@ pub async fn update_relay_member_role(
     pubkey: &str,
     new_role: &str,
 ) -> Result<bool> {
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE relay_members SET role = $1, updated_at = now() \
          WHERE community_id = $2 AND pubkey = $3 AND role <> 'owner'",
@@ -358,16 +403,19 @@ pub async fn update_relay_member_role(
     .bind(new_role)
     .bind(community.as_uuid())
     .bind(pubkey)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
 /// Ensures the configured owner pubkey holds the `"owner"` role *in
 /// `community`*, and demotes any other owners in that community to `"admin"`.
 /// This handles owner rotation: if `RELAY_OWNER_PUBKEY` changes, the old owner
-/// is automatically demoted. Scoped to one community — an owner of community A
-/// is never bootstrapped into community B.
+/// is automatically demoted only while the community is active and has no
+/// durable deletion intent. Scoped to one community — an owner of community A
+/// is never bootstrapped into community B. Initial insertion and exact-owner
+/// convergence remain allowed because neither rotates existing ownership.
 ///
 /// Runs in a single transaction. Safe to call at every startup — idempotent.
 ///
@@ -383,13 +431,101 @@ pub async fn bootstrap_owner(
     community: CommunityId,
     owner_pubkey: &str,
 ) -> Result<()> {
-    bootstrap_owner_with_operation(
+    match bootstrap_owner_with_operation(
         pool,
         community,
         owner_pubkey,
         observability::WriterOperation::Bootstrap,
     )
-    .await
+    .await?
+    {
+        ProvisionOwnerResult::Applied => Ok(()),
+        ProvisionOwnerResult::LifecycleConflict => Err(DbError::AccessDenied(
+            "community lifecycle freezes owner rotation".to_string(),
+        )),
+        ProvisionOwnerResult::DeletionPending => Err(DbError::AccessDenied(
+            "community deletion is pending".to_string(),
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OwnerMutationMode {
+    Transfer,
+    Converge,
+}
+
+enum OwnerMutationAdmission {
+    Allowed(Vec<String>),
+    NotFound,
+    LifecycleConflict,
+    DeletionPending,
+}
+
+async fn lock_owner_mutation_admission(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    proposed_owner: &str,
+    mode: OwnerMutationMode,
+) -> Result<OwnerMutationAdmission> {
+    crate::deletion::lock_community_deletion_shared(tx, community).await?;
+    let target = sqlx::query(
+        "SELECT archived_at, deletion_state, deleted_at FROM communities \
+         WHERE id = $1 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(target) = target else {
+        return Ok(OwnerMutationAdmission::NotFound);
+    };
+    let existing_owners: Vec<String> = sqlx::query_scalar(
+        "SELECT pubkey FROM relay_members \
+         WHERE community_id = $1 AND role = 'owner' \
+         ORDER BY pubkey FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let changes_existing_owner = match mode {
+        OwnerMutationMode::Transfer => true,
+        OwnerMutationMode::Converge => {
+            !(existing_owners.is_empty()
+                || existing_owners.len() == 1 && existing_owners[0] == proposed_owner)
+        }
+    };
+    if !changes_existing_owner {
+        return Ok(OwnerMutationAdmission::Allowed(existing_owners));
+    }
+
+    if deletion_pending(tx, community).await? {
+        return Ok(OwnerMutationAdmission::DeletionPending);
+    }
+
+    let archived_at: Option<chrono::DateTime<chrono::Utc>> = target.try_get("archived_at")?;
+    let deletion_state: String = target.try_get("deletion_state")?;
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> = target.try_get("deleted_at")?;
+    if archived_at.is_some() || deletion_state != "active" || deleted_at.is_some() {
+        return Ok(OwnerMutationAdmission::LifecycleConflict);
+    }
+
+    Ok(OwnerMutationAdmission::Allowed(existing_owners))
+}
+
+/// Whether `community` has a non-aborted deletion request.
+///
+/// A quiescing or fenced community always has one, so owner mutations that
+/// admission refuses report `DeletionPending` rather than a generic lifecycle
+/// conflict.
+async fn deletion_pending(conn: &mut sqlx::PgConnection, community: CommunityId) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_deletion_requests \
+         WHERE community_id = $1 AND stage <> 'aborted')",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(conn)
+    .await?)
 }
 
 async fn bootstrap_owner_with_operation(
@@ -397,10 +533,34 @@ async fn bootstrap_owner_with_operation(
     community: CommunityId,
     owner_pubkey: &str,
     operation: observability::WriterOperation,
-) -> Result<()> {
+) -> Result<ProvisionOwnerResult> {
     let pubkey = owner_pubkey.to_ascii_lowercase();
     let connection = observability::acquire_writer(pool, operation).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
+
+    if let Err(error) = crate::deletion::guard_community_write(&mut tx, community).await {
+        return match error {
+            DbError::AccessDenied(_) if deletion_pending(&mut tx, community).await? => {
+                Ok(ProvisionOwnerResult::DeletionPending)
+            }
+            DbError::AccessDenied(_) => Ok(ProvisionOwnerResult::LifecycleConflict),
+            other => Err(other),
+        };
+    }
+
+    match lock_owner_mutation_admission(&mut tx, community, &pubkey, OwnerMutationMode::Converge)
+        .await?
+    {
+        OwnerMutationAdmission::Allowed(_) => {}
+        OwnerMutationAdmission::NotFound | OwnerMutationAdmission::LifecycleConflict => {
+            tx.rollback().await?;
+            return Ok(ProvisionOwnerResult::LifecycleConflict);
+        }
+        OwnerMutationAdmission::DeletionPending => {
+            tx.rollback().await?;
+            return Ok(ProvisionOwnerResult::DeletionPending);
+        }
+    }
 
     // 1. Upsert the configured owner for this community.
     sqlx::query(
@@ -424,7 +584,7 @@ async fn bootstrap_owner_with_operation(
     .await?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(ProvisionOwnerResult::Applied)
 }
 
 /// The result of a transfer-ownership attempt.
@@ -444,23 +604,41 @@ pub enum TransferResult {
     /// concurrent transfer or owner rotation has already changed ownership.
     /// The caller must NOT retry blindly — re-read ownership and re-evaluate.
     OwnerConflict,
-    /// The transferee already owns the maximum number of communities.
+    /// The community is archived, quiescing, or deleted; ownership is frozen.
+    LifecycleConflict,
+    /// Durable deletion intent exists and wins over ownership mutation.
+    DeletionPending,
+    /// The transferee has reached the active or lifetime community limit.
     /// Enforced atomically inside the transfer transaction so concurrent
     /// transfers to the same recipient cannot both pass the limit.
     LimitReached,
 }
 
+/// Result of converging an owner through deployment-root provisioning.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProvisionOwnerResult {
+    /// The initial owner was inserted or existing ownership converged.
+    Applied,
+    /// The community lifecycle freezes ownership mutation.
+    LifecycleConflict,
+    /// Durable deletion intent exists and wins over owner convergence.
+    DeletionPending,
+}
+
 /// Default maximum number of communities a single pubkey can own. Enforced at
 /// the relay layer — the authoritative layer — so that concurrent transfers or
 /// transfer-vs-create races cannot both pass a preflight count.
-pub const MAX_COMMUNITIES_PER_OWNER: i64 = 5;
+pub const MAX_COMMUNITIES_PER_OWNER: i64 = 50;
 
 /// Effective per-owner community limit for this deployment.
 ///
 /// Reads `BUZZ_MAX_COMMUNITIES_PER_OWNER` once (cached for the process
 /// lifetime); a missing, unparsable, or non-positive value falls back to
-/// [`MAX_COMMUNITIES_PER_OWNER`]. Lets multi-tenant operators raise the cap
-/// without a source change while keeping the stock default for everyone else.
+/// [`MAX_COMMUNITIES_PER_OWNER`]. Lets multi-tenant operators raise the active
+/// cap without a source change while keeping the stock default for everyone
+/// else. [`MAX_LIFETIME_COMMUNITIES_PER_OWNER`] still applies and counts live
+/// ownership, so values above it are unreachable: no owner can hold more live
+/// communities than the lifetime cap allows.
 pub fn max_communities_per_owner() -> i64 {
     static LIMIT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -493,6 +671,72 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
     h as i64
 }
 
+/// Lifetime cap on communities a pubkey may own, counting owner-deleted
+/// communities whose tombstones permanently retain their hosts. Bounds
+/// create-then-delete host squatting. Absolute: it does not scale with
+/// `BUZZ_MAX_COMMUNITIES_PER_OWNER`.
+pub const MAX_LIFETIME_COMMUNITIES_PER_OWNER: i64 = 50;
+
+/// One owner's quota usage, read inside the admitting transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnerQuota {
+    /// Live ownership plus incomplete owner-deletion reservations.
+    pub active: i64,
+    /// Live ownership plus every non-aborted owner deletion, completed or not.
+    pub lifetime: i64,
+}
+
+impl OwnerQuota {
+    /// Whether this owner may gain one more community.
+    pub fn admits(self) -> bool {
+        self.active < max_communities_per_owner()
+            && self.lifetime < MAX_LIFETIME_COMMUNITIES_PER_OWNER
+    }
+}
+
+/// Read an owner's active and lifetime community counts.
+///
+/// `UNION` deliberately de-duplicates the live membership and deletion row
+/// before PostgreSQL purges membership. An active reservation remains until
+/// the logical-completion transition records `completed_at`; the lifetime
+/// count keeps it forever. Aborted requests restore the community, which is
+/// then counted through its live membership.
+pub(crate) async fn owner_quota_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner_pubkey: &str,
+) -> Result<OwnerQuota> {
+    let (active, lifetime): (i64, i64) = sqlx::query_as(
+        r#"
+        WITH owned AS (
+            SELECT community_id
+            FROM relay_members
+            WHERE pubkey = $1 AND role = 'owner'
+        ), deleted AS (
+            SELECT community_id, completed_at
+            FROM community_deletion_requests
+            WHERE request_origin = 'owner'
+              AND owner_pubkey = $1
+              AND stage <> 'aborted'
+        )
+        SELECT
+            (SELECT count(*) FROM (
+                SELECT community_id FROM owned
+                UNION
+                SELECT community_id FROM deleted WHERE completed_at IS NULL
+            ) active)::BIGINT,
+            (SELECT count(*) FROM (
+                SELECT community_id FROM owned
+                UNION
+                SELECT community_id FROM deleted
+            ) lifetime)::BIGINT
+        "#,
+    )
+    .bind(owner_pubkey)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(OwnerQuota { active, lifetime })
+}
+
 /// Atomically transfers ownership of `community` to `new_owner_pubkey`.
 ///
 /// Runs in a single transaction:
@@ -500,13 +744,17 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
 ///    so that concurrent transfers to the same recipient serialize. The same
 ///    lock key is also used by `Db::create_community_with_owner` to prevent
 ///    transfer-vs-create races.
-/// 2. Locks the current owner row `FOR UPDATE` and verifies
+/// 2. Locks the community row and rejects archive/non-active lifecycle or any
+///    non-aborted deletion request.
+///    Owner-deletion admission takes the same row lock, so whichever operation
+///    commits first makes the other re-evaluate and conflict.
+/// 3. Locks the current owner row `FOR UPDATE` and verifies
 ///    `expected_owner_pubkey` matches. This prevents a stale-owner race where
 ///    a delayed/retried request overwrites a completed transfer.
-/// 3. Enforces the [`MAX_COMMUNITIES_PER_OWNER`] limit on the transferee by
-///    counting owned communities inside the same transaction.
-/// 4. Upserts `new_owner_pubkey` as `owner` (insert or promote).
-/// 5. Demotes every other owner in this community to `member` — **not**
+/// 4. Enforces the transferee's active and lifetime limits
+///    ([`OwnerQuota::admits`]) inside the same transaction.
+/// 5. Upserts `new_owner_pubkey` as `owner` (insert or promote).
+/// 6. Demotes every other owner in this community to `member` — **not**
 ///    `admin`, per product decision: the former owner retains no management
 ///    capabilities.
 ///
@@ -523,6 +771,27 @@ pub async fn transfer_ownership(
         observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
+    if let Err(error) = crate::deletion::guard_community_write(&mut tx, community).await {
+        return match error {
+            DbError::AccessDenied(_) if deletion_pending(&mut tx, community).await? => {
+                Ok(TransferResult::DeletionPending)
+            }
+            DbError::AccessDenied(_) => {
+                let exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1)")
+                        .bind(community.as_uuid())
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if exists {
+                    Ok(TransferResult::LifecycleConflict)
+                } else {
+                    Ok(TransferResult::NoOwner)
+                }
+            }
+            other => Err(other),
+        };
+    }
+
     // 1. Serialize on the transferee so concurrent transfers to the same
     //    recipient cannot both pass the ownership count check.
     crate::observability::observe_advisory_lock(
@@ -533,18 +802,28 @@ pub async fn transfer_ownership(
     )
     .await?;
 
-    // 2. Lock the current owner row FOR UPDATE and verify the expected owner.
-    //    FOR UPDATE prevents the stale-owner race: a concurrent transfer that
-    //    already changed the owner will block on this lock until our txn
-    //    completes (or vice versa), and the expected_owner check will fail.
-    let existing_owners: Vec<String> = sqlx::query_scalar(
-        "SELECT pubkey FROM relay_members \
-         WHERE community_id = $1 AND role = 'owner' \
-         FOR UPDATE",
+    let existing_owners = match lock_owner_mutation_admission(
+        &mut tx,
+        community,
+        &pubkey,
+        OwnerMutationMode::Transfer,
     )
-    .bind(community.as_uuid())
-    .fetch_all(&mut *tx)
-    .await?;
+    .await?
+    {
+        OwnerMutationAdmission::Allowed(existing_owners) => existing_owners,
+        OwnerMutationAdmission::NotFound => {
+            tx.rollback().await?;
+            return Ok(TransferResult::NoOwner);
+        }
+        OwnerMutationAdmission::LifecycleConflict => {
+            tx.rollback().await?;
+            return Ok(TransferResult::LifecycleConflict);
+        }
+        OwnerMutationAdmission::DeletionPending => {
+            tx.rollback().await?;
+            return Ok(TransferResult::DeletionPending);
+        }
+    };
 
     if existing_owners.is_empty() {
         tx.rollback().await?;
@@ -570,22 +849,15 @@ pub async fn transfer_ownership(
         existing_owners.iter().find(|p| **p != pubkey).cloned()
     };
 
-    // 3. Enforce the transferee's community ownership limit inside the same
+    // 4. Enforce the transferee's community ownership limit inside the same
     //    transaction that holds the advisory lock. This is the authoritative
     //    check — kgoose's preflight count is advisory only.
-    let owned_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
-    )
-    .bind(&pubkey)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    if owned_count >= max_communities_per_owner() {
+    if !owner_quota_in_transaction(&mut tx, &pubkey).await?.admits() {
         tx.rollback().await?;
         return Ok(TransferResult::LimitReached);
     }
 
-    // 4. Upsert the new owner.
+    // 5. Upsert the new owner.
     sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'owner', NULL) \
@@ -596,7 +868,7 @@ pub async fn transfer_ownership(
     .execute(&mut *tx)
     .await?;
 
-    // 5. Demote all other owners to member (not admin).
+    // 6. Demote all other owners to member (not admin).
     sqlx::query(
         "UPDATE relay_members SET role = 'member', updated_at = now() \
          WHERE community_id = $1 AND role = 'owner' AND pubkey <> $2",
@@ -615,40 +887,52 @@ pub async fn transfer_ownership(
 ///
 /// Converts BYTEA pubkeys to lowercase hex text and inserts them as members of
 /// `community`. Returns the number of rows inserted, or 0 if:
-/// - the `pubkey_allowlist` table doesn't exist, or
+/// - the `pubkey_allowlist` table doesn't exist,
+/// - `pubkey_allowlist` has no rows for this community, or
 /// - `relay_members` already has rows for this community (migration ran in a
 ///   prior startup).
 ///
 /// The empty-table guard prevents re-adding members that were intentionally
 /// removed by an admin after the initial backfill.
 pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> Result<u64> {
+    // The common startup case writes nothing: the legacy table is gone, it
+    // has no rows for this community, or the community already has members.
+    // Answer those with plain reads so a startup with nothing to backfill
+    // never needs write admission, and a quiescing deployment community keeps
+    // starting as it did before.
     let mut connection =
         observability::acquire_writer(pool, observability::WriterOperation::Bootstrap).await?;
-    // Check if pubkey_allowlist table exists.
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
          WHERE table_schema = 'public' AND table_name = 'pubkey_allowlist')",
     )
     .fetch_one(&mut *connection)
     .await?;
-
-    if !exists {
+    if !exists || community_has_members(&mut connection, community).await? {
         return Ok(0);
     }
-
-    // Only backfill if this community's relay_members is empty — once it has
-    // rows (from a previous backfill or manual admin commands), we must not
-    // re-add members that were intentionally removed.
-    let has_members: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM relay_members WHERE community_id = $1)")
-            .bind(community.as_uuid())
-            .fetch_one(&mut *connection)
-            .await?;
-
-    if has_members {
+    let has_allowlist_rows: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pubkey_allowlist WHERE community_id = $1)",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    if !has_allowlist_rows {
         return Ok(0);
     }
+    drop(connection);
 
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Bootstrap,
+    )
+    .await?;
+    // Re-check under admission: another pod may have backfilled meanwhile.
+    if community_has_members(tx.conn(), community).await? {
+        tx.commit().await?;
+        return Ok(0);
+    }
     let result = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by, created_at) \
          SELECT $1, encode(pubkey, 'hex'), 'member', NULL, added_at \
@@ -657,10 +941,25 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
          ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
     .bind(community.as_uuid())
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
-
+    tx.commit().await?;
     Ok(result.rows_affected())
+}
+
+/// Whether `community` has any `relay_members` row. Once it does (from a
+/// previous backfill or admin commands), the backfill must not re-add members
+/// that were intentionally removed.
+async fn community_has_members(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM relay_members WHERE community_id = $1)")
+            .bind(community.as_uuid())
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 impl Db {
@@ -698,6 +997,18 @@ impl Db {
             }
             RouteDecision::Writer => is_relay_member(&self.pool, community, pubkey).await,
         }
+    }
+
+    /// Writer-authoritative [`Db::is_relay_member`]: never replica-routed.
+    /// For admission fences that run after a removal's disconnect may already
+    /// have passed, where a stale replica answer would grant lasting access.
+    #[datastore_span(name = "is_relay_member_writer", system = "postgresql")]
+    pub async fn is_relay_member_writer(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<bool> {
+        is_relay_member(&self.pool, community, pubkey).await
     }
 
     /// Returns the relay member record for `pubkey` in `community`, or `None` if not found.
@@ -798,7 +1109,11 @@ impl Db {
 
     /// Ensure an owner during operator-driven community provisioning.
     #[datastore_span(name = "provision_owner", system = "postgresql")]
-    pub async fn provision_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
+    pub async fn provision_owner(
+        &self,
+        community: CommunityId,
+        owner_pubkey: &str,
+    ) -> Result<ProvisionOwnerResult> {
         bootstrap_owner_with_operation(
             &self.pool,
             community,
@@ -978,11 +1293,15 @@ impl Db {
             None,
         );
 
-        let (mut tx, transaction_timer) = observability::begin_transaction(
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
-            observability::TransactionOperation::PublishNip43MembershipLocked,
+            community_id,
+            observability::WriterOperation::EventWrite,
         )
         .await?;
+        let transaction_timer = observability::TransactionTimer::start(
+            observability::TransactionOperation::PublishNip43MembershipLocked,
+        );
         let (event, received_at, was_inserted, member_count) = transaction_timer
             .observe(async {
 
@@ -994,7 +1313,7 @@ impl Db {
             observability::LockType::Membership,
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(lock_key)
-                .execute(&mut *tx),
+                .execute(tx.conn()),
         )
         .await?;
 
@@ -1004,7 +1323,7 @@ impl Db {
              WHERE community_id = $1 ORDER BY created_at ASC",
         )
         .bind(community_id.as_uuid())
-        .fetch_all(&mut *tx)
+        .fetch_all(tx.conn())
         .await?;
 
         let member_count = rows.len();
@@ -1048,7 +1367,7 @@ impl Db {
         .bind(community_id.as_uuid())
         .bind(kind_i32)
         .bind(pubkey_bytes.as_slice())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         let insert_result = sqlx::query(
@@ -1067,11 +1386,18 @@ impl Db {
         .bind(received_at)
         .bind::<Option<Uuid>>(None)
         .bind(d_tag.as_deref())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
         let was_inserted = insert_result.rows_affected() > 0;
         if was_inserted {
+            crate::store::event_follow_up::after_admitted_insert(
+                &mut tx,
+                event.id.as_bytes().as_slice(),
+                kind_i32,
+                None,
+            )
+            .await?;
             tx.commit().await?;
         } else {
             tx.rollback().await?;
@@ -1100,7 +1426,8 @@ mod postgres_tests {
     fn owner_limit_defaults_when_unset_or_invalid() {
         assert_eq!(
             super::effective_owner_limit(None),
-            super::MAX_COMMUNITIES_PER_OWNER
+            50,
+            "stock deployment permits 50 active communities"
         );
         assert_eq!(
             super::effective_owner_limit(Some("not-a-number")),
@@ -1113,6 +1440,20 @@ mod postgres_tests {
         assert_eq!(
             super::effective_owner_limit(Some("-5")),
             super::MAX_COMMUNITIES_PER_OWNER
+        );
+    }
+
+    #[test]
+    fn owner_quota_admits_only_under_active_and_lifetime_caps() {
+        let quota = |active, lifetime| super::OwnerQuota { active, lifetime };
+        let limit = super::max_communities_per_owner();
+        let lifetime = super::MAX_LIFETIME_COMMUNITIES_PER_OWNER;
+        assert!(quota(0, 0).admits());
+        assert!(quota(limit - 1, lifetime - 1).admits());
+        assert!(!quota(limit, limit).admits(), "active cap");
+        assert!(
+            !quota(0, lifetime).admits(),
+            "tombstones count toward lifetime"
         );
     }
 
@@ -1161,6 +1502,126 @@ mod postgres_tests {
                 .as_deref(),
             Some(role)
         );
+    }
+
+    async fn acceptances(pool: &PgPool, community: CommunityId, pubkey: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM join_policy_acceptances WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .fetch_one(pool)
+        .await
+        .expect("count acceptances")
+    }
+
+    /// Both removal paths delete acceptance evidence themselves: with every
+    /// foreign-key delete action retired, nothing cascades. Owners and a role
+    /// mismatch keep theirs.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_removal_deletes_acceptances_without_cascades() {
+        let pool = setup_pool().await;
+        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
+        let (community, owner) = owned_community(&pool).await;
+        let version = "a".repeat(64);
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&owner)
+        .bind(&version)
+        .execute(&pool)
+        .await
+        .expect("owner acceptance");
+        let member = test_pubkey();
+        let admin = test_pubkey();
+        for (pubkey, role) in [(&member, "member"), (&admin, "admin")] {
+            claim_relay_membership(&pool, community, pubkey, role, Some(&version))
+                .await
+                .expect("claim membership");
+            assert_eq!(acceptances(&pool, community, pubkey).await, 1);
+        }
+
+        assert_eq!(
+            remove_relay_member(&pool, community, &owner)
+                .await
+                .expect("owner removal"),
+            RemoveResult::IsOwner
+        );
+        assert_eq!(acceptances(&pool, community, &owner).await, 1);
+        assert_eq!(
+            remove_relay_member_if_role(&pool, community, &admin, "member")
+                .await
+                .expect("mismatched removal"),
+            RemoveResult::RoleMismatch
+        );
+        assert_eq!(acceptances(&pool, community, &admin).await, 1);
+
+        assert_eq!(
+            remove_relay_member(&pool, community, &member)
+                .await
+                .expect("member removal"),
+            RemoveResult::Removed
+        );
+        assert_eq!(acceptances(&pool, community, &member).await, 0);
+        assert_eq!(
+            remove_relay_member_if_role(&pool, community, &admin, "admin")
+                .await
+                .expect("role removal"),
+            RemoveResult::Removed
+        );
+        assert_eq!(acceptances(&pool, community, &admin).await, 0);
+    }
+
+    /// An acceptance inserted concurrently with the removal holds the member
+    /// row's key-share lock. Removal must wait for it at its row lock and then
+    /// delete it; with no cascade, a removal that took its child snapshot first
+    /// would fail the foreign-key check on the member.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_removal_waits_for_and_removes_concurrent_acceptance() {
+        let pool = setup_pool().await;
+        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
+        let (community, _owner) = owned_community(&pool).await;
+        let member = test_pubkey();
+        claim_relay_membership(&pool, community, &member, "member", Some(&"a".repeat(64)))
+            .await
+            .expect("claim membership");
+
+        let mut inserter = pool.begin().await.expect("begin acceptance insert");
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .bind("b".repeat(64))
+        .execute(&mut *inserter)
+        .await
+        .expect("insert concurrent acceptance");
+
+        let name = format!("member-remove-{}", Uuid::new_v4().simple());
+        let remover = crate::test_support::named_pool(&name).await;
+        let removal = tokio::spawn({
+            let member = member.clone();
+            async move { remove_relay_member(&remover, community, &member).await }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, &name).await;
+        inserter
+            .commit()
+            .await
+            .expect("commit concurrent acceptance");
+
+        assert_eq!(
+            removal
+                .await
+                .expect("join removal")
+                .expect("removal after concurrent acceptance"),
+            RemoveResult::Removed
+        );
+        assert_eq!(acceptances(&pool, community, &member).await, 0);
     }
 
     async fn owned_community(pool: &PgPool) -> (CommunityId, String) {
@@ -1341,6 +1802,50 @@ mod postgres_tests {
         assert_role(&pool, community, &owner, "owner").await;
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_ownership_rejects_archived_community_without_membership_change() {
+        let pool = setup_pool().await;
+        let (community, owner) = owned_community(&pool).await;
+        let replacement = test_pubkey();
+        sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("archive community");
+
+        let result = transfer_ownership(&pool, community, &replacement, &owner)
+            .await
+            .expect("transfer archived community");
+
+        assert_eq!(result, TransferResult::LifecycleConflict);
+        assert_role(&pool, community, &owner, "owner").await;
+        assert!(
+            get_relay_member(&pool, community, &replacement)
+                .await
+                .expect("get replacement")
+                .is_none(),
+            "archived transfer must not add the replacement owner"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn provision_owner_still_bootstraps_initial_owner() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let db = Db::from_pool(pool.clone());
+
+        assert_eq!(
+            db.provision_owner(community, &owner)
+                .await
+                .expect("provision initial owner"),
+            ProvisionOwnerResult::Applied
+        );
+        assert_role(&pool, community, &owner, "owner").await;
+    }
+
     /// Transferring a community with no owner row returns `NoOwner`.
     #[tokio::test]
     #[ignore = "requires Postgres"]
@@ -1486,34 +1991,66 @@ mod postgres_tests {
         let owner = test_pubkey();
         let transferee = test_pubkey();
 
-        // Fill the configured default ownership limit.
-        for _ in 0..MAX_COMMUNITIES_PER_OWNER {
+        // At 49 ownerships, the fiftieth transfer succeeds; at 50, the
+        // fifty-first is rejected by the same transaction-side admission.
+        for _ in 0..(MAX_COMMUNITIES_PER_OWNER - 1) {
             let c = make_test_community(&pool).await;
             bootstrap_owner(&pool, c, &transferee)
                 .await
                 .expect("bootstrap transferee community");
         }
 
-        // Create a community owned by `owner` and try to transfer to `transferee`.
-        let community = make_test_community(&pool).await;
-        bootstrap_owner(&pool, community, &owner)
+        let fiftieth = make_test_community(&pool).await;
+        bootstrap_owner(&pool, fiftieth, &owner)
             .await
             .expect("bootstrap owner");
-
-        let result = transfer_ownership(&pool, community, &transferee, &owner)
-            .await
-            .expect("transfer to maxed transferee");
-
-        assert_eq!(result, TransferResult::LimitReached);
-
-        // Owner is still owner — transfer did not happen.
+        assert!(matches!(
+            transfer_ownership(&pool, fiftieth, &transferee, &owner)
+                .await
+                .expect("fiftieth transfer"),
+            TransferResult::Transferred { .. }
+        ));
         assert_eq!(
-            get_relay_member(&pool, community, &owner)
+            get_relay_member(&pool, fiftieth, &transferee)
+                .await
+                .expect("get transferee")
+                .expect("exists")
+                .role,
+            "owner"
+        );
+        assert_eq!(
+            get_relay_member(&pool, fiftieth, &owner)
+                .await
+                .expect("get previous owner")
+                .expect("exists")
+                .role,
+            "member"
+        );
+
+        let fifty_first = make_test_community(&pool).await;
+        bootstrap_owner(&pool, fifty_first, &owner)
+            .await
+            .expect("bootstrap owner");
+        assert_eq!(
+            transfer_ownership(&pool, fifty_first, &transferee, &owner)
+                .await
+                .expect("fifty-first transfer"),
+            TransferResult::LimitReached
+        );
+        assert_eq!(
+            get_relay_member(&pool, fifty_first, &owner)
                 .await
                 .expect("get owner")
                 .expect("exists")
                 .role,
             "owner"
+        );
+        assert!(
+            get_relay_member(&pool, fifty_first, &transferee)
+                .await
+                .expect("get transferee")
+                .is_none(),
+            "rejected transfer must not add transferee"
         );
     }
 }

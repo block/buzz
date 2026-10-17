@@ -8,7 +8,7 @@ use serde::Serialize;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use crate::{nip98::nip98_header, state::AppState};
+use crate::{handlers::req::event_visible_to_reader, nip98::nip98_header, state::AppState};
 
 use reqwest::StatusCode;
 
@@ -20,14 +20,17 @@ const OUTBOX_REAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const REGISTRATION_REAP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Notification sent to the configured operator-listener endpoint.
+///
+/// Version 2 adds the full signed `event` to version 1's metadata.
 #[derive(Debug, Serialize)]
-struct MentionNotification {
+struct MentionNotification<'a> {
     v: u8,
     pubkey: String,
     community_host: String,
     event_id: String,
     event_kind: i32,
     event_created_at: i64,
+    event: &'a nostr::Event,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +108,10 @@ trait DeliveryTransport: Sync {
 
 #[async_trait::async_trait]
 trait DeliveryStore: Sync {
+    async fn load(
+        &self,
+        delivery: &buzz_db::operator_listener::ClaimedDelivery,
+    ) -> Result<Option<buzz_core::StoredEvent>, String>;
     async fn release(&self, id: Uuid, claim_id: Uuid, next: DateTime<Utc>) -> Result<bool, String>;
     async fn complete(&self, id: Uuid, claim_id: Uuid) -> Result<bool, String>;
     async fn retry(&self, id: Uuid, claim_id: Uuid, next: DateTime<Utc>) -> Result<bool, String>;
@@ -113,10 +120,21 @@ trait DeliveryStore: Sync {
 
 struct DbDeliveryStore<'a> {
     db: &'a buzz_db::Db,
+    admission: buzz_db::operator_listener::DeliveryAdmission,
 }
 
 #[async_trait::async_trait]
 impl DeliveryStore for DbDeliveryStore<'_> {
+    async fn load(
+        &self,
+        delivery: &buzz_db::operator_listener::ClaimedDelivery,
+    ) -> Result<Option<buzz_core::StoredEvent>, String> {
+        self.db
+            .load_operator_listener_delivery_event(delivery, self.admission)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn release(&self, id: Uuid, claim_id: Uuid, next: DateTime<Utc>) -> Result<bool, String> {
         self.db
             .release_operator_listener_delivery(id, claim_id, next)
@@ -191,7 +209,14 @@ async fn run_delivery_once_with_transport<T: DeliveryTransport>(
     if claimed.is_empty() {
         return WorkerIteration::Idle;
     }
-    let store = DbDeliveryStore { db: &state.db };
+    let store = DbDeliveryStore {
+        db: &state.db,
+        admission: buzz_db::operator_listener::DeliveryAdmission {
+            require_membership: state.config.require_relay_membership,
+            allow_owner_membership: state.config.allow_nip_oa_auth,
+            require_allowlist: state.config.pubkey_allowlist_enabled,
+        },
+    };
     join_all(claimed.into_iter().map(|delivery| {
         deliver_one(
             &state.config.operator_listener_delivery_urls,
@@ -233,13 +258,29 @@ async fn deliver_one<T: DeliveryTransport, S: DeliveryStore>(
             .increment(1);
         return;
     };
+    let stored = match store.load(&delivery).await {
+        Ok(Some(stored)) if event_visible_to_reader(&stored.event, &delivery.target_pubkey) => {
+            stored
+        }
+        // Retry rather than drop: a mention can commit just before the
+        // target is added to the channel.
+        Ok(_) => {
+            retry_or_fail(store, &delivery, "target cannot read event".to_owned()).await;
+            return;
+        }
+        Err(error) => {
+            retry_or_fail(store, &delivery, format!("event load failed: {error}")).await;
+            return;
+        }
+    };
     let body = match serde_json::to_vec(&MentionNotification {
-        v: 1,
+        v: 2,
         pubkey: hex::encode(&delivery.target_pubkey),
         community_host: delivery.community_host.clone(),
         event_id: hex::encode(&delivery.event_id),
         event_kind: delivery.event_kind,
         event_created_at: delivery.event_created_at.timestamp(),
+        event: &stored.event,
     }) {
         Ok(body) => body,
         Err(error) => {
@@ -350,7 +391,7 @@ mod tests {
 
     use super::*;
     use buzz_core::tenant::CommunityId;
-    use nostr::Keys;
+    use nostr::{EventBuilder, Keys, Kind};
 
     #[test]
     fn reapers_use_their_expected_intervals() {
@@ -369,19 +410,46 @@ mod tests {
         Fail(Uuid, Uuid),
     }
 
-    #[derive(Default)]
     struct MockStore {
         calls: Mutex<Vec<StoreCall>>,
+        loaded: Result<Option<buzz_core::StoredEvent>, String>,
+    }
+
+    impl Default for MockStore {
+        fn default() -> Self {
+            Self::loading(Ok(Some(stored_event(Kind::Custom(9)))))
+        }
     }
 
     impl MockStore {
+        fn loading(loaded: Result<Option<buzz_core::StoredEvent>, String>) -> Self {
+            Self {
+                calls: Mutex::default(),
+                loaded,
+            }
+        }
+
         fn calls(&self) -> Vec<StoreCall> {
             self.calls.lock().expect("store calls lock").clone()
         }
     }
 
+    fn stored_event(kind: Kind) -> buzz_core::StoredEvent {
+        let event = EventBuilder::new(kind, "hello agent")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign test event");
+        buzz_core::StoredEvent::new(event, None)
+    }
+
     #[async_trait::async_trait]
     impl DeliveryStore for MockStore {
+        async fn load(
+            &self,
+            _delivery: &buzz_db::operator_listener::ClaimedDelivery,
+        ) -> Result<Option<buzz_core::StoredEvent>, String> {
+            self.loaded.clone()
+        }
+
         async fn release(
             &self,
             id: Uuid,
@@ -546,7 +614,9 @@ mod tests {
     #[tokio::test]
     async fn successful_delivery_posts_payload_and_completes_claim() {
         let (routes, relay_keypair, delivery) = delivery_fixture(1);
-        let store = MockStore::default();
+        let loaded = stored_event(Kind::Custom(9));
+        let expected = loaded.event.clone();
+        let store = MockStore::loading(Ok(Some(loaded)));
         let transport = MockTransport::new(Ok(StatusCode::NO_CONTENT));
 
         deliver_one(
@@ -562,7 +632,7 @@ mod tests {
         assert_eq!(request.url, routes[&hex::encode(&delivery.listener_pubkey)]);
         assert!(request.authorization.starts_with("Nostr "));
         let body: serde_json::Value = serde_json::from_slice(&request.body).expect("JSON body");
-        assert_eq!(body["v"], 1);
+        assert_eq!(body["v"], 2);
         assert_eq!(body["pubkey"], hex::encode(&delivery.target_pubkey));
         assert_eq!(body["community_host"], delivery.community_host);
         assert_eq!(body["event_id"], hex::encode(&delivery.event_id));
@@ -571,10 +641,73 @@ mod tests {
             body["event_created_at"],
             delivery.event_created_at.timestamp()
         );
+        let event: nostr::Event =
+            serde_json::from_value(body["event"].clone()).expect("signed event in body");
+        assert_eq!(event, expected);
+        event
+            .verify()
+            .expect("delivered event keeps a valid signature");
         assert_eq!(
             store.calls(),
             [StoreCall::Complete(delivery.id, delivery.claim_id)]
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_event_retries_then_fails_without_http_request() {
+        // Author-only kinds pass the database check but not the reader check.
+        for loaded in [None, Some(stored_event(Kind::Custom(30300)))] {
+            for (attempt, expect_retry) in [
+                (1, true),
+                (buzz_db::operator_listener::MAX_DELIVERY_ATTEMPTS, false),
+            ] {
+                let (routes, relay_keypair, delivery) = delivery_fixture(attempt);
+                let store = MockStore::loading(Ok(loaded.clone()));
+                let transport = MockTransport::new(Ok(StatusCode::NO_CONTENT));
+
+                deliver_one(
+                    &routes,
+                    &relay_keypair,
+                    &store,
+                    &transport,
+                    delivery.clone(),
+                )
+                .await;
+
+                assert_eq!(transport.request_count(), 0);
+                match store.calls().as_slice() {
+                    [StoreCall::Retry(id, claim_id, _)] if expect_retry => {
+                        assert_eq!((*id, *claim_id), (delivery.id, delivery.claim_id));
+                    }
+                    [StoreCall::Fail(id, claim_id)] if !expect_retry => {
+                        assert_eq!((*id, *claim_id), (delivery.id, delivery.claim_id));
+                    }
+                    calls => panic!("attempt {attempt}: unexpected store calls {calls:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn event_load_error_retries_without_http_request() {
+        let (routes, relay_keypair, delivery) = delivery_fixture(1);
+        let store = MockStore::loading(Err("database unavailable".to_owned()));
+        let transport = MockTransport::new(Ok(StatusCode::NO_CONTENT));
+
+        deliver_one(
+            &routes,
+            &relay_keypair,
+            &store,
+            &transport,
+            delivery.clone(),
+        )
+        .await;
+
+        assert_eq!(transport.request_count(), 0);
+        assert!(matches!(
+            store.calls().as_slice(),
+            [StoreCall::Retry(id, claim_id, _)] if *id == delivery.id && *claim_id == delivery.claim_id
+        ));
     }
 
     #[tokio::test]
@@ -636,7 +769,7 @@ mod tests {
         );
     }
 
-    async fn read_http_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+    async fn read_http_request(stream: &mut TcpStream) -> (String, Vec<u8>, String) {
         let mut reader = BufReader::new(stream);
         let mut request_line = String::new();
         reader
@@ -645,6 +778,7 @@ mod tests {
             .expect("read request line");
 
         let mut content_length = 0;
+        let mut authorization = String::new();
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).await.expect("read header");
@@ -654,6 +788,8 @@ mod tests {
             if let Some((name, value)) = line.split_once(':') {
                 if name.eq_ignore_ascii_case("content-length") {
                     content_length = value.trim().parse().expect("valid content length");
+                } else if name.eq_ignore_ascii_case("authorization") {
+                    authorization = value.trim().to_owned();
                 }
             }
         }
@@ -663,7 +799,67 @@ mod tests {
             .read_exact(&mut body)
             .await
             .expect("read request body");
-        (request_line, body)
+        (request_line, body, authorization)
+    }
+
+    #[tokio::test]
+    async fn successful_http_delivery_is_signed_and_completes_claim() {
+        use nostr::nips::nip98::{verify_auth_header, HttpMethod};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("HTTP listener");
+        let endpoint = url::Url::parse(&format!(
+            "http://{}/mentions",
+            listener.local_addr().expect("listener address")
+        ))
+        .expect("HTTP endpoint");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept delivery");
+            let request = read_http_request(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write success response");
+            request
+        });
+        let (_, relay_keypair, delivery) = delivery_fixture(1);
+        let routes = HashMap::from([(hex::encode(&delivery.listener_pubkey), endpoint.clone())]);
+        let store = MockStore::default();
+        let http = build_delivery_http_client(Duration::from_secs(2)).expect("delivery client");
+        let transport = ReqwestDeliveryTransport { http: &http };
+
+        deliver_one(
+            &routes,
+            &relay_keypair,
+            &store,
+            &transport,
+            delivery.clone(),
+        )
+        .await;
+
+        let (request_line, body, authorization) =
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("HTTP server completed")
+                .expect("HTTP server task");
+        assert!(request_line.starts_with("POST /mentions HTTP/1.1"));
+        let signer = verify_auth_header(
+            &authorization,
+            &endpoint,
+            HttpMethod::POST,
+            nostr::Timestamp::now(),
+            Some(&body),
+        )
+        .expect("valid signature binding the HTTP endpoint and body");
+        assert_eq!(signer, relay_keypair.public_key());
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("notification JSON");
+        assert_eq!(payload["pubkey"], hex::encode(&delivery.target_pubkey));
+        assert_eq!(payload["event_id"], hex::encode(&delivery.event_id));
+        assert_eq!(
+            store.calls(),
+            [StoreCall::Complete(delivery.id, delivery.claim_id)]
+        );
     }
 
     #[tokio::test]

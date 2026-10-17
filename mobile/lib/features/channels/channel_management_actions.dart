@@ -225,15 +225,13 @@ class ChannelActions {
     _ref.invalidate(channelCanvasProvider(channelId));
   }
 
-  /// User search via NIP-50 over kind:0 profile events.
+  /// User search by profile name ([RelaySessionNotifier.searchProfiles]).
   Future<List<DirectoryUser>> searchUsers(String query, {int limit = 8}) async {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return const [];
 
-    final events = await _session.queryRelay([
-      NostrFilters.searchUsers(trimmed, limit: limit),
-    ]);
-    return directoryUsersFromProfileEvents(events)
+    final events = await _session.searchProfiles(trimmed, limit: limit);
+    return directoryUsersFromProfileEvents(events, alphabetize: false)
         .where(
           (user) =>
               _currentPubkey == null ||

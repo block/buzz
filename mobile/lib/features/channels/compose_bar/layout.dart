@@ -1,6 +1,7 @@
 part of '../compose_bar.dart';
 
 class _ComposeBarLayout extends HookWidget {
+  final GlobalKey surfaceKey;
   final Widget? voiceNoteRecorder;
   final List<_PendingAttachment> attachments;
   final ValueChanged<int> onRemoveAttachment;
@@ -30,6 +31,7 @@ class _ComposeBarLayout extends HookWidget {
   final bool isSending;
 
   const _ComposeBarLayout({
+    required this.surfaceKey,
     required this.voiceNoteRecorder,
     required this.attachments,
     required this.onRemoveAttachment,
@@ -212,19 +214,19 @@ class _ComposeBarLayout extends HookWidget {
                               key: const ValueKey('standard-actions'),
                               children: [
                                 _ComposeAction(
-                                  icon: LucideIcons.atSign,
+                                  icon: BuzzIcons.atSign,
                                   onTap: onMention,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.hash,
+                                  icon: BuzzIcons.hash,
                                   onTap: onChannel,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.smilePlus,
+                                  icon: BuzzIcons.smilePlus,
                                   onTap: onEmoji,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.aLargeSmall,
+                                  icon: BuzzIcons.aLargeSmall,
                                   onTap: onOpenFormatting,
                                 ),
                                 const Spacer(),
@@ -289,22 +291,25 @@ class _ComposeBarLayout extends HookWidget {
         final voiceNoteInsetProgress = hasVoiceNoteAttachment
             ? 1.0
             : recordingTransition.value;
-        final composer = Container(
-          key: const ValueKey('composer-surface'),
-          decoration: BoxDecoration(
-            color: usesIosConcentricSurface
-                ? Colors.transparent
-                : context.colors.surfaceContainerHighest,
-            borderRadius: radius,
-            border: Border.all(
-              color: Colors.black.withValues(alpha: 0.04),
-              width: 1,
+        final composer = KeyedSubtree(
+          key: surfaceKey,
+          child: Container(
+            key: const ValueKey('composer-surface'),
+            decoration: BoxDecoration(
+              color: usesIosConcentricSurface
+                  ? Colors.transparent
+                  : context.colors.surfaceContainerHighest,
+              borderRadius: radius,
+              border: Border.all(
+                color: Colors.black.withValues(alpha: 0.04),
+                width: 1,
+              ),
             ),
+            padding: EdgeInsets.all(
+              Grid.xxs + Grid.half * voiceNoteInsetProgress,
+            ),
+            child: child,
           ),
-          padding: EdgeInsets.all(
-            Grid.xxs + Grid.half * voiceNoteInsetProgress,
-          ),
-          child: child,
         );
         if (!usesIosConcentricSurface) return composer;
         return ConcentricSheetSurface(

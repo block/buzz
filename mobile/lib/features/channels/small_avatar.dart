@@ -36,7 +36,7 @@ class SmallAvatar extends StatelessWidget {
       child: AvatarImage(
         imageUrl: avatarUrl,
         radius: (size - 2) / 2,
-        backgroundColor: context.colors.primaryContainer,
+        backgroundColor: context.controlSurface,
         fallback: Text(
           initial,
           style: TextStyle(

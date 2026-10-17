@@ -70,8 +70,9 @@ impl Db {
         added_by: &[u8],
         note: Option<&str>,
     ) -> Result<bool> {
-        let mut connection = crate::observability::acquire_writer(
+        let mut tx = crate::begin_community_write_transaction(
             &self.pool,
+            community,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
@@ -83,8 +84,9 @@ impl Db {
         .bind(pubkey)
         .bind(added_by)
         .bind(note)
-        .execute(&mut *connection)
+        .execute(tx.conn())
         .await?;
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -95,8 +97,9 @@ impl Db {
         community: CommunityId,
         pubkey: &[u8],
     ) -> Result<bool> {
-        let mut connection = crate::observability::acquire_writer(
+        let mut tx = crate::begin_community_write_transaction(
             &self.pool,
+            community,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
@@ -104,8 +107,9 @@ impl Db {
             sqlx::query("DELETE FROM pubkey_allowlist WHERE community_id = $1 AND pubkey = $2")
                 .bind(community.as_uuid())
                 .bind(pubkey)
-                .execute(&mut *connection)
+                .execute(tx.conn())
                 .await?;
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 

@@ -89,13 +89,7 @@ final class JumpToLatestGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     configuration.cornerStyle = .capsule
     configuration.baseForegroundColor = .label
-    configuration.image = UIImage(
-      systemName: "arrow.down",
-      withConfiguration: UIImage.SymbolConfiguration(
-        pointSize: 16,
-        weight: .semibold
-      )
-    )
+    configuration.image = NativeTabler.image("arrow.down", size: 16)
     button.configuration = configuration
     button.accessibilityLabel = "Jump to latest message"
     button.translatesAutoresizingMaskIntoConstraints = false
@@ -176,6 +170,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let button = NavigationGlassButton(type: .system)
   private let activityIndicator = UIActivityIndicatorView(style: .medium)
   private let swatchView = UIView()
+  private var labelForegroundColor: UIColor?
   private var buttonLabel: String?
   private var buttonIconName = "chevron.backward"
   private var contentIcon = "back"
@@ -363,6 +358,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
     button.isSelected = selected
+    // Resolve label contrast explicitly on the first selected frame as well as
+    // later selections; UIKit may retain the initial glass title foreground.
+    labelForegroundColor = selected
+      ? (interfaceStyle == .dark ? .black : .white)
+      : foregroundColor
     isBusy = busy
     if selected {
       button.accessibilityTraits.insert(.selected)
@@ -411,6 +411,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "shutter": buttonIconName = "circle.fill"
     case "sun": buttonIconName = "sun.max"
     case "moon": buttonIconName = "moon"
+    case "more": buttonIconName = "ellipsis"
+    case "reply": buttonIconName = "arrowshape.turn.up.left"
     case "systemAppearance": buttonIconName = "circle.lefthalf.filled"
     case "colorSwatch": buttonIconName = "circle.fill"
     default: buttonIconName = "chevron.backward"
@@ -425,8 +427,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       )
       button.configuration?.titleLineBreakMode = .byClipping
       button.configuration?.titleTextAttributesTransformer =
-        UIConfigurationTextAttributesTransformer { incoming in
+        UIConfigurationTextAttributesTransformer { [weak self] incoming in
           var outgoing = incoming
+          if let foreground = self?.labelForegroundColor {
+            outgoing.foregroundColor = foreground
+          }
           let preferred = UIFont.preferredFont(forTextStyle: .subheadline)
           outgoing.font = UIFont.systemFont(
             ofSize: preferred.pointSize,
@@ -448,13 +453,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       let pointSize: CGFloat = icon == "shutter"
         ? controlSize * Self.shutterIconRatio
         : 17
-      buttonImage = UIImage(
-        systemName: buttonIconName,
-        withConfiguration: UIImage.SymbolConfiguration(
-          pointSize: pointSize,
-          weight: .semibold
-        )
-      )
+      buttonImage = NativeTabler.image(buttonIconName, size: pointSize)
     }
     updateDisplayedContent()
     button.setNeedsUpdateConfiguration()

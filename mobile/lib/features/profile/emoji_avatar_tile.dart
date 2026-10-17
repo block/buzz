@@ -43,9 +43,7 @@ class EmojiAvatarTile extends StatelessWidget {
         onTap: onTap,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: isSelected
-                ? context.colors.primaryContainer
-                : Colors.transparent,
+            color: isSelected ? context.controlSurface : Colors.transparent,
             borderRadius: BorderRadius.circular(Radii.sm),
           ),
           child: Center(

@@ -101,6 +101,7 @@ async fn terminal_refusal_and_deadline_do_not_become_empty_success() {
     for message in [
         "restricted: denied",
         "error: transient",
+        "error: query timed out",
         "rate-limited: quota exceeded; retry in 10s",
         "rate-limited: quota exceeded",
         "rate-limited: quota exceeded; retry in 18446744073709551615s",

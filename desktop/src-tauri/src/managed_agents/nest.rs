@@ -48,11 +48,11 @@ const BUZZ_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
 /// Version 1 is implicitly "before this mechanism existed" (no version file).
-const NEST_AGENTS_VERSION: u32 = 5;
+const NEST_AGENTS_VERSION: u32 = 7;
 
 /// Template content version for SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
-const NEST_SKILL_VERSION: u32 = 5;
+const NEST_SKILL_VERSION: u32 = 6;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
 const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
@@ -87,6 +87,15 @@ pub fn init_nest_dir(is_dev: bool) {
     // set() is a no-op when already initialized, which is correct: only the
     // first call (at boot, before any filesystem work) should win.
     let _ = NEST_DIR.set(path);
+}
+
+/// Pin the nest root for a child-process test so background nest work cannot
+/// reach the user's real nest.
+#[cfg(test)]
+pub(crate) fn pin_nest_dir_for_test(path: PathBuf) {
+    NEST_DIR
+        .set(Some(path))
+        .expect("nest dir pinned before first use");
 }
 
 /// Returns the nest root path (`~/.buzz` for prod, `~/.buzz-dev` for dev),

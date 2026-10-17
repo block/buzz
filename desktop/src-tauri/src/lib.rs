@@ -10,6 +10,8 @@ mod deep_link;
 mod egress_guard;
 mod event_sync;
 mod events;
+#[cfg_attr(not(test), allow(dead_code))]
+mod hpke_key_backup;
 mod huddle;
 mod identity_storage;
 mod initial_window;
@@ -840,6 +842,8 @@ pub fn run() {
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
+            remove_community_relay,
+            readd_community_relay,
             set_agent_avatar_communities,
             validate_repos_dir,
             get_active_workspace,
@@ -894,8 +898,13 @@ pub fn run() {
             admin_put_operator,
             admin_delete_operator,
             admin_list_restrictions,
-            admin_lift_ban,
-            admin_lift_timeout,
+            admin_lift_restriction,
+            admin_list_communities,
+            admin_search_members,
+            admin_get_member,
+            admin_get_event,
+            admin_connected_community_host,
+            admin_direct_action,
             get_admin_origin,
             set_admin_origin,
             admin_discover_origin,

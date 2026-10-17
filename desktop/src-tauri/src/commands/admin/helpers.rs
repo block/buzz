@@ -14,6 +14,7 @@ pub(super) async fn fetch_admin_json(
 ) -> Result<Vec<u8>, String> {
     use crate::relay::build_nip98_auth_header_for_keys;
 
+    crate::egress_guard::assert_no_key_backup(url, "admin API request URL")?;
     let keys = state.signing_keys()?;
     let http_client = client::ADMIN_CLIENT
         .get()
@@ -109,11 +110,32 @@ pub(super) async fn mutation_admin_json(
     state: &tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<Vec<u8>, AdminMutationError> {
     let keys = state.signing_keys()?;
+    send_admin_mutation(&keys, method, url, body, cap).await
+}
+
+/// State-free core of [`mutation_admin_json`]: every request, including the
+/// 401 retry, is signed by the caller's `keys` snapshot and never re-reads the
+/// active identity. The body passes the key-backup egress guard before any
+/// request is built, so free-text admin fields cannot carry an `ncryptsec`.
+pub(super) async fn send_admin_mutation(
+    keys: &nostr::Keys,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&[u8]>,
+    cap: u64,
+) -> Result<Vec<u8>, AdminMutationError> {
+    // Every refusal before the first `.send()` is `not_sent`: nothing reached
+    // the relay, so resending the same intent can never succeed.
+    if let Some(bytes) = body {
+        crate::egress_guard::assert_no_key_backup_bytes(bytes, "admin API mutation")
+            .map_err(AdminMutationError::not_sent)?;
+    }
     let http_client = client::ADMIN_CLIENT
         .get()
-        .ok_or_else(|| "admin client not initialised".to_string())?;
+        .ok_or_else(|| AdminMutationError::not_sent("admin client not initialised".to_string()))?;
 
-    let resp = build_admin_mutation_request(http_client, &keys, &method, url, body)?
+    let resp = build_admin_mutation_request(http_client, keys, &method, url, body)
+        .map_err(AdminMutationError::not_sent)?
         .send()
         .await
         .map_err(|e| crate::relay::classify_request_error(&e))?;
@@ -121,7 +143,7 @@ pub(super) async fn mutation_admin_json(
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         // Retry once with a freshly signed request — each build mints a new
         // NIP-98 nonce, so this is a distinct event, not a replay of the first.
-        let resp2 = build_admin_mutation_request(http_client, &keys, &method, url, body)?
+        let resp2 = build_admin_mutation_request(http_client, keys, &method, url, body)?
             .send()
             .await
             .map_err(|e| crate::relay::classify_request_error(&e))?;
@@ -142,6 +164,9 @@ pub(super) async fn mutation_admin_json(
 /// [`crate::relay::build_nip98_auth_header_for_keys`]), which is why the
 /// 401-retry re-invokes this rather than resending the first request.
 ///
+/// The URL passes the key-backup egress guard before signing: the NIP-98
+/// header embeds it, and admin searches put typed text in its query.
+///
 /// State-free (`&Client` + `&Keys`) so the wire shape is unit-testable without
 /// a running Tauri app.
 pub(super) fn build_admin_mutation_request(
@@ -151,6 +176,7 @@ pub(super) fn build_admin_mutation_request(
     url: &str,
     body: Option<&[u8]>,
 ) -> Result<reqwest::RequestBuilder, String> {
+    crate::egress_guard::assert_no_key_backup(url, "admin API request URL")?;
     let auth_header =
         crate::relay::build_nip98_auth_header_for_keys(keys, method, url, body.unwrap_or(&[]))
             .map_err(|e| format!("nip98 build failed: {e}"))?;
@@ -357,6 +383,7 @@ async fn read_admin_mutation_response(
         return Err(AdminMutationError::authoritative(
             status,
             format!("admin API error: {body}"),
+            bytes.is_empty(),
         ));
     }
 

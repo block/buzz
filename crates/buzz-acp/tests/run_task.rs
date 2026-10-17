@@ -577,3 +577,37 @@ async fn memory_is_loaded_before_session_and_opt_out_makes_no_request() {
         }
     }
 }
+
+#[test]
+fn launch_prefix_wraps_the_shipped_local_task_entrypoint() {
+    let f = Fixture::new();
+    let mut command = f.command();
+    command
+        .env(
+            "BUZZ_ACP_LAUNCH_PREFIX",
+            json!([
+                "/bin/sh",
+                "-c",
+                "printf invoked > wrapper-called; exec \"$@\"",
+                "fixture-launcher"
+            ])
+            .to_string(),
+        )
+        .args(["--no-memory", "--task", "-"]);
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(f.task().to_string().as_bytes())
+        .unwrap();
+    terminal(&wait(child), 0, "completed");
+    assert_eq!(
+        fs::read_to_string(f.dir.join("wrapper-called")).unwrap(),
+        "invoked"
+    );
+    assert!(f
+        .wire()
+        .iter()
+        .any(|message| message["method"] == "session/prompt"));
+}

@@ -16,8 +16,6 @@ BEGIN
         -- pgschema may copy parent triggers onto standalone children. Drop
         -- those copies before ATTACH; PostgreSQL recreates inherited parent
         -- triggers while attaching and rejects same-named child triggers.
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p_past;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p_past;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_past;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_past;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_past;
@@ -30,8 +28,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_01'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_01;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_01;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_01;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_01;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_01;
@@ -44,8 +40,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_02'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_02;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_02;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_02;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_02;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_02;
@@ -58,8 +52,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_03'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_03;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_03;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_03;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_03;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_03;
@@ -72,8 +64,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_04'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_04;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_04;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_04;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_04;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_04;
@@ -86,8 +76,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_05'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_05;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_05;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_05;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_05;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_05;
@@ -100,8 +88,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_06'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p2026_06;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p2026_06;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_06;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_06;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_06;
@@ -114,8 +100,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p_future'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_enqueue_push_match ON events_p_future;
-        DROP TRIGGER IF EXISTS events_refresh_channel_ttl ON events_p_future;
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_future;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_future;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_future;
@@ -194,6 +178,29 @@ BEGIN
         DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log_p_future;
         ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p_future
             FOR VALUES FROM ('2026-07-01') TO (MAXVALUE);
+    END IF;
+END $$;
+
+-- pgschema drops multi-column CHECK constraints. Restore the direct-action
+-- shape CHECK from schema/schema.sql (and migration 0055) verbatim.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'relay_admin_actions'::regclass
+          AND conname = 'relay_admin_actions_direct_shape'
+    ) THEN
+        ALTER TABLE relay_admin_actions
+            ADD CONSTRAINT relay_admin_actions_direct_shape CHECK (
+                report_id IS NOT NULL
+                OR (action = 'ban' AND enforcement_target_pubkey IS NOT NULL
+                    AND timeout_secs IS NULL AND timeout_until IS NULL)
+                OR (action = 'timeout' AND enforcement_target_pubkey IS NOT NULL
+                    AND timeout_secs IS NOT NULL AND timeout_until IS NOT NULL)
+                OR (action = 'delete' AND enforcement_target_event_id IS NOT NULL
+                    AND enforcement_target_pubkey IS NOT NULL
+                    AND timeout_secs IS NULL AND timeout_until IS NULL)
+            );
     END IF;
 END $$;
 

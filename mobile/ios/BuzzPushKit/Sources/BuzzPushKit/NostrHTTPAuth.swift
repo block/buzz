@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import P256K
 
 public enum NostrHTTPAuthError: Error, Equatable {
     case invalidHex
@@ -44,14 +43,8 @@ public struct VerifiedNostrEvent: Codable, Equatable, Sendable {
               )
         else { return false }
         let digest = Array(SHA256.hash(data: serialized))
-        guard digest == idBytes,
-              let signature = try? P256K.Schnorr.SchnorrSignature(
-                dataRepresentation: Data(signatureBytes)
-              )
-        else { return false }
-        var message = digest
-        let key = P256K.Schnorr.XonlyKey(dataRepresentation: pubkeyBytes)
-        return key.isValid(signature, for: &message)
+        guard digest == idBytes else { return false }
+        return NostrSchnorr.verify(signature: signatureBytes, message: digest, publicKey: pubkeyBytes)
     }
 
     static func canonicalSerialization(
@@ -95,32 +88,28 @@ public enum NostrHTTPAuth {
               privateKeyBytes.count == 32
         else { throw NostrHTTPAuthError.invalidHex }
         do {
-            let privateKey = try P256K.Schnorr.PrivateKey(
-                dataRepresentation: privateKeyBytes
-            )
-            let pubkey = VerifiedNostrEvent.hex(privateKey.xonly.bytes)
+            let privateKey = privateKeyBytes
+            let pubkey = VerifiedNostrEvent.hex(try NostrSchnorr.publicKey(secret: privateKey))
             let payload = VerifiedNostrEvent.hex(SHA256.hash(data: body))
             let tags = [
                 ["u", url.absoluteString],
                 ["method", method.uppercased()],
                 ["payload", payload],
+                // Separate requests in the same second must not reuse an event ID.
+                ["nonce", UUID().uuidString.lowercased()],
             ]
             let serialized = try VerifiedNostrEvent.canonicalSerialization(
                 pubkey: pubkey, createdAt: createdAt, kind: 27235,
                 tags: tags, content: ""
             )
             let digest = Array(SHA256.hash(data: serialized))
-            var message = digest
-            let signature: P256K.Schnorr.SchnorrSignature
-            if var randomness = auxiliaryRandomness {
+            let message = digest
+            let signature: [UInt8]
+            if let randomness = auxiliaryRandomness {
                 guard randomness.count == 32 else { throw NostrHTTPAuthError.signingFailed }
-                signature = try privateKey.signature(
-                    message: &message, auxiliaryRand: &randomness
-                )
+                signature = try NostrSchnorr.sign(message: message, secret: privateKey, auxiliaryRandomness: randomness)
             } else {
-                signature = try privateKey.signature(
-                    message: &message, auxiliaryRand: nil
-                )
+                signature = try NostrSchnorr.sign(message: message, secret: privateKey)
             }
             let event = VerifiedNostrEvent(
                 id: VerifiedNostrEvent.hex(digest),
@@ -129,7 +118,7 @@ public enum NostrHTTPAuth {
                 kind: 27235,
                 tags: tags,
                 content: "",
-                sig: VerifiedNostrEvent.hex(signature.dataRepresentation)
+                sig: VerifiedNostrEvent.hex(signature)
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.withoutEscapingSlashes]

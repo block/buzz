@@ -204,6 +204,9 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Local-only thinking effort saved before the first spawn.
+    #[serde(default)]
+    pub effort_level: Option<String>,
 }
 
 /// Patch request for updating a managed agent's mutable fields.

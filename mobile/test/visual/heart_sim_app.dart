@@ -55,6 +55,7 @@ void main() => runApp(
 
 Widget _reactions(bool selected) => ReactionRow(
   messageId: 'heart-$selected',
+  channelId: 'channel',
   reactions: [
     for (final emoji in ['❤️', '⚠️', '👍'])
       TimelineReaction(

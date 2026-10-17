@@ -70,6 +70,7 @@ class CommunityThemeStorage {
   static const _prefix = 'buzz-community-theme.v1';
   static const _outboxPrefix = 'buzz-community-theme-outbox.v1';
   static const _migrationPrefix = 'buzz-community-theme-migrated.v1';
+  static const _localPreferenceKey = 'buzz-local-theme.v1';
   static const _legacyModeKey = 'buzz_theme_mode';
   static const _legacyAccentKey = 'buzz_accent_color';
   static const _legacySchemeKey = 'buzz_color_scheme';
@@ -134,15 +135,14 @@ class CommunityThemeStorage {
       prefs.setBool('$_migrationPrefix:$pubkey', true);
 
   Future<void> writeLegacy(CommunityThemePreference preference) async {
-    await prefs.setString(_legacyModeKey, preference.mode.name);
-    await prefs.setString(_legacySchemeKey, preference.theme);
-    await prefs.setInt(
-      _legacyAccentKey,
-      accentIndexForWireValue(preference.accent) ?? defaultAccentIndex,
-    );
+    // New writes use one versioned snapshot. Historical integer indexes remain
+    // read-only migration input and must never encode the current palette.
+    await prefs.setString(_localPreferenceKey, jsonEncode(preference.toJson()));
   }
 
   CommunityThemePreference legacyPreference() {
+    final local = _readKey(_localPreferenceKey);
+    if (local != null) return local;
     final modeName = prefs.getString(_legacyModeKey);
     final mode =
         ThemeMode.values.where((value) => value.name == modeName).firstOrNull ??

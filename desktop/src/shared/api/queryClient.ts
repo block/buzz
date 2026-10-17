@@ -1,5 +1,6 @@
 import { focusManager, QueryClient } from "@tanstack/react-query";
 
+import { isQueryDeadlineError } from "@/shared/lib/relayError";
 import {
   isAppFocused,
   subscribeAppFocus,
@@ -25,7 +26,10 @@ export function createBuzzQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        retry: 1,
+        // One retry, except after the relay's `query timed out` answer: that
+        // would re-run the same slow server-side query.
+        retry: (failureCount, error) =>
+          failureCount < 1 && !isQueryDeadlineError(error),
         refetchOnWindowFocus: false,
         networkMode: "always",
         gcTime: 5 * 60 * 1_000,

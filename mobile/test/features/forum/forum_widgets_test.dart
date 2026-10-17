@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -164,6 +166,56 @@ Widget _buildThreadPage({
   );
 }
 
+class _CountingForumSession extends RelaySessionNotifier {
+  _CountingForumSession(this.error);
+
+  Object? error;
+  int fetchCount = 0;
+  Completer<void>? park;
+
+  /// Forum-surface attempts only: the posts list (45001) or thread replies
+  /// (`#e`), excluding shared sub-providers such as profiles and emoji.
+  int forumAttempts = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    fetchCount++;
+    if (filter.ids == null &&
+        (filter.kinds.contains(45001) || filter.tags.containsKey('#e'))) {
+      forumAttempts++;
+      if (park case final park?) await park.future;
+    }
+    if (error case final error?) throw error;
+    return const [];
+  }
+}
+
+Widget _buildLiveForum(_CountingForumSession session, Widget child) =>
+    ProviderScope(
+      // Isolate the timers from Riverpod's own error retry.
+      retry: (_, _) => null,
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(const {})),
+        knownAgentPubkeysProvider.overrideWithValue(const {}),
+        profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        savedPrefsProvider.overrideWithValue(_testPrefs),
+        relayClientProvider.overrideWithValue(
+          RelayClient(baseUrl: 'http://localhost:3000'),
+        ),
+      ],
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(body: child),
+      ),
+    );
+
 void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -192,6 +244,134 @@ void main() {
         ),
       ),
     );
+  });
+
+  group('forum polling after a relay deadline', () {
+    final deadline = RelayException(503, '{"error":"query timed out"}');
+    final surfaces = {
+      'posts view (15s)': (
+        ForumPostsView(channel: _forumChannel, currentPubkey: 'self'),
+        const Duration(seconds: 15),
+      ),
+      'thread page (10s)': (
+        const ForumThreadPage(
+          channelId: _channelId,
+          postEventId: 'post1',
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+        const Duration(seconds: 10),
+      ),
+    };
+    for (final MapEntry(key: name, value: (surface, interval))
+        in surfaces.entries) {
+      testWidgets('$name pauses on a deadline', (tester) async {
+        final session = _CountingForumSession(deadline);
+        await tester.pumpWidget(_buildLiveForum(session, surface));
+        await tester.pump();
+        final settled = session.fetchCount;
+        expect(session.forumAttempts, 1);
+        for (var tick = 0; tick < 4; tick++) {
+          await tester.pump(interval);
+        }
+        expect(session.fetchCount, settled);
+        await tester.pumpWidget(const SizedBox());
+      });
+
+      testWidgets('$name keeps polling after an ordinary error', (
+        tester,
+      ) async {
+        final session = _CountingForumSession(Exception('reset'));
+        await tester.pumpWidget(_buildLiveForum(session, surface));
+        await tester.pump();
+        final settled = session.fetchCount;
+        await tester.pump(interval);
+        await tester.pump();
+        expect(session.fetchCount, greaterThan(settled));
+        await tester.pumpWidget(const SizedBox());
+      });
+
+      for (final (kind, error) in [
+        ('deadline', deadline as Object),
+        ('ordinary error', Exception('reset') as Object),
+      ]) {
+        testWidgets('$name Retry after a $kind loads once', (tester) async {
+          final session = _CountingForumSession(error);
+          await tester.pumpWidget(_buildLiveForum(session, surface));
+          await tester.pump();
+          await tester.pump();
+          final retry = find.byKey(const ValueKey('load-error-retry'));
+          expect(retry, findsOneWidget);
+          final before = session.forumAttempts;
+          session.error = null;
+          await tester.tap(retry);
+          await tester.pump();
+          await tester.pump();
+          expect(session.forumAttempts, before + 1);
+          // The post list settles empty; the thread page has no fake post,
+          // so it settles on not-found again (the count shows the reload).
+          if (surface is ForumPostsView) expect(retry, findsNothing);
+          await tester.pumpWidget(const SizedBox());
+        });
+
+        testWidgets('$name hides Retry while a $kind retry is pending', (
+          tester,
+        ) async {
+          final session = _CountingForumSession(error);
+          await tester.pumpWidget(_buildLiveForum(session, surface));
+          await tester.pump();
+          await tester.pump();
+          final retry = find.byKey(const ValueKey('load-error-retry'));
+          expect(retry, findsOneWidget);
+          final before = session.forumAttempts;
+          final park = session.park = Completer<void>();
+          await tester.tap(retry);
+          await tester.pump();
+          await tester.pump();
+          expect(retry, findsNothing);
+          expect(session.forumAttempts, before + 1);
+          // The replacement fails the same way and settles on Retry again.
+          park.complete();
+          await tester.pump();
+          await tester.pump();
+          expect(retry, findsOneWidget);
+          expect(session.forumAttempts, before + 1);
+          await tester.pumpWidget(const SizedBox());
+        });
+      }
+
+      testWidgets('$name shows no Retry while loading', (tester) async {
+        final session = _CountingForumSession(deadline)
+          ..park = Completer<void>();
+        await tester.pumpWidget(_buildLiveForum(session, surface));
+        await tester.pump();
+        expect(session.forumAttempts, 1);
+        expect(find.byKey(const ValueKey('load-error-retry')), findsNothing);
+        session.park!.complete();
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('load-error-retry')), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+      });
+
+      testWidgets('$name reopening retries a deadline', (tester) async {
+        final session = _CountingForumSession(deadline);
+        await tester.pumpWidget(_buildLiveForum(session, surface));
+        await tester.pump();
+        expect(session.forumAttempts, 1);
+        await tester.pumpWidget(_buildLiveForum(session, const SizedBox()));
+        await tester.pumpWidget(_buildLiveForum(session, surface));
+        await tester.pump();
+        await tester.pump();
+        expect(session.forumAttempts, 2);
+        for (var tick = 0; tick < 4; tick++) {
+          await tester.pump(interval);
+        }
+        expect(session.forumAttempts, 2);
+        await tester.pumpWidget(const SizedBox());
+      });
+    }
   });
 
   group('ForumPostCard', () {

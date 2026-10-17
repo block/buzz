@@ -12,8 +12,10 @@ created: 2026-08-28
 routing**: the read may be served from a read replica when
 `BUZZ_REPLICA_READ_MAX_AGE_MS` is set, subject to the soundness predicate
 `RoutePredicate::for_query` derives from the query shape. The seam fails closed
-to the writer at every error and is a genuine no-op until the budget is
-configured (`crates/buzz-db/src/lib.rs`).
+to the writer on replica errors, with one deliberate exception: a statement
+cancelled by `statement_timeout` (SQLSTATE `57014`) is surfaced rather than
+re-run, because the writer would run the same slow statement. It is a genuine
+no-op until the budget is configured (`crates/buzz-db/src/lib.rs`).
 
 ## Routing rule
 

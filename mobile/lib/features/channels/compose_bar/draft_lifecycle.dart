@@ -35,10 +35,19 @@ Future<void> _sendTextOnlyDraft({
 
   try {
     await addMentionedNonMembers();
+    // A draft that changed while adding ran is not the draft the user sent.
+    // Keep it and send nothing.
+    if (context.mounted && draftRevision.value != submittedDraftRevision) {
+      messenger?.showSnackBar(
+        const SnackBar(
+          content: Text('Not sent: the message changed while adding people.'),
+        ),
+      );
+      return;
+    }
     // Clear before optimistic insertion so the outgoing row and draft never
-    // appear simultaneously during the send transition. If the user edited
-    // while membership changes were pending, preserve that newer draft.
-    if (context.mounted && draftRevision.value == submittedDraftRevision) {
+    // appear simultaneously during the send transition.
+    if (context.mounted) {
       clearedDraftText = controller.value;
       clearedDraftMentions = Map<String, MentionCandidate>.of(mentionMap.value);
       clearComposer();
@@ -81,6 +90,10 @@ void _useComposeDraftLifecycle({
   required _IOSAttachmentPopoverController iosAttachmentPopover,
   required VoidCallback onDraftIdentityChanged,
 }) {
+  // Retire the old listener before restoring another scope's text: replacement
+  // effects can run before the previous effect's cleanup.
+  final owner = useMemoized(Object.new, [draftKey, draftIdentity]);
+  final currentOwner = useRef(owner)..value = owner;
   final lastDraftIdentity = useRef<String?>(null);
   useEffect(() {
     final identity = '$draftIdentity\u0000$draftKey';
@@ -126,6 +139,7 @@ void _useComposeDraftLifecycle({
       for (final e in mentionMap.value.entries) e.key: e.value.pubkey,
     };
     void persistDraft() {
+      if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
       if (text != lastPersistedText) {
         // Prune before the atomic snapshot, not in a later editor listener.

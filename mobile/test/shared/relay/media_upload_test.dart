@@ -292,7 +292,7 @@ void main() {
       expect(authEvent['content'], 'Get buzz-media');
       expect(authEvent['tags'], contains(equals(['t', 'get'])));
       expect(authEvent['tags'], contains(equals(['server', 'relay.example'])));
-      expect(authEvent['tags'], contains(equals(['expiration', '1700000600'])));
+      expect(authEvent['tags'], contains(equals(['expiration', '1700000060'])));
     });
 
     test('does not sign non-relay or non-media URLs', () {
@@ -419,7 +419,7 @@ void main() {
           equals(<String>['x', capturedRequest!.headers['X-SHA-256']!]),
         ),
       );
-      expect(tags, anyElement(equals(<String>['expiration', '1700000300'])));
+      expect(tags, anyElement(equals(<String>['expiration', '1700000060'])));
       expect(
         tags,
         anyElement(equals(<String>['server', 'relay.example:8443'])),

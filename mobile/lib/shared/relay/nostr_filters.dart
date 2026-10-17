@@ -47,6 +47,7 @@ abstract final class NostrFilters {
     String channelId, {
     int limit = 200,
     int? until,
+    String? beforeId,
   }) => NostrFilter(
     kinds: EventKind.channelEventKinds,
     tags: {
@@ -54,6 +55,7 @@ abstract final class NostrFilters {
     },
     limit: limit,
     until: until,
+    extensions: {'before_id': ?beforeId},
   );
 
   /// Huddle lifecycle state for one parent channel, independent of timeline paging.

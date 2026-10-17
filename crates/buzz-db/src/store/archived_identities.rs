@@ -64,8 +64,9 @@ pub async fn archive(
     replaced_by: Option<&str>,
     request_event_id: &str,
 ) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -82,9 +83,9 @@ pub async fn archive(
     .bind(reason)
     .bind(replaced_by)
     .bind(request_event_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
-
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -93,8 +94,9 @@ pub async fn archive(
 /// Returns `true` if a row was deleted, `false` if the identity was not archived
 /// in that community.
 pub async fn unarchive(pool: &PgPool, community_id: CommunityId, pubkey: &str) -> Result<bool> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
@@ -102,9 +104,9 @@ pub async fn unarchive(pool: &PgPool, community_id: CommunityId, pubkey: &str) -
         sqlx::query("DELETE FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
             .bind(community_id.as_uuid())
             .bind(pubkey)
-            .execute(&mut *connection)
+            .execute(tx.conn())
             .await?;
-
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 

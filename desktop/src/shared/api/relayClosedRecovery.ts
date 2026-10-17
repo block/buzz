@@ -1,4 +1,5 @@
 import { classifyRelayClosed } from "@/shared/api/relayClosedPolicy";
+import { isQueryDeadlineError } from "@/shared/lib/relayError";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -132,7 +133,13 @@ function recoverLiveSubscriptionFromClosed({
   subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
 
-  const closedClass = classifyRelayClosed(message);
+  // A deadline on a live sub is treated as retryable: resubscribe with the
+  // same filter under the 1-30s backoff, which can keep retrying at the cap.
+  // `since` is deliberately not advanced to now; that could skip events
+  // missed while the sub was closed.
+  const closedClass = isQueryDeadlineError(message)
+    ? "retryable"
+    : classifyRelayClosed(message);
 
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it

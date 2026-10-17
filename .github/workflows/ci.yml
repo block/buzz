@@ -17,7 +17,9 @@ jobs:
   changes:
     name: Detect Changed Paths
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # The steps take about 75 seconds, but GitHub can finish the job minutes
+    # after the last step. A 2-minute limit cancelled finished runs.
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
@@ -64,8 +66,17 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
-              - 'justfile'
+              - 'scripts/ci-apt-retry.sh'
+              - 'Justfile'
             desktop:
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/_ci-desktop.yml'
+              - 'scripts/ci-apt-retry.sh'
+              - 'Justfile'
+              - 'scripts/generate-macos-icon.py'
+              - 'scripts/macos-icon.sh'
+              - 'bin/uv'
+              - 'bin/.uv-*.pkg'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'desktop/**'
@@ -77,6 +88,8 @@ jobs:
               - 'pnpm-lock.yaml'
             mobile:
               - 'mobile/**'
+              - 'Justfile'
+              - 'scripts/test-mobile-gateway-recipes.sh'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
@@ -125,7 +138,7 @@ jobs:
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs
       - name: File size policy
         run: just file-size-check
 

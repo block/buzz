@@ -76,7 +76,18 @@ Future<T?> showBuzzModalBottomSheet<T>({
             showCloseButton: showCloseButton,
             showDragHandle: showDragHandle == true,
             surfaceColor: surfaceColor,
-            child: builder(themedContext),
+            // Keep the entire scroll viewport above gesture navigation. The
+            // inner builder sees a consumed bottom inset, so sheet-local safe
+            // areas and scroll padding do not reserve that system inset twice.
+            child: SafeArea(
+              top: false,
+              left: false,
+              right: false,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: Grid.half),
+                child: Builder(builder: builder),
+              ),
+            ),
           ),
         ),
       ),

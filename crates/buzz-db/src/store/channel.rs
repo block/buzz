@@ -26,29 +26,8 @@ pub use crate::channel_members::{
     get_users_bulk, is_member, list_large_channel_rosters_needing_reconciliation,
     lock_member_snapshot, membership_pairs, remove_member, verify_channel_roster_fence_behavior,
     verify_channel_roster_fence_catalog, AccessibleChannel, BotChannelEntry, BotMemberRecord,
-    LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
+    ChannelIdentity, LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
 };
-
-async fn begin_event_write_transaction(
-    pool: &PgPool,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-    let connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    Ok(sqlx::Transaction::begin(connection, None).await?)
-}
-
-async fn acquire_event_write_connection(
-    pool: &PgPool,
-) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-    Ok(crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?)
-}
 
 /// A channel row as returned from the database.
 #[derive(Debug, Clone)]
@@ -97,6 +76,19 @@ pub struct ChannelRecord {
     pub ttl_seconds: Option<i32>,
     /// Deadline by which a new message must arrive or the channel is auto-archived.
     pub ttl_deadline: Option<DateTime<Utc>>,
+    /// Labels published as `["t", <label>]` after the channel type tag.
+    pub labels: Vec<String>,
+}
+
+impl ChannelRecord {
+    /// The facts every group-state event publishes about this channel.
+    pub fn identity(&self) -> ChannelIdentity {
+        ChannelIdentity {
+            channel_type: self.channel_type.clone(),
+            labels: self.labels.clone(),
+            created_by: self.created_by.clone(),
+        }
+    }
 }
 
 /// Creates a new channel, bootstraps the creator as owner, and returns the record.
@@ -110,6 +102,7 @@ pub async fn create_channel(
     description: Option<&str>,
     created_by: &[u8],
     ttl_seconds: Option<i32>,
+    labels: &[String],
 ) -> Result<ChannelRecord> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -125,13 +118,18 @@ pub async fn create_channel(
 
     let id = Uuid::new_v4();
 
-    let mut tx = begin_event_write_transaction(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
         "#,
     )
     .bind(id)
@@ -142,7 +140,8 @@ pub async fn create_channel(
     .bind(description)
     .bind(created_by)
     .bind(ttl_seconds)
-    .execute(&mut *tx)
+    .bind(labels)
+    .execute(tx.conn())
     .await?;
 
     sqlx::query(
@@ -159,7 +158,7 @@ pub async fn create_channel(
     .bind(id)
     .bind(created_by)
     .bind(created_by)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     let row = sqlx::query(
@@ -170,13 +169,13 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, labels
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     let record = row_to_channel_record(row)?;
@@ -199,6 +198,7 @@ pub async fn create_channel_with_id(
     description: Option<&str>,
     created_by: &[u8],
     ttl_seconds: Option<i32>,
+    labels: &[String],
 ) -> Result<(ChannelRecord, bool)> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -218,13 +218,18 @@ pub async fn create_channel_with_id(
         return Err(DbError::InvalidData("channel name is required".into()));
     }
 
-    let mut tx = begin_event_write_transaction(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -236,7 +241,8 @@ pub async fn create_channel_with_id(
     .bind(description)
     .bind(created_by)
     .bind(ttl_seconds)
-    .execute(&mut *tx)
+    .bind(labels)
+    .execute(tx.conn())
     .await?
     .rows_affected();
 
@@ -258,7 +264,7 @@ pub async fn create_channel_with_id(
         .bind(channel_id)
         .bind(created_by)
         .bind(created_by)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
     }
 
@@ -270,13 +276,13 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, labels
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
 
     let record = row_to_channel_record(row)?;
@@ -314,7 +320,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, labels
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -351,17 +357,24 @@ pub async fn set_canvas(
     channel_id: Uuid,
     canvas: Option<&str>,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let rows = sqlx::query(
         "UPDATE channels SET canvas = $1 WHERE community_id = $2 AND id = $3 AND deleted_at IS NULL",
     )
         .bind(canvas)
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .execute(pool)
+        .execute(tx.conn())
         .await?;
     if rows.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -396,7 +409,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, labels
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -416,7 +429,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, labels
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -480,6 +493,7 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         purpose_set_at,
         ttl_seconds,
         ttl_deadline,
+        labels: row.try_get("labels")?,
     })
 }
 
@@ -497,6 +511,9 @@ pub struct ChannelUpdate {
     /// ephemeral TTL (channel becomes permanent), `Some(Some(secs))` sets it.
     /// On any change the `ttl_deadline` is reset to `NOW() + ttl_seconds`.
     pub ttl_seconds: Option<Option<i32>>,
+    /// Replacement label set (empty clears it), or `None` to leave unchanged.
+    /// Callers validate with `buzz_core::channel::parse_channel_labels`.
+    pub labels: Option<Vec<String>>,
 }
 
 /// Updates channel metadata dynamically.
@@ -513,6 +530,7 @@ pub async fn update_channel(
         && updates.description.is_none()
         && updates.visibility.is_none()
         && updates.ttl_seconds.is_none()
+        && updates.labels.is_none()
     {
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
@@ -554,6 +572,10 @@ pub async fn update_channel(
             None => set_parts.push("ttl_deadline = NULL".to_string()),
         }
     }
+    if updates.labels.is_some() {
+        set_parts.push(format!("labels = ${param_idx}"));
+        param_idx += 1;
+    }
     let channel_param_idx = param_idx + 1;
     let sql = format!(
         "UPDATE channels SET {}, updated_at = NOW() WHERE community_id = ${param_idx} AND id = ${channel_param_idx} AND deleted_at IS NULL",
@@ -573,36 +595,47 @@ pub async fn update_channel(
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
     }
+    if let Some(ref labels) = updates.labels {
+        q = q.bind(labels);
+    }
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
-    // T1a repair: a TTL change can flip this channel's event-trigger fast
-    // path (migration 0024 reads ttl_seconds under a SHARED per-channel
-    // advisory lock). Take the same key EXCLUSIVE before the UPDATE so a
-    // concurrent event either sees the committed TTL or strictly precedes
-    // this transition — whose own deadline reset is then the latest word.
-    // Non-TTL updates don't touch the fast path and skip the lock.
+    // T1a repair: a TTL change can flip this channel's event-commit fast
+    // path (`event_follow_up::refresh_channel_ttls` reads ttl_seconds under
+    // a SHARED per-channel advisory lock). Take the same key EXCLUSIVE
+    // before the UPDATE so a concurrent event either sees the committed TTL
+    // or strictly precedes this transition — whose own deadline reset is
+    // then the latest word. Non-TTL updates don't touch the fast path and
+    // skip the lock.
     if updates.ttl_seconds.is_some() {
-        let mut tx = begin_event_write_transaction(pool).await?;
+        let mut tx = crate::begin_community_write_transaction(
+            pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "buzz_channel_ttl:{}:{}",
-                community_id.as_uuid(),
-                channel_id
-            ))
-            .execute(&mut *tx)
+            .bind(channel_ttl_lock_key(community_id, channel_id))
+            .execute(tx.conn())
             .await?;
-        let result = q.execute(&mut *tx).await?;
+        let result = q.execute(tx.conn()).await?;
         if result.rows_affected() == 0 {
             return Err(DbError::ChannelNotFound(channel_id));
         }
         tx.commit().await?;
     } else {
-        let mut connection = acquire_event_write_connection(pool).await?;
-        let result = q.execute(&mut *connection).await?;
+        let mut tx = crate::begin_community_write_transaction(
+            pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let result = q.execute(tx.conn()).await?;
         if result.rows_affected() == 0 {
             return Err(DbError::ChannelNotFound(channel_id));
         }
+        tx.commit().await?;
     }
 
     get_channel_with_operation(
@@ -622,7 +655,12 @@ pub async fn set_topic(
     topic: &str,
     set_by: &[u8],
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE channels SET topic = $1, topic_set_by = $2, topic_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
@@ -631,11 +669,12 @@ pub async fn set_topic(
     .bind(set_by)
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -647,7 +686,12 @@ pub async fn set_purpose(
     purpose: &str,
     set_by: &[u8],
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE channels SET purpose = $1, purpose_set_by = $2, purpose_set_at = NOW() \
          WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
@@ -656,11 +700,12 @@ pub async fn set_purpose(
     .bind(set_by)
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -673,14 +718,19 @@ pub async fn archive_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     // First check: does the channel exist and what is its state?
     let row = sqlx::query(
         "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
     match row {
@@ -701,9 +751,10 @@ pub async fn archive_channel(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
 
+    tx.commit().await?;
     Ok(())
 }
 
@@ -716,14 +767,19 @@ pub async fn unarchive_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     // First check: does the channel exist and what is its state?
     let row = sqlx::query(
         "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .fetch_optional(&mut *connection)
+        .fetch_optional(tx.conn())
         .await?;
 
     match row {
@@ -746,9 +802,10 @@ pub async fn unarchive_channel(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
 
+    tx.commit().await?;
     Ok(())
 }
 
@@ -761,15 +818,21 @@ pub async fn soft_delete_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<bool> {
-    let mut connection = acquire_event_write_connection(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
             .bind(community_id.as_uuid())
             .bind(channel_id)
-            .execute(&mut *connection)
+            .execute(tx.conn())
             .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -784,33 +847,53 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
         crate::observability::WriterOperation::Maintenance,
     )
     .await?;
-    let rows = sqlx::query(
-        "UPDATE channels AS ch SET archived_at = NOW() \
-         FROM communities AS c \
-         WHERE ch.community_id = c.id \
-           AND ch.ttl_seconds IS NOT NULL \
+    let communities: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT ch.community_id FROM channels AS ch \
+         JOIN communities AS c ON ch.community_id = c.id \
+         WHERE ch.ttl_seconds IS NOT NULL \
            AND ch.ttl_deadline < NOW() \
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
            AND c.archived_at IS NULL \
-           AND community_write_allowed(ch.community_id) \
-         RETURNING ch.community_id, c.host, ch.id",
+         ORDER BY ch.community_id",
     )
     .fetch_all(&mut *connection)
     .await?;
-
-    rows.into_iter()
-        .map(|row| {
-            let community_id: Uuid = row.try_get("community_id")?;
-            let host: String = row.try_get("host")?;
-            let channel_id: Uuid = row.try_get("id")?;
-            Ok(ReapedEphemeralChannel {
-                community_id: CommunityId::from_uuid(community_id),
-                host,
-                channel_id,
-            })
-        })
-        .collect()
+    drop(connection);
+    let reaped = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "ephemeral_channel_reap",
+        |id, mut tx| async move {
+            let rows = sqlx::query(
+                "UPDATE channels AS ch SET archived_at = NOW() \
+                 FROM communities AS c \
+                 WHERE ch.community_id = $1 AND ch.community_id = c.id \
+                   AND ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < NOW() \
+                   AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
+                   AND c.archived_at IS NULL \
+                 RETURNING ch.community_id, c.host, ch.id",
+            )
+            .bind(id)
+            .fetch_all(tx.conn())
+            .await?;
+            let parsed = rows
+                .into_iter()
+                .map(|row| {
+                    Ok(ReapedEphemeralChannel {
+                        community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                        host: row.try_get("host")?,
+                        channel_id: row.try_get("id")?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            tx.commit().await?;
+            Ok(parsed)
+        },
+    )
+    .await;
+    Ok(reaped.into_iter().flatten().collect())
 }
 
 impl Db {
@@ -836,6 +919,7 @@ impl Db {
             description,
             created_by,
             ttl_seconds,
+            &[],
         )
         .await
     }
@@ -866,6 +950,68 @@ impl Db {
             description,
             created_by,
             ttl_seconds,
+            &[],
+        )
+        .await
+    }
+
+    /// Creates a channel with a client-supplied UUID and an initial label set.
+    ///
+    /// The same as [`Db::create_channel_with_id`], plus `labels`, which the
+    /// caller has validated with `buzz_core::channel::parse_channel_labels`.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_labeled_channel_with_id", system = "postgresql")]
+    pub async fn create_labeled_channel_with_id(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        description: Option<&str>,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+        labels: &[String],
+    ) -> Result<(ChannelRecord, bool)> {
+        create_channel_with_id(
+            &self.pool,
+            community_id,
+            channel_id,
+            name,
+            channel_type,
+            visibility,
+            description,
+            created_by,
+            ttl_seconds,
+            labels,
+        )
+        .await
+    }
+
+    /// Creates a channel with a relay-chosen UUID and an initial label set.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_labeled_channel", system = "postgresql")]
+    pub async fn create_labeled_channel(
+        &self,
+        community_id: CommunityId,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        description: Option<&str>,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+        labels: &[String],
+    ) -> Result<ChannelRecord> {
+        create_channel(
+            &self.pool,
+            community_id,
+            name,
+            channel_type,
+            visibility,
+            description,
+            created_by,
+            ttl_seconds,
+            labels,
         )
         .await
     }
@@ -1010,6 +1156,14 @@ impl Db {
     pub async fn reap_expired_ephemeral_channels(&self) -> Result<Vec<ReapedEphemeralChannel>> {
         reap_expired_ephemeral_channels(&self.pool).await
     }
+}
+
+/// The per-channel TTL advisory lock key. Event commits take it SHARED
+/// (`event_follow_up::refresh_channel_ttls`); TTL transitions in
+/// [`update_channel`] take it EXCLUSIVE. Both sides build it here, so the keys
+/// cannot drift.
+pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> String {
+    format!("buzz_channel_ttl:{}:{channel}", community.as_uuid())
 }
 
 #[cfg(test)]

@@ -117,10 +117,12 @@ export async function submitMessageEdit({
   };
   // Current picker bindings must not reinterpret the original body: selecting a
   // different Scout would otherwise make that new key look already notified.
-  // With unresolved history, conservatively revalidate all current recipients.
-  const originalMentionPubkeys = editTarget.unresolvedMentionPubkeys?.length
-    ? []
-    : (editTarget.mentionRefs ?? []).map((ref) => ref.pubkey);
+  // Resolved historical keys are already recipients, so an unresolved neighbor
+  // must not make them notify again. Unresolved keys have no trusted binding to
+  // the edited text; they stay out of this set and are revalidated if present.
+  const originalMentionPubkeys = (editTarget.mentionRefs ?? []).map(
+    (ref) => ref.pubkey,
+  );
   let addedMentionPubkeys: string[];
   try {
     addedMentionPubkeys = diffAddedMentionPubkeys(

@@ -1,0 +1,313 @@
+suite: chart-owned Datadog version label on every workload
+# Regression: wrappers pinned tags.datadoghq.com/version beside image.tag on
+# each workload, so every image promotion had to edit several copies of one
+# identity and a missed copy reported the wrong version to Datadog. The chart
+# now owns the label everywhere it renders a Pod (storage accounting is covered
+# in storage_accounting_test.yaml).
+templates:
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+  - templates/pairing-relay.yaml
+  - templates/deletion-drain-cronjob.yaml
+tests:
+  - it: derives the relay version label from image.tag over a stale pin
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: sha-abcdef1
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      relay.podLabels:
+        tags.datadoghq.com/env: staging
+        tags.datadoghq.com/service: buzz-example
+        tags.datadoghq.com/version: sha-stale00
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deployment.yaml
+      # Deployment-describing labels still pass through.
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: staging
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-example
+        template: templates/deployment.yaml
+  - it: stamps the relay version label with no podLabels configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: sha-abcdef1
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deployment.yaml
+  - it: renders a label-safe relay version from a digest-only image
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "222222222222222222222222222222222222222222222222222222222222222"
+        template: templates/deployment.yaml
+  - it: derives the pairing relay version label from image.tag over a stale pin
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+      image.tag: sha-abcdef1
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      pairingRelay.podLabels:
+        tags.datadoghq.com/env: staging
+        tags.datadoghq.com/service: buzz-example
+        tags.datadoghq.com/version: sha-stale00
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+      # Deployment-describing labels still pass through.
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: staging
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-example
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+  - it: stamps the pairing relay version label with no podLabels configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+      image.tag: sha-abcdef1
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+  - it: renders a label-safe pairing relay version from a digest-only image
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      pairingRelay.enabled: true
+      pairingRelay.url: wss://pairing.buzz.xyz
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "222222222222222222222222222222222222222222222222222222222222222"
+        template: templates/pairing-relay.yaml
+        documentIndex: 0
+  - it: derives the deletion drain version label from image.tag over a stale pin
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain.enabled: true
+      image.tag: sha-abcdef1
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      operatorJobs.deletionDrain.podLabels:
+        tags.datadoghq.com/env: staging
+        tags.datadoghq.com/service: buzz-example
+        tags.datadoghq.com/version: sha-stale00
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deletion-drain-cronjob.yaml
+      # Deployment-describing labels still pass through.
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/env"]
+          value: staging
+        template: templates/deletion-drain-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/service"]
+          value: buzz-example
+        template: templates/deletion-drain-cronjob.yaml
+  - it: stamps the deletion drain version label with no podLabels configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain.enabled: true
+      image.tag: sha-abcdef1
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: sha-abcdef1
+        template: templates/deletion-drain-cronjob.yaml
+  - it: renders a label-safe deletion drain version from a digest-only image
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      operatorJobs.deletionDrain.enabled: true
+      image.digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "222222222222222222222222222222222222222222222222222222222222222"
+        template: templates/deletion-drain-cronjob.yaml
+  # ── Datadog normalization (PR #7876 review, P0) ───────────────────────────
+  # Datadog lowercases tag values and collapses "__", so a passthrough of a
+  # non-normal value would merge two revisions into one reported version. Each
+  # pair below must render two labels that stay distinct after normalization.
+  - it: hashes a tag with uppercase so it cannot merge with its lowercase twin
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "ReleaseA"
+    asserts:
+      # Passed through, Datadog would read this as "releasea".
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "4592ae6466f715bbba35c9e1931fe5cdd548a4355947759b1fcf7f2b6f0e727"
+        template: templates/deployment.yaml
+      - notEqual:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "releasea"
+        template: templates/deployment.yaml
+  - it: passes through the lowercase twin of a hashed uppercase tag
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "releasea"
+    asserts:
+      # Already in Datadog normal form, so preserved byte for byte.
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "releasea"
+        template: templates/deployment.yaml
+  - it: hashes a tag containing a double underscore
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "release__a"
+    asserts:
+      # Passed through, Datadog would collapse this to "release_a".
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "ab213bb0d3409388c915a5d3ef384cd6d812237d4aa712081edfc1c1473daa1"
+        template: templates/deployment.yaml
+      - notEqual:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "release_a"
+        template: templates/deployment.yaml
+  - it: passes through the single-underscore twin of a hashed double-underscore tag
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "release_a"
+    asserts:
+      # Already in Datadog normal form, so preserved byte for byte.
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "release_a"
+        template: templates/deployment.yaml
+  - it: hashes an uppercased 63-hex tag instead of letting it alias the reserved shape
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media-example
+      s3.accessKey: test
+      s3.secretKey: test
+      image.tag: "ABCDEF000000000000000000000000000000000000000000000000000000000"
+    asserts:
+      # Passed through, Datadog would lowercase this onto the reserved 63-hex shape that digest-derived labels use.
+      - equal:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "2435b36c0cdc7f75334db8b9151d18738e4358cd0fac9b260e98a84f0207b41"
+        template: templates/deployment.yaml
+      - notEqual:
+          path: spec.template.metadata.labels["tags.datadoghq.com/version"]
+          value: "abcdef000000000000000000000000000000000000000000000000000000000"
+        template: templates/deployment.yaml

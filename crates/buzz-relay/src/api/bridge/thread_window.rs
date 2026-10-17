@@ -84,6 +84,40 @@ fn append(events: &mut Vec<Value>, budget: &mut Budget, event: &nostr::Event) ->
     Ok(())
 }
 
+/// The reader's implicit channel set and, when a request names a channel
+/// outside it, the system channels it can read. A thread window names its
+/// channel, so a readable system channel joins that request's scope only.
+async fn access_sets(
+    state: &AppState,
+    tenant: &TenantContext,
+    reader: &nostr::PublicKey,
+    requests: &[&Request],
+    context: &str,
+) -> Result<(Vec<uuid::Uuid>, Vec<uuid::Uuid>), Error> {
+    let implicit = state
+        .db
+        .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
+        .await
+        .map_err(|e| database_error(context, e))?;
+    let system = if requests
+        .iter()
+        .any(|request| !implicit.contains(&request.channel))
+    {
+        state
+            .db
+            .get_readable_system_channel_ids(tenant.community(), &reader.to_bytes())
+            .await
+            .map_err(|e| database_error(context, e))?
+    } else {
+        Vec::new()
+    };
+    Ok((implicit, system))
+}
+
+fn same_set(a: &[uuid::Uuid], b: &[uuid::Uuid]) -> bool {
+    a.iter().collect::<HashSet<_>>() == b.iter().collect::<HashSet<_>>()
+}
+
 /// Authorize the entire batch against one writer access set, then refresh it
 /// once before releasing any output. A later window must never suppress only
 /// its own rows while releasing an earlier window built before revocation.
@@ -93,26 +127,28 @@ pub(super) async fn query_batch<'a>(
     reader: &nostr::PublicKey,
     requests: impl IntoIterator<Item = &'a Request>,
 ) -> Result<Vec<Value>, Error> {
-    let accessible = state
-        .db
-        .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
-        .await
-        .map_err(|e| database_error("access", e))?;
+    let requests: Vec<&Request> = requests.into_iter().collect();
+    let (implicit, system) = access_sets(state, tenant, reader, &requests, "access").await?;
     let mut budget = Budget::default();
     let mut events = Vec::new();
-    for request in requests {
-        if accessible.contains(&request.channel) {
-            events.extend(query(state, tenant, reader, request, &accessible, &mut budget).await?);
-        }
+    for request in &requests {
+        let accessible: std::borrow::Cow<'_, [uuid::Uuid]> = if implicit.contains(&request.channel)
+        {
+            std::borrow::Cow::Borrowed(&implicit)
+        } else if system.contains(&request.channel) {
+            let mut scope = implicit.clone();
+            scope.push(request.channel);
+            std::borrow::Cow::Owned(scope)
+        } else {
+            continue;
+        };
+        events.extend(query(state, tenant, reader, request, &accessible, &mut budget).await?);
     }
-    let current = state
-        .db
-        .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
-        .await
-        .map_err(|e| database_error("final access", e))?;
+    let (current_implicit, current_system) =
+        access_sets(state, tenant, reader, &requests, "final access").await?;
     // Grants can expose auxiliary events omitted from the original closure;
     // revocations can invalidate earlier windows or their cross-channel aux.
-    if accessible.iter().collect::<HashSet<_>>() != current.iter().collect::<HashSet<_>>() {
+    if !same_set(&implicit, &current_implicit) || !same_set(&system, &current_system) {
         return Err(unavailable("thread authorization changed; retry query"));
     }
     Ok(events)

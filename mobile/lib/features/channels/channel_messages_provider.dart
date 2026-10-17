@@ -11,6 +11,7 @@ import 'thread_reply_ownership.dart';
 import 'timeline_message.dart';
 
 part 'channel_messages_provider/thread_summaries.dart';
+part 'channel_messages_provider/pagination.dart';
 
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
@@ -27,10 +28,12 @@ const _channelLiveEventKinds = [
 /// relay does not return a valid NIP-CW bounds overlay.
 class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final String channelId;
+  final bool flatTimeline;
   void Function()? _unsubscribe;
   bool _reachedOldest = false;
   bool _initInFlight = false;
   bool _usingChannelWindow = false;
+  NostrEvent? _legacyHistoryCursor;
   bool _initialWindowQueryInFlight = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
@@ -68,7 +71,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     },
   );
 
-  ChannelMessagesNotifier(this.channelId);
+  ChannelMessagesNotifier(this.channelId, {this.flatTimeline = false});
 
   bool get _summaryMounted => ref.mounted;
   RelaySessionNotifier get _summarySession =>
@@ -193,6 +196,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final historyVersion = ++_threadQuerySerial;
       final history = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
+      if (!_usingChannelWindow) _legacyHistoryCursor = history.firstOrNull;
       _confirmLocalMessages(history.map((event) => event.id));
 
       final existing = state.value ?? const <NostrEvent>[];
@@ -228,6 +232,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Future<List<NostrEvent>> _fetchNewestHistory(
     RelaySessionNotifier session,
   ) async {
+    if (flatTimeline) {
+      _usingChannelWindow = false;
+      final history = await session.fetchHistory(
+        NostrFilters.messages(channelId),
+      );
+      history.sort(compareChannelTimelineEventsChronologically);
+      return history;
+    }
     try {
       _initialWindowQueryInFlight = true;
       final pageVersion = ++_threadQuerySerial;
@@ -247,6 +259,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     } catch (error) {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
+      // Legacy history would re-run the timed-out work another way.
+      if (isRelayDeadlineError(error)) rethrow;
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );
@@ -458,6 +472,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   List<NostrEvent> _boundEventReplies(List<NostrEvent> events) {
+    if (flatTimeline) return events;
     final replies = events.where(
       (event) =>
           EventKind.channelTimelineContentKinds.contains(event.kind) &&
@@ -917,61 +932,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ]..sort(compareChannelTimelineEventsChronologically);
   }
 
-  Future<bool> fetchOlder() async {
-    if (_reachedOldest || _initInFlight) return false;
+  AsyncValue<List<NostrEvent>> get _historyState => state;
+  set _historyState(AsyncValue<List<NostrEvent>> value) => state = value;
 
-    final session = ref.read(relaySessionProvider.notifier);
-    if (_usingChannelWindow) {
-      final cursor = channelWindowNextCursor(_windowStore);
-      if (cursor == null) {
-        _reachedOldest = true;
-        return false;
-      }
-      try {
-        final pageVersion = ++_threadQuerySerial;
-        final page = await _fetchWindowPage(session, cursor);
-        _windowStore = appendOlderChannelWindow(_windowStore, page);
-        _reconcilePageSummaries(page, pageVersion);
-        _reachedOldest = !channelWindowHasMore(_windowStore);
-        final flattened = _withDeepLinkEvents(
-          flattenChannelWindowEvents(_windowStore),
-        );
-        _lastKnownMessages = flattened;
-        _reconcileRetainedSummaryPayloads(page.rows.map((row) => row.event));
-        state = AsyncData(flattened);
-        return page.rows.isNotEmpty || page.aux.isNotEmpty;
-      } catch (error) {
-        debugPrint(
-          '[ChannelMessagesNotifier] failed to fetch older channel window page for $channelId: $error',
-        );
-        return false;
-      }
-    }
-
-    final currentEvents = state.value;
-    if (currentEvents == null || currentEvents.isEmpty) return false;
-    final oldest = currentEvents.first.createdAt;
-    final older = await session.fetchHistory(
-      NostrFilters.messages(channelId, limit: 100, until: oldest),
-    );
-    if (older.isEmpty) {
-      _reachedOldest = true;
-      return false;
-    }
-    final currentIds = state.value?.map((e) => e.id).toSet() ?? {};
-    final deduped = older.where((e) => !currentIds.contains(e.id)).toList();
-    if (deduped.isEmpty) {
-      _reachedOldest = true;
-      return false;
-    }
-    state = state.whenData((events) {
-      final merged = [...deduped, ...events];
-      merged.sort(compareChannelTimelineEventsChronologically);
-      _lastKnownMessages = merged;
-      return merged;
-    });
-    return true;
-  }
+  Future<bool> fetchOlder() => _fetchOlder();
 }
 
 int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;

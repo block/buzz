@@ -1,12 +1,91 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scroll_under_scope.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets('iOS conversations request a backdrop before scrolling', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const Stack(
+            children: [
+              FrostedAppBar(
+                title: Text('Alice'),
+                nativeSubtitle: 'Online',
+                alwaysFrosted: true,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    final view = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(view.creationParams, containsPair('alwaysFrosted', true));
+    expect(view.creationParams, containsPair('subtitle', 'Online'));
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+    'conversation backdrop stays mounted across scroll and keyboard changes',
+    (tester) async {
+      final scrolled = ValueNotifier(false);
+      addTearDown(scrolled.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: ValueListenableBuilder<bool>(
+            valueListenable: scrolled,
+            builder: (_, value, _) => FrostedScrollUnderScope(
+              isScrolledUnder: value,
+              child: const Stack(
+                children: [
+                  FrostedAppBar(
+                    title: Text('Conversation'),
+                    alwaysFrosted: true,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      final backdrop = tester.element(find.byType(BackdropFilter));
+      final initial = tester
+          .widget<Container>(
+            find.byKey(const ValueKey('frosted-app-bar-background')),
+          )
+          .decoration;
+      addTearDown(tester.view.reset);
+      for (final under in [true, false, true, false]) {
+        scrolled.value = under;
+        tester.view.viewInsets = FakeViewPadding(bottom: under ? 300 : 0);
+        await tester.pump();
+        expect(tester.element(find.byType(BackdropFilter)), same(backdrop));
+        expect(
+          tester
+              .widget<Container>(
+                find.byKey(const ValueKey('frosted-app-bar-background')),
+              )
+              .decoration,
+          initial,
+        );
+      }
+    },
+  );
+
   testWidgets('title row and reported height grow with accessible text', (
     tester,
   ) async {
@@ -118,30 +197,34 @@ void main() {
     );
   });
 
-  testWidgets('uses the native glass back control on iOS', (tester) async {
+  testWidgets('uses the UIKit navigation bar back action on iOS', (
+    tester,
+  ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
     await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.light(),
-        home: Builder(
-          builder: (context) => TextButton(
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => const Stack(
-                  children: [
-                    FrostedAppBar(
-                      title: Text(
-                        'Destination',
-                        key: ValueKey('destination-title'),
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const Stack(
+                    children: [
+                      FrostedAppBar(
+                        title: Text(
+                          'Destination',
+                          key: ValueKey('destination-title'),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
+              child: const Text('Open'),
             ),
-            child: const Text('Open'),
           ),
         ),
       ),
@@ -150,32 +233,18 @@ void main() {
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
 
-    final nativeBack = tester.widget<UiKitView>(find.byType(UiKitView));
-    expect(nativeBack.viewType, 'buzz/navigation_glass');
-    expect(nativeBack.creationParams, containsPair('icon', 'back'));
-    expect(
-      nativeBack.creationParams,
-      containsPair('accessibilityLabel', 'Back'),
+    final nativeView = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(nativeView.viewType, IosNavigationBar.viewType);
+    final navigation = tester.widget<IosNavigationBar>(
+      find.byType(IosNavigationBar),
     );
-    expect(
-      nativeBack.creationParams,
-      containsPair('buttonCenterX', iosGlassChannelHeaderButtonCenterX),
-    );
-    expect(
-      nativeBack.creationParams,
-      containsPair('hitTargetWidth', iosGlassChannelHeaderLeadingWidth),
-    );
-    expect(nativeBack.creationParams, containsPair('hitTargetHeight', 48.0));
-    final backRect = tester.getRect(find.byType(IosGlassNavigationButton));
-    final titleRect = tester.getRect(
-      find.byKey(const ValueKey('destination-title')),
-    );
-    expect(titleRect.left - backRect.right, iosGlassChannelHeaderTitleSpacing);
-    expect(find.byTooltip('Back'), findsOneWidget);
-    expect(
-      tester.widget<Tooltip>(find.byTooltip('Back')).excludeFromSemantics,
-      isTrue,
-    );
+    expect(navigation.title, 'Destination');
+    expect(navigation.onBack, isNotNull);
+    navigation.onBack!();
+    await tester.pumpAndSettle();
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.byType(IosNavigationBar), findsNothing);
+    expect(tester.takeException(), isNull);
     debugDefaultTargetPlatformOverride = null;
   });
 

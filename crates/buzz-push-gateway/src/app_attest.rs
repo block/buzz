@@ -2,9 +2,17 @@
 //! Apple production AAGUID material by default; personal development requires
 //! an explicit build feature and environment. No cryptographic checks are skipped.
 use crate::config::AppAttestEnvironment;
-use appattest::{assertion::Assertion, attestation::Attestation};
+mod authenticator;
+mod cbor;
+mod certificate;
+#[cfg(test)]
+mod compatibility_tests;
+mod error;
+mod proof;
+mod properties;
+#[cfg(test)]
+mod testing;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use byteorder::{BigEndian, ByteOrder};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -76,32 +84,28 @@ impl AppAttestVerifier {
         key_id_b64: &str,
         client_data: &[u8],
     ) -> Result<VerifiedAttestation, AppAttestError> {
+        if attestation_b64.len() > crate::model::MAX_APP_ATTESTATION_BYTES.div_ceil(3) * 4 {
+            return Err(AppAttestError::Invalid);
+        }
         let cbor = STANDARD
             .decode(attestation_b64)
             .map_err(|_| AppAttestError::Invalid)?;
         if cbor.is_empty() || cbor.len() > crate::model::MAX_APP_ATTESTATION_BYTES {
             return Err(AppAttestError::Invalid);
         }
-        verify_attestation_environment(&cbor, self.environment)?;
-        let challenge = std::str::from_utf8(client_data).map_err(|_| AppAttestError::Invalid)?;
-        let att = Attestation::from_cbor_bytes(&cbor).map_err(|_| AppAttestError::Invalid)?;
-        let (public_key, _) = att
-            .verify(
-                challenge,
-                &self.app_id,
-                key_id_b64,
-                &self.apple_root_cert_pem,
-            )
-            .map_err(|_| AppAttestError::Invalid)?;
-        let key_id = STANDARD
-            .decode(key_id_b64)
-            .map_err(|_| AppAttestError::Invalid)?;
-        if key_id.len() != 32 {
-            return Err(AppAttestError::Invalid);
-        }
+        let verified = proof::enroll(
+            &cbor,
+            client_data,
+            &self.app_id,
+            key_id_b64,
+            &self.apple_root_cert_pem,
+            matches_development(self.environment),
+        )
+        .map_err(verification_error)?;
+        observe_properties("attestation", verified.flags, &verified.properties);
         Ok(VerifiedAttestation {
-            key_id,
-            public_key: public_key.to_vec(),
+            key_id: verified.key_id,
+            public_key: verified.public_key.to_vec(),
         })
     }
     pub fn verify_assertion(
@@ -113,136 +117,71 @@ impl AppAttestVerifier {
         challenge: &str,
         stored_challenge: &str,
     ) -> Result<VerifiedAssertion, AppAttestError> {
+        if assertion_b64.len() > MAX_ASSERTION_BYTES.div_ceil(3) * 4 {
+            return Err(AppAttestError::Invalid);
+        }
         let cbor = STANDARD
             .decode(assertion_b64)
             .map_err(|_| AppAttestError::Invalid)?;
         if cbor.is_empty() || cbor.len() > MAX_ASSERTION_BYTES {
             return Err(AppAttestError::Invalid);
         }
-        let counter = assertion_counter(&cbor)?;
-        let client_data_hash = Sha256::digest(client_data);
-        Assertion::from_assertion(&cbor)
-            .map_err(|_| AppAttestError::Invalid)?
-            .verify(
-                client_data_hash,
-                challenge,
-                &self.app_id,
-                public_key,
-                previous_counter,
-                stored_challenge,
-            )
-            .map_err(|_| AppAttestError::Invalid)?;
-        Ok(VerifiedAssertion { counter })
+        if challenge != stored_challenge {
+            return Err(AppAttestError::Invalid);
+        }
+        let verified = proof::assert(
+            &cbor,
+            client_data,
+            &self.app_id,
+            public_key,
+            previous_counter,
+        )
+        .map_err(verification_error)?;
+        observe_properties("assertion", verified.flags, &verified.properties);
+        Ok(VerifiedAssertion {
+            counter: verified.counter,
+        })
     }
 }
 
-// The dependency's development feature accepts both Apple environments. Fence
-// the exact signed authData here, then let its full verifier validate those same
-// bytes (chain, nonce, app ID, counter, public key and credential ID).
-fn verify_attestation_environment(
-    cbor: &[u8],
-    environment: AppAttestEnvironment,
-) -> Result<(), AppAttestError> {
-    let mut decoder = minicbor::Decoder::new(cbor);
-    let count = decoder
-        .map()
-        .map_err(|_| AppAttestError::Invalid)?
-        .ok_or(AppAttestError::Invalid)?;
-    if count != 3 {
-        return Err(AppAttestError::Invalid);
-    }
-    let mut auth_data = None;
-    let mut format_seen = false;
-    let mut statement_seen = false;
-    for _ in 0..count {
-        match decoder.str().map_err(|_| AppAttestError::Invalid)? {
-            "authData" if auth_data.is_none() => {
-                auth_data = Some(decoder.bytes().map_err(|_| AppAttestError::Invalid)?);
-            }
-            "fmt" if !format_seen => {
-                if decoder.str().map_err(|_| AppAttestError::Invalid)? != "apple-appattest" {
-                    return Err(AppAttestError::Invalid);
-                }
-                format_seen = true;
-            }
-            "attStmt" if !statement_seen => {
-                // appattest 0.1.1 treats indefinite containers as empty without
-                // consuming their contents. Accept only the definite schema so
-                // its cursor cannot reinterpret nested fields as root fields.
-                if decoder.map().map_err(|_| AppAttestError::Invalid)? != Some(2) {
-                    return Err(AppAttestError::Invalid);
-                }
-                let mut certs_seen = false;
-                let mut receipt_seen = false;
-                for _ in 0..2 {
-                    match decoder.str().map_err(|_| AppAttestError::Invalid)? {
-                        "x5c" if !certs_seen => {
-                            let count = decoder
-                                .array()
-                                .map_err(|_| AppAttestError::Invalid)?
-                                .filter(|count| (1..=3).contains(count))
-                                .ok_or(AppAttestError::Invalid)?;
-                            for _ in 0..count {
-                                decoder.bytes().map_err(|_| AppAttestError::Invalid)?;
-                            }
-                            certs_seen = true;
-                        }
-                        "receipt" if !receipt_seen => {
-                            decoder.bytes().map_err(|_| AppAttestError::Invalid)?;
-                            receipt_seen = true;
-                        }
-                        _ => return Err(AppAttestError::Invalid),
-                    }
-                }
-                statement_seen = true;
-            }
-            _ => return Err(AppAttestError::Invalid),
+fn verification_error(error: error::AppAttestError) -> AppAttestError {
+    use error::AppAttestError as E;
+    let reason = match error {
+        E::ResourceLimit => "capacity",
+        E::InvalidCbor | E::InvalidFormat | E::AuthenticatorDataTooShort => "structure",
+        E::InvalidCertificate => "certificate",
+        E::InvalidNonce | E::InvalidSignature => "signature",
+        E::InvalidCounter => "counter",
+        E::InvalidAppID | E::InvalidAAGUID | E::InvalidCredentialID | E::InvalidPublicKey => {
+            "identity"
         }
-    }
-    if decoder.position() != cbor.len() {
-        return Err(AppAttestError::Invalid);
-    }
-    let expected: &[u8] = match environment {
-        AppAttestEnvironment::Production => b"appattest\0\0\0\0\0\0\0",
-        #[cfg(feature = "personal-dev-app-attest")]
-        AppAttestEnvironment::Development => b"appattestdevelop",
     };
-    if auth_data.and_then(|data| data.get(37..53)) != Some(expected) {
-        return Err(AppAttestError::Invalid);
-    }
-    Ok(())
+    tracing::debug!(reason, "App Attest verification rejected");
+    AppAttestError::Invalid
 }
 
-/// App Attest assertion CBOR is a closed two-field map. Extracting signCount
-/// from authenticatorData is safe only after the library verifies the same
-/// bytes' RP ID, signature, and monotonic relation.
-fn assertion_counter(cbor: &[u8]) -> Result<u32, AppAttestError> {
-    let mut d = minicbor::Decoder::new(cbor);
-    let count = d
-        .map()
-        .map_err(|_| AppAttestError::Invalid)?
-        .ok_or(AppAttestError::Invalid)?;
-    let mut auth = None;
-    for _ in 0..count {
-        let k = d.str().map_err(|_| AppAttestError::Invalid)?;
-        match k {
-            "authenticatorData" => auth = Some(d.bytes().map_err(|_| AppAttestError::Invalid)?),
-            "signature" => {
-                d.bytes().map_err(|_| AppAttestError::Invalid)?;
-            }
-            _ => return Err(AppAttestError::Invalid),
-        }
+fn observe_properties(
+    operation: &'static str,
+    flags: u8,
+    properties: &properties::ClientProperties,
+) {
+    tracing::debug!(operation, flags, bundle_version = ?properties.bundle_version,
+        category_bytes = ?properties.validation_category, opaque_property = properties.opaque_known_property,
+        unknown_extensions = properties.unknown_extensions, "App Attest authenticated properties");
+}
+
+fn matches_development(environment: AppAttestEnvironment) -> bool {
+    match environment {
+        AppAttestEnvironment::Production => false,
+        #[cfg(feature = "personal-dev-app-attest")]
+        AppAttestEnvironment::Development => true,
     }
-    let auth = auth
-        .filter(|a| a.len() == 37)
-        .ok_or(AppAttestError::Invalid)?;
-    Ok(BigEndian::read_u32(&auth[33..37]))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::error::AppAttestError as ProofError;
     use super::*;
-    use appattest::error::AppAttestError as DependencyAppAttestError;
     use serde::Deserialize;
 
     const GOOD_FIXTURE_JSON: &str = include_str!("../tests/fixtures/app-attest-good.json");
@@ -259,14 +198,32 @@ mod tests {
         app_id: String,
         challenge: String,
         aaguid: String,
+        #[serde(skip)]
         attestation_b64: String,
+        #[serde(skip)]
         key_id_b64: String,
         root_cert_pem: String,
     }
 
     fn fixture(json: &str) -> Fixture {
-        let fixture: Fixture = serde_json::from_str(json).expect("valid App Attest fixture JSON");
+        let mut fixture: Fixture =
+            serde_json::from_str(json).expect("valid App Attest fixture JSON");
         assert!(!fixture.description.is_empty());
+        // Sign a fresh leaf at test time instead of checking in a certificate
+        // whose one-year validity will eventually break positive tests.
+        let generated = super::testing::build_test_attestation_with_auth_data(
+            &fixture.challenge,
+            &fixture.app_id,
+            |auth| {
+                if fixture.aaguid == "appattestdevelop" {
+                    auth[37..53].copy_from_slice(b"appattestdevelop");
+                } else {
+                    assert_eq!(fixture.aaguid, "appattest");
+                }
+            },
+        );
+        fixture.attestation_b64 = STANDARD.encode(generated.cbor);
+        fixture.key_id_b64 = generated.key_id;
         fixture
     }
 
@@ -278,28 +235,32 @@ mod tests {
         }
     }
 
-    fn verify_dependency(
+    fn verify_proof(
         fixture: &Fixture,
         app_id: &str,
         challenge: &str,
         key_id_b64: &str,
         root_cert_pem: &[u8],
-    ) -> Result<(), DependencyAppAttestError> {
+    ) -> Result<(), ProofError> {
         let cbor = STANDARD
             .decode(&fixture.attestation_b64)
             .expect("fixture attestation is base64");
-        let attestation = Attestation::from_cbor_bytes(&cbor)?;
-        let result = attestation
-            .verify(challenge, app_id, key_id_b64, root_cert_pem)
-            .map(|_| ());
-        result
+        proof::enroll(
+            &cbor,
+            challenge.as_bytes(),
+            app_id,
+            key_id_b64,
+            root_cert_pem,
+            false,
+        )
+        .map(|_| ())
     }
 
     #[test]
     fn strict_verifier_accepts_good_fixture() {
         let fixture = fixture(GOOD_FIXTURE_JSON);
         assert_eq!(fixture.aaguid, "appattest");
-        verify_dependency(
+        verify_proof(
             &fixture,
             &fixture.app_id,
             &fixture.challenge,
@@ -323,19 +284,19 @@ mod tests {
     fn wrong_root_is_rejected() {
         let good = fixture(GOOD_FIXTURE_JSON);
         let wrong_root = fixture(WRONG_ROOT_FIXTURE_JSON);
-        assert!(verify_dependency(
-            &wrong_root,
-            &wrong_root.app_id,
-            &wrong_root.challenge,
-            &wrong_root.key_id_b64,
-            good.root_cert_pem.as_bytes(),
+        assert!(verify_proof(
+            &good,
+            &good.app_id,
+            &good.challenge,
+            &good.key_id_b64,
+            wrong_root.root_cert_pem.as_bytes(),
         )
         .is_err());
-        assert!(verifier(&wrong_root.app_id, good.root_cert_pem.as_bytes())
+        assert!(verifier(&good.app_id, wrong_root.root_cert_pem.as_bytes())
             .verify_attestation(
-                &wrong_root.attestation_b64,
-                &wrong_root.key_id_b64,
-                wrong_root.challenge.as_bytes(),
+                &good.attestation_b64,
+                &good.key_id_b64,
+                good.challenge.as_bytes()
             )
             .is_err());
     }
@@ -345,14 +306,14 @@ mod tests {
         let fixture = fixture(GOOD_FIXTURE_JSON);
         let wrong_app_id = "TEAMID.xyz.buzz.wrong";
         assert_eq!(
-            verify_dependency(
+            verify_proof(
                 &fixture,
                 wrong_app_id,
                 &fixture.challenge,
                 &fixture.key_id_b64,
                 fixture.root_cert_pem.as_bytes(),
             ),
-            Err(DependencyAppAttestError::InvalidAppID)
+            Err(ProofError::InvalidAppID)
         );
         assert!(verifier(wrong_app_id, fixture.root_cert_pem.as_bytes())
             .verify_attestation(
@@ -368,14 +329,14 @@ mod tests {
         let fixture = fixture(GOOD_FIXTURE_JSON);
         let wrong_challenge = "wrong-challenge";
         assert_eq!(
-            verify_dependency(
+            verify_proof(
                 &fixture,
                 &fixture.app_id,
                 wrong_challenge,
                 &fixture.key_id_b64,
                 fixture.root_cert_pem.as_bytes(),
             ),
-            Err(DependencyAppAttestError::InvalidNonce)
+            Err(ProofError::InvalidNonce)
         );
         assert!(verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes())
             .verify_attestation(
@@ -392,14 +353,14 @@ mod tests {
         assert_eq!(fixture.aaguid, "appattestdevelop");
         #[cfg(not(feature = "personal-dev-app-attest"))]
         assert_eq!(
-            verify_dependency(
+            verify_proof(
                 &fixture,
                 &fixture.app_id,
                 &fixture.challenge,
                 &fixture.key_id_b64,
                 fixture.root_cert_pem.as_bytes(),
             ),
-            Err(DependencyAppAttestError::InvalidAAGUID)
+            Err(ProofError::InvalidAAGUID)
         );
         assert!(verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes())
             .verify_attestation(
@@ -416,19 +377,6 @@ mod tests {
         let dev = fixture(WRONG_AAGUID_FIXTURE_JSON);
         let mut v = verifier(&dev.app_id, dev.root_cert_pem.as_bytes());
         v.environment = AppAttestEnvironment::Development;
-        let cbor = STANDARD.decode(&dev.attestation_b64).unwrap();
-        assert!(
-            verify_attestation_environment(&cbor, v.environment).is_ok(),
-            "environment parser"
-        );
-        verify_dependency(
-            &dev,
-            &dev.app_id,
-            &dev.challenge,
-            &dev.key_id_b64,
-            dev.root_cert_pem.as_bytes(),
-        )
-        .expect("development dependency");
         assert!(v
             .verify_attestation(
                 &dev.attestation_b64,
@@ -543,16 +491,7 @@ mod tests {
                 .unwrap();
             let length = encoder.writer().position();
             let malicious = &buffer[..length];
-            // Prove this envelope reaches valid signed material in the dependency.
-            Attestation::from_cbor_bytes(malicious)
-                .unwrap()
-                .verify(
-                    &fixture.challenge,
-                    &fixture.app_id,
-                    &fixture.key_id_b64,
-                    fixture.root_cert_pem.as_bytes(),
-                )
-                .unwrap();
+            // Reject the ambiguous envelope at the public boundary.
             let mut verifier = verifier(&fixture.app_id, fixture.root_cert_pem.as_bytes());
             verifier.environment = environment;
             assert!(
@@ -571,9 +510,7 @@ mod tests {
     #[test]
     fn environment_parser_rejects_ambiguous_or_truncated_auth_data() {
         for data in [vec![], vec![0xa0], vec![0xa1, 0x68], vec![0xbf, 0xff]] {
-            assert!(
-                verify_attestation_environment(&data, AppAttestEnvironment::Production).is_err()
-            );
+            assert!(proof::enroll(&data, b"challenge", "app", "key", b"root", false).is_err());
         }
         let mut data = [0u8; 256];
         let mut encoder =
@@ -593,8 +530,7 @@ mod tests {
             .unwrap();
         let length = encoder.writer().position();
         assert!(
-            verify_attestation_environment(&data[..length], AppAttestEnvironment::Production)
-                .is_err()
+            proof::enroll(&data[..length], b"challenge", "app", "key", b"root", false).is_err()
         );
     }
 
@@ -602,7 +538,7 @@ mod tests {
     fn short_and_oversize_key_ids_are_rejected() {
         let fixture = fixture(GOOD_FIXTURE_JSON);
         for key_id_b64 in [STANDARD.encode([0x11; 31]), STANDARD.encode([0x22; 33])] {
-            assert!(verify_dependency(
+            assert!(verify_proof(
                 &fixture,
                 &fixture.app_id,
                 &fixture.challenge,
@@ -638,3 +574,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "app_attest_assertion_tests.rs"]
+mod assertion_tests;

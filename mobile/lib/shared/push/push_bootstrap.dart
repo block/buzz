@@ -35,11 +35,12 @@ class BuzzPushAttemptGate {
 
   void failed(String attempt, {required VoidCallback retry}) {
     if (_attempt != attempt) return;
-    _attempt = null;
     _retryTimer?.cancel();
     _retryTimer = Timer(retryDelay, () {
       _retryTimer = null;
-      if (_attempt == null) retry();
+      if (_attempt != attempt) return;
+      _attempt = null;
+      retry();
     });
   }
 
@@ -171,6 +172,16 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     final community = ref.watch(activeCommunityProvider).value;
     final memberPubkey = ref.watch(myPubkeyProvider);
     final descriptor = ref.watch(currentRelayPushDescriptorProvider).value;
+    final enablementEpoch = useRef(0);
+    useEffect(() {
+      // Each opt-in needs a fresh active lease even when endpoint, executor,
+      // and subscriptions match the lease replaced by the opt-out tombstone.
+      // A distinct key also fences renewal callbacks from the prior opt-in.
+      if (community?.pushNotificationsEnabled == true) {
+        enablementEpoch.value += 1;
+      }
+      return null;
+    }, [community?.id, community?.pushNotificationsEnabled]);
 
     useEffect(() {
       final listener = AppLifecycleListener(
@@ -269,13 +280,14 @@ class BuzzPushBootstrap extends HookConsumerWidget {
         final activeDescriptor = descriptor!;
         final state = activeCommunity.pushSubscriptionState;
         if (state.desired.isEmpty) return null;
-        final attempt = buzzPushPublicationAttemptKey(
+        final publicationKey = buzzPushPublicationAttemptKey(
           communityId: activeCommunity.id,
           relayBaseUrl: config.baseUrl,
           token: token,
           descriptor: activeDescriptor,
           subscriptions: state.desired,
         );
+        final attempt = '${enablementEpoch.value}|$publicationKey';
         if (!publicationAttempt.tryBegin(attempt)) return null;
         final relay = SignedEventRelay(
           session: ref.read(relaySessionProvider.notifier),
@@ -365,7 +377,9 @@ class BuzzPushBootstrap extends HookConsumerWidget {
   ) async {
     final state = community.pushSubscriptionState;
     final desired = state.desired;
-    final descriptor = await fetchBuzzPushLeaseDescriptor(config.baseUrl);
+    final descriptor = await ref.read(buzzPushDescriptorFetcherProvider)(
+      config.baseUrl,
+    );
     final grant = await enrollBuzzPush(
       config.wsUrl,
       Env.pushGatewayUrl,

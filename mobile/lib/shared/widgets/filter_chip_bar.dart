@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'ios_glass_navigation_button.dart';
 
 import '../theme/theme.dart';
 
@@ -37,6 +39,9 @@ class FilterChipBar<T> extends StatelessWidget {
   /// When enabled, every chip shares the width rather than scrolling.
   final bool expandItems;
 
+  /// Uses native glass capsules on iOS for navigation-style filters.
+  final bool useNativeGlass;
+
   /// Material density applied to each chip.
   final VisualDensity visualDensity;
 
@@ -52,6 +57,7 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.selected,
     required this.onSelected,
     this.expandItems = false,
+    this.useNativeGlass = false,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
     this.barVerticalPadding = Grid.xxs,
@@ -59,6 +65,60 @@ class FilterChipBar<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (useNativeGlass && defaultTargetPlatform == TargetPlatform.iOS) {
+      final textStyle = filterChipTextStyle.copyWith(
+        fontWeight: FontWeight.w600,
+      );
+      final height = (MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16)
+          .clamp(48.0, double.infinity);
+      final widths = [
+        for (final item in items)
+          (TextPainter(
+                text: TextSpan(text: item.label, style: textStyle),
+                textScaler: MediaQuery.textScalerOf(context),
+                textDirection: Directionality.of(context),
+              )..layout()).width +
+              32,
+      ];
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final available = constraints.maxWidth - Grid.gutter * 2;
+          final required =
+              widths.fold(0.0, (sum, width) => sum + width) +
+              Grid.xxs * (items.length - 1);
+          final extra = expandItems && available > required
+              ? (available - required) / items.length
+              : 0.0;
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            clipBehavior: Clip.none,
+            padding: EdgeInsets.symmetric(
+              horizontal: Grid.gutter,
+              vertical: barVerticalPadding,
+            ),
+            child: Row(
+              children: [
+                for (var index = 0; index < items.length; index++) ...[
+                  if (index > 0) const SizedBox(width: Grid.xxs),
+                  IosGlassNavigationButton(
+                    icon: IosGlassNavigationIcon.more,
+                    label: items[index].label,
+                    semanticLabel: items[index].label,
+                    onPressed: () => onSelected(items[index].id),
+                    isSelected: selected == items[index].id,
+                    width: widths[index] + extra,
+                    height: height,
+                    controlSize: height - 8,
+                    fillWidth: true,
+                    foregroundColor: context.colors.primary,
+                  ),
+                ],
+              ],
+            ),
+          );
+        },
+      );
+    }
     final chips = [
       for (var index = 0; index < items.length; index++) ...[
         if (index > 0) const SizedBox(width: Grid.xxs),

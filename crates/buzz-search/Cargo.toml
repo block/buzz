@@ -17,4 +17,5 @@ tracing     = { workspace = true }
 metrics     = { workspace = true }
 
 [dev-dependencies]
+buzz-db     = { workspace = true }
 tokio       = { workspace = true }

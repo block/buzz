@@ -460,7 +460,9 @@ export async function createChannelManagedAgents(
   );
   const [managedAgents, members, personas] = await Promise.all([
     listManagedAgents(),
-    getChannelMembers(channelId),
+    // Read-your-writes: templates call this right after creating the channel,
+    // before a read replica may have the member list.
+    getChannelMembers(channelId, { readYourWrites: true }),
     needsPersonaPolicy ? listPersonas() : Promise.resolve([]),
   ]);
   const channelMemberPubkeys = new Set(

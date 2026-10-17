@@ -21,6 +21,34 @@ external Flutter SDK has touched `mobile/.dart_tool`, rerun `mobile-install`
 with the pinned SDK before building so `flutter_test`, `sky_engine`, and the
 engine all come from the same Flutter version.
 
+### iOS toolchain
+
+Use Xcode 27.0 for iOS development and build validation on an Apple silicon
+Mac running macOS Tahoe 26.6 or later, as required by the
+[Xcode 27 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
+On Intel Macs or hosts that cannot meet those requirements, use a compatible
+Xcode 26 version, which remains supported. Activate the repository's pinned
+Flutter SDK with Hermit as described above.
+
+When multiple Xcode versions are installed, select the intended version for
+the command with `DEVELOPER_DIR`, for example:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode-27.0.0.app/Contents/Developer xcodebuild -version
+```
+
+Adjust the path to your installation. Keep the compiler and SDK from the same
+Xcode installation. The pinned Flutter native-assets tooling can discover the
+globally selected SDK even when `DEVELOPER_DIR` selects another compiler, so
+use a build machine with a matching default Xcode when validating either
+Xcode 26 or Xcode 27.
+
+The native cryptography dependency is pinned upstream C source in
+`ios/BuzzPushKit/Sources/CSecp256k1`; it requires no Swift build-plugin approval.
+GitHub's mobile CI currently uses the Xcode default of its `macos-latest`
+runner. The internal release toolchain is configured separately in
+[buzz-releases](https://github.com/squareup/buzz-releases).
+
 ## Run
 
 ```bash
@@ -35,7 +63,7 @@ cd mobile && flutter run --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.exampl
 
 Debug builds produced from a git worktree get a unique app identifier keyed
 to the **worktree directory name**
-(`xyz.block.buzz.dogfood.mobile.<slug>` on iOS,
+(`xyz.block.buzz.dev.mobile.<slug>` on iOS,
 `xyz.block.buzz.mobile.<slug>` on Android) plus a display-only branch label
 in the app name (`Buzz (my-branch)`, or a short SHA when the worktree is
 detached). Because the identifier follows the directory rather than the
@@ -105,7 +133,7 @@ installs are never touched.
 
 Every iOS artifact builds and embeds the Notification Service Extension and
 native push bridge. Runtime activation is fail-closed and scoped to the current
-relay. After authenticated connectivity and a fully valid NIP-11 `nip-pl` push
+relay. After authenticated connectivity and a fully valid NIP-11 `buzz-push-v1` push
 descriptor, Buzz independently requests display permission and registers with
 APNs. Display denial or request failure does not gate the device token, gateway
 enrollment, or lease publication, so a later user opt-in can display pushes
@@ -153,15 +181,14 @@ App Attest application ID, APNs topic and sandbox certificate. Development
 attestation requires the explicit `personal-dev-app-attest` gateway build feature
 and `BUZZ_PUSH_APP_ATTEST_ENVIRONMENT=development`; ordinary gateway builds accept
 production attestation only. See `docs/push-gateway-deployment.md`.
-This validates the personal client/relay/gateway integration, not the internally
-distributed dogfood artifact. Validate dogfood separately using the signed
-internal release and its production gateway configuration.
+Validate distributed builds separately using a signed release candidate and
+its matching gateway configuration.
 
 Parent app identifiers require Apple's Communication
 Notifications capability and a regenerated app provisioning profile. The
 Notification Service Extension profile does not require that capability.
 Enable it on the personal development App ID for local rich-presentation
-validation. Enabling it on the Block dogfood and eventual App Store App IDs is
+validation. Enabling it on distribution App IDs is
 a release follow-up and is not performed by this repository change. Without a
 matching parent profile, source and unit validation still work, but the app
 cannot be signed for a physical device.

@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
+import '../../shared/community/paired_community_landing.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
 import '../../shared/relay/relay.dart';
@@ -15,64 +16,15 @@ import '../../shared/security/sensitive_action_authorizer.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
 
+part 'pairing_provider_helpers.dart';
+part 'pairing_state.dart';
+
 /// HTTP client used by [PairingNotifier] for the validation request.
 final pairingHttpClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
   ref.onDispose(client.close);
   return client;
 });
-
-enum PairingStatus {
-  idle,
-  connecting,
-  confirmingSas,
-  transferring,
-  storing,
-  success,
-  error,
-}
-
-class PairingState {
-  final PairingStatus status;
-  final String? errorMessage;
-  final String? sasCode;
-  final bool userConfirmedSas;
-  final bool sendsIdentityToDesktop;
-  final bool protectSensitiveActions;
-  final bool authorizationInProgress;
-
-  const PairingState({
-    this.status = PairingStatus.idle,
-    this.errorMessage,
-    this.sasCode,
-    this.userConfirmedSas = false,
-    this.sendsIdentityToDesktop = false,
-    this.protectSensitiveActions = true,
-    this.authorizationInProgress = false,
-  });
-
-  PairingState copyWith({
-    PairingStatus? status,
-    String? errorMessage,
-    String? sasCode,
-    bool? userConfirmedSas,
-    bool? sendsIdentityToDesktop,
-    bool? protectSensitiveActions,
-    bool? authorizationInProgress,
-    bool clearErrorMessage = false,
-  }) => PairingState(
-    status: status ?? this.status,
-    errorMessage: clearErrorMessage ? null : errorMessage ?? this.errorMessage,
-    sasCode: sasCode ?? this.sasCode,
-    userConfirmedSas: userConfirmedSas ?? this.userConfirmedSas,
-    sendsIdentityToDesktop:
-        sendsIdentityToDesktop ?? this.sendsIdentityToDesktop,
-    protectSensitiveActions:
-        protectSensitiveActions ?? this.protectSensitiveActions,
-    authorizationInProgress:
-        authorizationInProgress ?? this.authorizationInProgress,
-  );
-}
 
 typedef PairingSocketFactory =
     PairingSocket Function({
@@ -98,6 +50,9 @@ class PairingNotifier extends Notifier<PairingState> {
   RelaySocket? _validationSocket;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
+  Completer<bool>? _codeResult;
+  String? _codeRequestId;
+  int _codeRequestSequence = 0;
   Community? _identityExportCommunity;
   bool _identityExportBiometricOnly = false;
 
@@ -180,6 +135,41 @@ class PairingNotifier extends Notifier<PairingState> {
     _userConfirmedSas = true;
     state = state.copyWith(userConfirmedSas: true);
     if (_sasConfirmReceived) unawaited(_continueAfterSas());
+  }
+
+  /// Check user input with the source; never compare a QR-derived SAS when the
+  /// source has negotiated an independent desktop-only code.
+  Future<bool> verifyDesktopCode(String code) async {
+    if (!state.requiresDesktopCode ||
+        state.status != PairingStatus.confirmingSas ||
+        _codeResult != null ||
+        !RegExp(r'^\d{6}$').hasMatch(code)) {
+      return false;
+    }
+    final result = Completer<bool>();
+    _codeResult = result;
+    _codeRequestId = '${++_codeRequestSequence}';
+    _publishEvent(
+      kind: 24134,
+      content: _encryptMessage({
+        'type': 'code-submit',
+        'code': code,
+        'request_id': _codeRequestId,
+      }),
+      tags: [
+        ['p', _sourcePubkey!],
+      ],
+    );
+    try {
+      // Keep this logical attempt pending until its response or session cleanup.
+      // A local deadline cannot undo a guess already consumed by the source.
+      return await result.future;
+    } finally {
+      if (identical(_codeResult, result)) {
+        _codeResult = null;
+        _codeRequestId = null;
+      }
+    }
   }
 
   void setProtectSensitiveActions(bool value) {
@@ -323,6 +313,9 @@ class PairingNotifier extends Notifier<PairingState> {
   }
 
   void _cleanup() {
+    if (_codeResult?.isCompleted == false) _codeResult!.complete(false);
+    _codeResult = null;
+    _codeRequestId = null;
     _pairingGeneration++;
     _validationSocket?.dispose();
     _validationSocket = null;
@@ -331,6 +324,7 @@ class PairingNotifier extends Notifier<PairingState> {
     _socket?.dispose();
     _socket = null;
     _processedEventIds.clear();
+    _publishedEventIds.clear();
     _sasConfirmReceived = false;
     _userConfirmedSas = false;
     _pendingPayload = null;
@@ -356,6 +350,7 @@ class PairingNotifier extends Notifier<PairingState> {
   int _pairingGeneration = 0;
   DateTime? _identityExportAuthorizedAt;
   Map<String, dynamic>? _pendingPayload; // buffered until user confirms SAS
+  final Set<String> _publishedEventIds = {};
   final Set<String> _processedEventIds = {}; // NIP-AB §Duplicate Event Handling
 
   Future<void> _pairNipAb(String uri) async {
@@ -419,6 +414,7 @@ class PairingNotifier extends Notifier<PairingState> {
       // 7. Build and send the offer event.
       final offerContent = _encryptMessage({
         'type': 'offer',
+        if (!_sendIdentityToSource) 'confirmation': 'desktop-code-v1',
         'version': 1,
         'session_id': bytesToHex(_sessionId!),
       });
@@ -468,41 +464,27 @@ class PairingNotifier extends Notifier<PairingState> {
     }
   }
 
-  static String _friendlyErrorMessage(Object error) {
-    final message = error.toString();
-    if (message.contains('SocketException') ||
-        message.contains('Connection refused') ||
-        message.contains('Network is unreachable') ||
-        message.contains('No route to host') ||
-        message.contains('Failed to connect')) {
-      return 'Could not reach the pairing relay. Check your internet '
-          'connection and VPN, then try again.';
-    }
-    if (error is PairingAuthException) {
-      return 'The pairing relay rejected authentication. Try creating a new '
-          'pairing code.';
-    }
-    if (error is StateError ||
-        message.contains('Null check operator used on a null value')) {
-      return 'Pairing stopped because of an internal error. Please try again.';
-    }
-    if (message.contains('HandshakeException') ||
-        message.contains('CERTIFICATE_VERIFY_FAILED')) {
-      return 'Secure connection failed. Check your network settings '
-          'and try again.';
-    }
-    if (message.contains('TimeoutException') || message.contains('timed out')) {
-      return 'Connection timed out. Check your internet connection and '
-          'try again.';
-    }
-    return 'Connection failed. Please check your internet connection '
-        'and try again.';
-  }
-
   void _handleRelayMessage(List<dynamic> data) {
     if (data.isEmpty) return;
     final type = data[0] as String;
 
+    final rejected =
+        type == 'OK' &&
+        data.length >= 3 &&
+        _publishedEventIds.remove(data[1]) &&
+        data[2] == false;
+    final closed = type == 'CLOSED' && data.length >= 2 && data[1] == 'pair';
+    if ((rejected || closed) &&
+        state.status != PairingStatus.success &&
+        state.status != PairingStatus.error) {
+      _cleanup();
+      state = const PairingState(
+        status: PairingStatus.error,
+        errorMessage:
+            'Pairing couldn’t continue. Scan a new desktop QR code and try again.',
+      );
+      return;
+    }
     if (type == 'EVENT' && data.length >= 3) {
       final eventJson = data[2] as Map<String, dynamic>;
       _handlePairingEvent(eventJson);
@@ -555,6 +537,28 @@ class PairingNotifier extends Notifier<PairingState> {
       final msgType = msg['type'] as String?;
 
       switch (msgType) {
+        case 'desktop-code':
+          if (!_sendIdentityToSource &&
+              state.status == PairingStatus.confirmingSas &&
+              !_sasConfirmReceived) {
+            state = state.copyWith(requiresDesktopCode: true);
+          }
+          _processedEventIds.add(eventId);
+        case 'code-rejected':
+          if (state.requiresDesktopCode &&
+              msg['request_id'] == _codeRequestId &&
+              _codeResult?.isCompleted == false) {
+            _codeResult!.complete(false);
+            if (msg['remaining_attempts'] == 0) {
+              _cleanup();
+              state = const PairingState(
+                status: PairingStatus.error,
+                errorMessage:
+                    'Too many incorrect codes. Scan a new desktop QR code and try again.',
+              );
+            }
+          }
+          _processedEventIds.add(eventId);
         case 'sas-confirm':
           _handleSasConfirm(msg);
           _processedEventIds.add(eventId); // record after successful processing
@@ -602,6 +606,9 @@ class PairingNotifier extends Notifier<PairingState> {
     }
 
     _sasConfirmReceived = true;
+    if (state.requiresDesktopCode && _codeResult?.isCompleted == false) {
+      _codeResult!.complete(true);
+    }
 
     // If the user already tapped "Codes Match", complete the transition now
     // that the transcript hash is verified.
@@ -728,6 +735,7 @@ class PairingNotifier extends Notifier<PairingState> {
 
       // Validate relay URL to prevent SSRF via private network addresses.
       _validateRelayUrl(relayUrl);
+      state = state.copyWith(destinationRelayUrl: relayUrl);
 
       // Validate credentials against the relay via NIP-42 WS handshake.
       final credentialValidator = _credentialValidator ?? _validateCredentials;
@@ -761,7 +769,8 @@ class PairingNotifier extends Notifier<PairingState> {
       }
 
       _cleanup();
-      state = const PairingState(status: PairingStatus.success);
+      state = state.copyWith(status: PairingStatus.success);
+      ref.read(pairedCommunityLandingProvider.notifier).request(community);
     } catch (e) {
       if (pairingGeneration != _pairingGeneration ||
           state.status != PairingStatus.storing ||
@@ -831,6 +840,7 @@ class PairingNotifier extends Notifier<PairingState> {
       createdAt: createdAt,
     );
 
+    _publishedEventIds.add(event.id);
     _socket?.publishEvent(event.toMap());
   }
 
@@ -862,7 +872,11 @@ class PairingNotifier extends Notifier<PairingState> {
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
       if (generation != _pairingGeneration) return;
-      state = const PairingState(status: PairingStatus.success);
+      state = PairingState(
+        status: PairingStatus.success,
+        destinationRelayUrl: community.relayUrl,
+      );
+      ref.read(pairedCommunityLandingProvider.notifier).request(community);
     } on FormatException catch (e) {
       if (generation != _pairingGeneration) return;
       state = PairingState(
@@ -943,48 +957,6 @@ class PairingNotifier extends Notifier<PairingState> {
       nsec: decoded['nsec'] as String?,
       sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
     );
-  }
-
-  void _validateRelayUrl(String url) {
-    final uri = Uri.parse(url);
-
-    if (!kDebugMode && uri.scheme != 'https') {
-      throw const FormatException('Relay URL must use HTTPS');
-    }
-    if (uri.scheme != 'http' && uri.scheme != 'https') {
-      throw FormatException('Invalid URL scheme: ${uri.scheme}');
-    }
-
-    final host = uri.host.toLowerCase();
-    if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
-      if (!kDebugMode) {
-        throw const FormatException('Relay URL cannot target localhost');
-      }
-      return;
-    }
-
-    final ip = Uri.tryParse('http://$host')?.host ?? host;
-    if (_isPrivateHost(ip)) {
-      throw const FormatException(
-        'Relay URL cannot target private network addresses',
-      );
-    }
-  }
-
-  static bool _isPrivateHost(String host) {
-    final parts = host.split('.');
-    if (parts.length != 4) return false;
-    final octets = parts.map(int.tryParse).toList();
-    if (octets.any((o) => o == null)) return false;
-
-    final a = octets[0]!;
-    final b = octets[1]!;
-
-    if (a == 10) return true;
-    if (a == 172 && b >= 16 && b <= 31) return true;
-    if (a == 192 && b == 168) return true;
-    if (a == 169 && b == 254) return true;
-    return false;
   }
 }
 

@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
-import 'package:buzz/shared/push/push_presentation_cache.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,13 +28,27 @@ void main() {
     ),
   );
 
-  test('accepts bounded raster data avatars for the push cache', () {
-    expect(isCacheablePushAvatarSource('data:image/png;base64,AA=='), isTrue);
-    expect(
-      isCacheablePushAvatarSource('data:image/svg+xml;base64,AA=='),
-      isFalse,
-    );
-    expect(isCacheablePushAvatarSource('data:image/png;base64,%%%'), isFalse);
+  testWidgets('only animated agent artwork shrinks inside its unchanged frame', (
+    tester,
+  ) async {
+    const poster = 'https://relay.example/poster.png';
+    final animated =
+        '$poster#buzz-anim=${Uri.encodeComponent('https://relay.example/animation.png')}';
+    const preset =
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-10.png';
+    for (final url in [poster, animated, preset]) {
+      await tester.pumpWidget(subject(url, isAgent: true));
+      final clip = find.byType(ClipRRect);
+      final scale = find.descendant(of: clip, matching: find.byType(Transform));
+      if (url != poster) {
+        expect(scale, findsOneWidget);
+        expect(tester.widget<Transform>(scale).transform.entry(0, 0), 0.85);
+        final content = find.byType(AvatarImageContent);
+        expect(tester.getSize(content), tester.getSize(clip));
+      } else {
+        expect(scale, findsNothing);
+      }
+    }
   });
 
   testWidgets('clips agents to a 30 percent squircle', (tester) async {

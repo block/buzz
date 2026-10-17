@@ -50,3 +50,16 @@ this check. PR images may be cropped afterward for readability.
 artifacts in the existing Flutter test lane. Restoring either original font or
 changing any other font data fails CI. When upgrading Inter, verify the
 transformation and native rendering before updating the expected digests.
+
+## Tabler mobile preview
+
+`TablerIcons.ttf` is the unmodified outline webfont from
+`@tabler/icons-webfont@3.46.0`, matching buzz-app's Tabler dependency version.
+Source: https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.46.0/dist/fonts/tabler-icons.ttf
+The upstream MIT license is bundled in `TablerIcons-LICENSE.txt`.
+
+`lib/shared/theme/buzz_icons.dart` maps the existing mobile semantic names to
+Tabler glyphs using the package's `dist/tabler-icons.css` codepoints. Native
+UIKit controls retain SF Symbols. Lucide's 300/500 navigation weight variants
+both map to Tabler's standard outline; selection still uses the existing color
+and label treatment.

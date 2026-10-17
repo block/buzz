@@ -11,6 +11,7 @@ use std::{
 use serde_json::Value;
 
 use buzz_relay::lifecycle::StartupPhase;
+use buzz_relay::startup_steps;
 use buzz_relay::state::REDIS_BOOTSTRAP_FAILURE;
 
 const VALID_RELAY_PRIVATE_KEY: &str =
@@ -186,8 +187,19 @@ fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) 
     }
 }
 
-fn assert_no_startup_lifecycle_metrics(scrape: &str) {
+/// The early lifecycle phases (crypto through metrics bind) are log-only.
+/// The only startup metric families are the post-metrics-bind step gauges,
+/// and no metric family or label value may name an early phase.
+fn assert_no_early_lifecycle_metrics(scrape: &str) {
+    let step_families = [startup_steps::CURRENT_METRIC, startup_steps::SECONDS_METRIC];
     for line in scrape.lines() {
+        for phase in StartupPhase::ALL {
+            assert!(
+                !line.contains(&format!("\"{}\"", phase.as_str())),
+                "logs-only lifecycle contract exported early phase {}: {line}",
+                phase.as_str()
+            );
+        }
         let Some(name) = line
             .strip_prefix("# HELP ")
             .or_else(|| line.strip_prefix("# TYPE "))
@@ -195,6 +207,9 @@ fn assert_no_startup_lifecycle_metrics(scrape: &str) {
         else {
             continue;
         };
+        if step_families.contains(&name) {
+            continue;
+        }
         assert!(
             !["startup", "boot", "lifecycle"]
                 .iter()
@@ -465,7 +480,7 @@ fn otlp_build_failure_is_degraded_without_leaking_endpoint_credentials() {
         ("DATABASE_URL", &database_url),
     ]);
     let scrape = wait_for_relay_metrics(&mut process, port);
-    assert_no_startup_lifecycle_metrics(&scrape);
+    assert_no_early_lifecycle_metrics(&scrape);
     let output = process.terminate();
     let events = lifecycle_events(&output);
     assert_accounting(&events);
@@ -481,7 +496,7 @@ fn otlp_build_failure_is_degraded_without_leaking_endpoint_credentials() {
 }
 
 #[test]
-fn successful_main_emits_complete_lifecycle_without_startup_metrics() {
+fn successful_main_emits_complete_lifecycle_and_reports_current_startup_step() {
     let fake_database = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake database");
     let database_url = format!(
         "postgres://buzz@127.0.0.1:{}/buzz",
@@ -498,8 +513,20 @@ fn successful_main_emits_complete_lifecycle_without_startup_metrics() {
         ("DATABASE_URL", &database_url),
     ]);
     let scrape = wait_for_relay_metrics(&mut process, port);
-    assert_no_startup_lifecycle_metrics(&scrape);
+    assert_no_early_lifecycle_metrics(&scrape);
     assert_auth_metrics_have_stable_boot_zeros(&scrape);
+    // The fake database accepts TCP but never speaks Postgres, so the relay
+    // stays in its first post-metrics-bind step and must say so on /metrics.
+    let current = format!(
+        "{}{{phase=\"db_connect\"}} 1",
+        startup_steps::CURRENT_METRIC
+    );
+    let scrape = wait_for_scraped_metric(&mut process, port, &current);
+    assert!(
+        !scrape.contains(&format!("{}{{", startup_steps::SECONDS_METRIC)),
+        "no step has finished while the relay waits on Postgres"
+    );
+    assert_no_early_lifecycle_metrics(&scrape);
 
     let output = process.terminate();
     let events = lifecycle_events(&output);

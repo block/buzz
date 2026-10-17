@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/emoji/emoji_data.dart';
@@ -256,7 +256,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         key: const ValueKey('avatar-editor-fixed-preview'),
         imageUrl: previewUrl,
         radius: _previewSize / 2,
-        backgroundColor: context.colors.primaryContainer,
+        backgroundColor: context.controlSurface,
         fallback: Text(
           fallbackInitial,
           style: context.textTheme.displayLarge?.copyWith(
@@ -703,7 +703,7 @@ class _ImageMode extends StatelessWidget {
             Expanded(
               child: _ImageSourceOption(
                 key: const ValueKey('image-source-camera'),
-                icon: LucideIcons.camera,
+                icon: BuzzIcons.camera,
                 iosIcon: IosGlassNavigationIcon.camera,
                 label: 'Camera',
                 onTap: isPicking ? null : onCamera,
@@ -714,7 +714,7 @@ class _ImageMode extends StatelessWidget {
             Expanded(
               child: _ImageSourceOption(
                 key: const ValueKey('image-source-library'),
-                icon: LucideIcons.images,
+                icon: BuzzIcons.images,
                 iosIcon: IosGlassNavigationIcon.photoLibrary,
                 label: 'Photo Library',
                 onTap: isPicking ? null : onLibrary,

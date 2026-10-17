@@ -81,3 +81,6 @@ pub mod test_helpers {
         StoredEvent::with_received_at(make_event(kind), Utc::now(), channel_id, true)
     }
 }
+
+/// NIP-AR channel artifact envelope and limits.
+pub mod artifact;

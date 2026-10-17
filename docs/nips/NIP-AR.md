@@ -56,7 +56,7 @@ An artifact is identified by `(community, d)`, independently of its author or ho
 
 Creation requires an unused `d`, `op=create`, and no `prev`. Every later revision MUST name the current accepted event in `prev`. The relay checks authorization and advances the current revision atomically: two competing edits cannot both succeed. Timestamps do not choose the winner.
 
-Resubmitting an already accepted event succeeds without applying it again, even if a later revision has since become current, so a client that lost an acknowledgement never sees a false conflict. The response reveals nothing the sender can no longer read. A different event whose `prev` is not the current revision is a conflict. A conflict response MAY name the current revision only when the sender can read it. On conflict, clients fetch the current accessible revision and reconcile their changes rather than blindly retrying. An `update` keeps `h`; a `move` changes it.
+Resubmitting an already accepted event succeeds without applying it again, even if a later revision has since become current, so a client that lost an acknowledgement never sees a false conflict. The response reveals nothing the sender can no longer read. A different event whose `prev` is not the current revision is a conflict. On conflict, clients fetch the current revision and reconcile their changes rather than resubmitting with only `prev` replaced, which would overwrite the competing edit. An `update` keeps `h`; a `move` changes it.
 
 A `create` whose `d` is already in use fails. When the sender cannot read the existing artifact, the error reveals only that the identity is taken, never its home, type, title, or current revision. Clients MAY derive `d` deterministically, for example from the message an artifact tracks, and accept that disclosure.
 
@@ -66,15 +66,14 @@ On creation or when changed from the previous accepted revision, `root` MUST ide
 
 Channel read permission governs every artifact read, including lookups, history, search, previews, counts, and live updates. Threads inherit their channel's audience. Membership and visibility changes take effect on subsequent reads and deliveries.
 
-Write permission means permission to post a kind-9 message in the channel, including authentication, token restrictions, moderation, and archive checks. This includes agents and, where channel policy permits, nonmembers of open channels. Artifact writes use `messages:write`, the scope that admits kind-9 posting.
+Write permission means permission to post a kind-9 message in the channel, including authentication, token restrictions, moderation, and archive checks. Relays apply these checks the same way, and at the same point, as for a kind-9 message. This includes agents and, where channel policy permits, nonmembers of open channels. Artifact writes use `messages:write`, the scope that admits kind-9 posting.
 
-| Operation | Required permission at commit time |
+| Operation | Required permission |
 | --- | --- |
-| Create or update | Write in the home channel. |
+| Create, update, delete, or restore | Write in the home channel. |
 | Move | Write in both source and destination. |
-| Delete or restore | Write in the home channel, and either being the artifact's author (the signer of its `create` revision) or holding the channel's owner or admin role. In a DM, write alone suffices. |
 
-These rules apply to every type. Apart from deletion and restoration, they do not depend on who created the artifact. DM participants are peers. The relay determines channel type from the stored channel, not from an artifact tag.
+These rules apply to every type and do not depend on who created the artifact. DM participants are peers. The relay determines channel type from the stored channel, not from an artifact tag.
 
 Relationship tags organize work without changing access. Linking a task to a project does not move it or share it. References to repositories or other services retain those services' access and action permissions. Errors MUST NOT disclose inaccessible artifact details.
 
@@ -82,7 +81,7 @@ Relationship tags organize work without changing access. Linking a task to a pro
 
 A move publishes the current snapshot into the destination under the same `d`. Its `root` must be absent or belong to the destination. Clients MUST show the destination audience and the information being shared before confirmation.
 
-The relay MUST atomically advance the current revision and durably record both arrival in the destination and removal from the source. The source receives a separate relay-authenticated removal identifying the artifact, source scope, and replay position, without destination metadata or content. Both changes must survive disconnects and crashes. Relays unable to provide this MUST reject moves.
+The relay MUST atomically advance the current revision and store both arrival in the destination and removal from the source. The source receives a separate relay-authenticated removal identifying the artifact, source scope, and the revision it replaced, without destination metadata or content. Both are stored events, so a client that misses live delivery recovers them by replaying the channel. Relays unable to provide this MUST reject moves.
 
 Earlier revisions remain under their original channels' access rules; a move never lets the destination read revisions from the source. The destination can load current state without reading earlier revisions. Conversation messages stay where they are.
 
@@ -90,7 +89,7 @@ Deletion is a soft delete: a revision with `op=delete`, empty content, and no `t
 
 ## Moderation and retention
 
-Relays MUST reject kind-5 deletion requests targeting artifact revisions with an explicit reason. A NIP-29 kind-9005 removal targeting a revision redacts it instead of deleting it: the relay withholds that revision's title, content, and client-defined tags from every surface, including history, search, and live delivery, and serves a relay-authenticated removal marker that keeps its `d`, `h`, `type`, `op`, and `prev`. Redaction never changes which revision is current, so a redacted current revision can still be edited, deleted, or restored with a new revision. Revision history is subject to the community's retention policy; expiring earlier revisions MUST NOT remove the current revision or break `prev` checks.
+Relays MUST reject kind-5 deletion requests targeting artifact revisions with an explicit reason. A NIP-29 kind-9005 removal redacts a revision under the channel's ordinary message-removal rules: the relay withholds that revision from every surface, including lookups, history, and search. The relay still records the revision as accepted, so redaction never changes which revision is current, and its ID remains valid as `prev`. Redacting an artifact's current revision retires the artifact: it is absent from current-state queries, and clients that do not already hold that revision's ID cannot edit it further. Revision history is subject to the community's retention policy; expiring earlier revisions MUST NOT remove the current revision or break `prev` checks.
 
 ## Current state and queries
 

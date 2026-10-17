@@ -8,6 +8,7 @@ import os.log
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private var nativeMessagePresentationCoordinator: NativeMessagePresentationCoordinator?
   private var mediaUploadChannel: FlutterMethodChannel?
   private var pushChannel: FlutterMethodChannel?
   private let apnsRegistrationBuffer = APNsRegistrationBuffer()
@@ -28,6 +29,7 @@ import os.log
     endpointGrantStore: endpointGrantStore,
     keychainAccessGroup: pushKeychainAccessGroup
   )
+  private var hapticsChannel: FlutterMethodChannel?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -39,6 +41,8 @@ import os.log
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeAddMembersSheetCoordinator: NativeAddMembersSheetCoordinator?
+  private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
   private var huddleMediaPlugin: HuddleMediaPlugin?
@@ -55,8 +59,15 @@ import os.log
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosMediaCarousel") {
+      registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
+    }
+
     let messenger = engineBridge.applicationRegistrar.messenger()
     huddleMediaPlugin = HuddleMediaPlugin(messenger: messenger)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosNavigationBar") {
+      registrar.register(IosNavigationBarFactory(messenger: messenger, parent: registrar.viewController), withId: "buzz/ios_navigation_bar")
+    }
     mediaUploadChannel = FlutterMethodChannel(
       name: "buzz/media_upload",
       binaryMessenger: messenger
@@ -73,6 +84,20 @@ import os.log
     }
     apnsRegistrationBuffer.attach { [weak self] update in
       self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
+    }
+    hapticsChannel = FlutterMethodChannel(
+      name: "buzz/haptics",
+      binaryMessenger: messenger
+    )
+    hapticsChannel?.setMethodCallHandler { call, result in
+      guard call.method == "success" || call.method == "error" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let generator = UINotificationFeedbackGenerator()
+      generator.prepare()
+      generator.notificationOccurred(call.method == "error" ? .error : .success)
+      result(nil)
     }
     qrScannerChannel = FlutterMethodChannel(
       name: "buzz/qr_scanner",
@@ -201,6 +226,12 @@ import os.log
         withId: "buzz/theme_pagination_glass"
       )
     }
+    nativeMessagePresentationCoordinator = NativeMessagePresentationCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeMessagePresentation"
+      )?.viewController
+    )
 
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
@@ -216,6 +247,24 @@ import os.log
     nativeEmojiPickerCoordinator = NativeEmojiPickerCoordinator(
       messenger: messenger,
       parentViewController: nativeEmojiPickerRegistrar?.viewController
+    )
+
+    engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativePresenceMenu")?.register(
+      NativePresenceMenuFactory(messenger: messenger), withId: "buzz/presence_menu"
+    )
+
+    nativeAddMembersSheetCoordinator = NativeAddMembersSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeAddMembersSheet"
+      )?.viewController
+    )
+
+    nativeConfirmationDialogCoordinator = NativeConfirmationDialogCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeConfirmationDialog"
+      )?.viewController
     )
 
     let nativeProfileTextEditorRegistrar = engineBridge.pluginRegistry.registrar(
@@ -1028,11 +1077,13 @@ import os.log
 }
 
 extension BuzzPushNavigationTarget {
-  fileprivate var flutterArguments: [String: String] {
-    [
+  var flutterArguments: [String: String] {
+    var arguments = [
       "eventId": eventID,
       "communityId": communityID,
       "channelId": channelID,
     ]
+    arguments["threadRootId"] = threadRootID
+    return arguments
   }
 }

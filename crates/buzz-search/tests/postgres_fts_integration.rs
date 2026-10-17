@@ -1,10 +1,9 @@
 //! Integration tests for community-scoped Postgres FTS.
 //!
-//! Run with a local PG: `BUZZ_TEST_DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz cargo test -p buzz-search --tests -- --include-ignored`
-//!
-//! Each test creates a uniquely-named schema, applies every FTS-affecting
-//! migration in order, exercises a scenario, and drops it. Tests are
-//! parallel-safe.
+//! Run through `scripts/postgres-test-run.sh -p buzz-search --tests` for a
+//! fresh desired-state database per test. Outside that lane, point
+//! BUZZ_TEST_DATABASE_URL at a disposable dedicated database; fixtures use
+//! the production migrator and unique community IDs.
 
 use buzz_core::{
     kind::{
@@ -14,96 +13,30 @@ use buzz_core::{
     CommunityId,
 };
 use buzz_search::{ChannelScope, SearchQuery, SearchService};
-use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
-const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
-const MIGRATION_0001_SQL: &str = include_str!("../../../migrations/0001_initial_schema.sql");
-const MIGRATION_0002_SQL: &str = include_str!("../../../migrations/0002_git_repo_names.sql");
-const MIGRATION_0003_SQL: &str = include_str!("../../../migrations/0003_community_icon.sql");
-const MIGRATION_0004_SQL: &str = include_str!("../../../migrations/0004_events_tags_gin.sql");
-const MIGRATION_0005_SQL: &str = include_str!("../../../migrations/0005_agent_turn_metric_fts.sql");
-const MIGRATION_0006_SQL: &str = include_str!("../../../migrations/0006_moderation.sql");
-const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_retention.sql");
-const MIGRATION_0008_SQL: &str =
-    include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
-const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
-const MIGRATION_0033_SQL: &str =
-    include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
-
+const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
-    let schema = format!("fts_test_{}", Uuid::new_v4().simple());
-    // Connect to the default schema first to create the test schema.
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
+    // The PostgreSQL lane supplies an isolated desired-state database. Outside
+    // that lane use a dedicated database with the production migrations.
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
         .connect(&url)
         .await
-        .expect("connect");
-    let create_sql = format!("CREATE SCHEMA \"{schema}\"");
-    sqlx::query(sqlx::AssertSqlSafe(create_sql))
-        .execute(&admin_pool)
-        .await
-        .expect("create schema");
-    admin_pool.close().await;
-
-    // Connect with search_path set so the migration's CREATE TABLE lands here.
-    let url_with_search_path = format!("{url}?options=-c%20search_path%3D{schema}");
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url_with_search_path)
-        .await
-        .expect("connect with search_path");
-    // Apply the full migration chain in order so the test schema exactly matches
-    // production. Future FTS-affecting migrations must be added here.
-    pool.execute(MIGRATION_0001_SQL)
-        .await
-        .expect("apply 0001 migration");
-    pool.execute(MIGRATION_0002_SQL)
-        .await
-        .expect("apply 0002 migration");
-    pool.execute(MIGRATION_0003_SQL)
-        .await
-        .expect("apply 0003 migration");
-    pool.execute(MIGRATION_0004_SQL)
-        .await
-        .expect("apply 0004 migration");
-    pool.execute(MIGRATION_0005_SQL)
-        .await
-        .expect("apply 0005 migration");
-    pool.execute(MIGRATION_0006_SQL)
-        .await
-        .expect("apply 0006 migration");
-    pool.execute(MIGRATION_0007_SQL)
-        .await
-        .expect("apply 0007 migration");
-    pool.execute(MIGRATION_0008_SQL)
-        .await
-        .expect("apply 0008 migration");
-    pool.execute(MIGRATION_0014_SQL)
-        .await
-        .expect("apply 0014 migration");
-    pool.execute(MIGRATION_0033_SQL)
-        .await
-        .expect("apply 0033 migration");
-    (pool, schema)
+        .expect("connect test database");
+    if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+        buzz_db::migration::run_migrations(&pool)
+            .await
+            .expect("apply production migrations");
+    }
+    (pool, String::new())
 }
 
-async fn teardown(pool: PgPool, schema: &str) {
+async fn teardown(pool: PgPool, _schema: &str) {
     pool.close().await;
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(
-            &std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string()),
-        )
-        .await
-        .expect("reconnect for drop");
-    let drop_sql = format!("DROP SCHEMA \"{schema}\" CASCADE");
-    sqlx::query(sqlx::AssertSqlSafe(drop_sql))
-        .execute(&admin_pool)
-        .await
-        .expect("drop schema");
-    admin_pool.close().await;
+    // The test runner owns database cleanup.
 }
 
 /// Insert a community row, return its id.
@@ -190,6 +123,7 @@ async fn search_finds_event_in_same_community() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -238,6 +172,7 @@ async fn search_does_not_return_other_community_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -255,6 +190,7 @@ async fn search_does_not_return_other_community_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -299,6 +235,7 @@ async fn kind0_search_by_display_name_works_without_flattening() {
                 page: 1,
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
+                sort: buzz_search::SearchSort::Relevance,
             })
             .await
             .unwrap();
@@ -359,6 +296,7 @@ async fn short_kind0_prefix_prioritizes_exact_lexeme_on_a_noisy_page() {
             page: 1,
             per_page: 3,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("short profile prefix search ok");
@@ -425,6 +363,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("full text search ok");
@@ -450,6 +389,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("prefix search ok");
@@ -469,6 +409,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("multi-token prefix search ok");
@@ -487,6 +428,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("completed-token exact + trailing-prefix search ok");
@@ -536,6 +478,7 @@ async fn prefix_mode_handles_tsquery_boundary_punctuation() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("prefix punctuation search ok");
@@ -594,6 +537,7 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("prefix privacy search ok");
@@ -674,6 +618,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -693,6 +638,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -711,6 +657,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -729,6 +676,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -768,6 +716,7 @@ async fn deleted_events_are_excluded() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -799,6 +748,7 @@ async fn empty_query_returns_empty_result_no_roundtrip() {
                 page: 1,
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
+                sort: buzz_search::SearchSort::Relevance,
             })
             .await
             .unwrap();
@@ -866,6 +816,7 @@ async fn since_until_filters() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -910,6 +861,7 @@ async fn pagination_works() {
             page: 1,
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -927,6 +879,7 @@ async fn pagination_works() {
             page: 3,
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -934,6 +887,85 @@ async fn pagination_works() {
         r2.hits.len(),
         1,
         "page 3 of 7 with per_page=3 should have 1 hit"
+    );
+
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn newest_sort_pages_by_time_then_id_within_scope() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "a.example").await;
+    let channel = Uuid::new_v4();
+    let pk = rand_bytes32();
+    let most_relevant = [9u8; 32];
+    let tie_low = [1u8; 32];
+    let tie_high = [2u8; 32];
+    let newest = [3u8; 32];
+    let rows = [
+        (
+            most_relevant,
+            "sortword sortword sortword sortword",
+            1_700_000_000,
+        ),
+        (tie_high, "sortword once", 1_700_000_100),
+        (tie_low, "sortword once", 1_700_000_100),
+        (newest, "sortword once", 1_700_000_200),
+    ];
+    for (id, content, created_at) in rows {
+        insert_event(&pool, c, id, pk, 9, content, Some(channel), created_at).await;
+    }
+    // Newer than every scoped row, but outside the requested channel scope.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        pk,
+        9,
+        "sortword once",
+        Some(Uuid::new_v4()),
+        1_700_000_300,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let page = |page, sort| {
+        let svc = svc.clone();
+        async move {
+            svc.search(&SearchQuery {
+                community: c,
+                q: "sortword".into(),
+                channel_scope: ChannelScope::Channels(vec![channel]),
+                kinds: None,
+                authors: None,
+                since: None,
+                until: None,
+                page,
+                per_page: 2,
+                mode: buzz_search::SearchMode::FullText,
+                sort,
+            })
+            .await
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|hit| hit.event_id)
+            .collect::<Vec<_>>()
+        }
+    };
+
+    let newest_order = [
+        page(1, buzz_search::SearchSort::Newest).await,
+        page(2, buzz_search::SearchSort::Newest).await,
+        page(3, buzz_search::SearchSort::Newest).await,
+    ]
+    .concat();
+    assert_eq!(newest_order, vec![newest, tie_low, tie_high, most_relevant]);
+    assert_eq!(
+        page(1, buzz_search::SearchSort::Relevance).await[0],
+        most_relevant
     );
 
     teardown(pool, &schema).await;
@@ -1019,6 +1051,7 @@ async fn channel_less_only_excludes_per_channel_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .unwrap();
@@ -1067,6 +1100,7 @@ async fn nul_bytes_in_query_are_sanitized() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("NUL-containing search query should not bubble a Postgres error");
@@ -1110,6 +1144,7 @@ async fn enormous_page_number_is_clamped() {
             page: u32::MAX,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("huge page number should be bounded, not error");
@@ -1139,6 +1174,7 @@ async fn very_long_query_is_bounded_before_pg_parse() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("long search query should be capped before Postgres parses it");
@@ -1280,6 +1316,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -1376,6 +1413,7 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
             page: 1,
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -1483,6 +1521,7 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
             page: 1,
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
         })
         .await
         .expect("search ok");
@@ -1509,6 +1548,230 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
         "expected exactly 1 hit (the kind:9 control), got {} (kinds={kinds:?})",
         result.hits.len(),
     );
+
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifact_search_uses_only_live_current_head() {
+    let (pool, schema) = setup().await;
+    let community = mk_community(&pool, "artifact-search.example").await;
+    let pk = rand_bytes32();
+    let old = rand_bytes32();
+    let head = rand_bytes32();
+    let artifact = Uuid::new_v4();
+    insert_event(
+        &pool,
+        community,
+        old,
+        pk,
+        45010,
+        "artifactneedle old",
+        None,
+        1700000000,
+    )
+    .await;
+    insert_event(
+        &pool,
+        community,
+        head,
+        pk,
+        45010,
+        "artifactneedle current",
+        None,
+        1700000001,
+    )
+    .await;
+    sqlx::query("INSERT INTO artifact_heads(community_id,artifact_id,event_id,channel_id,artifact_type) VALUES($1,$2,$3,$4,'buzz.task')")
+        .bind(community.as_uuid()).bind(artifact).bind(head.as_slice()).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+    let svc = SearchService::new(pool.clone());
+    let query = SearchQuery {
+        community,
+        q: "artifactneedle".into(),
+        channel_scope: ChannelScope::Any,
+        kinds: Some(vec![45010]),
+        authors: None,
+        since: None,
+        until: None,
+        page: 1,
+        per_page: 10,
+        mode: buzz_search::SearchMode::FullText,
+        sort: buzz_search::SearchSort::Relevance,
+    };
+    let result = svc.search(&query).await.unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].event_id, head);
+    sqlx::query("UPDATE artifact_heads SET deleted=true WHERE community_id=$1 AND artifact_id=$2")
+        .bind(community.as_uuid())
+        .bind(artifact)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let result = svc.search(&query).await.unwrap();
+    assert!(result.hits.is_empty());
+    teardown(pool, &schema).await;
+}
+
+/// Insert a current kind:0 profile; returns its event id.
+async fn put_profile(pool: &PgPool, community: CommunityId, content: &str, at: i64) -> [u8; 32] {
+    let id = rand_bytes32();
+    insert_event(pool, community, id, rand_bytes32(), 0, content, None, at).await;
+    id
+}
+
+async fn profile_names(
+    pool: &PgPool,
+    community: CommunityId,
+    q: &str,
+    page: u32,
+    per_page: u32,
+) -> Vec<[u8; 32]> {
+    SearchService::new(pool.clone())
+        .search_profile_names(community, q, page, per_page)
+        .await
+        .expect("profile name search")
+        .hits
+        .into_iter()
+        .map(|hit| hit.event_id)
+        .collect()
+}
+
+/// Profile name search keeps the NIP-50 prefix rule (whole words in any
+/// order, last word a prefix) but only `name` and `display_name` count. An
+/// equal name ranks first, then a name prefix, then a later word prefix, then
+/// other matches; ties stay newest first.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_names_match_name_words_only() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "profile-names.example").await;
+    let other = mk_community(&pool, "profile-names-other.example").await;
+
+    let exact = put_profile(
+        &pool,
+        c,
+        r#"{"display_name":"Wes","picture":"data:image/png;base64,P7+Wes+dYL"}"#,
+        1_700_000_000,
+    )
+    .await;
+    let westie_old = put_profile(&pool, c, r#"{"name":"Westie"}"#, 1_700_000_010).await;
+    let westie_new = put_profile(&pool, c, r#"{"display_name":"Westie"}"#, 1_700_000_020).await;
+    let word = put_profile(
+        &pool,
+        c,
+        r#"{"name":"carl","display_name":"Carl (borrowed from Wes)"}"#,
+        1_700_000_030,
+    )
+    .await;
+    let full = put_profile(
+        &pool,
+        c,
+        r#"{"name":"wjohnson","display_name":"Wes  Johnson"}"#,
+        1_700_000_040,
+    )
+    .await;
+    // Words split across the two fields still match, as in NIP-50 search.
+    let split = put_profile(
+        &pool,
+        c,
+        r#"{"name":"johnson","display_name":"Wes"}"#,
+        1_700_000_050,
+    )
+    .await;
+    // A word that only contains the query is not a match: same as NIP-50.
+    put_profile(&pool, c, r#"{"name":"Dwes"}"#, 1_700_000_060).await;
+
+    for (i, noise) in [
+        r#"{"display_name":"Blueberry","picture":"data:image/png;base64,P7+Wes+dYL"}"#,
+        r#"{"display_name":"Pollen","about":"Wes Johnson's bestie"}"#,
+        r#"{"display_name":"Pollen","nip05":"wes@example.com"}"#,
+        r#"{"display_name":"Pollen","banner":"https://wes.example/b.png"}"#,
+        r#"{"name":["wes"],"display_name":{"text":"wes"}}"#,
+        r#"not json wes"#,
+        r#"["wes"]"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_profile(&pool, c, noise, 1_700_000_100 + i as i64).await;
+    }
+    // A replaced profile (soft-deleted) no longer matches.
+    let replaced = put_profile(&pool, c, r#"{"name":"wes"}"#, 1_699_000_000).await;
+    sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = $2")
+        .bind(c.as_uuid())
+        .bind(&replaced[..])
+        .execute(&pool)
+        .await
+        .expect("replace profile");
+    put_profile(&pool, other, r#"{"name":"Wes"}"#, 1_700_000_000).await;
+
+    // Tier 0: exact (Wes; "Wes" display name of `split`), newest first.
+    // Tier 1: name prefix (Wes Johnson, Westie x2). Tier 2: later word (Carl).
+    let all = vec![split, exact, full, westie_new, westie_old, word];
+    assert_eq!(profile_names(&pool, c, "WES", 1, 100).await, all);
+    // Pages split the same order without overlap or gaps.
+    assert_eq!(profile_names(&pool, c, "wes", 1, 4).await, all[..4]);
+    assert_eq!(profile_names(&pool, c, "wes", 2, 4).await, all[4..]);
+    assert!(profile_names(&pool, c, "wes", 3, 4).await.is_empty());
+
+    // Word order does not matter; completed words must be whole words.
+    assert_eq!(
+        profile_names(&pool, c, "johnson wes", 1, 100).await,
+        vec![split, full]
+    );
+    assert_eq!(
+        profile_names(&pool, c, "wes  jo", 1, 100).await,
+        vec![full, split]
+    );
+    assert!(profile_names(&pool, c, "estie", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "bestie", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "example", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "%", 1, 100).await.is_empty());
+    assert!(profile_names(&pool, c, "   ", 1, 100).await.is_empty());
+
+    // The query and the names are normalized by the same SQL, so a non-ASCII
+    // exact name is tier 0 whatever the database collation lower-cases.
+    let emile = put_profile(&pool, c, r#"{"name":"Émile"}"#, 1_700_000_200).await;
+    let emilee = put_profile(&pool, c, r#"{"name":"Émilee"}"#, 1_700_000_210).await;
+    assert_eq!(
+        profile_names(&pool, c, "Émile", 1, 100).await,
+        vec![emile, emilee]
+    );
+
+    teardown(pool, &schema).await;
+}
+
+/// Stored kind:0 content is whatever the signer sent. Content that cannot
+/// become jsonb must not fail the query for everyone else.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_names_survive_unparsable_content() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "profile-names-unparsable.example").await;
+
+    let plain = put_profile(&pool, c, r#"{"name":"Wes"}"#, 1_700_000_000).await;
+
+    // Valid JSON objects that cannot become jsonb. Each one names Wes; it is
+    // not findable, but it must not break the search.
+    let deep = format!(
+        r#"{{"name":"Wes","nested":{}{}}}"#,
+        "[".repeat(60_000),
+        "]".repeat(60_000)
+    );
+    for (i, poison) in [
+        r#"{"name":"Wes","about":"\u0000"}"#,
+        r#"{"name":"Wes","about":"\ud800"}"#,
+        r#"{"name":"Wes","lud16":1e1000000}"#,
+        deep.as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_profile(&pool, c, poison, 1_700_000_100 + i as i64).await;
+    }
+
+    assert_eq!(profile_names(&pool, c, "wes", 1, 100).await, vec![plain]);
 
     teardown(pool, &schema).await;
 }

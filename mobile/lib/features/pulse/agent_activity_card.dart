@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/identity_names/identity_names.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/utils/string_utils.dart';
 import 'note_card.dart';
 import 'pulse_models.dart';
 
@@ -19,8 +19,12 @@ class AgentActivityCard extends HookConsumerWidget {
     super.key,
     required this.group,
     required this.reactions,
+    required this.names,
     this.onReactionChanged,
   });
+
+  /// The Pulse timeline's identity labels.
+  final IdentityNames names;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -28,7 +32,7 @@ class AgentActivityCard extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[group.pubkey])) ??
         ref.read(userCacheProvider.notifier).get(group.pubkey);
-    final name = profile?.label ?? shortPubkey(group.pubkey);
+    final name = names.labelFor(group.pubkey);
 
     return Column(
       children: [
@@ -46,8 +50,8 @@ class AgentActivityCard extends HookConsumerWidget {
                     AvatarImage(
                       imageUrl: profile?.avatarUrl,
                       radius: 18,
-                      backgroundColor: context.colors.primaryContainer,
-                      fallback: const Icon(LucideIcons.bot, size: 18),
+                      backgroundColor: context.controlSurface,
+                      fallback: const Icon(BuzzIcons.bot, size: 18),
                       isAgent: true,
                     ),
                     Positioned(
@@ -119,8 +123,8 @@ class AgentActivityCard extends HookConsumerWidget {
                 if (group.notes.length > 1)
                   Icon(
                     expanded.value
-                        ? LucideIcons.chevronUp
-                        : LucideIcons.chevronDown,
+                        ? BuzzIcons.chevronUp
+                        : BuzzIcons.chevronDown,
                     size: 18,
                     color: context.colors.onSurfaceVariant,
                   ),
@@ -143,6 +147,7 @@ class AgentActivityCard extends HookConsumerWidget {
                           reactedByCurrentUser: false,
                         ),
                     isAgent: true,
+                    names: names,
                     onReactionChanged: onReactionChanged,
                   ),
                   if (note != group.notes.last)

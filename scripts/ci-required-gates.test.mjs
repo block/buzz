@@ -88,3 +88,61 @@ for (const gate of gates) {
     }
   });
 }
+
+// The Desktop gate re-derives which of its needs were selected. Each job's
+// `if:` must match the gate's expression, or a selected job could be skipped
+// (or an unselected one run) with the gate's expectation out of step.
+const desktopWorkflow = readFileSync(
+  new URL("../.github/workflows/_ci-desktop.yml", import.meta.url),
+  "utf8",
+);
+function desktopJob(name) {
+  return desktopWorkflow.match(
+    new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"),
+  )[1];
+}
+const desktopGate = desktopJob("desktop");
+const gateSelection = (key) =>
+  desktopGate.match(new RegExp(`^ {10}${key}: \\$\\{\\{ (.+) \\}\\}$`, "m"))[1];
+const desktopJobs = {
+  "desktop-js": "JS_SELECTED",
+  "desktop-tauri": "RUST_SELECTED",
+  "desktop-smoke-e2e": "FRONTEND_SELECTED",
+  "desktop-windows-build": "FRONTEND_SELECTED",
+};
+function evaluate(expression, event, inputs) {
+  const substituted = expression.replace(
+    /github\.event_name|inputs\.([\w_]+)/g,
+    (key, input) =>
+      input === undefined ? JSON.stringify(event) : String(inputs[input] === true),
+  );
+  return runInNewContext(substituted, {}, { timeout: 100 });
+}
+test("desktop gate selection matches each job's if: condition", () => {
+  for (const [job, key] of Object.entries(desktopJobs)) {
+    const condition = desktopJob(job).match(/^ {4}if: (.+)$/m)[1];
+    assert.equal(condition, gateSelection(key), `${job} vs ${key}`);
+  }
+});
+test("desktop gate selects jobs per changed-path input", () => {
+  const selected = (event, inputs) =>
+    Object.keys(desktopJobs)
+      .filter((job) => evaluate(gateSelection(desktopJobs[job]), event, inputs))
+      .sort();
+  // Rust-only: Desktop JS still runs, because node:test pins relay/DB constants.
+  assert.deepEqual(selected("pull_request", { rust: true }), [
+    "desktop-js",
+    "desktop-tauri",
+  ]);
+  assert.deepEqual(selected("pull_request", { desktop: true }), [
+    "desktop-js",
+    "desktop-smoke-e2e",
+    "desktop-windows-build",
+  ]);
+  assert.deepEqual(
+    selected("pull_request", { desktop: true, desktop_rust: true }),
+    Object.keys(desktopJobs).sort(),
+  );
+  assert.deepEqual(selected("push", {}), Object.keys(desktopJobs).sort());
+  assert.deepEqual(selected("pull_request", {}), []);
+});

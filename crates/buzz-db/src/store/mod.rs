@@ -20,6 +20,14 @@ pub mod deletion;
 pub mod dm;
 /// Event storage and retrieval.
 pub mod event;
+/// App-owned push enqueue and channel TTL refresh for inserted events.
+pub(crate) mod event_follow_up;
+/// Per-community NIP-FI issuer bindings.
+pub mod nip_fi_binding;
+
+#[cfg(test)]
+mod event_follow_up_postgres_tests;
+
 /// Home feed queries.
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
@@ -30,6 +38,8 @@ pub mod moderation;
 pub mod operator_listener;
 /// Monthly table partition management.
 pub mod partition;
+/// Private signer-owned accessory read progress.
+pub mod personal_read;
 /// Buzz product-feedback sidecar persistence.
 pub mod product_feedback;
 /// Community-scoped push lease and durable wake-outbox persistence.
@@ -62,3 +72,14 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+/// NIP-AR artifact lifecycle and durable delivery.
+pub mod artifact;
+
+mod artifact_query;
+
+#[cfg(test)]
+mod artifact_postgres_tests;
+
+#[cfg(test)]
+mod admission_postgres_tests;

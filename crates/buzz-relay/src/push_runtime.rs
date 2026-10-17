@@ -9,9 +9,27 @@ use buzz_core::filter::{filters_match, reader_authorized_for_event};
 use chrono::{TimeDelta, Utc};
 use nostr::Filter;
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{handlers::push_lease::Subscription, nip98::nip98_header, state::AppState};
+
+// Dropping a SQLx transaction rolls it back; committed claims remain leased
+// until expiry. Dropping HTTP cannot recall requests already accepted by the
+// gateway. Do not acknowledge, delete, or retry a job merely on cancellation.
+async fn run_push_task(
+    enabled: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+    work: impl std::future::Future<Output = ()>,
+) {
+    if !enabled {
+        return;
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {},
+        _ = work => {},
+    }
+}
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
@@ -56,6 +74,15 @@ enum DeliveryResponse {
 /// transaction — plus one complete/retry statement each — regardless of
 /// batch size or how many (event, lease) pairs match.
 pub async fn run_matcher(state: Arc<AppState>) {
+    run_push_task(
+        state.config.push_enabled,
+        &state.push_cancel,
+        matcher_loop(&state),
+    )
+    .await;
+}
+
+async fn matcher_loop(state: &AppState) {
     let mut idle_delay = IDLE_POLL_FLOOR;
     let mut last_reap = tokio::time::Instant::now();
     loop {
@@ -75,7 +102,7 @@ pub async fn run_matcher(state: Arc<AppState>) {
         {
             Ok(Some(batch)) => {
                 idle_delay = IDLE_POLL_FLOOR;
-                process_match_batch(&state, batch).await;
+                process_match_batch(state, batch).await;
             }
             Ok(None) => {
                 tokio::time::sleep(idle_delay).await;
@@ -111,11 +138,18 @@ async fn load_match_context(
     let mut authors: Vec<Vec<u8>> = leases.iter().map(|lease| lease.author.clone()).collect();
     authors.sort_unstable();
     authors.dedup();
+    // System channels never push: drop their membership pairs, so a channel
+    // event there matches no lease (channel events require membership).
+    let system = state
+        .db
+        .system_channel_ids_among(batch.community, &channels)
+        .await?;
     let memberships = state
         .db
         .membership_pairs(batch.community, &channels, &authors)
         .await?
         .into_iter()
+        .filter(|(channel, _)| !system.contains(channel))
         .collect();
     Ok(MatchContext {
         leases,
@@ -336,6 +370,15 @@ fn push_filter_authorized_for_event(
 
 /// Continuously claim due wakes and deliver them through the push gateway.
 pub async fn run_delivery_worker(state: Arc<AppState>) {
+    run_push_task(
+        state.config.push_enabled,
+        &state.push_cancel,
+        delivery_worker_loop(&state),
+    )
+    .await;
+}
+
+async fn delivery_worker_loop(state: &AppState) {
     let http = match reqwest::Client::builder()
         .timeout(state.config.push_gateway_timeout)
         .build()
@@ -350,7 +393,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
-        match state.db.usage_community_hosts().await {
+        match state.db.active_community_hosts().await {
             Ok(communities) => {
                 for community in communities {
                     let community = buzz_core::CommunityId::from_uuid(community.id);
@@ -359,8 +402,13 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
                         Ok(wakes) => {
                             for wake in wakes {
                                 found = true;
-                                deliver_one(&state, &http, wake).await;
+                                deliver_one(state, &http, wake).await;
                             }
+                        }
+                        // The community left `active` after the host scan; the
+                        // next scan skips it, so this is not worth a warning.
+                        Err(e @ buzz_db::DbError::AccessDenied(_)) => {
+                            debug!(%community, "push wake claim refused: {e}")
                         }
                         Err(e) => warn!(%community, "push wake claim failed: {e}"),
                     }
@@ -772,5 +820,72 @@ mod tests {
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0]["request_id"], request_id.to_string());
         assert_eq!(bodies[1]["request_id"], request_id.to_string());
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::run_push_task;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn relay_shutdown_stops_both_worker_entry_points() {
+        let mut state = crate::state::tests::test_state().await;
+        let config = &mut Arc::get_mut(&mut state).unwrap().config;
+        Arc::get_mut(config).unwrap().push_enabled = true;
+        state.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                super::run_matcher(state.clone()),
+                super::run_delivery_worker(state.clone())
+            );
+        })
+        .await
+        .expect("both real workers must honor shutdown before touching dependencies");
+    }
+
+    #[tokio::test]
+    async fn disabled_or_cancelled_worker_never_polls_work() {
+        for enabled in [false, true] {
+            let cancel = CancellationToken::new();
+            if enabled {
+                cancel.cancel();
+            }
+            run_push_task(enabled, &cancel, async { panic!("worker must not start") }).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_drops_in_flight_work_without_waiting_for_it() {
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = OnDrop(dropped.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            run_push_task(true, &worker_cancel, async move {
+                let _guard = guard;
+                started.send(()).unwrap();
+                std::future::pending::<()>().await;
+            })
+            .await;
+        });
+        ready.await.unwrap();
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

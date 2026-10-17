@@ -988,3 +988,49 @@ fn databricks_static_token_error_redacts_echoed_token() {
         "error lost its remediation: {error}"
     );
 }
+
+/// Trimmed from a real `claude-agent-acp` 0.36.1 `session/new` response: the
+/// adapter labels options with `name`, not `displayName`.
+fn claude_code_models_raw() -> serde_json::Value {
+    serde_json::json!({
+        "agent": { "name": "claude-agent-acp", "version": "0.36.1" },
+        "stable": { "configOptions": [{
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "opus[1m]",
+            "options": [
+                { "value": "default", "name": "Default (recommended)",
+                  "description": "Use the default model (currently claude-opus-5-5[1m])" },
+                { "value": "opus[1m]", "name": "Opus",
+                  "description": "Opus with 1M context · Best for everyday, complex tasks" },
+                { "value": "haiku", "name": "Haiku",
+                  "description": "Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok" }
+            ]
+        }]}
+    })
+}
+
+#[test]
+fn claude_code_models_keep_adapter_name_description_and_current_value() {
+    let response = normalize_agent_models(&claude_code_models_raw(), None);
+
+    let haiku = response.models.iter().find(|m| m.id == "haiku").unwrap();
+    assert_eq!(haiku.name.as_deref(), Some("Haiku"));
+    assert_eq!(
+        haiku.description.as_deref(),
+        Some("Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok")
+    );
+    assert_eq!(response.agent_default_model.as_deref(), Some("opus[1m]"));
+}
+
+#[test]
+fn stable_current_value_outranks_unstable_current_model_id() {
+    let mut raw = claude_code_models_raw();
+    raw["unstable"] = serde_json::json!({ "currentModelId": "haiku", "availableModels": [] });
+
+    let response = normalize_agent_models(&raw, None);
+
+    assert_eq!(response.agent_default_model.as_deref(), Some("opus[1m]"));
+}
