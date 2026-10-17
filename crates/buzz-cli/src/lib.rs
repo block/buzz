@@ -408,6 +408,19 @@ buzz agents archived"
 
 #[derive(Subcommand)]
 pub enum MessagesCmd {
+    /// Stream authenticated, signed message events as newline-delimited JSON.
+    /// Disconnects and authorization failures exit nonzero; callers own replay.
+    Watch {
+        /// Channel UUID to subscribe to.
+        #[arg(long)]
+        channel: String,
+        /// Only accept events from these public keys (repeatable).
+        #[arg(long = "author", required = true)]
+        authors: Vec<String>,
+        /// Inclusive Unix timestamp for stored events and live delivery.
+        #[arg(long)]
+        since: u64,
+    },
     /// Send a message to a channel
     #[command(
         after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
@@ -2449,7 +2462,8 @@ mod tests {
                 "send",
                 "send-diff",
                 "thread",
-                "vote"
+                "vote",
+                "watch"
             ]
         );
         assert_eq!(
@@ -2587,7 +2601,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

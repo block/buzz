@@ -937,6 +937,11 @@ pub async fn dispatch(
 ) -> Result<(), CliError> {
     use crate::MessagesCmd;
     match cmd {
+        MessagesCmd::Watch {
+            channel,
+            authors,
+            since,
+        } => super::watch::run(client, &channel, &authors, since).await,
         MessagesCmd::Send {
             channel,
             content,

@@ -142,3 +142,5 @@ mod tests {
             .any(|tag| tag.as_slice().first().map(String::as_str) == Some("h")));
     }
 }
+
+pub(crate) mod watch;
