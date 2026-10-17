@@ -114,6 +114,11 @@ Debian/Ubuntu:
 sudo apt-get install -y --no-install-recommends \
   build-essential curl file libasound2-dev libayatana-appindicator3-dev \
   libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+  libclang-dev libegl1-mesa-dev libgbm-dev libpipewire-0.3-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-pipewire gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  gstreamer1.0-libav \
+  libwayland-dev libxcb1-dev libxcb-randr0-dev \
   patchelf wget
 ```
 

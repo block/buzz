@@ -507,6 +507,12 @@ pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
+/// Ephemeral: bounded H.264 video batches and screen-share stop notifications, scoped
+/// to the active private huddle backing channel by exactly one `h` tag.
+pub const KIND_HUDDLE_SCREEN: u32 = 24811;
+
+/// Ephemeral H.264 webcam video and camera stop notifications in a huddle.
+pub const KIND_HUDDLE_CAMERA: u32 = 24812;
 // Stream messaging
 /// NIP-29 group chat message kind. V1 used kind:10001 (replaceable range — wrong), then 40001.
 ///
@@ -740,6 +746,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TYPING_INDICATOR,
     KIND_AGENT_PRESENCE,
     KIND_HUDDLE_REACTION,
+    KIND_HUDDLE_SCREEN,
+    KIND_HUDDLE_CAMERA,
     KIND_BLOSSOM_AUTH,
     KIND_OPERATOR_LISTENER_REGISTRATION,
     KIND_PAIRING,
