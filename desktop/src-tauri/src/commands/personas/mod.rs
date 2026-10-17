@@ -63,6 +63,7 @@ pub(in crate::commands) use pending::retain_persona_pending;
 pub(in crate::commands) use pending::retain_persona_pending_at;
 pub(crate) use pending::tombstone_persona_at;
 pub(super) use pending::tombstone_persona_pending;
+mod propagate;
 mod create;
 pub use create::create_persona;
 mod sharing;
@@ -94,6 +95,8 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
 
 #[cfg(test)]
 mod delete_cascade_tests;
+#[cfg(test)]
+mod respond_to_propagation_tests;
 
 /// Return pubkeys of every managed agent whose definition is the given persona.
 ///
