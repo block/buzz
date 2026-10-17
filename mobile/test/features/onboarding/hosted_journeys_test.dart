@@ -121,7 +121,7 @@ void main() {
       expect(f.browserStarts, logins);
 
       f.expiredSession = true;
-      f.container.read(hostedRelayAuthProvider).invalidate();
+      f.assertionNow = f.assertionNow.add(const Duration(minutes: 6));
       await expectLater(
         session.queryRelay(const []),
         throwsA(AccountFailure.signedOut),
@@ -150,7 +150,7 @@ void main() {
       expect((await f.storage.loadAll()).single.nsec, community.nsec);
       // A legacy account can link the existing saved key on first issuance.
       f.bound = null;
-      f.container.read(hostedRelayAuthProvider).invalidate();
+      f.assertionNow = f.assertionNow.add(const Duration(minutes: 6));
       await session.reconnect();
       await f.settle(tester);
       expect(f.bound, f.keys.public);
@@ -189,7 +189,7 @@ void main() {
       // A timed-out query cannot dispatch later when a slow issuer completes.
       final stalled = Completer<void>();
       f.beforeAssertionReturn = () => stalled.future;
-      f.container.read(hostedRelayAuthProvider).invalidate();
+      f.assertionNow = f.assertionNow.add(const Duration(minutes: 6));
       final queries = f.sent('/query').length;
       await expectLater(
         session.queryRelay(const [], timeout: const Duration(milliseconds: 20)),

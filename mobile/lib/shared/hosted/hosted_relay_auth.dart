@@ -155,12 +155,6 @@ class HostedRelayAuth extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// A rejected assertion is never reused. The next explicit request asks the
-  /// issuer again; only a rejected account session asks the user to sign in.
-  void invalidate() {
-    _cached = null;
-  }
-
   void rejected(
     RelayConfig config,
     String? usedToken, {

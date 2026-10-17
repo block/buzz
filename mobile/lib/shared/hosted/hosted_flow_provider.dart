@@ -106,7 +106,6 @@ HostedFlow createHostedFlow(
   );
   void onCompleted() {
     if (flow.reconnecting && flow.stage == HostedFlowStage.complete) {
-      ref.read(hostedRelayAuthProvider).invalidate();
       unawaited(ref.read(relaySessionProvider.notifier).reconnect());
     } else if (flow.accountOnly && flow.stage == HostedFlowStage.complete) {
       ref.read(communityGridLandingProvider.notifier).request();
