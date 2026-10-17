@@ -52,7 +52,10 @@ class HostedJourneyFixture {
   bool offerProfile = true;
   bool profileUnavailable = false;
   bool rejectList = false;
+  bool missingList = false;
   bool loseCreateResponse = false;
+  bool loseClaimResponse = false;
+  bool inviteExpired = false;
   final owned = <Map<String, dynamic>>[];
   final expiry = DateTime.now()
       .toUtc()
@@ -182,6 +185,7 @@ class HostedJourneyFixture {
       result = {'community': created};
     } else if (path.endsWith('/communities/joined')) {
       if (rejectList) return http.Response('{}', 503);
+      if (missingList) return http.Response('{}', 404);
       result = {'communities': rows};
     } else if (path == '/api/join-policy') {
       if (policyFailures-- > 0) throw AccountFailure.unavailable;
@@ -194,8 +198,16 @@ class HostedJourneyFixture {
         },
       };
     } else if (path == '/api/invites/accept-policy') {
+      if (inviteExpired) {
+        return http.Response(jsonEncode({'error': 'invite_expired'}), 410);
+      }
       result = {'receipt': 'synthetic-policy-receipt'};
     } else if (path == '/api/invites/claim') {
+      if (loseClaimResponse) {
+        loseClaimResponse = false;
+        rows.add(row(request.url.host.split('.').first));
+        throw AccountFailure.unavailable;
+      }
       result = {'host': request.url.host};
     } else {
       throw StateError('Unexpected journey request: ${request.method} $path');

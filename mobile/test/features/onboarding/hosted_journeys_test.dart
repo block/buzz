@@ -317,6 +317,61 @@ void main() {
       expect(await f.storage.loadAll(), isEmpty);
       expect(await f.storage.loadActiveId(), isNull);
       expect((await f.store.read())!.pubkey, f.keys.public);
+
+      // An open relay's successful AUTH must not convert a failed invitation
+      // into a completed claim for a non-member.
+      f.offerProfile = false;
+      f.inviteExpired = true;
+      f.missingList = true;
+      await f.link(tester, 'one');
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(await f.storage.loadAll(), isEmpty);
+      expect(f.probes, isEmpty);
+
+      expect(
+        find.text('This invite has expired. Ask for a new invite link.'),
+        findsOneWidget,
+      );
+      f.missingList = false;
+      await f.link(tester, 'one');
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(await f.storage.loadAll(), isEmpty);
+      expect(f.probes, isEmpty);
+
+      // The server admits this identity but its reply is lost. The retained
+      // intent resumes after restart even once the code has expired.
+      f.inviteExpired = false;
+      f.missingList = false;
+      f.loseClaimResponse = true;
+      await f.link(tester, 'one');
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(await f.storage.loadAll(), isEmpty);
+      expect(f.rows, hasLength(1));
+      f.inviteExpired = true;
+      f.rejectList = true;
+      await f.restart(tester);
+      await f.tap(tester, 'Start login again');
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(await f.storage.loadAll(), isEmpty);
+      expect(f.probes, isEmpty);
+      f.rejectList = false;
+      await f.tap(tester, 'Try again');
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      final saved = (await f.storage.loadAll()).single;
+      expect(saved.relayUrl, 'wss://one.communities.buzz.xyz');
+      expect(saved.pubkey, f.keys.public);
+      expect(await f.storage.loadActiveId(), saved.id);
+      expect(find.text('Community home').hitTestable(), findsOneWidget);
     },
   );
 

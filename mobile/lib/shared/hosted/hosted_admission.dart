@@ -10,6 +10,7 @@ import 'account_identity_store.dart';
 import 'builderlab_account.dart';
 import 'community_entry_requirements.dart';
 import 'hosted_environment.dart';
+import 'hosted_communities.dart';
 import 'hosted_join_policy.dart';
 
 /// Builds a community only after scoped backup evidence and current binding.
@@ -70,36 +71,62 @@ class HostedAdmission {
     );
     checkCurrent();
     if (link is InviteDeepLink) {
-      final receipt = await freshJoinPolicyReceipt(
-        client: _http,
-        origin: uri,
-        code: link.code,
-        confirm: _confirmPolicy,
-        checkCurrent: checkCurrent,
-      );
-      final body = jsonEncode({'code': link.code, 'policy_receipt': ?receipt});
-      final url = uri.replace(scheme: 'https', path: '/api/invites/claim');
-      final header = await store.withKeys(
-        (keys) async => buildNip98AuthHeader(
-          method: 'POST',
-          url: url.toString(),
-          bodyBytes: utf8.encode(body),
-          nsec: keys.nsec,
-        ),
-      );
-      checkCurrent();
-      final request = http.Request('POST', url)
-        ..followRedirects = false
-        ..headers.addAll({
-          'Authorization': header,
-          'Content-Type': 'application/json',
-        })
-        ..body = body;
-      final response = await _http
-          .send(request)
-          .timeout(const Duration(seconds: 30));
-      await readJoinResponse(response);
-      checkCurrent();
+      try {
+        final receipt = await freshJoinPolicyReceipt(
+          client: _http,
+          origin: uri,
+          code: link.code,
+          confirm: _confirmPolicy,
+          checkCurrent: checkCurrent,
+        );
+        final body = jsonEncode({
+          'code': link.code,
+          'policy_receipt': ?receipt,
+        });
+        final url = uri.replace(scheme: 'https', path: '/api/invites/claim');
+        final header = await store.withKeys(
+          (keys) async => buildNip98AuthHeader(
+            method: 'POST',
+            url: url.toString(),
+            bodyBytes: utf8.encode(body),
+            nsec: keys.nsec,
+          ),
+        );
+        checkCurrent();
+        final request = http.Request('POST', url)
+          ..followRedirects = false
+          ..headers.addAll({
+            'Authorization': header,
+            'Content-Type': 'application/json',
+          })
+          ..body = body;
+        final response = await _http
+            .send(request)
+            .timeout(const Duration(seconds: 30));
+        await readJoinResponse(response);
+        checkCurrent();
+      } on HostedInviteFailure catch (failure) {
+        if (failure == HostedInviteFailure.policyRequired) rethrow;
+        checkCurrent();
+        // A lost claim response may outlive its code. AUTH alone also admits
+        // non-members on open relays; reconcile explicit membership first.
+        final List<AddCommunityDeepLink> joined;
+        try {
+          joined = await loadHostedCommunities(account);
+        } on AccountFailure catch (discoveryFailure) {
+          if (discoveryFailure == AccountFailure.rejected ||
+              discoveryFailure == AccountFailure.invalidResponse) {
+            throw failure;
+          }
+          rethrow;
+        }
+        checkCurrent();
+        if (!joined.any(
+          (entry) => Uri.parse(entry.relayUrl).host == uri.host,
+        )) {
+          rethrow;
+        }
+      }
     }
     if (account.account?.subject != subject) {
       throw AccountFailure.differentAccount;
