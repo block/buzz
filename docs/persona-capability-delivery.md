@@ -109,11 +109,19 @@ scripts. POSIX shell lifecycle execution is the implemented platform path.
   a failed start script.
 - `on_message` receives the exact text blocks joined by two newlines, immediately
   before a prompt or native steering request is written. Failure or timeout drops
-  that message without retrying it. It observes text; its output never replaces
+  that direct dispatch without retrying it and posts a failure notice. Rejected
+  messages remain in Buzz history and may still reach the model through later
+  history retrieval or context. Rejecting a native steering update does not
+  cancel the agent's existing task or trigger cancel-and-merge fallback.
+  It observes text; its output never replaces
   or augments a prompt and is not a memory-injection mechanism. It is not an OS
   read-only filesystem restriction.
 - `on_stop` runs once during normal harness teardown; failure is logged. Abrupt
   process termination cannot guarantee a cleanup callback.
+
+The prompt/steering rejection notice is:
+
+> The persona’s before-message script failed or timed out, so this message was not forwarded as a prompt or steering update. It remains in Buzz history. Review the script before sending again.
 
 These hooks are distinct from `buzz-agent` advisory MCP hooks and native
 Claude/Codex/OpenCode hooks. Native settings remain in effect in ordinary use.

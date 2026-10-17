@@ -5043,7 +5043,7 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
-const PERSONA_HOOK_REJECTION_NOTICE: &str = "The persona's before-message script failed or timed out. The message was not sent to the model. Review the script before sending again.";
+const PERSONA_HOOK_REJECTION_NOTICE: &str = "The persona’s before-message script failed or timed out, so this message was not forwarded as a prompt or steering update. It remains in Buzz history. Review the script before sending again.";
 
 /// Thread placement for a batch's terminal failure notice.
 ///

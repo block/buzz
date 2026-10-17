@@ -202,7 +202,7 @@ async fn rejected_steer_notice(hook_action: &str, threaded: bool) {
     notice.verify().unwrap();
     assert_eq!(notice.pubkey, rest.keys.public_key());
     assert_eq!(notice.kind, Kind::Custom(9));
-    assert_eq!(notice.content, "The persona's before-message script failed or timed out. The message was not sent to the model. Review the script before sending again.");
+    assert_eq!(notice.content, "The persona’s before-message script failed or timed out, so this message was not forwarded as a prompt or steering update. It remains in Buzz history. Review the script before sending again.");
     let channels: Vec<_> = notice
         .tags
         .iter()
