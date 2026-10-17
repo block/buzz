@@ -210,6 +210,10 @@ flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 
 Or from the repo root: `just mobile-check` and `just mobile-test`.
 
+When writing tests, favor a few journey tests that drive real user flows over
+many small logic tests. See
+[Testing Conventions](../AGENTS.md#testing-conventions).
+
 ## Android release signing
 
 Android release builds fail unless all upload-key inputs are supplied through the
