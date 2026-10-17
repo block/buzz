@@ -41,6 +41,9 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+pub(crate) mod sandbox;
+#[cfg(unix)]
+pub(crate) mod sandbox_profile;
 mod session_policy;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;

@@ -173,7 +173,7 @@ _ensure-sidecar-stubs:
     mkdir -p desktop/src-tauri/binaries
     SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
     if [[ "$TARGET" != *windows* ]]; then
-        SIDECARS+=(buzz-backend-kubernetes)
+        SIDECARS+=(buzz-backend-kubernetes nono)
     fi
     # Create missing stubs only: tauri-build reruns build.rs (and recompiles
     # buzz-desktop) whenever an externalBin's mtime changes, so touching
@@ -182,6 +182,11 @@ _ensure-sidecar-stubs:
         stub="desktop/src-tauri/binaries/${bin}-${TARGET}"
         [[ -e "$stub" ]] || : > "$stub"
     done
+
+# Install the pinned nono agent-sandbox sidecar (see desktop/src-tauri/nono.lock).
+# Run recipes need the real binary; check/test recipes only need the stub above.
+_nono-sidecar: _ensure-sidecar-stubs
+    ./scripts/fetch-nono.sh
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
@@ -324,6 +329,7 @@ desktop-release-build target="aarch64-apple-darwin":
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    ./scripts/fetch-nono.sh "$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
@@ -771,7 +777,7 @@ relay-release: bootstrap _ensure-migrations
 
 
 # Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
+dev *ARGS: bootstrap _nono-sidecar _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
@@ -833,7 +839,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
 
 # Run only the desktop app. No relay, database, Docker, migrations, or .env are needed.
 # The app opens normally and asks for a community before making a relay connection.
-desktop-standalone *ARGS: _ensure-sidecar-stubs
+desktop-standalone *ARGS: _nono-sidecar
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
@@ -865,7 +871,7 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
-staging *ARGS: bootstrap _ensure-sidecar-stubs
+staging *ARGS: bootstrap _nono-sidecar
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
@@ -900,7 +906,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the production relay (installs deps + builds agent tools automatically)
-production *ARGS: bootstrap _ensure-sidecar-stubs
+production *ARGS: bootstrap _nono-sidecar
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
