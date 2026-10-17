@@ -13,7 +13,10 @@ class _PairingWelcomeView extends StatelessWidget {
   final bool connectionLanding;
   final bool existingUser;
   final bool enteringCommunityLink;
+  final bool creatingCommunity;
+  final ValueChanged<String>? onSubmitCommunity;
   final VoidCallback? onCommunityLink;
+  final VoidCallback? onCreateCommunity;
   final VoidCallback? onBuilderlab;
   final String? accountStatus;
   final Widget? setupContent;
@@ -34,7 +37,10 @@ class _PairingWelcomeView extends StatelessWidget {
     this.connectionLanding = false,
     this.existingUser = false,
     this.enteringCommunityLink = false,
+    this.creatingCommunity = false,
+    this.onSubmitCommunity,
     this.onCommunityLink,
+    this.onCreateCommunity,
     this.onBuilderlab,
     this.accountStatus,
     this.setupContent,
@@ -48,13 +54,19 @@ class _PairingWelcomeView extends StatelessWidget {
         ? Duration.zero
         : const Duration(milliseconds: 220);
 
-    final selectedPage = enteringCommunityLink
+    final selectedPage = creatingCommunity
+        ? 4
+        : enteringCommunityLink
         ? 3
         : existingUser
         ? 2
         : 1;
-    Widget actions(int page) => page == 3
-        ? _CommunityLinkForm(onOpen: onOpenCommunity, onBack: onWelcomeBack)
+    Widget actions(int page) => page == 3 || page == 4
+        ? _CommunityLinkForm(
+            onOpen: onOpenCommunity,
+            onBack: onWelcomeBack,
+            onCreate: page == 4 ? onSubmitCommunity : null,
+          )
         : Column(
             children: [
               if (page == 1 && accountStatus != null) ...[
@@ -91,6 +103,14 @@ class _PairingWelcomeView extends StatelessWidget {
                   onPressed: onCommunityLink,
                   child: const Text('Enter a community link'),
                 ),
+                if (onCreateCommunity != null) ...[
+                  const SizedBox(height: Grid.xxs),
+                  FilledButton(
+                    style: context._onboardingGlassButtonStyle,
+                    onPressed: isBusy ? null : onCreateCommunity,
+                    child: const Text('Create a community'),
+                  ),
+                ],
                 const SizedBox(height: Grid.xxs),
                 FilledButton(
                   style: context._onboardingGlassButtonStyle,
@@ -303,7 +323,7 @@ class _PairingWelcomeView extends StatelessWidget {
                             child: Stack(
                               alignment: Alignment.bottomCenter,
                               children: [
-                                for (var page = 1; page < 4; page++)
+                                for (var page = 1; page < 5; page++)
                                   ExcludeFocus(
                                     excluding: page != selectedPage,
                                     child: ExcludeSemantics(

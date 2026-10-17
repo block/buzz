@@ -45,6 +45,12 @@ void main() {
       f.starterFailures = 2;
       final browserReturn = Completer<void>();
       f.beforeBrowserReturn = () => browserReturn.future;
+      final enrollmentReached = Completer<void>();
+      final enrollmentReturn = Completer<void>();
+      f.beforeEnrollmentReturn = () {
+        enrollmentReached.complete();
+        return enrollmentReturn.future;
+      };
       await f.mount(tester);
       await f.link(tester, 'one');
       try {
@@ -58,7 +64,26 @@ void main() {
       } finally {
         browserReturn.complete();
       }
+      await enrollmentReached.future.timeout(const Duration(seconds: 5));
+      await tester.pump();
+      try {
+        await tester.tap(find.text('Leave setup').hitTestable());
+        await tester.pump();
+      } finally {
+        enrollmentReturn.complete();
+      }
       await f.settle(tester);
+      expect(f.sent('/nsec-backups'), isEmpty);
+      final retainedKey = (await f.store.read())!.pubkey;
+      f.beforeEnrollmentReturn = null;
+      // A dispatched upload can succeed after cancellation. Its receipt must
+      // still be durable; resuming must not replay an acknowledged backup.
+      f.beforeUploadReturn = () => f.flow.leave();
+      await f.link(tester, 'one');
+      expect((await f.store.read())!.backup, isNotNull);
+      f.beforeUploadReturn = null;
+      await f.link(tester, 'one');
+      expect((await f.store.read())!.pubkey, retainedKey);
       expect(f.browserStarts, 1);
       final generated = (await f.store.read())!;
       expect(generated.pubkey, f.bound);
@@ -264,20 +289,64 @@ void main() {
   );
 
   journey(
-    'leaving consent performs no policy acceptance, claim or durable admission',
+    'signed-in invite survives restart and leaving consent abandons only setup',
     (tester, f) async {
       await f.initialize();
       await f.mount(tester);
       await f.link(tester, 'one');
       expect(find.text('Accept and join').hitTestable(), findsOneWidget);
-      await f.tap(tester, 'Leave setup');
-      expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
+      await f.restart(tester);
+      await f.tap(tester, 'Start login again');
+      expect(find.text('Accept and join').hitTestable(), findsOneWidget);
+      expect(f.browserStarts, 0);
+      expect(
+        f.sent('/api/join-policy').last.url.host,
+        'one.communities.buzz.xyz',
+      );
+      Navigator.of(
+        tester.element(find.text('Accept and join')),
+        rootNavigator: true,
+      ).pop();
+      await f.settle(tester);
+      await f.restart(tester);
+      expect(find.text('Start login again'), findsNothing);
+      expect(find.text('Community home').hitTestable(), findsOneWidget);
       expect(f.sent('/accept-policy'), isEmpty);
       expect(f.sent('/claim'), isEmpty);
       expect(f.probes, isEmpty);
       expect(await f.storage.loadAll(), isEmpty);
       expect(await f.storage.loadActiveId(), isNull);
       expect((await f.store.read())!.pubkey, f.keys.public);
+    },
+  );
+
+  journey(
+    'create survives a lost response and restart, then joins the same owned community',
+    (tester, f) async {
+      await f.initialize();
+      f.loseCreateResponse = true;
+      await f.mount(tester);
+      await f.tap(tester, 'Create a community');
+      await tester.enterText(find.byType(TextField).hitTestable(), 'new-home');
+      await f.tap(tester, 'Continue');
+      expect(find.text('Try again').hitTestable(), findsOneWidget);
+      expect(f.owned, hasLength(1));
+      expect(await f.storage.loadAll(), isEmpty);
+      await f.restart(tester);
+      await f.tap(tester, 'Start login again');
+      expect(find.byType(HostedProfileSetup), findsOneWidget);
+      await tester.enterText(find.byType(TextField).hitTestable(), 'Creator');
+      await f.tap(tester, 'Continue');
+      final saved = (await f.storage.loadAll()).single;
+      expect(saved.relayUrl, 'wss://new-home.communities.buzz.xyz');
+      expect(saved.nsec, f.keys.nsec);
+      expect(await f.storage.loadActiveId(), saved.id);
+      expect(f.sent('/v1/buzz/communities'), hasLength(2));
+      expect(f.owned, hasLength(1));
+      expect(f.sent('/status'), isEmpty);
+      expect(f.browserStarts, 0);
+      expect(f.profileWrites, ['Creator']);
+      expect(find.text('Community home').hitTestable(), findsOneWidget);
     },
   );
 

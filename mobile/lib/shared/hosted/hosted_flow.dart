@@ -14,6 +14,7 @@ import 'hosted_backup_service.dart';
 import 'hpke_backup.dart';
 import 'hosted_environment.dart';
 import 'hosted_communities.dart';
+import 'hosted_community_creation.dart';
 import 'hosted_community_connection.dart';
 import 'web_connect_binding.dart';
 import 'hosted_join_policy.dart';
@@ -50,6 +51,7 @@ enum HostedFlowProblem {
   inviteExpired,
   inviteExhausted,
   inviteInvalid,
+  communityCreationRejected,
 }
 
 /// Resolves only after relay admission is proven and local persistence completes.
@@ -363,6 +365,10 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() async {
       if (generation != _generation) return;
       if (!_acceptTarget(target)) return;
+      // Login may already be complete. Retain the destination before any
+      // remote work so restart can reconcile using the same saved identity.
+      await browser.retainIntent(_intent(target));
+      if (_disposed || generation != _generation) return;
       final restored = await account.restore();
       if (generation != _generation) return;
       if (restored == null) {
@@ -477,9 +483,14 @@ class HostedFlow extends ChangeNotifier {
             expectedPubkey: resolved.pubkey!,
             withKeys: store.withKeys,
             verify: _verifyBinding,
+            isCurrent: () => !_disposed && generation == _generation,
           );
         } else if (resolved.state == HostedIdentityState.needsBackup) {
-          await HostedBackupService(account, store, hpke: hpke).backup();
+          await HostedBackupService(
+            account,
+            store,
+            hpke: hpke,
+          ).backup(isCurrent: () => !_disposed && generation == _generation);
         } else {
           break;
         }
@@ -509,6 +520,7 @@ class HostedFlow extends ChangeNotifier {
         expectedPubkey: pubkey,
         withKeys: store.withKeys,
         verify: _verifyBinding,
+        isCurrent: () => !_disposed && generation == _generation,
       );
       if (generation != _generation || _disposed) return;
       if (!await _openWeb(returnTo)) throw BrowserAuthFailure.unavailable;
@@ -530,8 +542,16 @@ class HostedFlow extends ChangeNotifier {
       await _continueCommunities(generation, session.subject, pubkey);
       return;
     }
+    final destination = target is HostedCreateCommunity
+        ? await target.provision(
+            account,
+            pubkey,
+            () => !_disposed && generation == _generation,
+          )
+        : target;
+    if (_disposed || generation != _generation) return;
     await enterCommunity(
-      target,
+      destination,
       session.subject,
       pubkey,
       () => !_disposed && generation == _generation,
@@ -702,6 +722,8 @@ class HostedFlow extends ChangeNotifier {
   }
 
   static HostedFlowProblem _problemFor(Object error) => switch (error) {
+    HostedCreationFailure.rejected =>
+      HostedFlowProblem.communityCreationRejected,
     HostedInviteFailure.policyRequired =>
       HostedFlowProblem.invitePolicyRequired,
     HostedInviteFailure.expired => HostedFlowProblem.inviteExpired,
@@ -775,6 +797,9 @@ class HostedFlow extends ChangeNotifier {
   }
 
   static Map<String, String> _encode(BuzzDeepLink target) {
+    if (target is HostedCreateCommunity) {
+      return {'type': 'create', 'name': target.name};
+    }
     if (target is NostrBindDeepLink) return {'type': 'bind', ...target.fields};
     if (target is AddCommunityDeepLink) {
       return {'type': 'add', 'relay': target.relayUrl, 'name': target.name};
@@ -789,6 +814,12 @@ class HostedFlow extends ChangeNotifier {
   }
 
   static BuzzDeepLink? _decode(Map<String, String> intent) {
+    if (intent['type'] == 'create') {
+      final name = intent['name'];
+      return name != null && HostedCreateCommunity.validName(name)
+          ? HostedCreateCommunity(name)
+          : null;
+    }
     final fields = Map<String, String>.of(intent)
       ..remove('type')
       ..remove('paired_pubkey')

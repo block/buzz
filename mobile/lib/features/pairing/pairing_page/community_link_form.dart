@@ -1,7 +1,13 @@
 part of '../pairing_page.dart';
 
 class _CommunityLinkForm extends HookConsumerWidget {
-  const _CommunityLinkForm({required this.onOpen, required this.onBack});
+  const _CommunityLinkForm({
+    required this.onOpen,
+    required this.onBack,
+    this.onCreate,
+  });
+
+  final ValueChanged<String>? onCreate;
 
   final ValueChanged<Uri> onOpen;
   final VoidCallback? onBack;
@@ -23,6 +29,19 @@ class _CommunityLinkForm extends HookConsumerWidget {
 
     void submit() {
       if (busy || (failed && !flow.canRetry)) return;
+      final create = onCreate;
+      if (create != null) {
+        final name = controller.text.trim().toLowerCase();
+        if (!HostedCreateCommunity.validName(name)) {
+          error.value =
+              'Use letters, numbers and single hyphens (up to 63 characters).';
+          return;
+        }
+        error.value = null;
+        FocusManager.instance.primaryFocus?.unfocus();
+        create(name);
+        return;
+      }
       final link = parseCommunityLinkInput(controller.text);
       if (link == null) {
         error.value = 'Enter a valid community address or invite link.';
@@ -37,7 +56,11 @@ class _CommunityLinkForm extends HookConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         TextField(
-          key: const Key('community-link-input'),
+          key: Key(
+            onCreate != null
+                ? 'community-create-input'
+                : 'community-link-input',
+          ),
           controller: controller,
           enabled: !busy,
           keyboardType: TextInputType.url,
@@ -49,9 +72,17 @@ class _CommunityLinkForm extends HookConsumerWidget {
           ),
           cursorColor: context._onboardingInk,
           decoration: InputDecoration(
-            labelText: 'Community link or address',
+            labelText: onCreate != null
+                ? 'Community address'
+                : 'Community link or address',
+            helperText: onCreate != null
+                ? '.${HostedEnvironment.communitySuffix}'
+                : null,
+            helperStyle: TextStyle(color: context._onboardingMutedInk),
             labelStyle: TextStyle(color: context._onboardingInk),
-            hintText: 'community.example.com',
+            hintText: onCreate != null
+                ? 'my-community'
+                : 'community.example.com',
             hintStyle: TextStyle(color: context._onboardingMutedInk),
             errorText:
                 error.value ??

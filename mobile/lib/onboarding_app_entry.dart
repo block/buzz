@@ -8,6 +8,7 @@ import 'features/onboarding/hosted_connect_sheet.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'hosted_app_gate.dart';
 import 'shared/hosted/hosted_flow.dart';
+import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
 
 /// Navigation over the existing branded welcome surface.
@@ -18,6 +19,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final existingUser = useState(false);
+    final creating = useState(false);
     final enteringCommunityLink = useState(false);
     final flow = ref.watch(hostedFlowProvider);
     useListenable(flow);
@@ -92,6 +94,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
     void back() {
       unawaited(flow.leave());
       existingUser.value = false;
+      creating.value = false;
       enteringCommunityLink.value = false;
       FocusManager.instance.primaryFocus?.unfocus();
       ref.read(pairingProvider.notifier).reset();
@@ -99,7 +102,10 @@ class OnboardingAppEntry extends HookConsumerWidget {
 
     return PopScope(
       canPop:
-          !existingUser.value && !enteringCommunityLink.value && !inlineSetup,
+          !existingUser.value &&
+          !enteringCommunityLink.value &&
+          !creating.value &&
+          !inlineSetup,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) back();
       },
@@ -108,7 +114,13 @@ class OnboardingAppEntry extends HookConsumerWidget {
         addingCommunity: addingCommunity,
         existingUser: existingUser.value,
         enteringCommunityLink: enteringCommunityLink.value,
+        creatingCommunity: creating.value,
+        onSubmitCommunity: (name) {
+          creating.value = false;
+          unawaited(flow.start(HostedCreateCommunity(name)));
+        },
         onCommunityLink: () => enteringCommunityLink.value = true,
+        onCreateCommunity: busy ? null : () => creating.value = true,
         onBuilderlab: signingIn
             ? () => unawaited(flow.leave())
             : busy

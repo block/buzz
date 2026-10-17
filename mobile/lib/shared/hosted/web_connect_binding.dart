@@ -33,7 +33,15 @@ class WebConnectBindingService {
     required String expectedPubkey,
     required WithWebConnectKeys withKeys,
     required VerifyWebConnectBinding verify,
+    bool Function()? isCurrent,
   }) async {
+    void checkCurrent() {
+      if (isCurrent != null && !isCurrent()) {
+        throw const FormatException('Binding attempt cancelled');
+      }
+    }
+
+    checkCurrent();
     if (subject.isEmpty || !request.expiresAt.isAfter(now())) {
       throw const FormatException('Binding request expired or unauthenticated');
     }
@@ -70,6 +78,7 @@ class WebConnectBindingService {
       }
       return (payload: payload, pubkey: keys.public);
     });
+    checkCurrent();
     final boundPubkey = await verify(
       subject: subject,
       challengeId: request.challengeId,

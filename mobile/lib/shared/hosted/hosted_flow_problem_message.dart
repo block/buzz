@@ -3,6 +3,8 @@ import 'hosted_flow.dart';
 String hostedFlowProblemMessage(
   HostedFlowProblem? problem,
 ) => switch (problem) {
+  HostedFlowProblem.communityCreationRejected =>
+    'This community could not be created. Leave setup to choose another address, or check your hosted community limit in Builderlab.',
   HostedFlowProblem.unsupportedEnvironment =>
     'This community needs a different or unsupported Builderlab environment. Use an app build configured for this community.',
   HostedFlowProblem.accountSetupRequired =>

@@ -1,6 +1,16 @@
 /// Trusted build configuration, never supplied by a deep link or relay.
 abstract final class HostedEnvironment {
   static final Uri origin = _origin();
+  static const _communityAccounts = {
+    'communities.buzz.xyz': 'https://app.builderlab.xyz',
+    'communities.public.builderlabstaging.xyz':
+        'https://app.builderlabstaging.xyz',
+  };
+
+  /// Creation and admission use the same trusted build-specific host mapping.
+  static String get communitySuffix => _communityAccounts.entries
+      .singleWhere((entry) => Uri.parse(entry.value) == origin)
+      .key;
 
   /// Reserved domains cannot fall back to Nostr-only onboarding, even when
   /// this build does not support their account environment.
@@ -25,11 +35,8 @@ abstract final class HostedEnvironment {
       return null;
     }
     final host = relay.host.toLowerCase();
-    if (host.endsWith('.communities.buzz.xyz')) {
-      return Uri.parse('https://app.builderlab.xyz');
-    }
-    if (host.endsWith('.communities.public.builderlabstaging.xyz')) {
-      return Uri.parse('https://app.builderlabstaging.xyz');
+    for (final entry in _communityAccounts.entries) {
+      if (host.endsWith('.${entry.key}')) return Uri.parse(entry.value);
     }
     return null;
   }

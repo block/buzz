@@ -35,6 +35,8 @@ class HostedJourneyFixture {
   final storage = CommunityStorage();
   final requests = <http.Request>[];
   Future<void> Function()? beforeBrowserReturn;
+  Future<void> Function()? beforeEnrollmentReturn;
+  Future<void> Function()? beforeUploadReturn;
   final probes = <Community>[];
   final profileWrites = <String>[];
   final recoveryScopes = <InviteJoinRecoveryScope>[];
@@ -50,6 +52,8 @@ class HostedJourneyFixture {
   bool offerProfile = true;
   bool profileUnavailable = false;
   bool rejectList = false;
+  bool loseCreateResponse = false;
+  final owned = <Map<String, dynamic>>[];
   final expiry = DateTime.now()
       .toUtc()
       .add(const Duration(minutes: 5))
@@ -142,6 +146,7 @@ class HostedJourneyFixture {
         'identity': {'pubkey_hex': bound},
       };
     } else if (path.endsWith('/enrollment')) {
+      await beforeEnrollmentReturn?.call();
       result = {
         'version': 1,
         'suite': {'kem_id': 16, 'kdf_id': 1, 'aead_id': 2},
@@ -155,10 +160,26 @@ class HostedJourneyFixture {
             .replaceAll('=', ''),
       };
     } else if (path.endsWith('/nsec-backups')) {
+      await beforeUploadReturn?.call();
       result = {
         'stored': true,
         'backup_id': jsonDecode(request.body)['backup_id'],
       };
+    } else if (path.endsWith('/v1/buzz/communities')) {
+      final name = jsonDecode(request.body)['name'] as String;
+      final created =
+          owned
+              .where(
+                (row) => row['name'] == name && row['owner_pubkey'] == bound,
+              )
+              .firstOrNull ??
+          {...row(name), 'owner_pubkey': bound};
+      if (!owned.contains(created)) owned.add(created);
+      if (loseCreateResponse) {
+        loseCreateResponse = false;
+        throw AccountFailure.unavailable;
+      }
+      result = {'community': created};
     } else if (path.endsWith('/communities/joined')) {
       if (rejectList) return http.Response('{}', 503);
       result = {'communities': rows};
@@ -201,7 +222,7 @@ class HostedJourneyFixture {
     },
   );
 
-  Future<void> mount(WidgetTester tester) async {
+  Future<void> mount(WidgetTester tester, {bool openEntry = true}) async {
     await tester.binding.setSurfaceSize(const Size(440, 1100));
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/hosted_hpke'),
@@ -252,8 +273,19 @@ class HostedJourneyFixture {
       tester.element(find.byType(HostedAppGate)),
     );
     await container.read(authProvider.future);
-    await tap(tester, 'Community home');
-    expect(find.byType(OnboardingAppEntry), findsOneWidget);
+    if (openEntry) {
+      await tap(tester, 'Community home');
+      expect(find.byType(OnboardingAppEntry), findsOneWidget);
+    }
+  }
+
+  /// Recreate app owners while retaining secure storage and remote fixtures.
+  Future<void> restart(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await Future<void>.delayed(Duration.zero);
+    await tester.pump();
+    await mount(tester, openEntry: false);
   }
 
   // HTTP response streams use real event-loop turns. Yield between frames so

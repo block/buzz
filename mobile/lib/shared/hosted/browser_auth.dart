@@ -97,7 +97,7 @@ class BrowserAuth {
     }
   });
 
-  /// Persist a verified pairing destination before acknowledging key transfer.
+  /// Persist setup intent before remote work or acknowledging key transfer.
   Future<void> retainIntent(Map<String, String> intent) => _serial(() async {
     final raw = jsonEncode(intent);
     if (raw.length > 16384) throw BrowserAuthFailure.storage;

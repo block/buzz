@@ -38,13 +38,21 @@ class HostedBackupService {
   static String pendingKey(String subject, String pubkey) =>
       'buzz_backup_pending_v2_${sha256.convert(utf8.encode(jsonEncode([HostedEnvironment.origin.origin, subject, pubkey])))}';
 
-  Future<void> backup() {
-    final result = _tail.then((_) => _backup());
+  Future<void> backup({bool Function()? isCurrent}) {
+    final result = _tail.then((_) => _backup(isCurrent: isCurrent));
     _tail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
     return result;
   }
 
-  Future<void> _backup({bool reenrolled = false}) async {
+  Future<void> _backup({
+    bool reenrolled = false,
+    bool Function()? isCurrent,
+  }) async {
+    void checkCurrent() {
+      if (isCurrent != null && !isCurrent()) throw AccountFailure.unavailable;
+    }
+
+    checkCurrent();
     final subject = account.account?.subject;
     final local = await identity.read();
     if (subject == null || local == null) {
@@ -81,6 +89,7 @@ class HostedBackupService {
       throw HostedBackupFailure.storage;
     }
     checkAccount();
+    checkCurrent();
     if (envelope == null) {
       final Map<String, dynamic> enrollment;
       try {
@@ -115,6 +124,7 @@ class HostedBackupService {
       }
     }
     checkAccount();
+    checkCurrent();
     final pending = envelope!;
     final Map<String, dynamic> result;
     try {
@@ -122,6 +132,7 @@ class HostedBackupService {
     } on AccountFailure catch (failure) {
       if (failure != AccountFailure.rejected) rethrow;
       checkAccount();
+      checkCurrent();
       // Only a definitive rejection permits replacing the pending envelope.
       // A timeout/5xx/unknown response always preserves it for exact replay.
       if (reenrolled) throw HostedBackupFailure.rejected;
@@ -133,7 +144,7 @@ class HostedBackupService {
       } catch (_) {
         throw HostedBackupFailure.storage;
       }
-      return _backup(reenrolled: true);
+      return _backup(reenrolled: true, isCurrent: isCurrent);
     }
     checkAccount();
     if (result['stored'] != true ||

@@ -1,6 +1,8 @@
 import 'dart:async';
 import '../../hosted_app_gate.dart';
 import '../../shared/hosted/hosted_flow.dart';
+import '../../shared/hosted/hosted_community_creation.dart';
+import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/hosted/hosted_flow_problem_message.dart';
 import 'dart:math' show sqrt2;
 import 'dart:ui' show ImageFilter;
@@ -46,7 +48,10 @@ class PairingPage extends HookConsumerWidget {
   final bool connectionLanding;
   final bool existingUser;
   final bool enteringCommunityLink;
+  final bool creatingCommunity;
+  final ValueChanged<String>? onSubmitCommunity;
   final VoidCallback? onCommunityLink;
+  final VoidCallback? onCreateCommunity;
   final VoidCallback? onBuilderlab;
   final String? accountStatus;
   final Widget? setupContent;
@@ -61,7 +66,10 @@ class PairingPage extends HookConsumerWidget {
     this.connectionLanding = false,
     this.existingUser = false,
     this.enteringCommunityLink = false,
+    this.creatingCommunity = false,
+    this.onSubmitCommunity,
     this.onCommunityLink,
+    this.onCreateCommunity,
     this.onBuilderlab,
     this.accountStatus,
     this.setupContent,
@@ -262,7 +270,10 @@ class PairingPage extends HookConsumerWidget {
                     connectionLanding: connectionLanding,
                     existingUser: existingUser,
                     enteringCommunityLink: enteringCommunityLink,
+                    creatingCommunity: creatingCommunity,
+                    onSubmitCommunity: onSubmitCommunity,
                     onCommunityLink: onCommunityLink,
+                    onCreateCommunity: onCreateCommunity,
                     onOpenCommunity: (uri) {
                       FocusManager.instance.primaryFocus?.unfocus();
                       ref.read(pendingDeepLinkProvider.notifier).open(uri);
