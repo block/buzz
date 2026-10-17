@@ -1,3 +1,4 @@
+import type { PersonaCapabilities } from "./personaTypes";
 import { invokeTauri } from "@/shared/api/tauri";
 import type {
   AgentPersona,
@@ -13,6 +14,7 @@ export type RawPersona = {
   /** Optional short, PUBLIC description (max 280 chars). */
   description?: string | null;
   system_prompt: string;
+  capabilities?: PersonaCapabilities;
   acp_command?: string | null;
   runtime?: string | null;
   model?: string | null;
@@ -46,6 +48,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     avatarUrl: persona.avatar_url,
     description: persona.description ?? null,
     systemPrompt: persona.system_prompt,
+    ...(persona.capabilities ? { capabilities: persona.capabilities } : {}),
     acpCommand: persona.acp_command ?? "buzz-acp",
     runtime: persona.runtime ?? null,
     model: persona.model ?? null,
@@ -107,6 +110,7 @@ export async function createPersona(
         provider: input.provider,
         namePool: input.namePool ?? [],
         envVars: input.envVars ?? {},
+        ...(input.capabilities ? { capabilities: input.capabilities } : {}),
         behavior: input.behavior,
         catalogSource: input.catalogSource,
       },
@@ -131,6 +135,7 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     // tells the backend "don't touch the stored env vars" so editing
     // unrelated fields can't silently wipe saved credentials.
     envVars: input.envVars,
+    ...(input.capabilities ? { capabilities: input.capabilities } : {}),
     // Same absent-vs-present contract as envVars for the behavioral quad.
     behavior: input.behavior,
   };
@@ -394,6 +399,7 @@ export async function loadAgentCard(storedFileName: string): Promise<string> {
 
 /** Preview returned by `preview_agent_snapshot_import` before any write. */
 export type AgentSnapshotImportPreview = {
+  capabilities?: PersonaCapabilities;
   displayName: string;
   /** Source classification shown in the preview; imports remain custom. */
   isBuiltIn: boolean;

@@ -86,6 +86,9 @@ impl StopReason {
 /// Errors that can occur in the ACP client.
 #[derive(Debug, thiserror::Error)]
 pub enum AcpError {
+    /// An owner-authored Buzz hook rejected the message before dispatch. Never retry.
+    #[error("Persona on_message hook rejected the message: {0}")]
+    PersonaHookRejected(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -225,6 +228,7 @@ pub struct AcpClient {
     /// readable thinking unless asked; set only when the CLI the adapter runs
     /// is new enough to accept `--thinking-display`.
     claude_thinking_summaries: bool,
+    persona_on_message: Option<(String, String)>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -546,6 +550,24 @@ impl AcpClient {
                 cmd.env(key, value);
             }
         }
+        if crate::config::normalize_agent_command_identity(command) == "opencode" {
+            if let Some((_, root)) = extra_env
+                .iter()
+                .find(|(key, _)| key == "BUZZ_ACP_OPENCODE_SKILL_ROOT")
+            {
+                let inherited = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+                let base = inherited.as_deref().or_else(|| {
+                    extra_env
+                        .iter()
+                        .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+                        .map(|(_, value)| value.as_str())
+                });
+                let merged = crate::persona_capabilities::opencode_config_with_skills(base, root)
+                    .map_err(|e| AcpError::Protocol(e.to_string()))?;
+                cmd.env("OPENCODE_CONFIG_CONTENT", merged);
+                cmd.env_remove("BUZZ_ACP_OPENCODE_SKILL_ROOT");
+            }
+        }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
         }
@@ -634,7 +656,13 @@ impl AcpClient {
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
             claude_thinking_summaries,
+            persona_on_message: None,
         })
+    }
+
+    /// Set the read-only Buzz hook for every subsequently dispatched prompt.
+    pub(crate) fn set_persona_message_hook(&mut self, path: Option<String>, cwd: String) {
+        self.persona_on_message = path.map(|path| (path, cwd));
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -729,6 +757,20 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        self.session_new_with_plugins(cwd, mcp_servers, system_prompt, session_title, &[], &[])
+            .await
+    }
+
+    /// Create a session with additive native Claude plugin paths, preserving Buzz metadata.
+    pub(crate) async fn session_new_with_plugins(
+        &mut self,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
+        session_title: Option<&str>,
+        plugins: &[String],
+        codex_skill_roots: &[String],
+    ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -755,6 +797,15 @@ impl AcpClient {
             params["_meta"]["claudeCode"]["options"]["extraArgs"]["thinking-display"] =
                 serde_json::Value::String("summarized".to_owned());
         }
+        if !plugins.is_empty() {
+            params["_meta"]["claudeCode"]["options"]["plugins"] = serde_json::json!(plugins
+                .iter()
+                .map(|path| serde_json::json!({"type":"local","path":path}))
+                .collect::<Vec<_>>());
+        }
+        if !codex_skill_roots.is_empty() {
+            params["additionalDirectories"] = serde_json::json!(codex_skill_roots);
+        }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
             .as_str()
@@ -765,6 +816,19 @@ impl AcpClient {
             session_id,
             raw: result,
         })
+    }
+
+    async fn run_persona_message_hook(&self, blocks: &[&str]) -> Result<(), AcpError> {
+        if let Some((path, cwd)) = self.persona_on_message.clone() {
+            let input = blocks.join("\n\n").into_bytes();
+            tokio::task::spawn_blocking(move || {
+                crate::persona_capabilities::run_hook(&path, "on_message", &cwd, &input)
+            })
+            .await
+            .map_err(|_| AcpError::PersonaHookRejected("hook worker failed".into()))?
+            .map_err(|e| AcpError::PersonaHookRejected(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Send `session/new` and return only the `sessionId` string.
@@ -863,6 +927,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.run_persona_message_hook(prompt_blocks).await?;
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1157,7 +1222,10 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        self.observe(
+            "acp_write",
+            crate::persona_capabilities::diagnostic_wire_value(value),
+        );
         Ok(())
     }
 
@@ -1188,7 +1256,7 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&crate::persona_capabilities::diagnostic_wire_value(&msg)).unwrap_or_default());
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -1531,6 +1599,11 @@ impl AcpClient {
                             ));
                         }
                         Some((transport, method, params)) => {
+                            if let Err(error) = self.run_persona_message_hook(&prompt_block_refs).await {
+                                tracing::warn!(%error, "persona on_message rejected steer; dropping message");
+                                let _ = req.ack_tx.send(crate::pool::SteerAck::Err(crate::pool::SteerError::PersonaHookRejected));
+                                continue;
+                            }
                             let id = self.next_id;
                             self.next_id += 1;
                             let msg = serde_json::json!({
@@ -4296,7 +4369,7 @@ sleep 1"#,
     /// `capture_path` may be absent afterwards when the arm wrote nothing —
     /// callers assert on that. The read loop is expected to exit via a
     /// timeout or EOF; the ack is what these tests care about.
-    async fn run_one_steer(
+    pub(super) async fn run_one_steer(
         client: &mut AcpClient,
         capture_path: &std::path::Path,
     ) -> (Option<String>, crate::pool::SteerAck) {
@@ -5268,3 +5341,11 @@ sleep 1"#,
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "persona_session_tests.rs"]
+mod persona_session_tests;
+
+#[cfg(all(test, unix))]
+#[path = "persona_steer_tests.rs"]
+mod persona_steer_tests;

@@ -3,6 +3,18 @@
 // `@/shared/api/types`, which re-exports everything here.
 import type { AcpSessionPolicy, RespondToMode } from "./types";
 
+export type PersonaCapabilities = {
+  skills?: string[];
+  mcp_servers?: {
+    name: string;
+    command: string;
+    args?: string[];
+    env?: Record<string, string>;
+  }[];
+  hooks?: { on_start?: string; on_message?: string; on_stop?: string };
+  working_directory?: string;
+};
+
 export type AgentPersona = {
   id: string;
   displayName: string;
@@ -14,6 +26,7 @@ export type AgentPersona = {
    */
   description: string | null;
   systemPrompt: string;
+  capabilities?: PersonaCapabilities;
   acpCommand: string; // ACP transport selected before deployment.
   /** Preferred ACP runtime ID (e.g. "goose", "claude"). */
   runtime: string | null;
@@ -73,6 +86,7 @@ export type CreatePersonaInput = {
   /** Optional short, PUBLIC description (max 280 chars). Empty string clears. */
   description?: string | null;
   systemPrompt: string;
+  capabilities?: PersonaCapabilities;
   acpCommand?: string;
   runtime?: string;
   model?: string;
@@ -94,6 +108,7 @@ export type UpdatePersonaInput = {
   /** Optional short, PUBLIC description (max 280 chars). Empty string clears. */
   description?: string | null;
   systemPrompt: string;
+  capabilities?: PersonaCapabilities;
   acpCommand?: string;
   runtime?: string;
   model?: string;

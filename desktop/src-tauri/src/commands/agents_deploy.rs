@@ -210,6 +210,9 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
     )
     .require_resolved()?;
 
+    if !effective.capabilities.is_empty() {
+        return Err("Persona skill, MCP and lifecycle assignments currently require a local agent; remote delivery is not implemented".into());
+    }
     ensure_remote_provider_supported(effective.provider.value.as_deref())?;
 
     let descriptor =

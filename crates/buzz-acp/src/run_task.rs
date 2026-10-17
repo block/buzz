@@ -205,7 +205,8 @@ pub(crate) async fn run() -> i32 {
     // Keep signing material alive until execution has drained and reaped the adapter.
     let runtime = match AgentRuntime::prepare(config) {
         Ok(environment) => environment,
-        Err(_) => {
+        Err(error) => {
+            tracing::error!(%error, "agent runtime setup failed");
             terminal.status = "failed";
             terminal.error = Some("runtime_setup_failed");
             signal_task.abort();

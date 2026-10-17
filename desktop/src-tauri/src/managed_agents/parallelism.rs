@@ -64,6 +64,7 @@ mod tests {
 
     fn record_with(runtime: Option<&str>, parallelism: u32) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            capabilities: Default::default(),
             session_policy: Default::default(),
             description: None,
             pubkey: String::new(),
@@ -131,6 +132,7 @@ mod tests {
     ) -> crate::managed_agents::types::AgentDefinition {
         use crate::managed_agents::types::AgentDefinition;
         AgentDefinition {
+            capabilities: Default::default(),
             session_policy: Default::default(),
             description: None,
             id: id.to_string(),

@@ -2,6 +2,11 @@
 
 use std::path::PathBuf;
 
+/// Preserve inherited CWD when no Buzz nest or home directory is available.
+pub(super) fn default_or_inherited_workdir(default: Option<PathBuf>) -> std::io::Result<PathBuf> {
+    default.map(Ok).unwrap_or_else(std::env::current_dir)
+}
+
 /// Return `true` when `path` is a Windows batch shim (`.cmd` or `.bat`,
 /// case-insensitive) that cannot be passed directly to `CreateProcess`.
 ///
@@ -160,6 +165,23 @@ pub(in crate::managed_agents) fn build_augmented_path(
 mod tests {
     use super::build_augmented_path;
     use std::path::PathBuf;
+
+    #[test]
+    fn persona_default_workdir_preserves_inherited_cwd_without_a_home() {
+        assert_eq!(
+            super::default_or_inherited_workdir(None).unwrap(),
+            std::env::current_dir().unwrap()
+        );
+    }
+
+    #[test]
+    fn persona_default_workdir_keeps_supplied_spelling() {
+        let default = PathBuf::from("/provided/home/../nest");
+        assert_eq!(
+            super::default_or_inherited_workdir(Some(default.clone())).unwrap(),
+            default
+        );
+    }
 
     #[cfg(unix)]
     #[test]

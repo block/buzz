@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 /// relevant to snapshot export are filled; the rest use defaults.
 fn minimal_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: "deadbeef".to_string(),
@@ -398,6 +399,34 @@ fn secret_exclusion_auth_tag_absent() {
         !json.contains("authTag") && !json.contains("auth_tag"),
         "authTag field must not appear in snapshot"
     );
+}
+
+#[test]
+fn shared_snapshot_omits_local_capabilities_and_owner_file_keeps_them() {
+    let mut record = minimal_record();
+    record.capabilities = serde_json::from_value(serde_json::json!({
+        "skills": ["/Users/owner/skills/ops"],
+        "mcp_servers": [{"name": "ctx", "command": "node", "env": {"TOKEN": "sk-literal-secret"}}],
+        "hooks": {"on_start": "hooks/start.sh"},
+        "working_directory": "/Users/owner/work"
+    }))
+    .unwrap();
+    let encode = |audience| {
+        let snapshot =
+            build_snapshot(&record, MemoryLevel::None, vec![], None).for_audience(audience);
+        String::from_utf8(encode_snapshot_json(&snapshot).unwrap()).unwrap()
+    };
+    let shared = encode(SnapshotAudience::Shared);
+    for local in [
+        "sk-literal-secret",
+        "/Users/owner",
+        "hooks/start.sh",
+        "capabilities",
+    ] {
+        assert!(!shared.contains(local), "shared snapshot leaked {local}");
+    }
+    let owner = encode(SnapshotAudience::Owner);
+    assert!(owner.contains("sk-literal-secret") && owner.contains("/Users/owner/work"));
 }
 
 #[test]

@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 /// persona_id.
 fn make_definition(slug: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: String::new(),
@@ -104,6 +105,16 @@ fn linked_instance_snapshot_materializes_the_definition_description() {
     assert_eq!(instance.description, definition.description);
 }
 
+#[test]
+fn orphaned_instance_snapshot_keeps_its_own_capabilities() {
+    let mut instance = make_instance("agent-pubkey", "deleted-persona");
+    instance.capabilities.skills = vec!["skills/own".to_string()];
+
+    materialize_snapshot_description(&mut instance, false, &[make_definition("other")]);
+
+    assert_eq!(instance.capabilities.skills, ["skills/own"]);
+}
+
 /// Build a minimal valid AgentSnapshot for import tests.
 fn make_snapshot(
     memory_level: MemoryLevel,
@@ -113,6 +124,7 @@ fn make_snapshot(
         format: FORMAT_DISCRIMINATOR.to_string(),
         version: FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            capabilities: Default::default(),
             session_policy: Default::default(),
             acp_command: None,
             name: "Test Agent".to_string(),

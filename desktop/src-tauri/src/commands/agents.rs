@@ -658,6 +658,7 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
             linked_persona.as_ref(),
         )?;
         let mut record = ManagedAgentRecord {
+            capabilities: Default::default(),
             pubkey: pubkey.clone(),
             name: name.clone(),
             description: None,

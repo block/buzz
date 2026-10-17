@@ -8,6 +8,7 @@ use crate::managed_agents::AgentDefinition;
 
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: id.to_string(),
@@ -417,4 +418,63 @@ fn fizz_builtin_resolves_to_buzz_agent() {
         "buzz-agent",
         "Fizz must resolve to buzz-agent specifically"
     );
+}
+
+#[test]
+fn persona_capabilities_survive_unified_store_save_and_fresh_app_handle() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let _restore = RestoreEnv(
+        ["HOME", "XDG_DATA_HOME"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
+    );
+    std::env::set_var("HOME", temp.path());
+    std::env::set_var("XDG_DATA_HOME", temp.path());
+    let definitions: Vec<_> = ["operations", "reviewer"].into_iter().map(|name| {
+        let mut p = custom_persona(name, name);
+        p.runtime = Some("claude".into());
+        p.model = Some("sonnet".into());
+        p.capabilities = serde_json::from_value(serde_json::json!({
+            "skills":["skills/baseline",format!("skills/{name}")],
+            "mcp_servers":[{"name":"context", "command":"node", "args":["probe.mjs"], "env":{"ROLE":name}}],
+            "hooks":{"on_start":"start.sh","on_message":"message.sh","on_stop":"stop.sh"},
+            "working_directory":temp.path().to_string_lossy()
+        })).unwrap();
+        p
+    }).collect();
+    {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let base = crate::managed_agents::managed_agents_base_dir(app.handle()).unwrap();
+        assert!(
+            base.starts_with(temp.path()),
+            "store must remain under the injected test root"
+        );
+        super::save_personas(app.handle(), &definitions).unwrap();
+    }
+    let restarted_handle = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let loaded = super::load_personas(restarted_handle.handle()).unwrap();
+    for expected in definitions {
+        let actual = loaded.iter().find(|p| p.id == expected.id).unwrap();
+        assert_eq!(actual.capabilities, expected.capabilities);
+        assert_eq!(actual.system_prompt, expected.system_prompt);
+        assert_eq!(actual.model, expected.model);
+    }
 }

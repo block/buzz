@@ -25,6 +25,7 @@ pub struct ResolvedField<T> {
 
 #[derive(Debug, Clone)]
 pub struct EffectiveAgentConfig {
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     pub model: ResolvedField<String>,
     pub provider: ResolvedField<String>,
     pub system_prompt: ResolvedField<String>,
@@ -103,6 +104,7 @@ fn resolve_linked(
     };
 
     EffectiveAgentConfig {
+        capabilities: global.capabilities.merged(&definition.capabilities),
         model,
         provider,
         system_prompt,
@@ -217,6 +219,7 @@ fn resolve_definition_less(
     };
 
     let mut config = EffectiveAgentConfig {
+        capabilities: global.capabilities.merged(&record.capabilities),
         model,
         provider,
         system_prompt,

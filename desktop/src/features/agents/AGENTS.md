@@ -444,6 +444,24 @@ uses the fixed agent signer, origin-scoped Blossom auth, no redirects, byte caps
 and hash/descriptor verification; ordinary public external avatars remain
 unauthenticated passthrough. No image-reader proxy or tenant isolation exception.
 
+## Local persona capability assignments
+
+`PersonaCapabilitiesEditor` edits the single `capabilities` field on the existing
+persona/unified record. It stays mounted while collapsed so an invalid MCP JSON
+draft cannot be silently saved or discarded by toggling disclosure. Omitted update
+fields preserve assignments; `{}` clears persona overrides. Skills merge as a stable
+union; persona MCP names and individual lifecycle events override explicit global
+defaults. Native harness defaults remain available. Claude plugin roots, Codex additional
+directories/native skill roots and OpenCode native skills configuration are
+supported. Unsupported harnesses fail nonempty skill assignments visibly.
+This is delivery, not isolation.
+
+Portable snapshots explicitly carry skill paths, MCP arguments/environment and hook
+paths; referenced files are not bundled. Warn users that MCP values are exported and
+prefer `${ENV_NAME}` references. Public catalog heads do not publish these local
+execution settings and inbound catalog updates preserve them. Launch/restart reads
+current linked persona assignments; restart differences mask their contents.
+
 ## Keep this file true
 
 **If you change how agent configuration is modeled, rendered, persisted,

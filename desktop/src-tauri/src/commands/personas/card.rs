@@ -34,7 +34,7 @@ use crate::{
     managed_agents::{
         agent_snapshot::{
             build_snapshot, decode_avatar_data_url, decode_snapshot_png, encode_snapshot_png,
-            extract_chunk_payload_png, MemoryLevel,
+            extract_chunk_payload_png, MemoryLevel, SnapshotAudience,
         },
         agent_snapshot_envelope::{
             decrypt_envelope, encode_locked_snapshot_png, parse_chunk_payload, ChunkPayload,
@@ -691,12 +691,20 @@ pub async fn mint_agent_card(
         &avatar_bytes,
         record.avatar_url.as_deref(),
     )?;
+    // An unlocked card is a shareable image; only a locked card is readable
+    // solely by the owner/agent pair, so only it keeps local assignments.
+    let audience = if lock_keys.is_some() {
+        SnapshotAudience::Owner
+    } else {
+        SnapshotAudience::Shared
+    };
     let snapshot = build_snapshot(
         &record,
         memory_level,
         memory_entries,
         manifest_avatar.as_deref(),
-    );
+    )
+    .for_audience(audience);
 
     // ── One Responses API call ───────────────────────────────────────────────
     // For locked mints, prove the manifest (including any embedded memory)

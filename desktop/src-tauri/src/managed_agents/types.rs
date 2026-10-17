@@ -14,6 +14,12 @@ pub enum BackendKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
+    /// Skills, MCP assignments and Buzz lifecycle configuration.
+    #[serde(
+        default,
+        skip_serializing_if = "buzz_persona_pkg::capabilities::PersonaCapabilities::is_empty"
+    )]
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
@@ -120,6 +126,7 @@ impl AgentDefinition {
     /// event coordinate (`d_tag = slug`) across the fold.
     pub fn into_agent_record(self) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            capabilities: self.capabilities,
             pubkey: String::new(),
             name: self.display_name.clone(),
             persona_id: None,
@@ -193,6 +200,7 @@ impl ManagedAgentRecord {
     pub fn to_definition_view(&self) -> Option<AgentDefinition> {
         let slug = self.slug.clone()?;
         Some(AgentDefinition {
+            capabilities: self.capabilities.clone(),
             id: slug,
             display_name: self
                 .display_name
@@ -245,6 +253,12 @@ pub struct RelayAgentInfo {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
+    /// Skills, MCP assignments and Buzz lifecycle configuration.
+    #[serde(
+        default,
+        skip_serializing_if = "buzz_persona_pkg::capabilities::PersonaCapabilities::is_empty"
+    )]
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     pub pubkey: String,
     pub name: String,
     #[serde(default)]

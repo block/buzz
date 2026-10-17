@@ -45,6 +45,12 @@ use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 /// consulted); for a definition-less instance, instance → global.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlobalAgentConfig {
+    /// Skills, MCP assignments and Buzz lifecycle configuration.
+    #[serde(
+        default,
+        skip_serializing_if = "buzz_persona_pkg::capabilities::PersonaCapabilities::is_empty"
+    )]
+    pub capabilities: buzz_persona_pkg::capabilities::PersonaCapabilities,
     /// Global env vars injected into ALL agents unconditionally.
     ///
     /// Lowest user-settable layer — per-agent and persona values win on any
@@ -89,6 +95,7 @@ pub struct GlobalAgentConfig {
 ///   [`normalize_global_config_fields`], which must be called before
 ///   persisting (done inside [`save_global_agent_config`]).
 pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> {
+    config.capabilities.validate()?;
     // Strip empty values first — they mean "inherit" and must not be stored.
     let non_empty: BTreeMap<String, String> = config
         .env_vars

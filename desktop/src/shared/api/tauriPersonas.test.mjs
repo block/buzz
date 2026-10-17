@@ -37,3 +37,23 @@ test("fromRawPersona maps authored description and defaults absence to null", ()
   );
   assert.equal(fromRawPersona(rawPersona()).description, null);
 });
+
+test("persona wire mapping preserves native references and structured MCP settings", () => {
+  const capabilities = {
+    skills: ["skills/日本語"],
+    mcp_servers: [
+      {
+        name: "probe",
+        command: "node",
+        args: ["two words"],
+        env: { ROLE: "reviewer" },
+      },
+    ],
+    hooks: { on_message: "observe.sh" },
+    working_directory: "/tmp/persona",
+  };
+  assert.deepEqual(
+    fromRawPersona(rawPersona({ capabilities })).capabilities,
+    capabilities,
+  );
+});

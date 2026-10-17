@@ -157,6 +157,7 @@ mod tests {
             format: "buzz-agent-snapshot".to_string(),
             version: 1,
             definition: AgentSnapshotDefinition {
+                capabilities: Default::default(),
                 session_policy: Default::default(),
                 acp_command: None,
                 name: "Tree Trunks".to_string(),

@@ -65,7 +65,7 @@ pub struct RespondTo {
 }
 
 /// A single MCP server attached to this persona.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct McpServerConfig {
     pub name: String,
@@ -79,7 +79,7 @@ pub struct McpServerConfig {
 }
 
 /// Lifecycle hooks (paths are pack-relative).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Hooks {
     #[serde(skip_serializing_if = "Option::is_none")]

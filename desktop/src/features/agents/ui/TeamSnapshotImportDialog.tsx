@@ -1,3 +1,4 @@
+import { PersonaCapabilitiesImportNotice } from "./PersonaCapabilitiesImportNotice";
 import * as React from "react";
 import { AlertCircle, Upload } from "lucide-react";
 
@@ -178,6 +179,7 @@ function PreviewBody({
               // biome-ignore lint/suspicious/noArrayIndexKey: member names may duplicate
               <div key={idx} className="flex flex-col gap-0.5 px-1 py-0.5">
                 <p className="text-sm font-medium">{member.displayName}</p>
+                <PersonaCapabilitiesImportNotice value={member.capabilities} />
                 {member.systemPrompt ? (
                   <p className="line-clamp-1 text-xs text-muted-foreground">
                     {member.systemPrompt}

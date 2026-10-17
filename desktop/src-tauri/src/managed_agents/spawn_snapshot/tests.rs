@@ -42,6 +42,7 @@ fn snap(record: &ManagedAgentRecord) -> serde_json::Value {
 
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: "p".repeat(64),
@@ -105,6 +106,7 @@ fn record() -> ManagedAgentRecord {
 
 fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: id.into(),
@@ -943,3 +945,16 @@ fn openclaw_cap_crossing_parallelism_snapshots_differ() {
 #[cfg(test)]
 #[path = "tests_ext.rs"]
 mod ext;
+
+#[test]
+fn persona_capability_edits_change_the_effective_restart_snapshot() {
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    let mut def = persona("p1", Some("claude"), "instructions");
+    let global = GlobalAgentConfig::default();
+    let before = snapshot(&rec, &[def.clone()], &[], "wss://ws.example", &global);
+    def.capabilities.skills.push("new-skill".into());
+    let after = snapshot(&rec, &[def], &[], "wss://ws.example", &global);
+    assert_ne!(before, after);
+    assert_eq!(after["capabilities"]["skills"][0], "new-skill");
+}

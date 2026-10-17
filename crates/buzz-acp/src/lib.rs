@@ -11,6 +11,7 @@ mod engram_fetch;
 mod filter;
 mod isolated_execution;
 mod observer;
+mod persona_capabilities;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
@@ -23,6 +24,7 @@ mod runtime;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
 mod scope;
 mod setup_mode;
+mod steering_ack;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -2333,6 +2335,8 @@ struct SteerAckEvent {
     /// and deadline extension target this, not the whole channel.
     scope: scope::SessionScope,
     event_id: String,
+    /// Original follow-up and resolved edit routing for a terminal refusal notice.
+    event: Box<queue::BatchEvent>,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -4057,147 +4061,14 @@ async fn run_harness(
                     typing_channels.insert(scope, thread_tags);
                 }
             }
-            Some(PoolEvent::SteerAck(SteerAckEvent {
-                channel_id,
-                scope,
-                event_id,
-                ack,
-            })) => {
-                // Mid-turn steer attempt resolved (either transport:
-                // `_goose/unstable/session/steer` or `_session/steering`).
-                // Locked semantics (Eva + Max + Perci, unanimous on Option X):
-                //
-                //   Success
-                //     The agent received the steer via the non-cancelling
-                //     path. Drop the withheld event so normal dispatch
-                //     never redelivers it.
-                //
-                //     Also covers `_session/steering`'s `startedNewTurn`
-                //     outcome: the message was delivered, but into a fresh
-                //     turn because the one being steered had already
-                //     finished. Delivery is what this arm keys on, so the
-                //     event is still dropped. The read loop deliberately
-                //     does NOT renew its hard deadline in that case (the
-                //     awaited turn is settled), while
-                //     `extend_in_flight_deadline` below still applies —
-                //     the agent really is running more work, so the
-                //     channel's in-flight budget should reflect it.
-                //
-                //   Err(_) where the write never landed (Transport /
-                //   ExpectedRunIdMissing):
-                //     Delivery state of the underlying message is "never
-                //     attempted on the wire". Release withheld back to the
-                //     queue front AND issue the cancel+merge fallback so
-                //     the message still reaches the agent.
-                //
-                //   Err(OutcomeRejected { .. })
-                //     A `_session/steering` request returned a JSON-RPC
-                //     success whose `outcome` was not `injected` or
-                //     `startedNewTurn` (codex's `failed`, an unknown value,
-                //     or a bare `{}` with no `outcome` at all). The steer
-                //     did not land, so this is treated exactly like a write
-                //     that never happened: release withheld AND fire the
-                //     cancel+merge fallback. Handled by the catch-all
-                //     `Err(_)` arm below.
-                //
-                //   Err(AgentError { code: -32601, .. })
-                //     The agent returned method_not_found — it does not
-                //     implement the steer extension. Release withheld AND
-                //     fire the cancel+merge fallback so the message still
-                //     reaches the agent via the universal path.
-                //
-                //   Err(AgentError { code: other, .. })
-                //     The write landed and the agent returned a JSON-RPC
-                //     error at the application level (e.g. wrong run id).
-                //     The agent's turn is still running (or just completed).
-                //     Release withheld for normal dispatch; do NOT fire the
-                //     fallback signal — the agent already saw the steer
-                //     attempt. If the turn is still running, normal dispatch
-                //     re-delivers when it completes. If the turn already
-                //     ended, there is nothing to cancel.
-                //
-                //   PromptCompletedNeutral
-                //     The read loop wrote the steer (or was preparing to)
-                //     but the prompt completed before the response landed.
-                //     Delivery state is unknown — but the prompt completing
-                //     means there is no in-flight turn to signal anymore.
-                //     Release withheld for normal dispatch; do NOT fire
-                //     the fallback signal (it would target a turn that
-                //     just ended; normal dispatch already handles
-                //     redelivery via the released queue entry).
-                //
-                //   Err(PromptCompleted)
-                //     `SteerError::PromptCompleted` is returned synchronously
-                //     by `pool::send_steer` when no task is in flight (handled
-                //     in `try_native_steer`'s Err branch, which falls through
-                //     to cancel+merge). It is never routed through the ack
-                //     channel, so this variant never appears in `SteerAckEvent`.
-                //
-                //   Watcher Err (oneshot dropped)
-                //     Should not happen — the read loop drains
-                //     pending_steer on every return path. If it does,
-                //     treat as PromptCompletedNeutral to avoid leaking
-                //     the withheld event in `withheld_native_steer`.
-                let (release_withheld, drop_withheld, signal_fallback) = match &ack {
-                    Ok(pool::SteerAck::Success { .. }) => (false, true, false),
-                    // -32601 = method_not_found: agent does not implement the
-                    // steer extension. Fire cancel+merge so the message still
-                    // reaches the agent.
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. }))
-                        if *code == -32601 =>
-                    {
-                        (true, false, true)
-                    }
-                    // AgentError: write landed, agent rejected it at the
-                    // application level (e.g. wrong run id). Release for
-                    // normal dispatch; no fallback signal (the turn is still
-                    // running or just ended — either way there is nothing to
-                    // cancel).
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
-                        (true, false, false)
-                    }
-                    // Transport / ExpectedRunIdMissing / OutcomeRejected: the
-                    // steer did not land. Release and fire the cancel+merge
-                    // fallback so the message still reaches the agent.
-                    Ok(pool::SteerAck::Err(_)) => (true, false, true),
-                    Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
-                    Err(_recv_err) => (true, false, false),
-                };
-                tracing::info!(
-                    channel = %channel_id,
-                    event_id = %event_id,
-                    ?ack,
-                    release_withheld,
-                    drop_withheld,
-                    signal_fallback,
-                    "non-cancelling steer ack received"
+            Some(PoolEvent::SteerAck(ack_event)) => {
+                steering_ack::handle_steer_ack(
+                    &mut pool,
+                    &mut queue,
+                    ack_event,
+                    config.max_turn_duration_secs,
+                    Some(&ctx.rest_client),
                 );
-                if let Ok(pool::SteerAck::Success { session_id }) = &ack {
-                    queue.extend_in_flight_deadline(&scope, config.max_turn_duration_secs);
-                    if !pool.record_successful_steer(&scope, event_id.clone(), session_id.clone()) {
-                        tracing::warn!(
-                            channel = %channel_id,
-                            event_id = %event_id,
-                            "successful steer lost its in-flight delivery ledger"
-                        );
-                    }
-                }
-                if drop_withheld {
-                    queue.remove_event(&scope, &event_id);
-                }
-                if release_withheld {
-                    queue.release_native_steer(&scope, &event_id);
-                }
-                if signal_fallback {
-                    // Universal cancel+merge fallback. Note: the
-                    // queued event has already been released to the
-                    // front of `queues[scope]`, so the cancel will pick
-                    // it up as part of the merged batch and re-prompt the
-                    // agent. Scope-exact so the fallback cancels the
-                    // steered event's OWN thread, not a sibling thread
-                    // in the same channel.
-                    signal_in_flight_task_for_scope(&mut pool, &scope, ControlSignal::Steer);
-                }
                 // After releasing a withheld event, give dispatch a chance
                 // to re-flush. If the prompt is still in flight, the
                 // channel stays `in_flight_channels` and `flush_next`
@@ -4613,6 +4484,7 @@ fn try_native_steer(
                     channel_id,
                     scope: scope_for_watcher,
                     event_id: event_id_for_watcher,
+                    event: Box::new(be),
                     ack,
                 });
             });
@@ -5171,6 +5043,8 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+const PERSONA_HOOK_REJECTION_NOTICE: &str = "The persona’s before-message script failed or timed out, so this message was not forwarded as a prompt or steering update. It remains in Buzz history. Review the script before sending again.";
+
 /// Thread placement for a batch's terminal failure notice.
 ///
 /// Ordinary events keep their own thread tags. An edit follows its verified
@@ -5370,6 +5244,14 @@ fn handle_prompt_result(
                     to apply the new configuration, then re-send your request."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(acp::AcpError::PersonaHookRejected(_))
+            ) {
+                // Hook failures are local, deterministic dispatch refusals. A
+                // retry must not turn a dropped message into a later delivery.
+                tracing::warn!(channel_id = %batch.channel_id, "dropping batch rejected by persona on_message hook");
+                spawn_failure_notice(rest_client, &batch, PERSONA_HOOK_REJECTION_NOTICE.into());
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -6451,6 +6333,32 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    let mut servers = build_baseline_mcp_servers(config);
+    servers.extend(
+        config
+            .persona_capabilities
+            .mcp_servers
+            .iter()
+            .map(|server| {
+                let env: std::collections::BTreeMap<_, _> = server.env.iter().collect();
+                McpServer {
+                    name: server.name.clone(),
+                    command: server.command.clone(),
+                    args: server.args.clone(),
+                    env: env
+                        .into_iter()
+                        .map(|(name, value)| EnvVar {
+                            name: name.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                }
+            }),
+    );
+    servers
+}
+
+fn build_baseline_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
     }
@@ -10100,6 +10008,7 @@ mod build_mcp_servers_tests {
 
     pub(super) fn test_config() -> Config {
         Config {
+            persona_capabilities: Default::default(),
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
@@ -10454,6 +10363,19 @@ mod build_mcp_servers_tests {
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
         );
+    }
+
+    #[test]
+    fn persona_mcp_payload_keeps_arguments_environment_and_baseline() {
+        let mut config = test_config();
+        config.persona_capabilities = serde_json::from_value(serde_json::json!({"mcp_servers":[{"name":"probe","command":"node","args":["probe.mjs","two words"],"env":{"ROLE":"analyst"}}]})).unwrap();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].args, ["probe.mjs", "two words"]);
+        assert_eq!(servers[1].env.len(), 1);
+        assert_eq!(servers[1].env[0].name, "ROLE");
+        assert_eq!(servers[1].env[0].value, "analyst");
     }
 
     #[test]
@@ -11194,6 +11116,7 @@ mod error_outcome_emission_tests {
 
     fn test_config() -> Config {
         Config {
+            persona_capabilities: Default::default(),
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
             // `true` exits cleanly, so the async respawn fails fast and
@@ -12890,6 +12813,23 @@ mod error_outcome_emission_tests {
     /// rather than after 10 futile retries.
     #[tokio::test]
     async fn auth_error_dead_letters_immediately_without_requeueing() {
+        assert_nonretryable_error_is_not_requeued(acp::AcpError::AgentError {
+            code: -32000,
+            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
+                .into(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn persona_message_hook_failure_is_not_requeued() {
+        assert_nonretryable_error_is_not_requeued(acp::AcpError::PersonaHookRejected(
+            "exit 7".into(),
+        ))
+        .await;
+    }
+
+    async fn assert_nonretryable_error_is_not_requeued(error: acp::AcpError) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
             .sign_with_keys(&keys)
@@ -12906,12 +12846,6 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
-        };
-
-        let auth_error = acp::AcpError::AgentError {
-            code: -32000,
-            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
-                .to_string(),
         };
 
         let agent = dummy_agent(0).await;
@@ -12945,7 +12879,7 @@ mod error_outcome_emission_tests {
             agent,
             source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
             turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(auth_error),
+            outcome: PromptOutcome::Error(error),
             batch: Some(batch),
         };
         handle_prompt_result(
@@ -12967,12 +12901,12 @@ mod error_outcome_emission_tests {
         assert_eq!(
             queue.pending_channels(),
             0,
-            "auth error must dead-letter immediately — batch must not be requeued"
+            "non-retryable error must dead-letter immediately — batch must not be requeued"
         );
         assert_eq!(
             queue.queued_event_count(channel_id),
             0,
-            "auth error must dead-letter immediately — no events should be pending"
+            "non-retryable error must dead-letter immediately — no events should be pending"
         );
     }
 

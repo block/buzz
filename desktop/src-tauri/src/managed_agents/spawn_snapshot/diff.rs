@@ -76,6 +76,7 @@ enum MaskPolicy {
 /// is too large to render; everything else falls through to `Plain`.
 fn policy_for(path: &str) -> MaskPolicy {
     match path {
+        _ if path == "capabilities" || path.starts_with("capabilities.") => MaskPolicy::MaskedBare,
         // Arbitrary user text — a rendered before/after would be unbounded as
         // well as unreadable.
         "system_prompt" | "team_instructions" => MaskPolicy::Text,

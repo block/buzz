@@ -1,4 +1,6 @@
 import * as React from "react";
+import type { PersonaCapabilities } from "@/shared/api/personaTypes";
+import { PersonaCapabilitiesEditor } from "./PersonaCapabilitiesEditor";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type {
@@ -151,6 +153,11 @@ export function AgentDefinitionDialog({
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
+  const [capabilities, setCapabilities] = React.useState<PersonaCapabilities>(
+    {},
+  );
+  const [capabilitiesValid, setCapabilitiesValid] = React.useState(true);
+  const [capabilitiesSeed, setCapabilitiesSeed] = React.useState(0);
   const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
@@ -214,6 +221,9 @@ export function AgentDefinitionDialog({
     setDescriptionDraft(initialValues.description ?? "");
     setAvatarUrl(initialValues.avatarUrl ?? "");
     setSystemPrompt(initialValues.systemPrompt);
+    setCapabilities(initialValues.capabilities ?? {});
+    setCapabilitiesValid(true);
+    setCapabilitiesSeed((seed) => seed + 1);
     setAcpCommand(initialValues.acpCommand ?? "buzz-acp");
     setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
@@ -362,6 +372,7 @@ export function AgentDefinitionDialog({
       provider: providerForSubmit,
       namePool: namePoolInput,
       envVars,
+      capabilities,
       behavior: behaviorForSubmit(
         behaviorDraft,
         behaviorSeedRef.current,
@@ -491,6 +502,7 @@ export function AgentDefinitionDialog({
   // Gate model/provider validity through missingNormalizedFields — single
   // source of truth with the readiness gate so display and Save can't drift.
   const canSubmit =
+    capabilitiesValid &&
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
@@ -934,6 +946,21 @@ export function AgentDefinitionDialog({
           open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
           returnFocusRef={aiDefaultsTriggerRef}
         />
+
+        <details className="space-y-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            Skills, tools and lifecycle
+          </summary>
+          <PersonaCapabilitiesEditor
+            key={capabilitiesSeed}
+            value={capabilities}
+            onChange={(value) => {
+              setCapabilities(value);
+              setHasUserChanges(true);
+            }}
+            onValidityChange={setCapabilitiesValid}
+          />
+        </details>
 
         <AddCustomHarnessDialog
           onOpenChange={setIsAddHarnessOpen}

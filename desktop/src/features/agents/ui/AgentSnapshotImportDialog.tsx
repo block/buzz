@@ -1,3 +1,4 @@
+import { PersonaCapabilitiesImportNotice } from "./PersonaCapabilitiesImportNotice";
 import * as React from "react";
 import { AlertCircle, Lock, Upload } from "lucide-react";
 
@@ -206,6 +207,8 @@ export function PreviewBody({
         A new agent will be created with a fresh keypair. The imported agent is
         independent of the source — identity never travels.
       </p>
+
+      <PersonaCapabilitiesImportNotice value={preview.capabilities} />
 
       {/* Memory section */}
       {hasMemory ? (

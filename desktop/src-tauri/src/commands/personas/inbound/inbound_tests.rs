@@ -10,6 +10,7 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555"; // sadscan:disable sq
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
 fn local_in_app() -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: UUID.to_string(),
@@ -41,6 +42,7 @@ fn local_in_app() -> AgentDefinition {
 /// slug = Some(d-tag), empty env_vars, source_team None.
 fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         id: d_tag.to_string(),
@@ -182,6 +184,7 @@ const AGENT_PUBKEY: &str = "agentpubkeyhex00000000000000000000000000000000000000
 /// event must NEVER be able to overwrite.
 fn local_agent() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        capabilities: Default::default(),
         session_policy: Default::default(),
         description: None,
         pubkey: AGENT_PUBKEY.to_string(),
@@ -990,4 +993,25 @@ fn shared_transport_redaction_preserves_local_override_but_explicit_stock_resets
         .unwrap();
     apply_inbound_persona(&mut personas, persona_from_event(&clear).unwrap());
     assert_eq!(personas[0].acp_command, None);
+}
+
+#[test]
+fn inbound_persona_does_not_erase_or_install_local_execution_assignments() {
+    let mut local = local_in_app();
+    local.capabilities = serde_json::from_value(serde_json::json!({
+        "skills":["skills/local"],
+        "mcp_servers":[{"name":"local", "command":"node", "args":["local.mjs"]}],
+        "hooks":{"on_start":"start.sh"}
+    }))
+    .unwrap();
+    let expected = local.capabilities.clone();
+    let mut personas = vec![local];
+    let mut inbound = inbound_for(UUID, "Remote");
+    inbound
+        .capabilities
+        .skills
+        .push("unexpected-remote-path".into());
+    apply_inbound_persona(&mut personas, inbound);
+    assert_eq!(personas[0].capabilities, expected);
+    assert_eq!(personas[0].display_name, "Remote");
 }
